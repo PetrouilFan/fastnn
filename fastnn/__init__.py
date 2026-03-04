@@ -1,0 +1,140 @@
+import numpy as np
+import fastnn._core as _core
+
+
+def _flatten(nested):
+    result = []
+    for item in nested:
+        if isinstance(item, list):
+            result.extend(_flatten(item))
+        else:
+            result.append(item)
+    return result
+
+
+def tensor(data, shape):
+    flat_data = _flatten(data)
+    return _core.tensor_from_data(flat_data, shape)
+
+
+def _patch_numpy(tensor_cls):
+    _original_numpy = tensor_cls.numpy
+
+    def _new_numpy(self):
+        data = _original_numpy(self)
+        shape = self.shape
+        return np.array(data).reshape(shape)
+
+    tensor_cls.numpy = _new_numpy
+
+    def _new_getitem(self, idx):
+        return self.numpy()[idx]
+
+    tensor_cls.__getitem__ = _new_getitem
+
+
+_patch_numpy(_core.PyTensor)
+
+zeros = _core.zeros
+ones = _core.ones
+full = _core.full
+eye = _core.eye
+arange = _core.arange
+linspace = _core.linspace
+randn = _core.randn
+rand = _core.rand_uniform
+randint = _core.randint
+zeros_like = _core.zeros_like
+ones_like = _core.ones_like
+full_like = _core.full_like
+add = _core.add
+sub = _core.sub
+mul = _core.mul
+div = _core.div
+matmul = _core.matmul
+neg = _core.neg
+abs = _core.abs
+exp = _core.exp
+log = _core.log
+sqrt = _core.sqrt
+pow = _core.pow
+clamp = _core.clamp
+relu = _core.relu
+gelu = _core.gelu
+sigmoid = _core.sigmoid
+tanh = _core.tanh
+silu = _core.silu
+softmax = _core.softmax
+log_softmax = _core.log_softmax
+argmax = _core.argmax
+argmin = _core.argmin
+sum = _core.sum
+mean = _core.mean
+max = _core.max
+min = _core.min
+mse_loss = _core.mse_loss
+cross_entropy_loss = _core.cross_entropy_loss
+Linear = _core.Linear
+Conv2d = _core.Conv2d
+LayerNorm = _core.LayerNorm
+BatchNorm1d = _core.BatchNorm1d
+Dropout = _core.Dropout
+Embedding = _core.Embedding
+ReLU = _core.ReLU
+GELU = _core.GELU
+Sigmoid = _core.Sigmoid
+Tanh = _core.Tanh
+SiLU = _core.SiLU
+Sequential = _core.Sequential_
+
+
+class PySequential:
+    def __init__(self, layers):
+        self.layers = layers
+
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+    def parameters(self):
+        params = []
+        for layer in self.layers:
+            if hasattr(layer, "parameters"):
+                params.extend(layer.parameters())
+        return params
+
+    def train(self):
+        for layer in self.layers:
+            if hasattr(layer, "train"):
+                layer.train()
+
+    def eval(self):
+        for layer in self.layers:
+            if hasattr(layer, "eval"):
+                layer.eval()
+
+
+Sequential = PySequential
+ModuleList = _core.ModuleList
+SGD = _core.SGD
+Adam = _core.Adam
+AdamW = _core.AdamW
+save_model = _core.save_model
+load_model = _core.load_model
+allocator_stats = _core.allocator_stats
+list_registered_ops = _core.list_registered_ops
+from fastnn.core import no_grad, set_seed, set_num_threads, set_default_device
+from fastnn.data import DataLoader, Dataset, TensorDataset
+from fastnn.callbacks import (
+    EarlyStopping,
+    ModelCheckpoint,
+    LearningRateScheduler,
+    CSVLogger,
+)
+from fastnn import models

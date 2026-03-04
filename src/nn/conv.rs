@@ -1,0 +1,132 @@
+use crate::dispatcher::{dispatch, DispatchKey};
+use crate::nn::Module;
+use crate::storage::DType;
+use crate::tensor::Tensor;
+
+pub struct Conv2d {
+    pub weight: Tensor,
+    pub bias: Option<Tensor>,
+    pub in_channels: i64,
+    pub out_channels: i64,
+    pub kernel_size: i64,
+    pub stride: i64,
+    pub padding: i64,
+    pub dilation: i64,
+    pub groups: i64,
+    training: std::sync::atomic::AtomicBool,
+}
+
+impl Conv2d {
+    pub fn new(
+        in_channels: i64,
+        out_channels: i64,
+        kernel_size: i64,
+        stride: i64,
+        padding: i64,
+        dilation: i64,
+        groups: i64,
+        bias: bool,
+    ) -> Self {
+        let k = kernel_size * kernel_size * in_channels / groups;
+        let scale = (2.0 / k as f32).sqrt();
+
+        let weight_data: Vec<f32> =
+            (0..out_channels * in_channels / groups * kernel_size * kernel_size)
+                .map(|_| (rand::random::<f32>() - 0.5) * 2.0 * scale)
+                .collect();
+        let weight = Tensor::from_vec(
+            weight_data,
+            vec![out_channels, in_channels / groups, kernel_size, kernel_size],
+        );
+        let weight = weight.requires_grad_(true);
+
+        let bias = if bias {
+            let bias_data: Vec<f32> = (0..out_channels).map(|_| 0.0).collect();
+            Some(Tensor::from_vec(bias_data, vec![out_channels]).requires_grad_(true))
+        } else {
+            None
+        };
+
+        Conv2d {
+            weight,
+            bias,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            training: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+}
+
+impl Module for Conv2d {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        let bias_tensor = self
+            .bias
+            .clone()
+            .unwrap_or_else(|| Tensor::from_scalar(0.0));
+
+        let result = dispatch(
+            "conv2d",
+            DispatchKey::Cpu,
+            &[
+                x,
+                &self.weight,
+                &bias_tensor,
+                &Tensor::from_scalar(self.stride as f32),
+                &Tensor::from_scalar(self.padding as f32),
+                &Tensor::from_scalar(self.dilation as f32),
+                &Tensor::from_scalar(self.groups as f32),
+            ],
+        );
+
+        result[0].clone()
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        let mut params = vec![self.weight.clone()];
+        if let Some(b) = &self.bias {
+            params.push(b.clone());
+        }
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        let mut params = vec![("weight".to_string(), self.weight.clone())];
+        if let Some(b) = &self.bias {
+            params.push(("bias".to_string(), b.clone()));
+        }
+        params
+    }
+
+    fn zero_grad(&self) {
+        let mut meta = self.weight.inner.autograd_meta.clone();
+        if let Some(m) = &mut meta {
+            m.grad = None;
+        }
+
+        if let Some(b) = &self.bias {
+            let mut meta = b.inner.autograd_meta.clone();
+            if let Some(m) = &mut meta {
+                m.grad = None;
+            }
+        }
+    }
+
+    fn train_mode(&self) {
+        self.training
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn eval_mode(&self) {
+        self.training
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
