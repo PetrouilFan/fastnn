@@ -432,11 +432,11 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let batch = batch_a.max(batch_b);
 
-    let m = a_shape[a_shape.len() - 2];
-    let k = a_shape[a_shape.len() - 1];
-    let n = b_shape[b_shape.len() - 1];
+    let m = a_shape[a_shape.len() - 2] as usize;
+    let k = a_shape[a_shape.len() - 1] as usize;
+    let n = b_shape[b_shape.len() - 1] as usize;
 
-    if b_shape[b_shape.len() - 2] != k {
+    if b_shape[b_shape.len() - 2] as usize != k {
         panic!("matmul: {} != {}", b_shape[b_shape.len() - 2], k);
     }
 
@@ -446,8 +446,8 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             output_shape.push(a_shape[i].max(b_shape[i]));
         }
     }
-    output_shape.push(m);
-    output_shape.push(n);
+    output_shape.push(m as i64);
+    output_shape.push(n as i64);
 
     let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
 
@@ -459,19 +459,70 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_cols = a_shape[a_shape.len() - 1] as usize;
     let b_cols = b_shape[b_shape.len() - 1] as usize;
 
-    for b in 0..batch {
-        for i in 0..m as usize {
-            for j in 0..n as usize {
-                let mut sum = 0.0f32;
-                for l in 0..k as usize {
-                    let a_idx = b * a_rows * a_cols + i * a_cols + l;
-                    let b_idx = b * k as usize * b_cols + l * b_cols + j;
-                    sum += a_data.get(a_idx).copied().unwrap_or(0.0)
-                        * b_data.get(b_idx).copied().unwrap_or(0.0);
-                }
-                let out_idx = b * m as usize * n as usize + i * n as usize + j;
-                if out_idx < output_data.len() {
-                    output_data[out_idx] = sum;
+    const TILE_SIZE: usize = 32;
+
+    for bat in 0..batch {
+        for i_tile in (0..m).step_by(TILE_SIZE) {
+            for j_tile in (0..n).step_by(TILE_SIZE) {
+                for k_tile in (0..k).step_by(TILE_SIZE) {
+                    let i_max = (i_tile + TILE_SIZE).min(m);
+                    let j_max = (j_tile + TILE_SIZE).min(n);
+                    let k_max = (k_tile + TILE_SIZE).min(k);
+
+                    for i in i_tile..i_max {
+                        for j in j_tile..j_max {
+                            let mut sum = 0.0f32;
+
+                            let mut kk = k_tile;
+                            while kk + 4 <= k_max {
+                                let a0 = unsafe {
+                                    *a_data.get_unchecked(bat * a_rows * a_cols + i * a_cols + kk)
+                                };
+                                let a1 = unsafe {
+                                    *a_data
+                                        .get_unchecked(bat * a_rows * a_cols + i * a_cols + kk + 1)
+                                };
+                                let a2 = unsafe {
+                                    *a_data
+                                        .get_unchecked(bat * a_rows * a_cols + i * a_cols + kk + 2)
+                                };
+                                let a3 = unsafe {
+                                    *a_data
+                                        .get_unchecked(bat * a_rows * a_cols + i * a_cols + kk + 3)
+                                };
+
+                                let b0 = unsafe {
+                                    *b_data.get_unchecked(bat * k * b_cols + kk * b_cols + j)
+                                };
+                                let b1 = unsafe {
+                                    *b_data.get_unchecked(bat * k * b_cols + (kk + 1) * b_cols + j)
+                                };
+                                let b2 = unsafe {
+                                    *b_data.get_unchecked(bat * k * b_cols + (kk + 2) * b_cols + j)
+                                };
+                                let b3 = unsafe {
+                                    *b_data.get_unchecked(bat * k * b_cols + (kk + 3) * b_cols + j)
+                                };
+
+                                sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
+                                kk += 4;
+                            }
+
+                            while kk < k_max {
+                                let a_val = unsafe {
+                                    *a_data.get_unchecked(bat * a_rows * a_cols + i * a_cols + kk)
+                                };
+                                let b_val = unsafe {
+                                    *b_data.get_unchecked(bat * k * b_cols + kk * b_cols + j)
+                                };
+                                sum += a_val * b_val;
+                                kk += 1;
+                            }
+
+                            let out_idx = bat * m * n + i * n + j;
+                            unsafe { *output_data.get_unchecked_mut(out_idx) = sum };
+                        }
+                    }
                 }
             }
         }
