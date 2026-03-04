@@ -1,4 +1,5 @@
 mod engine;
+pub use engine::backward;
 
 use crate::tensor::Tensor;
 use smallvec::SmallVec;
@@ -35,10 +36,13 @@ impl AutogradMeta {
             requires_grad,
             grad: None,
             grad_fn: None,
-            is_leaf: !requires_grad,
+            is_leaf: true,
         }
     }
 }
+
+#[derive(Clone)]
+pub struct Edge(pub Arc<dyn Node>, pub usize);
 
 #[allow(clippy::len_zero)]
 pub trait Node: Send + Sync {
@@ -224,13 +228,19 @@ impl Node for NegBackward {
     fn name(&self) -> &str {
         "NegBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct ReluBackward;
+pub struct ReluBackward {
+    pub input: Tensor,
+}
 
 impl ReluBackward {
-    pub fn new() -> Self {
-        ReluBackward
+    pub fn new(input: Tensor) -> Self {
+        ReluBackward { input }
     }
 }
 
@@ -252,6 +262,10 @@ impl Node for ReluBackward {
 
     fn name(&self) -> &str {
         "ReluBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
     }
 }
 
@@ -286,6 +300,10 @@ impl Node for MatmulBackward {
 
     fn name(&self) -> &str {
         "MatmulBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        &[]
     }
 }
 
@@ -329,6 +347,10 @@ impl Node for SumBackward {
 
     fn name(&self) -> &str {
         "SumBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
     }
 }
 
@@ -378,13 +400,19 @@ impl Node for MeanBackward {
     fn name(&self) -> &str {
         "MeanBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct ExpBackward;
+pub struct ExpBackward {
+    pub input: Tensor,
+}
 
 impl ExpBackward {
-    pub fn new() -> Self {
-        ExpBackward
+    pub fn new(input: Tensor) -> Self {
+        ExpBackward { input }
     }
 }
 
@@ -405,13 +433,19 @@ impl Node for ExpBackward {
     fn name(&self) -> &str {
         "ExpBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct LogBackward;
+pub struct LogBackward {
+    pub input: Tensor,
+}
 
 impl LogBackward {
-    pub fn new() -> Self {
-        LogBackward
+    pub fn new(input: Tensor) -> Self {
+        LogBackward { input }
     }
 }
 
@@ -432,13 +466,19 @@ impl Node for LogBackward {
     fn name(&self) -> &str {
         "LogBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct SqrtBackward;
+pub struct SqrtBackward {
+    pub input: Tensor,
+}
 
 impl SqrtBackward {
-    pub fn new() -> Self {
-        SqrtBackward
+    pub fn new(input: Tensor) -> Self {
+        SqrtBackward { input }
     }
 }
 
@@ -458,13 +498,19 @@ impl Node for SqrtBackward {
     fn name(&self) -> &str {
         "SqrtBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct AbsBackward;
+pub struct AbsBackward {
+    pub input: Tensor,
+}
 
 impl AbsBackward {
-    pub fn new() -> Self {
-        AbsBackward
+    pub fn new(input: Tensor) -> Self {
+        AbsBackward { input }
     }
 }
 
@@ -484,13 +530,19 @@ impl Node for AbsBackward {
     fn name(&self) -> &str {
         "AbsBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct GeluBackward;
+pub struct GeluBackward {
+    pub input: Tensor,
+}
 
 impl GeluBackward {
-    pub fn new() -> Self {
-        GeluBackward
+    pub fn new(input: Tensor) -> Self {
+        GeluBackward { input }
     }
 }
 
@@ -510,13 +562,19 @@ impl Node for GeluBackward {
     fn name(&self) -> &str {
         "GeluBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct SigmoidBackward;
+pub struct SigmoidBackward {
+    pub input: Tensor,
+}
 
 impl SigmoidBackward {
-    pub fn new() -> Self {
-        SigmoidBackward
+    pub fn new(input: Tensor) -> Self {
+        SigmoidBackward { input }
     }
 }
 
@@ -536,13 +594,19 @@ impl Node for SigmoidBackward {
     fn name(&self) -> &str {
         "SigmoidBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct TanhBackward;
+pub struct TanhBackward {
+    pub input: Tensor,
+}
 
 impl TanhBackward {
-    pub fn new() -> Self {
-        TanhBackward
+    pub fn new(input: Tensor) -> Self {
+        TanhBackward { input }
     }
 }
 
@@ -562,13 +626,19 @@ impl Node for TanhBackward {
     fn name(&self) -> &str {
         "TanhBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct SiLUBackward;
+pub struct SiLUBackward {
+    pub input: Tensor,
+}
 
 impl SiLUBackward {
-    pub fn new() -> Self {
-        SiLUBackward
+    pub fn new(input: Tensor) -> Self {
+        SiLUBackward { input }
     }
 }
 
@@ -588,13 +658,19 @@ impl Node for SiLUBackward {
     fn name(&self) -> &str {
         "SiLUBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct SoftmaxBackward;
+pub struct SoftmaxBackward {
+    pub input: Tensor,
+}
 
 impl SoftmaxBackward {
-    pub fn new() -> Self {
-        SoftmaxBackward
+    pub fn new(input: Tensor) -> Self {
+        SoftmaxBackward { input }
     }
 }
 
@@ -614,13 +690,19 @@ impl Node for SoftmaxBackward {
     fn name(&self) -> &str {
         "SoftmaxBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
-pub struct LogSoftmaxBackward;
+pub struct LogSoftmaxBackward {
+    pub input: Tensor,
+}
 
 impl LogSoftmaxBackward {
-    pub fn new() -> Self {
-        LogSoftmaxBackward
+    pub fn new(input: Tensor) -> Self {
+        LogSoftmaxBackward { input }
     }
 }
 
@@ -639,6 +721,10 @@ impl Node for LogSoftmaxBackward {
 
     fn name(&self) -> &str {
         "LogSoftmaxBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
     }
 }
 
@@ -687,6 +773,10 @@ impl Node for Conv2dBackward {
     fn name(&self) -> &str {
         "Conv2dBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        &[]
+    }
 }
 
 pub struct LayerNormBackward {
@@ -715,6 +805,10 @@ impl Node for LayerNormBackward {
     fn name(&self) -> &str {
         "LayerNormBackward"
     }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
 }
 
 pub struct EmbeddingBackward {
@@ -742,5 +836,9 @@ impl Node for EmbeddingBackward {
 
     fn name(&self) -> &str {
         "EmbeddingBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.weight)
     }
 }

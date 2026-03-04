@@ -99,7 +99,7 @@ impl PyTensor {
     }
 
     fn backward(&self) {
-        crate::autograd::engine::backward(&self.inner, None);
+        crate::autograd::backward(&self.inner, None);
     }
 
     fn detach(&self) -> PyTensor {
@@ -148,6 +148,10 @@ impl PyTensor {
 
     fn __mul__(&self, other: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.mul(&other.inner))
+    }
+
+    fn mul_scalar(&self, other: f32) -> PyTensor {
+        PyTensor::from_tensor(self.inner.mul(&Tensor::from_scalar(other)))
     }
 
     fn __truediv__(&self, other: &PyTensor) -> PyTensor {
@@ -362,37 +366,27 @@ fn sqrt(a: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn relu(a: &PyTensor) -> PyTensor {
-    use dispatcher::dispatch;
-    let result = dispatch("relu", dispatcher::DispatchKey::Cpu, &[&a.inner]);
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(a.inner.relu())
 }
 
 #[pyfunction]
 fn gelu(a: &PyTensor) -> PyTensor {
-    use dispatcher::dispatch;
-    let result = dispatch("gelu", dispatcher::DispatchKey::Cpu, &[&a.inner]);
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(a.inner.gelu())
 }
 
 #[pyfunction]
 fn sigmoid(a: &PyTensor) -> PyTensor {
-    use dispatcher::dispatch;
-    let result = dispatch("sigmoid", dispatcher::DispatchKey::Cpu, &[&a.inner]);
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(a.inner.sigmoid())
 }
 
 #[pyfunction]
 fn tanh(a: &PyTensor) -> PyTensor {
-    use dispatcher::dispatch;
-    let result = dispatch("tanh", dispatcher::DispatchKey::Cpu, &[&a.inner]);
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(a.inner.tanh())
 }
 
 #[pyfunction]
 fn silu(a: &PyTensor) -> PyTensor {
-    use dispatcher::dispatch;
-    let result = dispatch("silu", dispatcher::DispatchKey::Cpu, &[&a.inner]);
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(a.inner.silu())
 }
 
 #[pyfunction]
