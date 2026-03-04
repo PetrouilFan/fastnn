@@ -831,23 +831,40 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         "mean"
     };
 
-    let max_logits = logits.max(1, true);
-    let log_sum_exp = logits.sub(&max_logits.clone()).exp().sum(1, true).ln();
+    let logits_data = logits.to_numpy();
+    let targets_data = targets.to_numpy();
 
-    let target_idx = targets.item() as usize;
-    let class_logit = logits
-        .reshape(vec![logits.numel()])
-        .slice(0, target_idx as i64, (target_idx + 1) as i64, 1)
-        .item();
+    let batch_size = logits.shape()[0] as usize;
+    let num_classes = logits.shape()[1] as usize;
 
-    let loss = log_sum_exp.item() - class_logit;
+    let mut total_loss = 0.0f32;
+    let mut losses = vec![0.0f32; batch_size];
+
+    for b in 0..batch_size {
+        let max_logit = (0..num_classes)
+            .map(|c| logits_data[b * num_classes + c])
+            .fold(f32::MIN, f32::max);
+
+        let mut sum_exp = 0.0f32;
+        for c in 0..num_classes {
+            sum_exp += (logits_data[b * num_classes + c] - max_logit).exp();
+        }
+        let log_sum_exp = sum_exp.ln();
+
+        let target_class = targets_data[b] as usize;
+        let class_logit = logits_data[b * num_classes + target_class];
+
+        losses[b] = log_sum_exp - class_logit;
+        total_loss += losses[b];
+    }
 
     match reduction {
         "none" => {
             let output = Tensor::zeros(logits.shape(), DType::F32, Device::Cpu);
             vec![output]
         }
-        "mean" | "sum" | _ => vec![Tensor::from_scalar(loss)],
+        "mean" => vec![Tensor::from_scalar(total_loss / batch_size as f32)],
+        "sum" | _ => vec![Tensor::from_scalar(total_loss)],
     }
 }
 
@@ -1022,20 +1039,21 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x_shape = x.shape();
     let num_features = x_shape[1];
 
-    let mean = x.mean(0, true);
+    let mean = x.mean(0, false).unsqueeze(0);
     let var = x
         .sub(&mean.clone())
         .mul(&x.sub(&mean.clone()))
-        .mean(0, true);
+        .mean(0, false)
+        .unsqueeze(0);
     let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
 
     let mut normalized = x.sub(&mean).div(&std);
 
     if let Some(w) = weight {
-        normalized = normalized.mul(w);
+        normalized = normalized.mul(&w.unsqueeze(0));
     }
     if let Some(b) = bias {
-        normalized = normalized.add(b);
+        normalized = normalized.add(&b.unsqueeze(0));
     }
 
     vec![normalized]
