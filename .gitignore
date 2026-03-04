@@ -1,0 +1,62 @@
+# Byte-compiled / distribution / packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+wheels/
+wheelhouse/
+*.whl
+
+# Maturin / Rust build artifacts
+target/
+maturin/
+
+# C extensions / compiled artifacts
+*.so
+*.dll
+*.dylib
+
+# Test / coverage
+.pytest_cache/
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+
+# Editor directories and files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*~
+
+# Docs
+docs/_build/
+
+# Misc
+MANIFEST
+MANIFEST.in
+build/
