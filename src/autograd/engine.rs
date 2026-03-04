@@ -1,5 +1,5 @@
-use crate::autograd::{AutogradMeta, Edge, Node};
-use crate::tensor::Tensor;
+use crate::autograd::Node;
+use crate::tensor::{Tensor, TensorImpl};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -14,16 +14,12 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     let mut visited: HashSet<usize> = HashSet::new();
     let mut grads: HashMap<usize, Tensor> = HashMap::new();
 
-    let mut add_node_to_queue = |node: Arc<dyn Node>| {
-        let node_ptr = (&*node) as *const _ as *const () as usize;
+    if let Some(grad_fn) = root.grad_fn() {
+        let node_ptr = (&*grad_fn) as *const _ as *const () as usize;
         if !visited.contains(&node_ptr) {
             visited.insert(node_ptr);
-            queue.push_back(node);
+            queue.push_back(grad_fn);
         }
-    };
-
-    if let Some(grad_fn) = root.grad_fn() {
-        add_node_to_queue(grad_fn);
     }
 
     let root_ptr = Arc::as_ptr(&root.inner) as usize;
@@ -32,73 +28,66 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     while let Some(node) = queue.pop_front() {
         let node_ptr = (&*node) as *const _ as *const () as usize;
 
-        let mut grad_inputs = node.apply(&[grads.get(&node_ptr).cloned()]);
+        let grad_output_for_node = grads.get(&node_ptr).cloned();
+        let grad_inputs = node.apply(&[grad_output_for_node]);
 
-        for (i, edge) in node.next_edges().iter().enumerate() {
-            let Edge(ref next_node, _) = edge;
+        let input_tensors = node.inputs();
+        for (i, input_tensor) in input_tensors.iter().enumerate() {
+            if let Some(grad) = grad_inputs.get(i).and_then(|g| g.as_ref()) {
+                let input_ptr = Arc::as_ptr(&input_tensor.inner) as usize;
+                if let Some(existing) = grads.get(&input_ptr) {
+                    let new_grad = existing.clone() + grad.clone();
+                    grads.insert(input_ptr, new_grad);
+                } else {
+                    grads.insert(input_ptr, grad.clone());
+                }
+            }
+        }
+
+        for edge in node.next_edges() {
+            let next_node = &edge.0;
             let next_ptr = (&**next_node) as *const _ as *const () as usize;
-
-            if let Some(grad) = grad_inputs.get(i) {
-                if let Some(existing) = grads.get(&next_ptr) {
-                    let new_grad = existing.clone() + grad.clone().unwrap();
-                    grads.insert(next_ptr, new_grad);
-                } else if let Some(g) = grad {
-                    grads.insert(next_ptr, g.clone());
-                }
-            }
-
-            add_node_to_queue(next_node.clone());
-        }
-    }
-
-    fn accumulate_grad(tensor: &Tensor, grad: Tensor) {
-        let ptr = Arc::as_ptr(&tensor.inner) as usize;
-
-        let mut meta = tensor.inner.autograd_meta.clone();
-        if let Some(m) = &mut meta {
-            if let Some(existing) = &m.grad {
-                m.grad = Some(existing.clone() + grad);
-            } else {
-                m.grad = Some(grad);
+            if !visited.contains(&next_ptr) {
+                visited.insert(next_ptr);
+                queue.push_back(next_node.clone());
             }
         }
     }
 
-    fn find_leaves_and_accumulate(tensor: &Tensor, grads: &HashMap<usize, Tensor>) {
-        if tensor.is_leaf() && tensor.requires_grad() {
-            let ptr = Arc::as_ptr(&tensor.inner) as usize;
-            if let Some(grad) = grads.get(&ptr) {
-                accumulate_grad(tensor, grad.clone());
-            }
-        }
-    }
-
-    let mut tensors_to_process: Vec<Tensor> = vec![root.clone()];
-    let mut seen: HashSet<usize> = HashSet::new();
-
-    while let Some(t) = tensors_to_process.pop() {
-        let ptr = Arc::as_ptr(&t.inner) as usize;
-        if seen.contains(&ptr) {
-            continue;
-        }
-        seen.insert(ptr);
-
-        if t.is_leaf() && t.requires_grad() {
-            if let Some(grad) = grads.get(&ptr) {
-                accumulate_grad(&t, grad.clone());
-            }
-        } else if let Some(grad_fn) = t.grad_fn() {
-            let node_ptr = (&*grad_fn) as *const _ as *const () as usize;
-            if let Some(grad) = grads.get(&node_ptr) {
-                for edge in grad_fn.next_edges() {
-                    let Edge(ref node, idx) = edge;
-                    // This is simplified - real implementation would track input tensors
+    let root_ptr = Arc::as_ptr(&root.inner) as usize;
+    if let Some(grad) = grads.get(&root_ptr) {
+        if root.is_leaf() && root.requires_grad() {
+            unsafe {
+                let ptr = Arc::as_ptr(&root.inner) as *mut TensorImpl;
+                if let Some(meta) = (*ptr).autograd_meta.as_mut() {
+                    if let Some(existing) = &meta.grad {
+                        meta.grad = Some(existing.clone() + grad.clone());
+                    } else {
+                        meta.grad = Some(grad.clone());
+                    }
                 }
             }
         }
     }
-}
 
-pub fn grad(tensor: &Tensor) -> Option<Tensor> {
-    tensor.grad()
+    if let Some(grad_fn) = root.grad_fn() {
+        let input_tensors = grad_fn.inputs();
+        for input_tensor in input_tensors {
+            let input_ptr = Arc::as_ptr(&input_tensor.inner) as usize;
+            if let Some(grad) = grads.get(&input_ptr) {
+                if input_tensor.is_leaf() && input_tensor.requires_grad() {
+                    unsafe {
+                        let ptr = Arc::as_ptr(&input_tensor.inner) as *mut TensorImpl;
+                        if let Some(meta) = (*ptr).autograd_meta.as_mut() {
+                            if let Some(existing) = &meta.grad {
+                                meta.grad = Some(existing.clone() + grad.clone());
+                            } else {
+                                meta.grad = Some(grad.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
