@@ -2,6 +2,24 @@ import contextlib
 import fastnn._core as _core
 
 
+def sum(a, dim=None, keepdim=False):
+    if dim is None:
+        result = _core.sum(a)
+        while result.ndim > 0:
+            result = _core.sum(result)
+        return result
+    return _core.sum(a, dim, keepdim)
+
+
+def mean(a, dim=None, keepdim=False):
+    if dim is None:
+        result = _core.mean(a)
+        while result.ndim > 0:
+            result = _core.mean(result)
+        return result
+    return _core.mean(a, dim, keepdim)
+
+
 @contextlib.contextmanager
 def no_grad():
     _core._no_grad_enter()
