@@ -26,9 +26,15 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_shape = iter.output_shape.to_vec();
 
     let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
-    let a_data = a.to_numpy();
-    let b_data = b.to_numpy();
-    let mut output_data = output.to_numpy();
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+    let b_ptr = b.data_ptr() as *const f32;
+
+    // Get mutable access to output storage
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
     let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
     let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
@@ -39,108 +45,37 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    #[cfg(feature = "parallel")]
-    {
-        if output_data.len() >= 1024 {
-            let a_data = a_data;
-            let b_data = b_data;
-            let out_len = output_data.len();
+    for idx in 0..numel {
+        let mut remaining = idx;
+        let mut a_idx = 0;
+        let mut b_idx = 0;
 
-            output_data
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(idx, out_val)| {
-                    let mut remaining = idx;
-                    let mut a_idx = 0;
-                    let mut b_idx = 0;
+        for i in (0..out_shape.len()).rev() {
+            let dim_idx = remaining % out_shape[i] as usize;
+            remaining /= out_shape[i] as usize;
 
-                    for i in (0..out_shape.len()).rev() {
-                        let dim_idx = remaining % out_shape[i] as usize;
-                        remaining /= out_shape[i] as usize;
-
-                        if i >= a_shape.len() || a_shape[i] == 1 {
-                        } else {
-                            a_idx += dim_idx * a_strides[i] as usize;
-                        }
-
-                        if i >= b_shape.len() || b_shape[i] == 1 {
-                        } else {
-                            b_idx += dim_idx * b_strides[i] as usize;
-                        }
-                    }
-
-                    a_idx += a_storage_offset;
-                    b_idx += b_storage_offset;
-
-                    let a_val = a_data.get(a_idx).copied().unwrap_or(0.0);
-                    let b_val = b_data.get(b_idx).copied().unwrap_or(0.0);
-                    *out_val = a_val + b_val;
-                });
-        } else {
-            for idx in 0..output_data.len() {
-                let mut remaining = idx;
-                let mut a_idx = 0;
-                let mut b_idx = 0;
-
-                for i in (0..out_shape.len()).rev() {
-                    let dim_idx = remaining % out_shape[i] as usize;
-                    remaining /= out_shape[i] as usize;
-
-                    if i >= a_shape.len() || a_shape[i] == 1 {
-                    } else {
-                        a_idx += dim_idx * a_strides[i] as usize;
-                    }
-
-                    if i >= b_shape.len() || b_shape[i] == 1 {
-                    } else {
-                        b_idx += dim_idx * b_strides[i] as usize;
-                    }
-                }
-
-                a_idx += a_storage_offset;
-                b_idx += b_storage_offset;
-
-                let a_val = a_data.get(a_idx).copied().unwrap_or(0.0);
-                let b_val = b_data.get(b_idx).copied().unwrap_or(0.0);
-                output_data[idx] = a_val + b_val;
+            if i >= a_shape.len() || a_shape[i] == 1 {
+            } else {
+                a_idx += dim_idx * a_strides[i] as usize;
             }
+
+            if i >= b_shape.len() || b_shape[i] == 1 {
+            } else {
+                b_idx += dim_idx * b_strides[i] as usize;
+            }
+        }
+
+        a_idx += a_storage_offset;
+        b_idx += b_storage_offset;
+
+        unsafe {
+            let a_val = *a_ptr.add(a_idx);
+            let b_val = *b_ptr.add(b_idx);
+            *out_ptr.add(idx) = a_val + b_val;
         }
     }
 
-    #[cfg(not(feature = "parallel"))]
-    {
-        for idx in 0..output_data.len() {
-            let mut remaining = idx;
-            let mut a_idx = 0;
-            let mut b_idx = 0;
-
-            for i in (0..out_shape.len()).rev() {
-                let dim_idx = remaining % out_shape[i] as usize;
-                remaining /= out_shape[i] as usize;
-
-                if i >= a_shape.len() || a_shape[i] == 1 {
-                } else {
-                    a_idx += dim_idx * a_strides[i] as usize;
-                }
-
-                if i >= b_shape.len() || b_shape[i] == 1 {
-                } else {
-                    b_idx += dim_idx * b_strides[i] as usize;
-                }
-            }
-
-            a_idx += a_storage_offset;
-            b_idx += b_storage_offset;
-
-            let a_val = a_data.get(a_idx).copied().unwrap_or(0.0);
-            let b_val = b_data.get(b_idx).copied().unwrap_or(0.0);
-            output_data[idx] = a_val + b_val;
-        }
-    }
-
-    let sizes: smallvec::SmallVec<[i64; 8]> = output_shape.into();
-    let storage = Arc::new(Storage::from_vec(output_data, a.dtype(), a.device()));
-    vec![Tensor::new(crate::tensor::TensorImpl::new(storage, sizes))]
+    vec![output]
 }
 
 fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -397,17 +332,23 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_shape = iter.output_shape.to_vec();
 
     let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
-    let a_data = a.to_numpy();
-    let mut output_data = output.to_numpy();
 
-    for idx in 0..output_data.len() {
-        let val = a_data.get(idx).copied().unwrap_or(0.0);
-        output_data[idx] = val.max(0.0);
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    // Get mutable access to output storage
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    for idx in 0..numel {
+        unsafe {
+            let val = *a_ptr.add(idx);
+            *out_ptr.add(idx) = val.max(0.0);
+        }
     }
 
-    let sizes: smallvec::SmallVec<[i64; 8]> = output_shape.into();
-    let storage = Arc::new(Storage::from_vec(output_data, a.dtype(), a.device()));
-    vec![Tensor::new(crate::tensor::TensorImpl::new(storage, sizes))]
+    vec![output]
 }
 
 fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -1486,5 +1427,4 @@ fn register_kernels() {
     register("eye", DispatchKey::Cpu, eye_kernel as KernelFn);
     register("randn", DispatchKey::Cpu, randn_kernel as KernelFn);
     register("rand", DispatchKey::Cpu, rand_kernel as KernelFn);
-    register("randint", DispatchKey::Cpu, randint_kernel as KernelFn);
 }
