@@ -70,6 +70,7 @@ argmax = _core.argmax
 argmin = _core.argmin
 sum = _core.sum
 mean = _core.mean
+
 max = _core.max
 min = _core.min
 mse_loss = _core.mse_loss
@@ -129,6 +130,7 @@ save_model = _core.save_model
 load_model = _core.load_model
 allocator_stats = _core.allocator_stats
 list_registered_ops = _core.list_registered_ops
+batched_mlp_forward = _core.batched_mlp_forward
 from fastnn.core import no_grad, set_seed, set_num_threads, set_default_device
 from fastnn.data import DataLoader, Dataset, TensorDataset
 from fastnn.callbacks import (

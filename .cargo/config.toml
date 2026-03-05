@@ -1,6 +1,9 @@
 [build]
 rustflags = ["-C", "target-cpu=native"]
 
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-cpu=native", "-Clink-arg=-L/c/msys64/mingw64/lib", "-Clink-arg=-lopenblas"]
+
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-cpu=native"]
 

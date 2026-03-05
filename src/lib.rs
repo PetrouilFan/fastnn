@@ -338,6 +338,51 @@ fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
+fn batched_mlp_forward(
+    input: &PyTensor,
+    weights: Vec<PyTensor>,
+    biases: Vec<PyTensor>,
+    activations: Vec<String>,
+) -> PyTensor {
+    let mut x = input.inner.clone();
+
+    for i in 0..weights.len() {
+        let w = &weights[i].inner;
+        let b = biases.get(i).map(|b| &b.inner);
+
+        // fastnn Linear stores weight as [in_features, out_features], so x @ w works directly
+        x = x.matmul(w);
+        if let Some(bias) = b {
+            x = x.add(bias);
+        }
+
+        if i < activations.len() {
+            let act = &activations[i];
+            match act.as_str() {
+                "relu" => {
+                    use dispatcher::dispatch;
+                    let result = dispatch("relu", dispatcher::DispatchKey::Cpu, &[&x]);
+                    x = result[0].clone();
+                }
+                "sigmoid" => {
+                    use dispatcher::dispatch;
+                    let result = dispatch("sigmoid", dispatcher::DispatchKey::Cpu, &[&x]);
+                    x = result[0].clone();
+                }
+                "tanh" => {
+                    use dispatcher::dispatch;
+                    let result = dispatch("tanh", dispatcher::DispatchKey::Cpu, &[&x]);
+                    x = result[0].clone();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    PyTensor::from_tensor(x)
+}
+
+#[pyfunction]
 fn neg(a: &PyTensor) -> PyTensor {
     PyTensor::from_tensor(a.inner.neg())
 }
@@ -542,8 +587,35 @@ fn _no_grad_exit() {
 #[pyfunction]
 fn _set_seed(_seed: u64) {}
 
+#[cfg(feature = "parallel")]
+use rayon::ThreadPoolBuilder;
+
 #[pyfunction]
+#[cfg(feature = "parallel")]
+fn _set_num_threads(n: i32) {
+    if n > 0 {
+        ThreadPoolBuilder::new()
+            .num_threads(n as usize)
+            .build_global()
+            .expect("Failed to set rayon thread pool");
+    }
+}
+
+#[pyfunction]
+#[cfg(feature = "parallel")]
+fn _get_num_threads() -> usize {
+    rayon::current_num_threads()
+}
+
+#[pyfunction]
+#[cfg(not(feature = "parallel"))]
 fn _set_num_threads(_n: i32) {}
+
+#[pyfunction]
+#[cfg(not(feature = "parallel"))]
+fn _get_num_threads() -> usize {
+    1
+}
 
 #[pyfunction]
 fn _set_default_device(_device: String) {}
@@ -1035,6 +1107,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mul, py)?)?;
     m.add_function(wrap_pyfunction!(div, py)?)?;
     m.add_function(wrap_pyfunction!(matmul, py)?)?;
+    m.add_function(wrap_pyfunction!(batched_mlp_forward, py)?)?;
     m.add_function(wrap_pyfunction!(neg, py)?)?;
     m.add_function(wrap_pyfunction!(abs, py)?)?;
     m.add_function(wrap_pyfunction!(exp, py)?)?;
@@ -1061,6 +1134,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_no_grad_exit, py)?)?;
     m.add_function(wrap_pyfunction!(_set_seed, py)?)?;
     m.add_function(wrap_pyfunction!(_set_num_threads, py)?)?;
+    m.add_function(wrap_pyfunction!(_get_num_threads, py)?)?;
     m.add_function(wrap_pyfunction!(_set_default_device, py)?)?;
     m.add_function(wrap_pyfunction!(allocator_stats, py)?)?;
     m.add_function(wrap_pyfunction!(list_registered_ops, py)?)?;
