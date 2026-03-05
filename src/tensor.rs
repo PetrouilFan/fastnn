@@ -736,6 +736,10 @@ impl Tensor {
         }
     }
 
+    pub fn data_ptr(&self) -> *const u8 {
+        self.inner.storage.data.as_ptr()
+    }
+
     pub fn increment_version(&self) {
         self.inner.increment_version();
     }
