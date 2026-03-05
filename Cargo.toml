@@ -21,8 +21,13 @@ serde         = { version = "1.0", features = ["derive"] }
 serde_json    = "1.0"
 rand          = "0.8"
 
+[target.'cfg(windows)'.dependencies]
+blas-sys = { version = "0.9", optional = true }
+
 [features]
-default = []
+default = ["blas", "parallel"]
+blas = ["dep:blas-sys"]
+parallel = []
 
 [profile.release]
 lto = true

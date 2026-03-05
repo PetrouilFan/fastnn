@@ -1,9 +1,14 @@
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
+#[cfg(feature = "blas")]
+use crate::kernels::blas::{self, MIN_BLAS_SIZE};
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use smallvec::smallvec;
 use std::sync::Arc;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
     let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
@@ -29,32 +34,108 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
     let out_shape = output_shape.clone();
 
-    for idx in 0..output_data.len() {
-        let mut remaining = idx;
-        let mut a_idx = 0;
-        let mut b_idx = 0;
+    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
+    let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
+    let a_storage_offset = a.inner.storage_offset as usize;
+    let b_storage_offset = b.inner.storage_offset as usize;
 
-        for i in (0..out_shape.len()).rev() {
-            let dim_idx = remaining % out_shape[i] as usize;
-            remaining /= out_shape[i] as usize;
+    #[cfg(feature = "parallel")]
+    {
+        if output_data.len() >= 1024 {
+            let a_data = a_data;
+            let b_data = b_data;
+            let out_len = output_data.len();
 
-            if i >= a_shape.len() || a_shape[i] == 1 {
-            } else {
-                a_idx += dim_idx as usize * a.inner.strides[i] as usize;
-            }
+            output_data
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(idx, out_val)| {
+                    let mut remaining = idx;
+                    let mut a_idx = 0;
+                    let mut b_idx = 0;
 
-            if i >= b_shape.len() || b_shape[i] == 1 {
-            } else {
-                b_idx += dim_idx as usize * b.inner.strides[i] as usize;
+                    for i in (0..out_shape.len()).rev() {
+                        let dim_idx = remaining % out_shape[i] as usize;
+                        remaining /= out_shape[i] as usize;
+
+                        if i >= a_shape.len() || a_shape[i] == 1 {
+                        } else {
+                            a_idx += dim_idx * a_strides[i] as usize;
+                        }
+
+                        if i >= b_shape.len() || b_shape[i] == 1 {
+                        } else {
+                            b_idx += dim_idx * b_strides[i] as usize;
+                        }
+                    }
+
+                    a_idx += a_storage_offset;
+                    b_idx += b_storage_offset;
+
+                    let a_val = a_data.get(a_idx).copied().unwrap_or(0.0);
+                    let b_val = b_data.get(b_idx).copied().unwrap_or(0.0);
+                    *out_val = a_val + b_val;
+                });
+        } else {
+            for idx in 0..output_data.len() {
+                let mut remaining = idx;
+                let mut a_idx = 0;
+                let mut b_idx = 0;
+
+                for i in (0..out_shape.len()).rev() {
+                    let dim_idx = remaining % out_shape[i] as usize;
+                    remaining /= out_shape[i] as usize;
+
+                    if i >= a_shape.len() || a_shape[i] == 1 {
+                    } else {
+                        a_idx += dim_idx * a_strides[i] as usize;
+                    }
+
+                    if i >= b_shape.len() || b_shape[i] == 1 {
+                    } else {
+                        b_idx += dim_idx * b_strides[i] as usize;
+                    }
+                }
+
+                a_idx += a_storage_offset;
+                b_idx += b_storage_offset;
+
+                let a_val = a_data.get(a_idx).copied().unwrap_or(0.0);
+                let b_val = b_data.get(b_idx).copied().unwrap_or(0.0);
+                output_data[idx] = a_val + b_val;
             }
         }
+    }
 
-        a_idx += a.inner.storage_offset as usize;
-        b_idx += b.inner.storage_offset as usize;
+    #[cfg(not(feature = "parallel"))]
+    {
+        for idx in 0..output_data.len() {
+            let mut remaining = idx;
+            let mut a_idx = 0;
+            let mut b_idx = 0;
 
-        let a_val = a_data.get(a_idx).copied().unwrap_or(0.0);
-        let b_val = b_data.get(b_idx).copied().unwrap_or(0.0);
-        output_data[idx] = a_val + b_val;
+            for i in (0..out_shape.len()).rev() {
+                let dim_idx = remaining % out_shape[i] as usize;
+                remaining /= out_shape[i] as usize;
+
+                if i >= a_shape.len() || a_shape[i] == 1 {
+                } else {
+                    a_idx += dim_idx * a_strides[i] as usize;
+                }
+
+                if i >= b_shape.len() || b_shape[i] == 1 {
+                } else {
+                    b_idx += dim_idx * b_strides[i] as usize;
+                }
+            }
+
+            a_idx += a_storage_offset;
+            b_idx += b_storage_offset;
+
+            let a_val = a_data.get(a_idx).copied().unwrap_or(0.0);
+            let b_val = b_data.get(b_idx).copied().unwrap_or(0.0);
+            output_data[idx] = a_val + b_val;
+        }
     }
 
     let sizes: smallvec::SmallVec<[i64; 8]> = output_shape.into();
@@ -420,6 +501,43 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         panic!("matmul: both tensors must have at least 2 dimensions");
     }
 
+    let m = a_shape[a_shape.len() - 2] as i32;
+    let k = a_shape[a_shape.len() - 1] as i32;
+    let n = b_shape[b_shape.len() - 1] as i32;
+
+    if b_shape[b_shape.len() - 2] as i32 != k {
+        panic!("matmul: {} != {}", b_shape[b_shape.len() - 2], k);
+    }
+
+    #[cfg(feature = "blas")]
+    {
+        if a.dtype() == DType::F32
+            && b.dtype() == DType::F32
+            && a.is_contiguous()
+            && b.is_contiguous()
+        {
+            let total_elements = (m * k + k * n + m * n) as usize;
+            if total_elements >= MIN_BLAS_SIZE {
+                let a_data = a.to_numpy();
+                let b_data = b.to_numpy();
+                let c_data = blas::matmul_blas(&a_data, &b_data, m, k, n);
+
+                let mut output_shape: Vec<i64> = vec![];
+                if a_shape.len() > 2 {
+                    for i in 0..a_shape.len() - 2 {
+                        output_shape.push(a_shape[i].max(b_shape[i]));
+                    }
+                }
+                output_shape.push(m as i64);
+                output_shape.push(n as i64);
+
+                let sizes: smallvec::SmallVec<[i64; 8]> = output_shape.into();
+                let storage = Arc::new(Storage::from_vec(c_data, a.dtype(), a.device()));
+                return vec![Tensor::new(crate::tensor::TensorImpl::new(storage, sizes))];
+            }
+        }
+    }
+
     let batch_a = if a_shape.len() > 2 {
         a_shape[..a_shape.len() - 2].iter().product::<i64>() as usize
     } else {
@@ -431,14 +549,6 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         1
     };
     let batch = batch_a.max(batch_b);
-
-    let m = a_shape[a_shape.len() - 2] as usize;
-    let k = a_shape[a_shape.len() - 1] as usize;
-    let n = b_shape[b_shape.len() - 1] as usize;
-
-    if b_shape[b_shape.len() - 2] as usize != k {
-        panic!("matmul: {} != {}", b_shape[b_shape.len() - 2], k);
-    }
 
     let mut output_shape: Vec<i64> = vec![];
     if a_shape.len() > 2 {
@@ -462,12 +572,12 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     const TILE_SIZE: usize = 32;
 
     for bat in 0..batch {
-        for i_tile in (0..m).step_by(TILE_SIZE) {
-            for j_tile in (0..n).step_by(TILE_SIZE) {
-                for k_tile in (0..k).step_by(TILE_SIZE) {
-                    let i_max = (i_tile + TILE_SIZE).min(m);
-                    let j_max = (j_tile + TILE_SIZE).min(n);
-                    let k_max = (k_tile + TILE_SIZE).min(k);
+        for i_tile in (0..m as usize).step_by(TILE_SIZE) {
+            for j_tile in (0..n as usize).step_by(TILE_SIZE) {
+                for k_tile in (0..k as usize).step_by(TILE_SIZE) {
+                    let i_max = (i_tile + TILE_SIZE).min(m as usize);
+                    let j_max = (j_tile + TILE_SIZE).min(n as usize);
+                    let k_max = (k_tile + TILE_SIZE).min(k as usize);
 
                     for i in i_tile..i_max {
                         for j in j_tile..j_max {
@@ -492,16 +602,23 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                                 };
 
                                 let b0 = unsafe {
-                                    *b_data.get_unchecked(bat * k * b_cols + kk * b_cols + j)
+                                    *b_data
+                                        .get_unchecked(bat * k as usize * b_cols + kk * b_cols + j)
                                 };
                                 let b1 = unsafe {
-                                    *b_data.get_unchecked(bat * k * b_cols + (kk + 1) * b_cols + j)
+                                    *b_data.get_unchecked(
+                                        bat * k as usize * b_cols + (kk + 1) * b_cols + j,
+                                    )
                                 };
                                 let b2 = unsafe {
-                                    *b_data.get_unchecked(bat * k * b_cols + (kk + 2) * b_cols + j)
+                                    *b_data.get_unchecked(
+                                        bat * k as usize * b_cols + (kk + 2) * b_cols + j,
+                                    )
                                 };
                                 let b3 = unsafe {
-                                    *b_data.get_unchecked(bat * k * b_cols + (kk + 3) * b_cols + j)
+                                    *b_data.get_unchecked(
+                                        bat * k as usize * b_cols + (kk + 3) * b_cols + j,
+                                    )
                                 };
 
                                 sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
@@ -513,13 +630,14 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                                     *a_data.get_unchecked(bat * a_rows * a_cols + i * a_cols + kk)
                                 };
                                 let b_val = unsafe {
-                                    *b_data.get_unchecked(bat * k * b_cols + kk * b_cols + j)
+                                    *b_data
+                                        .get_unchecked(bat * k as usize * b_cols + kk * b_cols + j)
                                 };
                                 sum += a_val * b_val;
                                 kk += 1;
                             }
 
-                            let out_idx = bat * m * n + i * n + j;
+                            let out_idx = bat * m as usize * n as usize + i * n as usize + j;
                             unsafe { *output_data.get_unchecked_mut(out_idx) = sum };
                         }
                     }
