@@ -548,7 +548,33 @@ impl GeluBackward {
 
 impl Node for GeluBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let x = &self.input;
+
+        let sqrt_2_over_pi = (2.0_f32 / std::f32::consts::PI).sqrt();
+        let x2 = x.mul(x);
+        let x3 = x2.mul(x);
+        let tanh_arg = x
+            .mul(&Tensor::from_scalar(sqrt_2_over_pi))
+            .add(&x3.mul(&Tensor::from_scalar(0.044715)));
+        let tanh_arg_tanh = tanh_arg.tanh();
+
+        let exp_term = x
+            .mul(&Tensor::from_scalar(sqrt_2_over_pi))
+            .add(&x2.mul(&Tensor::from_scalar(0.134)));
+        let exp_term_exp = exp_term.exp();
+        let sigmoid_term =
+            Tensor::from_scalar(1.0).div(&Tensor::from_scalar(1.0).add(&exp_term_exp));
+
+        let derivative = Tensor::from_scalar(0.5)
+            .mul(&Tensor::from_scalar(1.0).add(&tanh_arg_tanh))
+            .add(
+                &x.mul(&Tensor::from_scalar(0.5))
+                    .mul(&tanh_arg_tanh.tanh())
+                    .mul(&sigmoid_term),
+            );
+
+        vec![Some(grad.mul(&derivative))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -580,7 +606,10 @@ impl SigmoidBackward {
 
 impl Node for SigmoidBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let sigmoid_x = self.input.sigmoid();
+        let derivative = sigmoid_x.mul(&sigmoid_x.neg().add(&Tensor::from_scalar(1.0)));
+        vec![Some(grad.mul(&derivative))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -612,7 +641,10 @@ impl TanhBackward {
 
 impl Node for TanhBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let tanh_x = self.input.tanh();
+        let derivative = Tensor::from_scalar(1.0).sub(&tanh_x.mul(&tanh_x));
+        vec![Some(grad.mul(&derivative))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -644,7 +676,15 @@ impl SiLUBackward {
 
 impl Node for SiLUBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let sigmoid_x = self.input.sigmoid();
+        let silu_x = self.input.mul(&sigmoid_x);
+        let derivative = silu_x.add(
+            &sigmoid_x
+                .mul(&Tensor::from_scalar(1.0))
+                .sub(&silu_x.div(&self.input)),
+        );
+        vec![Some(grad.mul(&derivative))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -759,7 +799,8 @@ impl Conv2dBackward {
 
 impl Node for Conv2dBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone(), grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        vec![Some(grad.clone()), Some(grad)]
     }
 
     fn next_edges(&self) -> &[Edge] {

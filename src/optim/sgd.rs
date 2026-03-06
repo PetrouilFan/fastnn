@@ -40,7 +40,7 @@ impl SGD {
 
 impl Optimizer for SGD {
     fn step(&mut self) {
-        for (i, param) in self.params.iter().enumerate() {
+        for (i, param) in self.params.iter_mut().enumerate() {
             let mut grad = if let Some(g) = param.grad() {
                 g
             } else {
@@ -70,7 +70,20 @@ impl Optimizer for SGD {
                 }
             }
 
-            let _update = grad.mul(&Tensor::from_scalar(self.lr as f32));
+            let update = grad.mul(&Tensor::from_scalar(self.lr as f32));
+
+            let inner = Arc::make_mut(&mut param.inner);
+            let storage = Arc::make_mut(&mut inner.storage);
+            let ptr = storage.data.as_mut_ptr() as *mut f32;
+            let numel = param.numel() as usize;
+
+            let update_data = update.to_numpy();
+            for j in 0..numel {
+                unsafe {
+                    let param_val = *ptr.add(j);
+                    *ptr.add(j) = param_val - update_data[j];
+                }
+            }
         }
     }
 
