@@ -62,16 +62,38 @@ class DataLoader:
 
 def stack(tensors, dim=0):
     import fastnn as fnn
-    import numpy as np
 
     if not tensors:
         raise ValueError("stack requires at least one tensor")
 
-    arrays = []
-    for t in tensors:
-        if hasattr(t, "numpy"):
-            arrays.append(t.numpy())
-        else:
+    first = tensors[0]
+    if hasattr(first, "numpy"):
+        first_data = first.numpy()
+        numel = len(first_data)
+        dtype = first.dtype if hasattr(first, "dtype") else "float32"
+        device = first.device if hasattr(first, "device") else "cpu"
+
+        total_tensors = len(tensors)
+        result_data = [0.0] * (numel * total_tensors)
+
+        for i, t in enumerate(tensors):
+            if hasattr(t, "numpy"):
+                t_data = t.numpy()
+                for j in range(numel):
+                    result_data[i * numel + j] = t_data[j]
+
+        result_shape = [total_tensors] + list(first.shape())
+        result = fnn.tensor(result_data, result_shape)
+
+        if dim != 0:
+            result = result.transpose(dim, 0)
+
+        return result
+    else:
+        import numpy as np
+
+        arrays = []
+        for t in tensors:
             arrays.append(np.array(t))
-    result = np.stack(arrays, axis=dim)
-    return fnn.tensor(result.flatten().tolist(), list(result.shape))
+        result = np.stack(arrays, axis=dim)
+        return fnn.tensor(result.flatten().tolist(), list(result.shape))

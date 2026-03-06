@@ -1,9 +1,62 @@
+use parking_lot::RwLock;
 use std::alloc::{alloc, dealloc, Layout};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
+
+struct MemoryPool {
+    free_blocks: HashMap<usize, Vec<Vec<u8>>>,
+}
+
+impl MemoryPool {
+    fn new() -> Self {
+        Self {
+            free_blocks: HashMap::new(),
+        }
+    }
+
+    fn allocate(&mut self, size: usize) -> Vec<u8> {
+        if size == 0 {
+            return vec![];
+        }
+
+        let rounded_size = (size + 63) & !63; // Align to 64 bytes
+
+        if let Some(blocks) = self.free_blocks.get_mut(&rounded_size) {
+            if let Some(block) = blocks.pop() {
+                return block;
+            }
+        }
+
+        vec![0u8; rounded_size]
+    }
+
+    fn deallocate(&mut self, data: Vec<u8>) {
+        if data.is_empty() {
+            return;
+        }
+
+        let rounded_size = (data.len() + 63) & !63;
+
+        // Limit cached blocks to avoid excessive memory usage
+        if let Some(blocks) = self.free_blocks.get_mut(&rounded_size) {
+            if blocks.len() < 10 {
+                blocks.push(data);
+            }
+        } else {
+            self.free_blocks.insert(rounded_size, vec![data]);
+        }
+    }
+}
+
+static MEMORY_POOL: std::sync::OnceLock<RwLock<MemoryPool>> = std::sync::OnceLock::new();
+
+fn get_memory_pool() -> &'static RwLock<MemoryPool> {
+    MEMORY_POOL.get_or_init(|| RwLock::new(MemoryPool::new()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
@@ -86,7 +139,13 @@ pub struct Storage {
 impl Storage {
     pub fn new(dtype: DType, device: Device, nbytes: usize) -> Self {
         let id = STORAGE_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let data = vec![0u8; nbytes];
+
+        let data = if nbytes > 0 {
+            let pool = get_memory_pool();
+            pool.write().allocate(nbytes)
+        } else {
+            vec![]
+        };
 
         if let Some(stats) = ALLOC_STATS.get() {
             stats.add_alloc(nbytes);

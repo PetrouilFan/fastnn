@@ -1,7 +1,9 @@
+use crate::autograd::{AutogradMeta, Conv2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::storage::DType;
 use crate::tensor::Tensor;
+use std::sync::Arc;
 
 pub struct Conv2d {
     pub weight: Tensor,
@@ -83,7 +85,25 @@ impl Module for Conv2d {
             ],
         );
 
-        result[0].clone()
+        let output = result[0].clone();
+
+        if x.requires_grad() || self.weight.requires_grad() {
+            let backward = Conv2dBackward::new(
+                x.clone(),
+                self.weight.clone(),
+                self.stride,
+                self.padding,
+                self.dilation,
+                self.groups,
+            );
+            let mut meta = AutogradMeta::new(false);
+            meta.grad_fn = Some(Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     fn parameters(&self) -> Vec<Tensor> {
