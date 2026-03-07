@@ -879,19 +879,25 @@ impl Tensor {
     }
 
     pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {
-        let mut data = self.to_numpy();
-        for v in data.iter_mut() {
-            *v = v.clamp(min_val, max_val);
-        }
-        Tensor::from_vec(data, self.shape())
+        let result = dispatch(
+            "clamp",
+            DispatchKey::Cpu,
+            &[
+                self,
+                &Tensor::from_scalar(min_val),
+                &Tensor::from_scalar(max_val),
+            ],
+        );
+        result[0].clone()
     }
 
     pub fn pow(&self, exponent: f32) -> Tensor {
-        let mut data = self.to_numpy();
-        for v in data.iter_mut() {
-            *v = v.powf(exponent);
-        }
-        Tensor::from_vec(data, self.shape())
+        let result = dispatch(
+            "pow",
+            DispatchKey::Cpu,
+            &[self, &Tensor::from_scalar(exponent)],
+        );
+        result[0].clone()
     }
 
     pub fn sum(&self, dim: i32, keepdim: bool) -> Tensor {

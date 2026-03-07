@@ -35,12 +35,18 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         for (i, input_tensor) in input_tensors.iter().enumerate() {
             if let Some(grad) = grad_inputs.get(i).and_then(|g| g.as_ref()) {
                 let input_ptr = Arc::as_ptr(&input_tensor.inner) as usize;
-                if let Some(existing) = grads.get(&input_ptr) {
-                    let new_grad = existing.clone() + grad.clone();
-                    grads.insert(input_ptr, new_grad);
+                let new_grad = if let Some(existing) = grads.get(&input_ptr) {
+                    let existing_data = existing.to_numpy();
+                    let grad_data = grad.to_numpy();
+                    let mut result = existing_data;
+                    for (j, v) in grad_data.iter().enumerate() {
+                        result[j] += v;
+                    }
+                    Tensor::from_vec(result, existing.shape())
                 } else {
-                    grads.insert(input_ptr, grad.clone());
-                }
+                    grad.clone()
+                };
+                grads.insert(input_ptr, new_grad);
             }
         }
 

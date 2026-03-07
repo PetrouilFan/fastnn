@@ -12,6 +12,7 @@ mod train;
 use autograd::{no_grad_enter, no_grad_exit};
 use dispatcher::list_registered_ops as dispatcher_list_ops;
 use nn::Module;
+use optim::Optimizer;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use pyo3::wrap_pyfunction;
@@ -1001,77 +1002,110 @@ impl ModuleList {
 }
 
 #[pyclass]
-struct SGD;
+struct PySGD {
+    inner: optim::sgd::SGD,
+}
 
 #[pymethods]
-impl SGD {
+impl PySGD {
     #[new]
-    #[pyo3(signature = (params, lr = 0.01, momentum = None, weight_decay = None))]
-    fn new(
-        params: Vec<PyTensor>,
-        lr: f64,
-        momentum: Option<f64>,
-        weight_decay: Option<f64>,
-    ) -> Self {
-        SGD
+    #[pyo3(signature = (params, lr = 0.01, momentum = 0.0, weight_decay = 0.0))]
+    fn new(params: Vec<PyTensor>, lr: f64, momentum: f64, weight_decay: f64) -> Self {
+        let tensors: Vec<tensor::Tensor> = params.into_iter().map(|p| p.inner).collect();
+        PySGD {
+            inner: optim::sgd::SGD::new(tensors, lr, momentum, 0.0, weight_decay, false),
+        }
     }
 
-    fn step(&self) {}
-    fn zero_grad(&self) {}
+    fn step(&mut self) {
+        self.inner.step();
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
     fn state_dict(&self) -> String {
         "{}".to_string()
     }
-    fn load_state_dict(&self, _state: String) {}
+
+    fn load_state_dict(&mut self, _state: String) {}
 }
 
 #[pyclass]
-struct Adam;
+struct PyAdam {
+    inner: optim::adam::Adam,
+}
 
 #[pymethods]
-impl Adam {
+impl PyAdam {
     #[new]
-    #[pyo3(signature = (params, lr = 0.001, betas = None, eps = None, weight_decay = None))]
+    #[pyo3(signature = (params, lr = 0.001, betas = None, eps = 1e-8, weight_decay = 0.0))]
     fn new(
         params: Vec<PyTensor>,
         lr: f64,
         betas: Option<(f64, f64)>,
-        eps: Option<f64>,
-        weight_decay: Option<f64>,
+        eps: f64,
+        weight_decay: f64,
     ) -> Self {
-        Adam
+        let tensors: Vec<tensor::Tensor> = params.into_iter().map(|p| p.inner).collect();
+        let betas = betas.unwrap_or((0.9, 0.999));
+        PyAdam {
+            inner: optim::adam::Adam::new(tensors, lr, betas, eps, weight_decay, false),
+        }
     }
 
-    fn step(&self) {}
-    fn zero_grad(&self) {}
+    fn step(&mut self) {
+        self.inner.step();
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
     fn state_dict(&self) -> String {
         "{}".to_string()
     }
-    fn load_state_dict(&self, _state: String) {}
+
+    fn load_state_dict(&mut self, _state: String) {}
 }
 
 #[pyclass]
-struct AdamW;
+struct PyAdamW {
+    inner: optim::adamw::AdamW,
+}
 
 #[pymethods]
-impl AdamW {
+impl PyAdamW {
     #[new]
-    #[pyo3(signature = (params, lr = 0.001, betas = None, eps = None, weight_decay = None))]
+    #[pyo3(signature = (params, lr = 0.001, betas = None, eps = 1e-8, weight_decay = 0.0))]
     fn new(
         params: Vec<PyTensor>,
         lr: f64,
         betas: Option<(f64, f64)>,
-        eps: Option<f64>,
-        weight_decay: Option<f64>,
+        eps: f64,
+        weight_decay: f64,
     ) -> Self {
-        AdamW
+        let tensors: Vec<tensor::Tensor> = params.into_iter().map(|p| p.inner).collect();
+        let betas = betas.unwrap_or((0.9, 0.999));
+        PyAdamW {
+            inner: optim::adamw::AdamW::new(tensors, lr, betas, eps, weight_decay, false),
+        }
     }
 
-    fn step(&self) {}
-    fn zero_grad(&self) {}
+    fn step(&mut self) {
+        self.inner.step();
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
     fn state_dict(&self) -> String {
         "{}".to_string()
     }
-    fn load_state_dict(&self, _state: String) {}
+
+    fn load_state_dict(&mut self, _state: String) {}
 }
 
 #[pyfunction]
@@ -1154,9 +1188,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SiLU>()?;
     m.add_class::<Sequential>()?;
     m.add_class::<ModuleList>()?;
-    m.add_class::<SGD>()?;
-    m.add_class::<Adam>()?;
-    m.add_class::<AdamW>()?;
+    m.add_class::<PySGD>()?;
+    m.add_class::<PyAdam>()?;
+    m.add_class::<PyAdamW>()?;
 
     m.add_class::<PyTensor>()?;
 
