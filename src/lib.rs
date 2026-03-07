@@ -17,6 +17,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use pyo3::wrap_pyfunction;
 use rand::Rng;
+use std::sync::Arc;
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
 use tensor::Tensor;
 
@@ -77,8 +78,10 @@ impl PyTensor {
         self.inner.to_numpy()
     }
 
+    #[pyo3(signature = (requires_grad))]
     fn requires_grad_(&mut self, requires_grad: bool) {
-        let _ = self.inner.requires_grad_(requires_grad);
+        let new_inner = self.inner.requires_grad_(requires_grad);
+        self.inner = new_inner;
     }
 
     fn requires_grad(&self) -> bool {

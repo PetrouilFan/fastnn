@@ -64,3 +64,4 @@ build/
 # Benchmark tests
 benchmark_tests/
 nul
+fastnn/fastnn.pdb

@@ -371,7 +371,7 @@ impl TensorImpl {
     pub fn requires_grad_(&self, requires_grad: bool) -> Tensor {
         let mut new = self.clone();
         new.set_requires_grad(requires_grad);
-        new.into()
+        Tensor::new(new)
     }
 
     pub fn grad(&self) -> Option<Tensor> {

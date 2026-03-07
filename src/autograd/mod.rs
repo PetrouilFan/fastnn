@@ -137,8 +137,8 @@ impl Node for MulBackward {
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
-        let grad_a = grad.clone().mul(&b.clone());
-        let grad_b = grad.clone().mul(&a.clone()).sum(0, true);
+        let grad_a = grad.clone().mul(b);
+        let grad_b = grad.mul(a);
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -270,22 +270,23 @@ impl Node for ReluBackward {
 }
 
 pub struct MatmulBackward {
-    pub a: Tensor,
-    pub b: Tensor,
+    pub inputs: Vec<Tensor>,
 }
 
 impl MatmulBackward {
     pub fn new(a: Tensor, b: Tensor) -> Self {
-        MatmulBackward { a, b }
+        MatmulBackward { inputs: vec![a, b] }
     }
 }
 
 impl Node for MatmulBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
+        let a = &self.inputs[0];
+        let b = &self.inputs[1];
 
-        let grad_a = grad.matmul(&self.b.transpose(0, 1));
-        let grad_b = self.a.transpose(0, 1).matmul(&grad);
+        let grad_a = grad.matmul(&b.transpose(0, 1));
+        let grad_b = a.transpose(0, 1).matmul(&grad);
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -303,7 +304,7 @@ impl Node for MatmulBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        &[]
+        &self.inputs
     }
 }
 
@@ -418,8 +419,9 @@ impl ExpBackward {
 
 impl Node for ExpBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        // Would need input for proper gradient
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let exp_x = self.input.exp();
+        vec![Some(grad.mul(&exp_x))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -451,8 +453,10 @@ impl LogBackward {
 
 impl Node for LogBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        // Would need input for proper gradient
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let one = Tensor::from_scalar(1.0);
+        let inv_x = one.div(&self.input);
+        vec![Some(grad.mul(&inv_x))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -484,7 +488,10 @@ impl SqrtBackward {
 
 impl Node for SqrtBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let half = Tensor::from_scalar(0.5);
+        let inv_sqrt_x = half.div(&self.input.sqrt());
+        vec![Some(grad.mul(&inv_sqrt_x))]
     }
 
     fn next_edges(&self) -> &[Edge] {

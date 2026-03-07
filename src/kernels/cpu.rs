@@ -664,7 +664,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_ptr = a_ptr;
             out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
                 let x = unsafe { *a_ptr.add(idx) };
-                *slot = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+                *slot = 1.0 / (1.0 + (-x).exp());
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -672,7 +672,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             for idx in 0..numel {
                 unsafe {
                     let x = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+                    *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
                 }
             }
         }
@@ -1479,7 +1479,7 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     match reduction {
         "none" => {
-            let output = Tensor::zeros(logits.shape(), DType::F32, Device::Cpu);
+            let output = Tensor::from_vec(losses, vec![batch_size as i64]);
             vec![output]
         }
         "mean" => vec![Tensor::from_scalar(total_loss / batch_size as f32)],
