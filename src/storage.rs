@@ -7,14 +7,19 @@ use std::sync::Arc;
 static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
+const MAX_CACHED_BLOCKS: usize = 32;
+const POOL_THRESHOLD: usize = 10 * 1024 * 1024;
+
 struct MemoryPool {
     free_blocks: HashMap<usize, Vec<Vec<u8>>>,
+    total_cached: usize,
 }
 
 impl MemoryPool {
     fn new() -> Self {
         Self {
             free_blocks: HashMap::new(),
+            total_cached: 0,
         }
     }
 
@@ -23,10 +28,15 @@ impl MemoryPool {
             return vec![];
         }
 
-        let rounded_size = (size + 63) & !63; // Align to 64 bytes
+        if size > POOL_THRESHOLD {
+            return vec![0u8; size];
+        }
+
+        let rounded_size = (size + 63) & !63;
 
         if let Some(blocks) = self.free_blocks.get_mut(&rounded_size) {
             if let Some(block) = blocks.pop() {
+                self.total_cached = self.total_cached.saturating_sub(rounded_size);
                 return block;
             }
         }
@@ -41,12 +51,22 @@ impl MemoryPool {
 
         let rounded_size = (data.len() + 63) & !63;
 
-        // Limit cached blocks to avoid excessive memory usage
+        if rounded_size > POOL_THRESHOLD || self.total_cached > POOL_THRESHOLD {
+            return;
+        }
+
+        let current_size = self.total_cached;
+        if current_size + rounded_size > POOL_THRESHOLD {
+            return;
+        }
+
         if let Some(blocks) = self.free_blocks.get_mut(&rounded_size) {
-            if blocks.len() < 10 {
+            if blocks.len() < MAX_CACHED_BLOCKS {
+                self.total_cached += rounded_size;
                 blocks.push(data);
             }
         } else {
+            self.total_cached += rounded_size;
             self.free_blocks.insert(rounded_size, vec![data]);
         }
     }
