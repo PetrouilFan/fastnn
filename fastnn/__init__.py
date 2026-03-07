@@ -123,9 +123,9 @@ class PySequential:
 
 Sequential = PySequential
 ModuleList = _core.ModuleList
-SGD = _core.SGD
-Adam = _core.Adam
-AdamW = _core.AdamW
+SGD = _core.PySGD
+Adam = _core.PyAdam
+AdamW = _core.PyAdamW
 save_model = _core.save_model
 load_model = _core.load_model
 allocator_stats = _core.allocator_stats

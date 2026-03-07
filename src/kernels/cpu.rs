@@ -1,5 +1,6 @@
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
+use crate::kernels::blas::{matmul_blas, MIN_BLAS_SIZE};
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use smallvec::smallvec;
@@ -61,9 +62,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             for idx in 0..numel {
                 unsafe {
-                    let a_val = *a_ptr.add(idx);
-                    let b_val = *b_ptr.add(idx);
-                    *out_ptr.add(idx) = a_val + b_val;
+                    *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
                 }
             }
         }
@@ -132,24 +131,19 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let b_data: Vec<f32> = (0..numel).map(|i| unsafe { *b_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data
-                .par_iter()
-                .zip(b_data.par_iter())
-                .map(|(x, y)| x - y)
-                .collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_addr = a_ptr as usize;
+            let b_addr = b_ptr as usize;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                *slot =
+                    unsafe { *(a_addr.add(idx) as *const f32) - *(b_addr.add(idx) as *const f32) };
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let a_val = *a_ptr.add(idx);
-                    let b_val = *b_ptr.add(idx);
-                    *out_ptr.add(idx) = a_val - b_val;
+                    *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
                 }
             }
         }
@@ -218,24 +212,18 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let b_data: Vec<f32> = (0..numel).map(|i| unsafe { *b_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data
-                .par_iter()
-                .zip(b_data.par_iter())
-                .map(|(x, y)| x * y)
-                .collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            let b_ptr = b_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                *slot = unsafe { *a_ptr.add(idx) * *b_ptr.add(idx) };
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let a_val = *a_ptr.add(idx);
-                    let b_val = *b_ptr.add(idx);
-                    *out_ptr.add(idx) = a_val * b_val;
+                    *out_ptr.add(idx) = *a_ptr.add(idx) * *b_ptr.add(idx);
                 }
             }
         }
@@ -304,24 +292,18 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let b_data: Vec<f32> = (0..numel).map(|i| unsafe { *b_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data
-                .par_iter()
-                .zip(b_data.par_iter())
-                .map(|(x, y)| x / y)
-                .collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            let b_ptr = b_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                *slot = unsafe { *a_ptr.add(idx) / *b_ptr.add(idx) };
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let a_val = *a_ptr.add(idx);
-                    let b_val = *b_ptr.add(idx);
-                    *out_ptr.add(idx) = a_val / b_val;
+                    *out_ptr.add(idx) = *a_ptr.add(idx) / *b_ptr.add(idx);
                 }
             }
         }
@@ -379,18 +361,17 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data.par_iter().map(|&x| -x).collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                *slot = unsafe { -*a_ptr.add(idx) };
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let val = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = -val;
+                    *out_ptr.add(idx) = -*a_ptr.add(idx);
                 }
             }
         }
@@ -450,18 +431,17 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data.par_iter().map(|&x| x.exp()).collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                *slot = unsafe { (*a_ptr.add(idx)).exp() };
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let val = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = val.exp();
+                    *out_ptr.add(idx) = (*a_ptr.add(idx)).exp();
                 }
             }
         }
@@ -496,18 +476,17 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data.par_iter().map(|&x| x.ln()).collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                *slot = unsafe { (*a_ptr.add(idx)).ln() };
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let val = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = val.ln();
+                    *out_ptr.add(idx) = (*a_ptr.add(idx)).ln();
                 }
             }
         }
@@ -542,18 +521,17 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data.par_iter().map(|&x| x.sqrt()).collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                *slot = unsafe { (*a_ptr.add(idx)).sqrt() };
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let val = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = val.sqrt();
+                    *out_ptr.add(idx) = (*a_ptr.add(idx)).sqrt();
                 }
             }
         }
@@ -588,11 +566,12 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data.par_iter().map(|&x| x.max(0.0)).collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                let val = unsafe { *a_ptr.add(idx) };
+                *slot = val.max(0.0);
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -634,14 +613,12 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data
-                .par_iter()
-                .map(|&x| 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh()))
-                .collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                let x = *a_ptr.add(idx);
+                *slot = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -683,21 +660,19 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data
-                .par_iter()
-                .map(|&x| 1.0 / (1.0 + (-x).exp()))
-                .collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                let x = unsafe { *a_ptr.add(idx) };
+                *slot = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
                     let x = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
+                    *out_ptr.add(idx) = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
                 }
             }
         }
@@ -732,18 +707,17 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data.par_iter().map(|&x| x.tanh()).collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                *slot = unsafe { (*a_ptr.add(idx)).tanh() };
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let x = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = x.tanh();
+                    *out_ptr.add(idx) = (*a_ptr.add(idx)).tanh();
                 }
             }
         }
@@ -778,18 +752,19 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data.par_iter().map(|&x| x / (1.0 + (-x).exp())).collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                let x = unsafe { *a_ptr.add(idx) };
+                *slot = 1.0 / (1.0 + (-x).exp());
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
                     let x = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = x / (1.0 + (-x).exp());
+                    *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
                 }
             }
         }
@@ -859,11 +834,165 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_cols = a_shape[a_shape.len() - 1] as usize;
     let b_cols = b_shape[b_shape.len() - 1] as usize;
 
-    single_threaded_matmul(
-        a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
-    );
+    let use_blas = batch == 1
+        && m as usize >= MIN_BLAS_SIZE
+        && n as usize >= MIN_BLAS_SIZE
+        && k as usize >= MIN_BLAS_SIZE;
+
+    if use_blas {
+        let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
+        let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
+        let result = matmul_blas(a_slice, b_slice, m as usize, k as usize, n as usize);
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, m as usize * n as usize) };
+        out_slice.copy_from_slice(&result);
+    } else {
+        #[cfg(feature = "parallel")]
+        {
+            if batch > 1 || m as usize * n as usize > 10000 {
+                parallel_matmul(
+                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                );
+            } else if m as usize <= 64 && n as usize <= 64 && k as usize <= 64 {
+                small_matrix_matmul(
+                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                );
+            } else {
+                single_threaded_matmul(
+                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                );
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            if m as usize <= 64 && n as usize <= 64 && k as usize <= 64 {
+                small_matrix_matmul(
+                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                );
+            } else {
+                single_threaded_matmul(
+                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                );
+            }
+        }
+    }
 
     vec![output]
+}
+
+#[cfg(feature = "parallel")]
+#[inline]
+fn parallel_matmul(
+    a_ptr: *const f32,
+    b_ptr: *const f32,
+    out_ptr: *mut f32,
+    batch: usize,
+    m: i32,
+    n: i32,
+    k: i32,
+    a_rows: usize,
+    a_cols: usize,
+    b_cols: usize,
+) {
+    use rayon::prelude::*;
+    let total_outputs = batch * m as usize * n as usize;
+    let a_ptr = a_ptr;
+    let b_ptr = b_ptr;
+    let out_ptr = out_ptr;
+
+    (0..total_outputs).into_par_iter().for_each(|idx| {
+        let bat = idx / (m as usize * n as usize);
+        let rem = idx % (m as usize * n as usize);
+        let i = rem / n as usize;
+        let j = rem % n as usize;
+
+        let mut sum = 0.0f32;
+        let mut kk = 0;
+
+        while kk + 4 <= k as usize {
+            let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+            let a_val1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
+            let a_val2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
+            let a_val3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+
+            let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+            let b_val1 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 1) * b_cols + j) };
+            let b_val2 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 2) * b_cols + j) };
+            let b_val3 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 3) * b_cols + j) };
+
+            sum += a_val * b_val + a_val1 * b_val1 + a_val2 * b_val2 + a_val3 * b_val3;
+            kk += 4;
+        }
+
+        while kk < k as usize {
+            let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+            let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+            sum += a_val * b_val;
+            kk += 1;
+        }
+
+        unsafe {
+            *out_ptr.add(idx) = sum;
+        }
+    });
+}
+
+#[inline]
+fn small_matrix_matmul(
+    a_ptr: *const f32,
+    b_ptr: *const f32,
+    out_ptr: *mut f32,
+    batch: usize,
+    m: i32,
+    n: i32,
+    k: i32,
+    a_rows: usize,
+    a_cols: usize,
+    b_cols: usize,
+) {
+    for bat in 0..batch {
+        for i in 0..m as usize {
+            for j in 0..n as usize {
+                let mut sum0 = 0.0f32;
+                let mut sum1 = 0.0f32;
+                let mut sum2 = 0.0f32;
+                let mut sum3 = 0.0f32;
+
+                let mut kk = 0;
+                let k_limit = k as usize;
+
+                while kk + 4 <= k_limit {
+                    let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                    let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
+                    let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
+                    let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+
+                    let b_base = bat * k as usize * b_cols + kk * b_cols + j;
+                    let b0 = unsafe { *b_ptr.add(b_base) };
+                    let b1 = unsafe { *b_ptr.add(b_base + b_cols) };
+                    let b2 = unsafe { *b_ptr.add(b_base + 2 * b_cols) };
+                    let b3 = unsafe { *b_ptr.add(b_base + 3 * b_cols) };
+
+                    sum0 += a0 * b0;
+                    sum1 += a1 * b1;
+                    sum2 += a2 * b2;
+                    sum3 += a3 * b3;
+                    kk += 4;
+                }
+
+                let mut sum = sum0 + sum1 + sum2 + sum3;
+
+                while kk < k_limit {
+                    let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                    let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                    sum += a_val * b_val;
+                    kk += 1;
+                }
+
+                let out_idx = bat * m as usize * n as usize + i * n as usize + j;
+                unsafe { *out_ptr.add(out_idx) = sum };
+            }
+        }
+    }
 }
 
 #[inline]
@@ -2329,6 +2458,103 @@ fn write_f32(slice: &[u8], val: f32) {
     }
 }
 
+fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let min_val = args[1].item();
+    let max_val = args[2].item();
+
+    let iter = TensorIterator::build_for_unary(a);
+    let output_shape = iter.output_shape.to_vec();
+
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    if a.is_contiguous() && numel > 10000 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                let val = unsafe { *a_ptr.add(idx) };
+                *slot = val.clamp(min_val, max_val);
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for idx in 0..numel {
+                unsafe {
+                    let val = *a_ptr.add(idx);
+                    *out_ptr.add(idx) = val.clamp(min_val, max_val);
+                }
+            }
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let val = *a_ptr.add(idx);
+                *out_ptr.add(idx) = val.clamp(min_val, max_val);
+            }
+        }
+    }
+
+    vec![output]
+}
+
+fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let exponent = args[1].item();
+
+    let iter = TensorIterator::build_for_unary(a);
+    let output_shape = iter.output_shape.to_vec();
+
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    if a.is_contiguous() && numel > 10000 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            let a_ptr = a_ptr;
+            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
+                let val = unsafe { *a_ptr.add(idx) };
+                *slot = val.powf(exponent);
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for idx in 0..numel {
+                unsafe {
+                    let val = *a_ptr.add(idx);
+                    *out_ptr.add(idx) = val.powf(exponent);
+                }
+            }
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let val = *a_ptr.add(idx);
+                *out_ptr.add(idx) = val.powf(exponent);
+            }
+        }
+    }
+
+    vec![output]
+}
+
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Cpu, add_kernel as KernelFn);
@@ -2345,6 +2571,8 @@ fn register_kernels() {
     register("sigmoid", DispatchKey::Cpu, sigmoid_kernel as KernelFn);
     register("tanh", DispatchKey::Cpu, tanh_kernel as KernelFn);
     register("silu", DispatchKey::Cpu, silu_kernel as KernelFn);
+    register("clamp", DispatchKey::Cpu, clamp_kernel as KernelFn);
+    register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
     register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
     register("linear", DispatchKey::Cpu, linear_kernel as KernelFn);
     register("sum", DispatchKey::Cpu, sum_kernel as KernelFn);
