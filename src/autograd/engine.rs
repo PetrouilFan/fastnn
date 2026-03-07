@@ -1,5 +1,5 @@
 use crate::autograd::Node;
-use crate::tensor::{Tensor, TensorImpl};
+use crate::tensor::Tensor;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         }
     }
 
-    let root_ptr = Arc::as_ptr(&root.inner) as usize;
+    let root_ptr = root.data_ptr() as usize;
     grads.insert(root_ptr, grad_output);
 
     while let Some(node) = queue.pop_front() {
@@ -34,7 +34,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         let input_tensors = node.inputs();
         for (i, input_tensor) in input_tensors.iter().enumerate() {
             if let Some(grad) = grad_inputs.get(i).and_then(|g| g.as_ref()) {
-                let input_ptr = Arc::as_ptr(&input_tensor.inner) as usize;
+                let input_ptr = input_tensor.data_ptr() as usize;
                 let new_grad = if let Some(existing) = grads.get(&input_ptr) {
                     let existing_data = existing.to_numpy();
                     let grad_data = grad.to_numpy();
@@ -56,43 +56,6 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             if !visited.contains(&next_ptr) {
                 visited.insert(next_ptr);
                 queue.push_back(next_node.clone());
-            }
-        }
-    }
-
-    let root_ptr = Arc::as_ptr(&root.inner) as usize;
-    if let Some(grad) = grads.get(&root_ptr) {
-        if root.is_leaf() && root.requires_grad() {
-            unsafe {
-                let ptr = Arc::as_ptr(&root.inner) as *mut TensorImpl;
-                if let Some(meta) = (*ptr).autograd_meta.as_mut() {
-                    if let Some(existing) = &meta.grad {
-                        meta.grad = Some(existing.clone() + grad.clone());
-                    } else {
-                        meta.grad = Some(grad.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(grad_fn) = root.grad_fn() {
-        let input_tensors = grad_fn.inputs();
-        for input_tensor in input_tensors {
-            let input_ptr = Arc::as_ptr(&input_tensor.inner) as usize;
-            if let Some(grad) = grads.get(&input_ptr) {
-                if input_tensor.is_leaf() && input_tensor.requires_grad() {
-                    unsafe {
-                        let ptr = Arc::as_ptr(&input_tensor.inner) as *mut TensorImpl;
-                        if let Some(meta) = (*ptr).autograd_meta.as_mut() {
-                            if let Some(existing) = &meta.grad {
-                                meta.grad = Some(existing.clone() + grad.clone());
-                            } else {
-                                meta.grad = Some(grad.clone());
-                            }
-                        }
-                    }
-                }
             }
         }
     }
