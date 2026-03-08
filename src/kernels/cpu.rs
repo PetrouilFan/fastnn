@@ -1,5 +1,5 @@
 #![allow(clippy::too_many_arguments, clippy::needless_range_loop, clippy::wildcard_in_or_patterns)]
-#![allow(clippy::unnecessary_unsafe, unused_imports)]
+#![allow(unused_imports)]
 
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
@@ -1170,8 +1170,8 @@ fn small_matrix_matmul(
                             sum += acc_arr.assume_init().iter().sum::<f32>();
 
                             while kk < k as usize {
-                                let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                                let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                let a_val = *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk);
+                                let b_val = *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j);
                                 sum += a_val * b_val;
                                 kk += 1;
                             }
@@ -1321,8 +1321,8 @@ fn single_threaded_matmul(
                                         sum += acc_arr.assume_init().iter().sum::<f32>();
 
                                         while kk < k_max {
-                                            let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                                            let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                            let a_val = *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk);
+                                            let b_val = *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j);
                                             sum += a_val * b_val;
                                             kk += 1;
                                         }

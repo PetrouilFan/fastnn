@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;

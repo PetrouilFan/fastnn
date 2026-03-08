@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 mod engine;
 pub use engine::backward;
 
@@ -58,6 +59,7 @@ pub struct AddBackward {
 }
 
 impl AddBackward {
+    #[allow(dead_code)]
     pub fn new(inputs: Vec<Tensor>) -> Self {
         AddBackward { inputs }
     }

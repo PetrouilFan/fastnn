@@ -21,6 +21,7 @@ pub struct Conv2d {
 }
 
 impl Conv2d {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         in_channels: i64,
         out_channels: i64,

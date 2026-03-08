@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::tensor::Tensor;
 
 #[allow(dead_code)]
