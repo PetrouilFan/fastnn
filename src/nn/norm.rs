@@ -34,7 +34,7 @@ impl LayerNorm {
 impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
         let shape = x.shape();
-        let ndim = shape.len();
+        let _ndim = shape.len();
 
         let weight = self.weight.clone().unwrap_or_else(|| {
             Tensor::full(
@@ -115,14 +115,17 @@ impl Module for LayerNorm {
 }
 
 pub struct BatchNorm1d {
+    #[allow(dead_code)]
     pub num_features: i64,
     pub eps: f64,
+    #[allow(dead_code)]
     pub momentum: f64,
     pub weight: Option<Tensor>,
     pub bias: Option<Tensor>,
     pub running_mean: Arc<RwLock<Tensor>>,
     pub running_var: Arc<RwLock<Tensor>>,
     pub training: std::sync::atomic::AtomicBool,
+    #[allow(dead_code)]
     pub track_running_stats: bool,
 }
 

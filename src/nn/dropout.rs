@@ -23,7 +23,7 @@ impl Module for Dropout {
                 .to_numpy()
                 .iter()
                 .map(|&v| {
-                    if rand::random::<f64>() < (1.0 - self.p) as f64 {
+                    if rand::random::<f64>() < (1.0 - self.p) {
                         v / (1.0 - self.p) as f32
                     } else {
                         0.0

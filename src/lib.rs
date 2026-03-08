@@ -14,14 +14,12 @@ use dispatcher::list_registered_ops as dispatcher_list_ops;
 use nn::Module;
 use optim::Optimizer;
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
 use pyo3::wrap_pyfunction;
 use rand::Rng;
-use std::sync::Arc;
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
 use tensor::Tensor;
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 struct PyTensor {
     inner: Tensor,
@@ -47,12 +45,12 @@ impl PyTensor {
 
     #[getter]
     fn dtype(&self) -> String {
-        self.inner.dtype().to_str().to_string()
+        self.inner.dtype().as_str().to_string()
     }
 
     #[getter]
     fn device(&self) -> String {
-        self.inner.device().to_str().to_string()
+        self.inner.device().as_str().to_string()
     }
 
     #[getter]
@@ -174,8 +172,8 @@ impl PyTensor {
         format!(
             "Tensor(shape={:?}, dtype={}, device={})",
             self.inner.shape(),
-            self.inner.dtype().to_str(),
-            self.inner.device().to_str()
+            self.inner.dtype().as_str(),
+            self.inner.device().as_str()
         )
     }
 }
@@ -712,6 +710,7 @@ struct Conv2d {
 impl Conv2d {
     #[new]
     #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=true))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         in_channels: i64,
         out_channels: i64,
@@ -910,13 +909,13 @@ impl ReLU {
 }
 
 #[pyclass]
-struct GELU;
+struct Gelu;
 
 #[pymethods]
-impl GELU {
+impl Gelu {
     #[new]
     fn new() -> Self {
-        GELU
+        Gelu
     }
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
@@ -970,6 +969,7 @@ impl SiLU {
 }
 
 #[pyclass(name = "Sequential_")]
+#[allow(dead_code)]
 struct Sequential {
     layers: Vec<Py<PyAny>>,
 }
@@ -1193,7 +1193,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Dropout>()?;
     m.add_class::<Embedding>()?;
     m.add_class::<ReLU>()?;
-    m.add_class::<GELU>()?;
+    m.add_class::<Gelu>()?;
     m.add_class::<Sigmoid>()?;
     m.add_class::<Tanh>()?;
     m.add_class::<SiLU>()?;

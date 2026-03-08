@@ -40,6 +40,7 @@ pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Vec<Tensor> {
     let dispatcher = get_dispatcher();
     let guard = dispatcher.read();
 
+    #[allow(clippy::expect_fun_call)]
     let kernel = guard.ops.get(&(op.to_string(), key)).expect(&format!(
         "No kernel registered for op '{}' with key {:?}",
         op, key
@@ -58,6 +59,7 @@ pub fn list_registered_ops() -> Vec<String> {
     ops
 }
 
+#[allow(dead_code)]
 pub fn is_registered(op: &str, key: DispatchKey) -> bool {
     let dispatcher = get_dispatcher();
     let guard = dispatcher.read();

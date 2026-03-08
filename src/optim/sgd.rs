@@ -2,10 +2,12 @@ use crate::optim::{Optimizer, OptimizerState, ParamGroup};
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct SGD {
     pub params: Vec<Tensor>,
     pub lr: f64,
     pub momentum: f64,
+    #[allow(dead_code)]
     pub dampening: f64,
     pub weight_decay: f64,
     pub nesterov: bool,
@@ -39,6 +41,7 @@ impl SGD {
 }
 
 impl Optimizer for SGD {
+    #[allow(clippy::needless_range_loop)]
     fn step(&mut self) {
         for (i, param) in self.params.iter_mut().enumerate() {
             let mut grad = if let Some(g) = param.grad() {

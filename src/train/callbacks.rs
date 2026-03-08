@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TrainLogs {
     pub metrics: HashMap<String, f64>,
     pub epoch: usize,
@@ -19,13 +20,15 @@ impl TrainLogs {
     }
 }
 
+#[allow(dead_code)]
 pub trait Callback: Send + Sync {
-    fn on_epoch_begin(&mut self, epoch: usize, logs: &mut TrainLogs) {}
-    fn on_epoch_end(&mut self, epoch: usize, logs: &mut TrainLogs) {}
-    fn on_batch_begin(&mut self, batch: usize, logs: &mut TrainLogs) {}
-    fn on_batch_end(&mut self, batch: usize, logs: &mut TrainLogs) {}
+    fn on_epoch_begin(&mut self, _epoch: usize, _logs: &mut TrainLogs) {}
+    fn on_epoch_end(&mut self, _epoch: usize, _logs: &mut TrainLogs) {}
+    fn on_batch_begin(&mut self, _batch: usize, _logs: &mut TrainLogs) {}
+    fn on_batch_end(&mut self, _batch: usize, _logs: &mut TrainLogs) {}
 }
 
+#[allow(dead_code)]
 pub struct ModelCheckpoint {
     dir_path: String,
     monitor: String,
@@ -80,6 +83,7 @@ impl Callback for ModelCheckpoint {
     }
 }
 
+#[allow(dead_code)]
 pub struct EarlyStopping {
     monitor: String,
     patience: usize,
@@ -136,6 +140,7 @@ impl Callback for EarlyStopping {
     }
 }
 
+#[allow(dead_code, non_snake_case)]
 pub struct LearningRateScheduler {
     schedule: String,
     lr: f64,
@@ -146,6 +151,7 @@ pub struct LearningRateScheduler {
 }
 
 impl LearningRateScheduler {
+    #[allow(non_snake_case)]
     pub fn new(
         schedule: String,
         lr: f64,
@@ -182,6 +188,7 @@ impl Callback for LearningRateScheduler {
     }
 }
 
+#[allow(dead_code)]
 pub struct CSVLogger {
     filepath: String,
     header_written: bool,
@@ -206,6 +213,7 @@ impl Callback for CSVLogger {
     }
 }
 
+#[allow(dead_code)]
 pub struct ProgressBar {
     verbose: bool,
 }
@@ -218,6 +226,7 @@ impl ProgressBar {
 
 impl Callback for ProgressBar {
     fn on_batch_end(&mut self, batch: usize, logs: &mut TrainLogs) {
+        #[allow(clippy::manual_is_multiple_of)]
         if self.verbose && batch % 10 == 0 {
             let loss = logs
                 .metrics

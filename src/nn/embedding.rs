@@ -4,7 +4,9 @@ use crate::tensor::Tensor;
 
 pub struct Embedding {
     pub weight: Tensor,
+    #[allow(dead_code)]
     pub num_embeddings: i64,
+    #[allow(dead_code)]
     pub embedding_dim: i64,
     training: std::sync::atomic::AtomicBool,
 }

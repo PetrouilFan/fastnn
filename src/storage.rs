@@ -1,12 +1,11 @@
 use parking_lot::RwLock;
-use std::alloc::{alloc, dealloc, Layout};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
 
 static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
+#[allow(dead_code)]
 const MAX_CACHED_BLOCKS: usize = 32;
 const POOL_THRESHOLD: usize = 10 * 1024 * 1024;
 
@@ -44,6 +43,7 @@ impl MemoryPool {
         vec![0u8; rounded_size]
     }
 
+    #[allow(dead_code)]
     fn deallocate(&mut self, data: Vec<u8>) {
         if data.is_empty() {
             return;
@@ -111,7 +111,7 @@ impl DType {
         }
     }
 
-    pub fn to_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             DType::F32 => "f32",
             DType::F64 => "f64",
@@ -123,6 +123,7 @@ impl DType {
         }
     }
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
@@ -140,7 +141,7 @@ impl Device {
         }
     }
 
-    pub fn to_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Device::Cpu => "cpu",
         }
@@ -220,7 +221,7 @@ impl AllocStats {
     }
 
     pub fn get() -> &'static Self {
-        ALLOC_STATS.get_or_init(|| AllocStats::new())
+        ALLOC_STATS.get_or_init(AllocStats::new)
     }
 
     fn add_alloc(&self, nbytes: usize) {

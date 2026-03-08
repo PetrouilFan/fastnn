@@ -2,6 +2,7 @@ use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
 
+#[allow(dead_code)]
 pub struct ReLU;
 
 impl ReLU {
@@ -35,15 +36,16 @@ impl Module for ReLU {
     }
 }
 
-pub struct GELU;
+#[allow(dead_code)]
+pub struct Gelu;
 
-impl GELU {
+impl Gelu {
     pub fn new() -> Self {
-        GELU
+        Gelu
     }
 }
 
-impl Module for GELU {
+impl Module for Gelu {
     fn forward(&self, x: &Tensor) -> Tensor {
         let result = dispatch("gelu", DispatchKey::Cpu, &[x]);
         result[0].clone()
@@ -68,6 +70,7 @@ impl Module for GELU {
     }
 }
 
+#[allow(dead_code)]
 pub struct Sigmoid;
 
 impl Sigmoid {
@@ -101,6 +104,7 @@ impl Module for Sigmoid {
     }
 }
 
+#[allow(dead_code)]
 pub struct Tanh;
 
 impl Tanh {
@@ -134,6 +138,7 @@ impl Module for Tanh {
     }
 }
 
+#[allow(dead_code)]
 pub struct SiLU;
 
 impl SiLU {

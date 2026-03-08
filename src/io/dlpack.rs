@@ -2,12 +2,14 @@ use crate::storage::DType;
 use crate::tensor::Tensor;
 
 #[repr(C)]
+#[allow(dead_code)]
 pub struct DLDevice {
     pub device_type: u32,
     pub device_id: u32,
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 pub struct DLTensor {
     pub data: *mut std::ffi::c_void,
     pub device: DLDevice,
@@ -19,6 +21,7 @@ pub struct DLTensor {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 pub struct DLDataType {
     pub code: u8,
     pub bits: u8,
@@ -26,12 +29,14 @@ pub struct DLDataType {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 pub struct DLManagedTensor {
     pub tensor: DLTensor,
     pub manager_ctx: *mut std::ffi::c_void,
     pub deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
 }
 
+#[allow(dead_code)]
 pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
     let shape = tensor.shape();
     let ndim = shape.len() as i32;
@@ -82,7 +87,8 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
     Box::into_raw(managed)
 }
 
-pub fn from_dlpack(capsule: *mut DLManagedTensor) -> Tensor {
+#[allow(dead_code)]
+pub fn from_dlpack(_capsule: *mut DLManagedTensor) -> Tensor {
     // Would parse DLPack capsule and create tensor
     Tensor::from_scalar(0.0)
 }
