@@ -1,6 +1,3 @@
-from fastnn import Sequential
-
-
 class Transformer:
     """Stub — architecture placeholder for future implementation."""
 

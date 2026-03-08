@@ -1,5 +1,5 @@
 # Type hints for fastnn
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 Tensor = Any
 Device = str

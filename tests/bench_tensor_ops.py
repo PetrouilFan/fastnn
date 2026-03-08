@@ -6,38 +6,38 @@ import fastnn as fnn
 def test_add(benchmark, size):
     a = fnn.rand(list(size))
     b = fnn.rand(list(size))
-    result = benchmark(lambda: a + b)
+    benchmark(lambda: a + b)
 
 
 @pytest.mark.parametrize("size", [(100, 100), (1000, 1000), (3162, 3162)])
 def test_mul(benchmark, size):
     a = fnn.rand(list(size))
     b = fnn.rand(list(size))
-    result = benchmark(lambda: a * b)
+    benchmark(lambda: a * b)
 
 
 @pytest.mark.parametrize("size", [(100, 100), (1000, 1000), (3162, 3162)])
 def test_relu(benchmark, size):
     x = fnn.rand(list(size))
-    result = benchmark(fnn.relu, x)
+    benchmark(fnn.relu, x)
 
 
 @pytest.mark.parametrize("size", [(100, 100), (1000, 1000), (3162, 3162)])
 def test_sigmoid(benchmark, size):
     x = fnn.rand(list(size))
-    result = benchmark(fnn.sigmoid, x)
+    benchmark(fnn.sigmoid, x)
 
 
 @pytest.mark.parametrize("size", [(100, 100), (1000, 1000), (3162, 3162)])
 def test_tanh(benchmark, size):
     x = fnn.rand(list(size))
-    result = benchmark(fnn.tanh, x)
+    benchmark(fnn.tanh, x)
 
 
 @pytest.mark.parametrize("size", [(100, 100), (1000, 1000), (3162, 3162)])
 def test_gelu(benchmark, size):
     x = fnn.rand(list(size))
-    result = benchmark(fnn.gelu, x)
+    benchmark(fnn.gelu, x)
 
 
 @pytest.mark.parametrize(
@@ -55,7 +55,7 @@ def test_matmul(benchmark, sizes):
     assert k == k2
     a = fnn.rand([m, k])
     b = fnn.rand([k, n])
-    result = benchmark(lambda: a @ b)
+    benchmark(lambda: a @ b)
 
 
 @pytest.mark.parametrize(
@@ -72,7 +72,7 @@ def test_linear(benchmark, config):
     batch_size, in_features, out_features = config
     linear = fnn.Linear(in_features, out_features)
     x = fnn.rand([batch_size, in_features])
-    result = benchmark(linear, x)
+    benchmark(linear, x)
 
 
 @pytest.mark.parametrize(
@@ -88,39 +88,39 @@ def test_conv2d(benchmark, config):
     batch, channels, height, width, kernel = config
     conv = fnn.Conv2d(channels, channels, kernel)
     x = fnn.rand([batch, channels, height, width])
-    result = benchmark(conv, x)
+    benchmark(conv, x)
 
 
 @pytest.mark.parametrize("size", [(1000, 1000), (3162, 3162)])
 def test_sum(benchmark, size):
     x = fnn.rand(list(size))
-    result = benchmark(fnn.sum, x, 1)
+    benchmark(fnn.sum, x, 1)
 
 
 @pytest.mark.parametrize("size", [(1000, 1000), (3162, 3162)])
 def test_mean(benchmark, size):
     x = fnn.rand(list(size))
-    result = benchmark(fnn.mean, x, 1)
+    benchmark(fnn.mean, x, 1)
 
 
 @pytest.mark.parametrize("size", [(1000, 1000), (3162, 3162)])
 def test_max(benchmark, size):
     x = fnn.rand(list(size))
-    result = benchmark(fnn.max, x, 1)
+    benchmark(fnn.max, x, 1)
 
 
 def test_zeros(benchmark):
-    result = benchmark(fnn.zeros, [1000, 1000])
+    benchmark(fnn.zeros, [1000, 1000])
 
 
 def test_ones(benchmark):
-    result = benchmark(fnn.ones, [1000, 1000])
+    benchmark(fnn.ones, [1000, 1000])
 
 
 def test_rand(benchmark):
-    result = benchmark(fnn.rand, [1000, 1000])
+    benchmark(fnn.rand, [1000, 1000])
 
 
 def test_to_numpy(benchmark):
     x = fnn.rand([1000, 1000])
-    result = benchmark(x.numpy)
+    benchmark(x.numpy)
