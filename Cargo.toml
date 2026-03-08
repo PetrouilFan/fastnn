@@ -27,6 +27,8 @@ default = ["simd", "parallel"]
 openblas = []
 parallel = []
 simd = []
+prefetch = []
+simd_avx512 = []
 
 [profile.release]
 lto = true
