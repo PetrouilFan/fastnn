@@ -1,9 +1,11 @@
 use crate::tensor::Tensor;
 
+#[allow(dead_code)]
 pub trait LossFn {
     fn compute(&self, pred: &Tensor, target: &Tensor) -> Tensor;
 }
 
+#[allow(dead_code)]
 pub struct CrossEntropyLoss {
     pub reduction: String,
 }
@@ -20,7 +22,7 @@ impl LossFn for CrossEntropyLoss {
     fn compute(&self, pred: &Tensor, target: &Tensor) -> Tensor {
         match self.reduction.as_str() {
             "none" => Tensor::zeros(pred.shape(), pred.dtype(), pred.device()),
-            "mean" | "sum" | _ => {
+            "mean" | "sum" => {
                 let pred_data = pred.to_numpy();
                 let target_data = target.to_numpy();
 
@@ -53,6 +55,7 @@ impl LossFn for CrossEntropyLoss {
                 };
                 Tensor::from_scalar(loss)
             }
+            _ => Tensor::zeros(pred.shape(), pred.dtype(), pred.device()),
         }
     }
 }

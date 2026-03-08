@@ -2,12 +2,11 @@ mod engine;
 pub use engine::backward;
 
 use crate::tensor::Tensor;
-use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 thread_local! {
-    static NO_GRAD: AtomicBool = AtomicBool::new(false);
+    static NO_GRAD: AtomicBool = const { AtomicBool::new(false) };
 }
 
 pub fn is_grad_enabled() -> bool {
@@ -53,6 +52,7 @@ pub trait Node: Send + Sync {
     fn inputs(&self) -> &[Tensor];
 }
 
+#[allow(dead_code)]
 pub struct AddBackward {
     pub inputs: Vec<Tensor>,
 }
@@ -86,6 +86,7 @@ impl Node for AddBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct SubBackward {
     pub inputs: Vec<Tensor>,
 }
@@ -121,6 +122,7 @@ impl Node for SubBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct MulBackward {
     pub inputs: Vec<Tensor>,
 }
@@ -160,6 +162,7 @@ impl Node for MulBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct DivBackward {
     pub inputs: Vec<Tensor>,
 }
@@ -200,6 +203,7 @@ impl Node for DivBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct NegBackward {
     pub input: Tensor,
 }
@@ -407,6 +411,7 @@ impl Node for MeanBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct ExpBackward {
     pub input: Tensor,
 }
@@ -441,6 +446,7 @@ impl Node for ExpBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct LogBackward {
     pub input: Tensor,
 }
@@ -476,6 +482,7 @@ impl Node for LogBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct SqrtBackward {
     pub input: Tensor,
 }
@@ -511,6 +518,7 @@ impl Node for SqrtBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct AbsBackward {
     pub input: Tensor,
 }
@@ -711,6 +719,7 @@ impl Node for SiLUBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct SoftmaxBackward {
     pub input: Tensor,
 }
@@ -743,6 +752,7 @@ impl Node for SoftmaxBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct LogSoftmaxBackward {
     pub input: Tensor,
 }
@@ -775,6 +785,7 @@ impl Node for LogSoftmaxBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct Conv2dBackward {
     pub input: Tensor,
     pub weight: Tensor,
@@ -827,6 +838,7 @@ impl Node for Conv2dBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct LayerNormBackward {
     pub input: Tensor,
 }
@@ -859,6 +871,7 @@ impl Node for LayerNormBackward {
     }
 }
 
+#[allow(dead_code)]
 pub struct EmbeddingBackward {
     pub weight: Tensor,
 }
