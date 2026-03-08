@@ -60,6 +60,7 @@ sqrt = _core.sqrt
 pow = _core.pow
 clamp = _core.clamp
 relu = _core.relu
+fused_add_relu = _core.fused_add_relu
 gelu = _core.gelu
 sigmoid = _core.sigmoid
 tanh = _core.tanh

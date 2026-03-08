@@ -43,20 +43,16 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let a_data: Vec<f32> = (0..numel).map(|i| unsafe { *a_ptr.add(i) }).collect();
-            let b_data: Vec<f32> = (0..numel).map(|i| unsafe { *b_ptr.add(i) }).collect();
-            let result: Vec<f32> = a_data
-                .par_iter()
-                .zip(b_data.par_iter())
-                .map(|(x, y)| x + y)
-                .collect();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), out_ptr, numel);
-            }
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
+                *out = a_val + b_val;
+            });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -127,16 +123,15 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_addr = a_ptr as usize;
-            let b_addr = b_ptr as usize;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                *slot =
-                    unsafe { *(a_addr.add(idx) as *const f32) - *(b_addr.add(idx) as *const f32) };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
+                *out = a_val - b_val;
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -208,15 +203,15 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            let b_ptr = b_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                *slot = unsafe { *a_ptr.add(idx) * *b_ptr.add(idx) };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
+                *out = a_val * b_val;
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -288,15 +283,15 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            let b_ptr = b_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                *slot = unsafe { *a_ptr.add(idx) / *b_ptr.add(idx) };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
+                *out = a_val / b_val;
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -357,14 +352,14 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                *slot = unsafe { -*a_ptr.add(idx) };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
+                *out = -a_val;
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -427,14 +422,14 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                *slot = unsafe { (*a_ptr.add(idx)).exp() };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
+                *out = a_val.exp();
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -472,14 +467,14 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                *slot = unsafe { (*a_ptr.add(idx)).ln() };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
+                *out = a_val.ln();
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -517,14 +512,14 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                *slot = unsafe { (*a_ptr.add(idx)).sqrt() };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
+                *out = a_val.sqrt();
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -562,15 +557,14 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                let val = unsafe { *a_ptr.add(idx) };
-                *slot = val.max(0.0);
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
+                *out = a_val.max(0.0);
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -594,6 +588,57 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+#[inline]
+fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let b = args[1];
+
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    let output_shape = a_shape.to_vec();
+
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+    let b_ptr = b.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
+                *out = (a_val + b_val).max(0.0);
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for idx in 0..numel {
+                unsafe {
+                    let val = *a_ptr.add(idx) + *b_ptr.add(idx);
+                    *out_ptr.add(idx) = val.max(0.0);
+                }
+            }
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let val = *a_ptr.add(idx) + *b_ptr.add(idx);
+                *out_ptr.add(idx) = val.max(0.0);
+            }
+        }
+    }
+
+    vec![output]
+}
+
 fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
 
@@ -609,15 +654,14 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                let x = *a_ptr.add(idx);
-                *slot = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
+                *out = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -656,15 +700,14 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                let x = unsafe { *a_ptr.add(idx) };
-                *slot = 1.0 / (1.0 + (-x).exp());
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
+                *out = 1.0 / (1.0 + (-x).exp());
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -703,14 +746,14 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                *slot = unsafe { (*a_ptr.add(idx)).tanh() };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
+                *out = a_val.tanh();
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -748,15 +791,14 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                let x = unsafe { *a_ptr.add(idx) };
-                *slot = 1.0 / (1.0 + (-x).exp());
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
+                *out = x / (1.0 + (-x).exp());
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -764,7 +806,7 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             for idx in 0..numel {
                 unsafe {
                     let x = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
+                    *out_ptr.add(idx) = x / (1.0 + (-x).exp());
                 }
             }
         }
@@ -895,11 +937,11 @@ fn parallel_matmul(
 ) {
     use rayon::prelude::*;
     let total_outputs = batch * m as usize * n as usize;
-    let a_ptr = a_ptr;
-    let b_ptr = b_ptr;
-    let out_ptr = out_ptr;
+    let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, batch * a_rows * a_cols) };
+    let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, batch * k as usize * b_cols) };
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_outputs) };
 
-    (0..total_outputs).into_par_iter().for_each(|idx| {
+    out_slice.par_iter_mut().enumerate().for_each(|(idx, out)| {
         let bat = idx / (m as usize * n as usize);
         let rem = idx % (m as usize * n as usize);
         let i = rem / n as usize;
@@ -909,30 +951,28 @@ fn parallel_matmul(
         let mut kk = 0;
 
         while kk + 4 <= k as usize {
-            let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-            let a_val1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
-            let a_val2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
-            let a_val3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+            let a_val = a_slice[bat * a_rows * a_cols + i * a_cols + kk];
+            let a_val1 = a_slice[bat * a_rows * a_cols + i * a_cols + kk + 1];
+            let a_val2 = a_slice[bat * a_rows * a_cols + i * a_cols + kk + 2];
+            let a_val3 = a_slice[bat * a_rows * a_cols + i * a_cols + kk + 3];
 
-            let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
-            let b_val1 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 1) * b_cols + j) };
-            let b_val2 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 2) * b_cols + j) };
-            let b_val3 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 3) * b_cols + j) };
+            let b_val = b_slice[bat * k as usize * b_cols + kk * b_cols + j];
+            let b_val1 = b_slice[bat * k as usize * b_cols + (kk + 1) * b_cols + j];
+            let b_val2 = b_slice[bat * k as usize * b_cols + (kk + 2) * b_cols + j];
+            let b_val3 = b_slice[bat * k as usize * b_cols + (kk + 3) * b_cols + j];
 
             sum += a_val * b_val + a_val1 * b_val1 + a_val2 * b_val2 + a_val3 * b_val3;
             kk += 4;
         }
 
         while kk < k as usize {
-            let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-            let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+            let a_val = a_slice[bat * a_rows * a_cols + i * a_cols + kk];
+            let b_val = b_slice[bat * k as usize * b_cols + kk * b_cols + j];
             sum += a_val * b_val;
             kk += 1;
         }
 
-        unsafe {
-            *out_ptr.add(idx) = sum;
-        }
+        *out = sum;
     });
 }
 
@@ -2475,23 +2515,22 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                let val = unsafe { *a_ptr.add(idx) };
-                *slot = val.clamp(min_val, max_val);
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &val)| {
+                *out = val.clamp(min_val, max_val);
             });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let val = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = val.clamp(min_val, max_val);
+                    let x = *a_ptr.add(idx);
+                    *out_ptr.add(idx) = x.clamp(min_val, max_val);
                 }
             }
         }
@@ -2523,23 +2562,22 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 10000 {
+    if a.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            let a_ptr = a_ptr;
-            out_slice.par_iter().enumerate().for_each(|(idx, slot)| {
-                let val = unsafe { *a_ptr.add(idx) };
-                *slot = val.powf(exponent);
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &val)| {
+                *out = val.powf(exponent);
             });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for idx in 0..numel {
                 unsafe {
-                    let val = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = val.powf(exponent);
+                    let x = *a_ptr.add(idx);
+                    *out_ptr.add(idx) = x.powf(exponent);
                 }
             }
         }
@@ -2567,6 +2605,7 @@ fn register_kernels() {
     register("log", DispatchKey::Cpu, log_kernel as KernelFn);
     register("sqrt", DispatchKey::Cpu, sqrt_kernel as KernelFn);
     register("relu", DispatchKey::Cpu, relu_kernel as KernelFn);
+    register("fused_add_relu", DispatchKey::Cpu, fused_add_relu_kernel as KernelFn);
     register("gelu", DispatchKey::Cpu, gelu_kernel as KernelFn);
     register("sigmoid", DispatchKey::Cpu, sigmoid_kernel as KernelFn);
     register("tanh", DispatchKey::Cpu, tanh_kernel as KernelFn);

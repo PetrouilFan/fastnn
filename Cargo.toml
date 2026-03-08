@@ -23,11 +23,9 @@ rand          = "0.8"
 matrixmultiply = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-blas-sys = { version = "0.9", optional = true }
 
 [features]
-default = ["simd"]
-blas = ["dep:blas-sys"]
+default = ["simd", "parallel"]
 parallel = []
 simd = []
 
