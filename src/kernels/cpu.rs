@@ -6,6 +6,9 @@ use crate::tensor::Tensor;
 use smallvec::smallvec;
 use std::sync::Arc;
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use std::arch::x86_64::*;
+
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -56,9 +59,37 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let mut i = 0usize;
+                        while i + 8 <= numel {
+                            let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                            let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                            let result = _mm256_add_ps(a_vec, b_vec);
+                            _mm256_storeu_ps(out_ptr.add(i), result);
+                            i += 8;
+                        }
+                        while i < numel {
+                            *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                            i += 1;
+                        }
+                    }
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
+                    }
                 }
             }
         }
@@ -136,9 +167,37 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let mut i = 0usize;
+                        while i + 8 <= numel {
+                            let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                            let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                            let result = _mm256_sub_ps(a_vec, b_vec);
+                            _mm256_storeu_ps(out_ptr.add(i), result);
+                            i += 8;
+                        }
+                        while i < numel {
+                            *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
+                            i += 1;
+                        }
+                    }
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
+                    }
                 }
             }
         }
@@ -216,9 +275,37 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    *out_ptr.add(idx) = *a_ptr.add(idx) * *b_ptr.add(idx);
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let mut i = 0usize;
+                        while i + 8 <= numel {
+                            let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                            let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                            let result = _mm256_mul_ps(a_vec, b_vec);
+                            _mm256_storeu_ps(out_ptr.add(i), result);
+                            i += 8;
+                        }
+                        while i < numel {
+                            *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                            i += 1;
+                        }
+                    }
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = *a_ptr.add(idx) * *b_ptr.add(idx);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) * *b_ptr.add(idx);
+                    }
                 }
             }
         }
@@ -296,9 +383,37 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    *out_ptr.add(idx) = *a_ptr.add(idx) / *b_ptr.add(idx);
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let mut i = 0usize;
+                        while i + 8 <= numel {
+                            let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                            let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                            let result = _mm256_div_ps(a_vec, b_vec);
+                            _mm256_storeu_ps(out_ptr.add(i), result);
+                            i += 8;
+                        }
+                        while i < numel {
+                            *out_ptr.add(i) = *a_ptr.add(i) / *b_ptr.add(i);
+                            i += 1;
+                        }
+                    }
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = *a_ptr.add(idx) / *b_ptr.add(idx);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) / *b_ptr.add(idx);
+                    }
                 }
             }
         }
@@ -569,10 +684,41 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    let val = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = val.max(0.0);
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let zero = _mm256_setzero_ps();
+                        let mut i = 0usize;
+                        while i + 8 <= numel {
+                            let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                            let mask = _mm256_cmp_ps(a_vec, zero, _CMP_GT_OQ);
+                            let result = _mm256_blendv_ps(zero, a_vec, mask);
+                            _mm256_storeu_ps(out_ptr.add(i), result);
+                            i += 8;
+                        }
+                        while i < numel {
+                            let val = *a_ptr.add(i);
+                            *out_ptr.add(i) = val.max(0.0);
+                            i += 1;
+                        }
+                    }
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            let val = *a_ptr.add(idx);
+                            *out_ptr.add(idx) = val.max(0.0);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        let val = *a_ptr.add(idx);
+                        *out_ptr.add(idx) = val.max(0.0);
+                    }
                 }
             }
         }
@@ -992,40 +1138,117 @@ fn small_matrix_matmul(
     for bat in 0..batch {
         for i in 0..m as usize {
             for j in 0..n as usize {
-                let mut sum0 = 0.0f32;
-                let mut sum1 = 0.0f32;
-                let mut sum2 = 0.0f32;
-                let mut sum3 = 0.0f32;
+                let mut sum = 0.0f32;
 
-                let mut kk = 0;
-                let k_limit = k as usize;
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("fma") {
+                        unsafe {
+                            let mut acc0 = _mm256_setzero_ps();
+                            let mut acc1 = _mm256_setzero_ps();
+                            let mut kk = 0usize;
 
-                while kk + 4 <= k_limit {
-                    let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                    let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
-                    let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
-                    let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+                            while kk + 8 <= k as usize {
+                                let a0 = _mm256_loadu_ps(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk));
+                                let a1 = _mm256_loadu_ps(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 8));
 
-                    let b_base = bat * k as usize * b_cols + kk * b_cols + j;
-                    let b0 = unsafe { *b_ptr.add(b_base) };
-                    let b1 = unsafe { *b_ptr.add(b_base + b_cols) };
-                    let b2 = unsafe { *b_ptr.add(b_base + 2 * b_cols) };
-                    let b3 = unsafe { *b_ptr.add(b_base + 3 * b_cols) };
+                                let b0 = _mm256_loadu_ps(b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j));
+                                let b1 = _mm256_loadu_ps(b_ptr.add(bat * k as usize * b_cols + (kk + 8) * b_cols + j));
 
-                    sum0 += a0 * b0;
-                    sum1 += a1 * b1;
-                    sum2 += a2 * b2;
-                    sum3 += a3 * b3;
-                    kk += 4;
+                                acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+                                acc1 = _mm256_fmadd_ps(a1, b1, acc1);
+
+                                kk += 16;
+                            }
+
+                            let acc = _mm256_add_ps(acc0, acc1);
+                            let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                            _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
+                            sum += acc_arr.assume_init().iter().sum::<f32>();
+
+                            while kk < k as usize {
+                                let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                                let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                sum += a_val * b_val;
+                                kk += 1;
+                            }
+                        }
+                    } else {
+                        let mut sum0 = 0.0f32;
+                        let mut sum1 = 0.0f32;
+                        let mut sum2 = 0.0f32;
+                        let mut sum3 = 0.0f32;
+
+                        let mut kk = 0usize;
+                        let k_limit = k as usize;
+
+                        while kk + 4 <= k_limit {
+                            let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                            let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
+                            let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
+                            let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+
+                            let b_base = bat * k as usize * b_cols + kk * b_cols + j;
+                            let b0 = unsafe { *b_ptr.add(b_base) };
+                            let b1 = unsafe { *b_ptr.add(b_base + b_cols) };
+                            let b2 = unsafe { *b_ptr.add(b_base + 2 * b_cols) };
+                            let b3 = unsafe { *b_ptr.add(b_base + 3 * b_cols) };
+
+                            sum0 += a0 * b0;
+                            sum1 += a1 * b1;
+                            sum2 += a2 * b2;
+                            sum3 += a3 * b3;
+                            kk += 4;
+                        }
+
+                        sum = sum0 + sum1 + sum2 + sum3;
+
+                        while kk < k_limit {
+                            let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                            let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                            sum += a_val * b_val;
+                            kk += 1;
+                        }
+                    }
                 }
 
-                let mut sum = sum0 + sum1 + sum2 + sum3;
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    let mut sum0 = 0.0f32;
+                    let mut sum1 = 0.0f32;
+                    let mut sum2 = 0.0f32;
+                    let mut sum3 = 0.0f32;
 
-                while kk < k_limit {
-                    let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                    let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
-                    sum += a_val * b_val;
-                    kk += 1;
+                    let mut kk = 0usize;
+                    let k_limit = k as usize;
+
+                    while kk + 4 <= k_limit {
+                        let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                        let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
+                        let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
+                        let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+
+                        let b_base = bat * k as usize * b_cols + kk * b_cols + j;
+                        let b0 = unsafe { *b_ptr.add(b_base) };
+                        let b1 = unsafe { *b_ptr.add(b_base + b_cols) };
+                        let b2 = unsafe { *b_ptr.add(b_base + 2 * b_cols) };
+                        let b3 = unsafe { *b_ptr.add(b_base + 3 * b_cols) };
+
+                        sum0 += a0 * b0;
+                        sum1 += a1 * b1;
+                        sum2 += a2 * b2;
+                        sum3 += a3 * b3;
+                        kk += 4;
+                    }
+
+                    sum = sum0 + sum1 + sum2 + sum3;
+
+                    while kk < k_limit {
+                        let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                        let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                        sum += a_val * b_val;
+                        kk += 1;
+                    }
                 }
 
                 let out_idx = bat * m as usize * n as usize + i * n as usize + j;
@@ -1048,7 +1271,7 @@ fn single_threaded_matmul(
     a_cols: usize,
     b_cols: usize,
 ) {
-    const TILE_SIZE: usize = 32;
+    const TILE_SIZE: usize = 64;
 
     for bat in 0..batch {
         for i_tile in (0..m as usize).step_by(TILE_SIZE) {
@@ -1062,45 +1285,95 @@ fn single_threaded_matmul(
                         for j in j_tile..j_max {
                             let mut sum = 0.0f32;
 
-                            let mut kk = k_tile;
-                            while kk + 4 <= k_max {
-                                let a0 =
-                                    unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                                let a1 = unsafe {
-                                    *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1)
-                                };
-                                let a2 = unsafe {
-                                    *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2)
-                                };
-                                let a3 = unsafe {
-                                    *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3)
-                                };
+                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                            {
+                                if is_x86_feature_detected!("fma") {
+                                    unsafe {
+                                        let mut acc0 = _mm256_setzero_ps();
+                                        let mut acc1 = _mm256_setzero_ps();
+                                        let mut kk = k_tile;
 
-                                let b0 = unsafe {
-                                    *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
-                                };
-                                let b1 = unsafe {
-                                    *b_ptr.add(bat * k as usize * b_cols + (kk + 1) * b_cols + j)
-                                };
-                                let b2 = unsafe {
-                                    *b_ptr.add(bat * k as usize * b_cols + (kk + 2) * b_cols + j)
-                                };
-                                let b3 = unsafe {
-                                    *b_ptr.add(bat * k as usize * b_cols + (kk + 3) * b_cols + j)
-                                };
+                                        while kk + 8 <= k_max {
+                                            let a0 = _mm256_loadu_ps(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk));
+                                            let a1 = _mm256_loadu_ps(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 8));
 
-                                sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
-                                kk += 4;
+                                            let b0 = _mm256_loadu_ps(b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j));
+                                            let b1 = _mm256_loadu_ps(b_ptr.add(bat * k as usize * b_cols + (kk + 8) * b_cols + j));
+
+                                            acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+                                            acc1 = _mm256_fmadd_ps(a1, b1, acc1);
+
+                                            #[cfg(feature = "prefetch")]
+                                            {
+                                                _mm_prefetch(b_ptr.add(bat * k as usize * b_cols + (kk + TILE_SIZE) * b_cols + j), _MM_HINT_T0);
+                                                _mm_prefetch(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + TILE_SIZE), _MM_HINT_T0);
+                                            }
+
+                                            kk += 16;
+                                        }
+
+                                        let acc = _mm256_add_ps(acc0, acc1);
+                                        let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                                        _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
+                                        sum += acc_arr.assume_init().iter().sum::<f32>();
+
+                                        while kk < k_max {
+                                            let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                                            let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                            sum += a_val * b_val;
+                                            kk += 1;
+                                        }
+                                    }
+                                } else {
+                                    let mut kk = k_tile;
+                                    while kk + 4 <= k_max {
+                                        let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                                        let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
+                                        let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
+                                        let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+
+                                        let b0 = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                        let b1 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 1) * b_cols + j) };
+                                        let b2 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 2) * b_cols + j) };
+                                        let b3 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 3) * b_cols + j) };
+
+                                        sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
+                                        kk += 4;
+                                    }
+
+                                    while kk < k_max {
+                                        let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                                        let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                        sum += a_val * b_val;
+                                        kk += 1;
+                                    }
+                                }
                             }
 
-                            while kk < k_max {
-                                let a_val =
-                                    unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                                let b_val = unsafe {
-                                    *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
-                                };
-                                sum += a_val * b_val;
-                                kk += 1;
+                            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                            {
+                                let mut kk = k_tile;
+                                while kk + 4 <= k_max {
+                                    let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                                    let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
+                                    let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
+                                    let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+
+                                    let b0 = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                    let b1 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 1) * b_cols + j) };
+                                    let b2 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 2) * b_cols + j) };
+                                    let b3 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 3) * b_cols + j) };
+
+                                    sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
+                                    kk += 4;
+                                }
+
+                                while kk < k_max {
+                                    let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                                    let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                    sum += a_val * b_val;
+                                    kk += 1;
+                                }
                             }
 
                             let out_idx = bat * m as usize * n as usize + i * n as usize + j;
@@ -1593,49 +1866,131 @@ fn im2col_kernel(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[inline]
 fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
-    use std::arch::x86_64::__m256;
-
     let mut sum = 0.0f32;
     let mut i = 0;
 
-    if is_x86_feature_detected!("avx2") {
-        unsafe {
-            let mut acc0 = _mm256_setzero_ps();
-            let mut acc1 = _mm256_setzero_ps();
-            let mut acc2 = _mm256_setzero_ps();
-            let mut acc3 = _mm256_setzero_ps();
+    #[cfg(feature = "simd_avx512")]
+    {
+        if is_x86_feature_detected!("avx512f") {
+            unsafe {
+                let mut acc0 = _mm512_setzero_ps();
+                let mut acc1 = _mm512_setzero_ps();
+                let mut acc2 = _mm512_setzero_ps();
+                let mut acc3 = _mm512_setzero_ps();
 
-            while i + 32 <= len {
-                let a0 = _mm256_loadu_ps(a.as_ptr().add(i));
-                let b0 = _mm256_loadu_ps(b.as_ptr().add(i));
-                let a1 = _mm256_loadu_ps(a.as_ptr().add(i + 8));
-                let b1 = _mm256_loadu_ps(b.as_ptr().add(i + 8));
-                let a2 = _mm256_loadu_ps(a.as_ptr().add(i + 16));
-                let b2 = _mm256_loadu_ps(b.as_ptr().add(i + 16));
-                let a3 = _mm256_loadu_ps(a.as_ptr().add(i + 24));
-                let b3 = _mm256_loadu_ps(b.as_ptr().add(i + 24));
+                while i + 64 <= len {
+                    let a0 = _mm512_loadu_ps(a.as_ptr().add(i));
+                    let b0 = _mm512_loadu_ps(b.as_ptr().add(i));
+                    let a1 = _mm512_loadu_ps(a.as_ptr().add(i + 16));
+                    let b1 = _mm512_loadu_ps(b.as_ptr().add(i + 16));
+                    let a2 = _mm512_loadu_ps(a.as_ptr().add(i + 32));
+                    let b2 = _mm512_loadu_ps(b.as_ptr().add(i + 32));
+                    let a3 = _mm512_loadu_ps(a.as_ptr().add(i + 48));
+                    let b3 = _mm512_loadu_ps(b.as_ptr().add(i + 48));
 
-                acc0 = _mm256_fmadd_ps(a0, b0, acc0);
-                acc1 = _mm256_fmadd_ps(a1, b1, acc1);
-                acc2 = _mm256_fmadd_ps(a2, b2, acc2);
-                acc3 = _mm256_fmadd_ps(a3, b3, acc3);
+                    acc0 = _mm512_fmadd_ps(a0, b0, acc0);
+                    acc1 = _mm512_fmadd_ps(a1, b1, acc1);
+                    acc2 = _mm512_fmadd_ps(a2, b2, acc2);
+                    acc3 = _mm512_fmadd_ps(a3, b3, acc3);
 
-                i += 32;
+                    i += 64;
+                }
+
+                let acc = _mm512_add_ps(_mm512_add_ps(acc0, acc1), _mm512_add_ps(acc2, acc3));
+                sum += _mm512_reduce_add_ps(acc);
+
+                while i + 16 <= len {
+                    let a_vec = _mm512_loadu_ps(a.as_ptr().add(i));
+                    let b_vec = _mm512_loadu_ps(b.as_ptr().add(i));
+                    acc0 = _mm512_fmadd_ps(a_vec, b_vec, _mm512_setzero_ps());
+                    sum += _mm512_reduce_add_ps(acc0);
+                    i += 16;
+                }
             }
+        } else if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let mut acc0 = _mm256_setzero_ps();
+                let mut acc1 = _mm256_setzero_ps();
+                let mut acc2 = _mm256_setzero_ps();
+                let mut acc3 = _mm256_setzero_ps();
 
-            let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-            let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-            _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
-            sum += acc_arr.assume_init().iter().sum::<f32>();
+                while i + 32 <= len {
+                    let a0 = _mm256_loadu_ps(a.as_ptr().add(i));
+                    let b0 = _mm256_loadu_ps(b.as_ptr().add(i));
+                    let a1 = _mm256_loadu_ps(a.as_ptr().add(i + 8));
+                    let b1 = _mm256_loadu_ps(b.as_ptr().add(i + 8));
+                    let a2 = _mm256_loadu_ps(a.as_ptr().add(i + 16));
+                    let b2 = _mm256_loadu_ps(b.as_ptr().add(i + 16));
+                    let a3 = _mm256_loadu_ps(a.as_ptr().add(i + 24));
+                    let b3 = _mm256_loadu_ps(b.as_ptr().add(i + 24));
 
-            while i + 8 <= len {
-                let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
-                let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
-                let prod = _mm256_mul_ps(a_vec, b_vec);
-                let sum_vec = _mm256_hadd_ps(prod, prod);
-                let sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
-                sum += _mm256_cvtss_f32(sum_vec);
-                i += 8;
+                    acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+                    acc1 = _mm256_fmadd_ps(a1, b1, acc1);
+                    acc2 = _mm256_fmadd_ps(a2, b2, acc2);
+                    acc3 = _mm256_fmadd_ps(a3, b3, acc3);
+
+                    i += 32;
+                }
+
+                let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+                let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
+                sum += acc_arr.assume_init().iter().sum::<f32>();
+
+                while i + 8 <= len {
+                    let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
+                    let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
+                    let prod = _mm256_mul_ps(a_vec, b_vec);
+                    let sum_vec = _mm256_hadd_ps(prod, prod);
+                    let sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
+                    sum += _mm256_cvtss_f32(sum_vec);
+                    i += 8;
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "simd_avx512"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let mut acc0 = _mm256_setzero_ps();
+                let mut acc1 = _mm256_setzero_ps();
+                let mut acc2 = _mm256_setzero_ps();
+                let mut acc3 = _mm256_setzero_ps();
+
+                while i + 32 <= len {
+                    let a0 = _mm256_loadu_ps(a.as_ptr().add(i));
+                    let b0 = _mm256_loadu_ps(b.as_ptr().add(i));
+                    let a1 = _mm256_loadu_ps(a.as_ptr().add(i + 8));
+                    let b1 = _mm256_loadu_ps(b.as_ptr().add(i + 8));
+                    let a2 = _mm256_loadu_ps(a.as_ptr().add(i + 16));
+                    let b2 = _mm256_loadu_ps(b.as_ptr().add(i + 16));
+                    let a3 = _mm256_loadu_ps(a.as_ptr().add(i + 24));
+                    let b3 = _mm256_loadu_ps(b.as_ptr().add(i + 24));
+
+                    acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+                    acc1 = _mm256_fmadd_ps(a1, b1, acc1);
+                    acc2 = _mm256_fmadd_ps(a2, b2, acc2);
+                    acc3 = _mm256_fmadd_ps(a3, b3, acc3);
+
+                    i += 32;
+                }
+
+                let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+                let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
+                sum += acc_arr.assume_init().iter().sum::<f32>();
+
+                while i + 8 <= len {
+                    let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
+                    let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
+                    let prod = _mm256_mul_ps(a_vec, b_vec);
+                    let sum_vec = _mm256_hadd_ps(prod, prod);
+                    let sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
+                    sum += _mm256_cvtss_f32(sum_vec);
+                    i += 8;
+                }
             }
         }
     }

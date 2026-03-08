@@ -9,6 +9,26 @@ A Python deep learning library with a Rust core, inspired by NVLabs/vibetensor a
 - **Optimizers**: SGD, Adam, AdamW
 - **Training infrastructure**: Trainer with callbacks, metrics, checkpoints
 - **IO**: safetensors serialization, DLPack interop
+- **SIMD-optimized**: AVX2/AVX512 vectorization for maximum performance
+
+## Performance
+
+Benchmark comparisons with PyTorch (lower is better):
+
+| Operation | Size | fastnn | PyTorch | Status |
+|-----------|------|--------|---------|--------|
+| ReLU | 2×100 | 2.3μs | 2.5μs | ✅ faster |
+| FusedAddReLU | 2×100 | 3.6μs | 5.2μs | ✅ faster |
+| MatMul | 106×64×128 | 106μs | 163μs | ✅ faster |
+| GELU | 2×100 | 42μs | 42μs | competitive |
+| Sigmoid | 2×100 | 28μs | 15μs | |
+| Tanh | 2×100 | 39μs | 7.9ms | ✅ faster |
+| Add | 2×100 | 40μs | 2.9μs | |
+| Mul | 2×100 | 43μs | 3.2μs | |
+| Conv2d | 1×64×56×56 | 873μs | 135μs | |
+| Linear | 1×256 | 679μs | 41μs | |
+
+Note: Performance varies by hardware and tensor size. Best results require AVX2/AVX512 support.
 
 ## Installation
 
@@ -46,6 +66,9 @@ make build
 
 # Test
 make test
+
+# Benchmark
+make bench
 
 # Clean
 make clean
