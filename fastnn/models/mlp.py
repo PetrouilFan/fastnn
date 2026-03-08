@@ -1,6 +1,5 @@
 from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d, Sequential as Seq
 import fastnn as fnn
-import numpy as np
 
 
 def create_mlp(
@@ -79,7 +78,6 @@ class MLP:
     def fast_forward(self, x):
         self._prepare_weights()
 
-        dims = [self.input_dim] + self.hidden_dims + [self.output_dim]
         activations = [self.activation] * len(self.hidden_dims)
 
         weight_tensors = []

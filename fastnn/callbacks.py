@@ -1,4 +1,4 @@
-import os
+import numpy as np
 
 
 class Callback:
@@ -113,6 +113,3 @@ class CSVLogger:
 
     def on_epoch_end(self, epoch, logs):
         self.epoch = epoch
-
-
-import numpy as np
