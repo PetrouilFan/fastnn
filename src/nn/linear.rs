@@ -1,13 +1,13 @@
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
-use crate::storage::DType;
 use crate::tensor::Tensor;
-use smallvec::smallvec;
 
 pub struct Linear {
     pub weight: Tensor,
     pub bias: Option<Tensor>,
+    #[allow(dead_code)]
     pub in_features: i64,
+    #[allow(dead_code)]
     pub out_features: i64,
     training: std::sync::atomic::AtomicBool,
 }

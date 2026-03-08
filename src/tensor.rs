@@ -23,7 +23,7 @@ impl TensorImpl {
         let dtype = storage.dtype;
         let device = storage.device;
         let numel: i64 = sizes.iter().product();
-        let nbytes = (numel * dtype.size() as i64) as usize;
+        let _nbytes = (numel * dtype.size() as i64) as usize;
 
         let strides = compute_strides(&sizes);
 
@@ -280,7 +280,7 @@ impl TensorImpl {
             panic!("expand: not enough dimensions");
         }
 
-        let mut new_sizes = sizes.clone();
+        let new_sizes = sizes.clone();
         let offset = sizes.len() - self.ndim();
 
         for i in 0..self.ndim() {
@@ -662,7 +662,7 @@ impl Tensor {
         self.inner.grad()
     }
 
-    pub fn set_grad(&self, grad: Option<Tensor>) {
+    pub fn set_grad(&self, _grad: Option<Tensor>) {
         // Need mutable access - clone and modify
     }
 
@@ -1043,8 +1043,8 @@ impl std::fmt::Debug for Tensor {
             f,
             "Tensor(shape={:?}, dtype={}, device={})",
             self.shape(),
-            self.dtype().to_str(),
-            self.device().to_str()
+            self.dtype().as_str(),
+            self.device().as_str()
         )
     }
 }

@@ -1,15 +1,17 @@
 use crate::autograd::{AutogradMeta, Conv2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
-use crate::storage::DType;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
 pub struct Conv2d {
     pub weight: Tensor,
     pub bias: Option<Tensor>,
+    #[allow(dead_code)]
     pub in_channels: i64,
+    #[allow(dead_code)]
     pub out_channels: i64,
+    #[allow(dead_code)]
     pub kernel_size: i64,
     pub stride: i64,
     pub padding: i64,

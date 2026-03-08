@@ -1,9 +1,9 @@
 use crate::tensor::Tensor;
 use smallvec::smallvec;
 use smallvec::SmallVec;
-use std::sync::Arc;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct TensorIteratorInput {
     pub tensor: Tensor,
     pub sizes: SmallVec<[i64; 8]>,
@@ -12,6 +12,7 @@ pub struct TensorIteratorInput {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct TensorIterator {
     pub output_shape: SmallVec<[i64; 8]>,
     pub inner_strides: SmallVec<[i64; 8]>,
@@ -84,6 +85,7 @@ impl TensorIterator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn build_for_reduction(a: &Tensor, dim: Option<usize>, keepdim: bool) -> Self {
         let input_shape = &a.inner.sizes;
         let mut output_shape: SmallVec<[i64; 8]> = smallvec![];
@@ -132,6 +134,7 @@ impl TensorIterator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn for_each<F>(&self, mut f: F)
     where
         F: FnMut(&[&[u8]]) + Send + Sync,
@@ -173,6 +176,7 @@ impl TensorIterator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn for_each_with_index<F>(&self, mut f: F)
     where
         F: FnMut(usize, &[&[u8]]) + Send + Sync,

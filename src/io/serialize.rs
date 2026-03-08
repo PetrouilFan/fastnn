@@ -2,6 +2,7 @@ use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 pub fn save_model(model: &dyn Module, path: &str) {
     let params = model.named_parameters();
 
@@ -14,13 +15,13 @@ pub fn save_model(model: &dyn Module, path: &str) {
             name.clone(),
             serde_json::json!({
                 "shape": tensor.shape(),
-                "dtype": tensor.dtype().to_str(),
+                "dtype": tensor.dtype().as_str(),
             }),
         );
     }
 
     // Save safetensors (simplified - would use actual safetensors crate)
-    let json_meta = serde_json::json!({
+    let _json_meta = serde_json::json!({
         "format": "fastnn",
         "version": "0.1.0",
         "metadata": metadata,
@@ -29,7 +30,8 @@ pub fn save_model(model: &dyn Module, path: &str) {
     println!("Saved model to {} with {} parameters", path, params.len());
 }
 
-pub fn load_model(path: &str, model_class: Option<&str>) -> HashMap<String, Tensor> {
+#[allow(dead_code)]
+pub fn load_model(path: &str, _model_class: Option<&str>) -> HashMap<String, Tensor> {
     // Would load from safetensors file
     println!("Loaded model from {}", path);
     HashMap::new()

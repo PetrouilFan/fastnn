@@ -2,6 +2,7 @@ use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
+#[allow(dead_code)]
 pub struct Sequential {
     pub layers: Vec<Arc<dyn Module>>,
 }
@@ -66,6 +67,7 @@ impl Module for Sequential {
     }
 }
 
+#[allow(dead_code)]
 pub struct ModuleList {
     pub modules: Vec<Arc<dyn Module>>,
 }

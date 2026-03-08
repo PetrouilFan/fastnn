@@ -1,9 +1,11 @@
+#![allow(clippy::too_many_arguments, clippy::needless_range_loop, clippy::wildcard_in_or_patterns)]
+#![allow(clippy::unnecessary_unsafe, unused_imports)]
+
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{matmul_blas, MIN_BLAS_SIZE};
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
-use smallvec::smallvec;
 use std::sync::Arc;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -12,6 +14,7 @@ use std::arch::x86_64::*;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+#[allow(dead_code)]
 fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
     let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
     let numel: i64 = sizes.iter().product();
@@ -740,7 +743,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b = args[1];
 
     let a_shape = a.shape();
-    let b_shape = b.shape();
+    let _b_shape = b.shape();
     let output_shape = a_shape.to_vec();
 
     let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
@@ -807,7 +810,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
-                *out = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+                *out = 0.5 * x * (1.0 + (x * x * 0.797_884_6).tanh());
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -823,7 +826,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         for idx in 0..numel {
             unsafe {
                 let x = *a_ptr.add(idx);
-                *out_ptr.add(idx) = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+                *out_ptr.add(idx) = 0.5 * x * (1.0 + (x * x * 0.797_884_6).tanh());
             }
         }
     }
@@ -1452,7 +1455,7 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
 
     let a_ptr = a.data_ptr() as *const f32;
-    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
+    let _a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
     let a_storage_offset = a.inner.storage_offset as usize;
 
     let output_inner = Arc::make_mut(&mut output.inner);
@@ -1686,7 +1689,7 @@ fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let ndim = x_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
-    let dim_size = x_shape[dim] as usize;
+    let _dim_size = x_shape[dim] as usize;
 
     let max_vals = max_kernel(&[
         x,
@@ -1825,8 +1828,8 @@ fn im2col_kernel(
 
     let x_ptr = x.data_ptr() as *const f32;
 
-    let in_height_pad = in_height + 2 * padding;
-    let in_width_pad = in_width + 2 * padding;
+    let _in_height_pad = in_height + 2 * padding;
+    let _in_width_pad = in_width + 2 * padding;
 
     for n in 0..batch_size {
         for oh in 0..out_height {
@@ -2084,7 +2087,7 @@ fn winograd_conv3x3_kernel(
                 let mut sum = 0.0f32;
 
                 for ic in 0..in_channels {
-                    let mut w_offset = oc * in_channels * 9 + ic * 9;
+                    let w_offset = oc * in_channels * 9 + ic * 9;
                     let mut patch_values = [0.0f32; 9];
                     let mut patch_idx = 0;
 
@@ -2298,9 +2301,9 @@ fn conv2d_1x1(
     let w_data: Vec<f32> =
         unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels).to_vec() };
 
-    let n = batch_size * in_height * in_width;
-    let k = in_channels;
-    let m = out_channels;
+    let _n = batch_size * in_height * in_width;
+    let _k = in_channels;
+    let _m = out_channels;
 
     for b in 0..batch_size {
         for h in 0..in_height {
@@ -2345,7 +2348,7 @@ fn depthwise_conv2d(
     w: &Tensor,
     bias: Option<&Tensor>,
     stride: usize,
-    padding: usize,
+    _padding: usize,
     dilation: usize,
     out_height: usize,
     out_width: usize,
@@ -2584,7 +2587,7 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let x_shape = x.shape();
     let ndim = x_shape.len();
-    let normalized_shape: i64 = x_shape.iter().skip(ndim - 1).product();
+    let _normalized_shape: i64 = x_shape.iter().skip(ndim - 1).product();
 
     let mean = x.mean((ndim - 1) as i32, true);
     let var = x
@@ -2617,7 +2620,7 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     } else {
         None
     };
-    let training = if args.len() > 5 {
+    let _training = if args.len() > 5 {
         args[5].item() != 0.0
     } else {
         false
@@ -2629,7 +2632,7 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
 
     let x_shape = x.shape();
-    let num_features = x_shape[1];
+    let _num_features = x_shape[1];
 
     let mean = x.mean(0, false).unsqueeze(0);
     let var = x
@@ -2808,6 +2811,7 @@ fn rand_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![Tensor::from_vec(values, shape)]
 }
 
+#[allow(dead_code)]
 fn randint_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let shape_tensor = args[0];
     let shape: Vec<i64> = shape_tensor.inner.sizes.iter().copied().collect();
@@ -2824,6 +2828,7 @@ fn randint_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![Tensor::from_vec(values, shape)]
 }
 
+#[allow(dead_code)]
 fn read_f32(slice: &[u8], dtype: DType) -> f32 {
     match dtype {
         DType::F32 => {
@@ -2846,6 +2851,7 @@ fn read_f32(slice: &[u8], dtype: DType) -> f32 {
     }
 }
 
+#[allow(dead_code)]
 fn write_f32(slice: &[u8], val: f32) {
     let ptr = slice.as_ptr() as *mut u8;
     unsafe {
