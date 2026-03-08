@@ -70,8 +70,6 @@ def stack(tensors, dim=0):
     if hasattr(first, "numpy"):
         first_data = first.numpy()
         numel = len(first_data)
-        dtype = first.dtype if hasattr(first, "dtype") else "float32"
-        device = first.device if hasattr(first, "device") else "cpu"
 
         total_tensors = len(tensors)
         result_data = [0.0] * (numel * total_tensors)
