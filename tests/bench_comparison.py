@@ -44,6 +44,20 @@ def test_relu_torch(benchmark, size):
 
 
 @pytest.mark.parametrize("size", [(100, 100), (1000, 1000)])
+def test_fused_add_relu_fastnn(benchmark, size):
+    a = fnn.rand(list(size))
+    b = fnn.rand(list(size))
+    result = benchmark(fnn.fused_add_relu, a, b)
+
+
+@pytest.mark.parametrize("size", [(100, 100), (1000, 1000)])
+def test_fused_add_relu_torch(benchmark, size):
+    a = torch.rand(size)
+    b = torch.rand(size)
+    result = benchmark(lambda: torch.nn.functional.relu(a + b))
+
+
+@pytest.mark.parametrize("size", [(100, 100), (1000, 1000)])
 def test_sigmoid_fastnn(benchmark, size):
     x = fnn.rand(list(size))
     result = benchmark(fnn.sigmoid, x)

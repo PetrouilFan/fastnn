@@ -419,6 +419,13 @@ fn relu(a: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
+fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
+    use crate::dispatcher::{dispatch, DispatchKey};
+    let result = dispatch("fused_add_relu", DispatchKey::Cpu, &[&a.inner, &b.inner]);
+    PyTensor::from_tensor(result.into_iter().next().unwrap())
+}
+
+#[pyfunction]
 fn gelu(a: &PyTensor) -> PyTensor {
     PyTensor::from_tensor(a.inner.gelu())
 }
@@ -1153,6 +1160,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clamp, py)?)?;
     m.add_function(wrap_pyfunction!(pow, py)?)?;
     m.add_function(wrap_pyfunction!(relu, py)?)?;
+    m.add_function(wrap_pyfunction!(fused_add_relu, py)?)?;
     m.add_function(wrap_pyfunction!(gelu, py)?)?;
     m.add_function(wrap_pyfunction!(sigmoid, py)?)?;
     m.add_function(wrap_pyfunction!(tanh, py)?)?;
