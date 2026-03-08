@@ -60,7 +60,6 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          python-version: "3.12"
 
       - name: Run Python tests
         run: pytest tests/ -v
