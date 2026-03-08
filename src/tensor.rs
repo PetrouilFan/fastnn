@@ -970,6 +970,7 @@ impl Add for &Tensor {
 
 impl Add for Tensor {
     type Output = Tensor;
+    #[allow(clippy::needless_borrow)]
     fn add(self, other: Tensor) -> Tensor {
         (&self).add(&other)
     }
@@ -984,6 +985,7 @@ impl Sub for &Tensor {
 
 impl Sub for Tensor {
     type Output = Tensor;
+    #[allow(clippy::needless_borrow)]
     fn sub(self, other: Tensor) -> Tensor {
         (&self).sub(&other)
     }
@@ -998,6 +1000,7 @@ impl Mul for &Tensor {
 
 impl Mul for Tensor {
     type Output = Tensor;
+    #[allow(clippy::needless_borrow)]
     fn mul(self, other: Tensor) -> Tensor {
         (&self).mul(&other)
     }
@@ -1012,6 +1015,7 @@ impl Div for &Tensor {
 
 impl Div for Tensor {
     type Output = Tensor;
+    #[allow(clippy::needless_borrow)]
     fn div(self, other: Tensor) -> Tensor {
         (&self).div(&other)
     }
@@ -1019,6 +1023,7 @@ impl Div for Tensor {
 
 impl Neg for Tensor {
     type Output = Tensor;
+    #[allow(clippy::needless_borrow, unconditional_recursion)]
     fn neg(self) -> Tensor {
         (&self).neg()
     }

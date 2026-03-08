@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::train::loss::LossFn;
 
 #[allow(dead_code)]
