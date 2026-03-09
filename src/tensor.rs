@@ -63,7 +63,7 @@ impl TensorImpl {
                 if stride != expected_stride {
                     return false;
                 }
-                expected_stride *= stride;
+                expected_stride *= *size;
             }
         }
         true
@@ -369,9 +369,11 @@ impl TensorImpl {
     }
 
     pub fn requires_grad_(&self, requires_grad: bool) -> Tensor {
-        let mut new = self.clone();
-        new.set_requires_grad(requires_grad);
-        Tensor::new(new)
+        let self_ptr = self as *const TensorImpl as *mut TensorImpl;
+        unsafe {
+            (*self_ptr).set_requires_grad(requires_grad);
+        }
+        Tensor::new(self.clone())
     }
 
     pub fn grad(&self) -> Option<Tensor> {
@@ -432,6 +434,36 @@ impl TensorImpl {
 
     pub fn version(&self) -> u64 {
         self.version_counter.load(Ordering::SeqCst)
+    }
+
+    pub fn data_ptr(&self) -> *const u8 {
+        self.storage.data.as_ptr()
+    }
+
+    pub fn data_ptr_f32(&self) -> *const f32 {
+        let ptr = self.storage.data.as_ptr() as *const f32;
+        unsafe { ptr.add(self.storage_offset as usize) }
+    }
+
+    pub fn data_ptr_f32_mut(&self) -> *mut f32 {
+        let ptr = self.storage.data.as_ptr() as *mut f32;
+        unsafe { ptr.add(self.storage_offset as usize) }
+    }
+
+    pub fn as_f32_slice(&self) -> &[f32] {
+        unsafe {
+            let ptr = self.data_ptr_f32();
+            let numel = self.numel() as usize;
+            std::slice::from_raw_parts(ptr, numel)
+        }
+    }
+
+    pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
+        unsafe {
+            let ptr = self.data_ptr_f32_mut();
+            let numel = self.numel() as usize;
+            std::slice::from_raw_parts_mut(ptr, numel)
+        }
     }
 }
 
@@ -737,7 +769,23 @@ impl Tensor {
     }
 
     pub fn data_ptr(&self) -> *const u8 {
-        self.inner.storage.data.as_ptr()
+        self.inner.data_ptr()
+    }
+
+    pub fn data_ptr_f32(&self) -> *const f32 {
+        self.inner.data_ptr_f32()
+    }
+
+    pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
+        Arc::make_mut(&mut self.inner).data_ptr_f32_mut()
+    }
+
+    pub fn as_f32_slice(&self) -> &[f32] {
+        self.inner.as_f32_slice()
+    }
+
+    pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
+        Arc::make_mut(&mut self.inner).as_f32_slice_mut()
     }
 
     pub fn increment_version(&self) {
@@ -750,30 +798,70 @@ impl Tensor {
 
     pub fn add(&self, other: &Tensor) -> Tensor {
         let result = dispatch("add", DispatchKey::Cpu, &[self, other]);
-        result[0].clone()
+        let output = result[0].clone();
+        if self.requires_grad() || other.requires_grad() {
+            let backward = autograd::AddBackward::new(vec![self.clone(), other.clone()]);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
         let result = dispatch("sub", DispatchKey::Cpu, &[self, other]);
-        result[0].clone()
+        let output = result[0].clone();
+        if self.requires_grad() || other.requires_grad() {
+            let backward = autograd::SubBackward::new(vec![self.clone(), other.clone()]);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
         let result = dispatch("mul", DispatchKey::Cpu, &[self, other]);
-        result[0].clone()
+        let output = result[0].clone();
+        if self.requires_grad() || other.requires_grad() {
+            let backward = autograd::MulBackward::new(vec![self.clone(), other.clone()]);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
         let result = dispatch("div", DispatchKey::Cpu, &[self, other]);
-        result[0].clone()
+        let output = result[0].clone();
+        if self.requires_grad() || other.requires_grad() {
+            let backward = autograd::DivBackward::new(vec![self.clone(), other.clone()]);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         let result = dispatch("matmul", DispatchKey::Cpu, &[self, other]);
-        let output = result[0].clone();
+        let mut output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
             let backward = autograd::MatmulBackward::new(self.clone(), other.clone());
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
@@ -793,7 +881,7 @@ impl Tensor {
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::ReluBackward::new(self.clone());
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
@@ -818,7 +906,7 @@ impl Tensor {
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::SigmoidBackward::new(self.clone());
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
@@ -833,7 +921,7 @@ impl Tensor {
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::TanhBackward::new(self.clone());
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
@@ -848,7 +936,7 @@ impl Tensor {
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::SiLUBackward::new(self.clone());
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
@@ -863,7 +951,7 @@ impl Tensor {
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::GeluBackward::new(self.clone());
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
@@ -913,7 +1001,7 @@ impl Tensor {
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::SumBackward::new(self.clone(), dim as usize, keepdim);
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
@@ -950,7 +1038,7 @@ impl Tensor {
         if self.requires_grad() {
             let numel: i64 = self.shape().iter().product();
             let backward = autograd::MeanBackward::new(self.clone(), dim as usize, keepdim, numel);
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);

@@ -1,23 +1,42 @@
+use mimalloc::MiMalloc;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
 
 static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
 #[allow(dead_code)]
-const MAX_CACHED_BLOCKS: usize = 32;
-const POOL_THRESHOLD: usize = 10 * 1024 * 1024;
+const MAX_CACHED_BLOCKS: usize = 64;
+const POOL_THRESHOLD: usize = 8 * 1024 * 1024;
+
+const NUM_SIZE_CLASSES: usize = 16;
+const SIZE_CLASSES: &[usize] = &[
+    64, 128, 256, 512, 1024, 2048, 4096, 8192,
+    16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152,
+];
+
+fn get_size_class(size: usize) -> usize {
+    for &class in SIZE_CLASSES.iter() {
+        if size <= class {
+            return class;
+        }
+    }
+    SIZE_CLASSES[NUM_SIZE_CLASSES - 1]
+}
 
 struct MemoryPool {
-    free_blocks: HashMap<usize, Vec<Vec<u8>>>,
+    free_blocks: Vec<Vec<u8>>,
     total_cached: usize,
 }
 
 impl MemoryPool {
     fn new() -> Self {
         Self {
-            free_blocks: HashMap::new(),
+            free_blocks: Vec::with_capacity(NUM_SIZE_CLASSES),
             total_cached: 0,
         }
     }
@@ -31,15 +50,17 @@ impl MemoryPool {
             return vec![0u8; size];
         }
 
-        let rounded_size = (size + 63) & !63;
+        let size_class = get_size_class(size);
 
-        if let Some(blocks) = self.free_blocks.get_mut(&rounded_size) {
-            if let Some(block) = blocks.pop() {
-                self.total_cached = self.total_cached.saturating_sub(rounded_size);
+        for i in 0..self.free_blocks.len() {
+            if self.free_blocks[i].len() >= size_class {
+                let block = self.free_blocks.swap_remove(i);
+                self.total_cached = self.total_cached.saturating_sub(block.len());
                 return block;
             }
         }
 
+        let rounded_size = (size + 63) & !63;
         vec![0u8; rounded_size]
     }
 
@@ -60,14 +81,9 @@ impl MemoryPool {
             return;
         }
 
-        if let Some(blocks) = self.free_blocks.get_mut(&rounded_size) {
-            if blocks.len() < MAX_CACHED_BLOCKS {
-                self.total_cached += rounded_size;
-                blocks.push(data);
-            }
-        } else {
+        if self.free_blocks.len() < MAX_CACHED_BLOCKS {
             self.total_cached += rounded_size;
-            self.free_blocks.insert(rounded_size, vec![data]);
+            self.free_blocks.push(data);
         }
     }
 }

@@ -80,20 +80,22 @@ impl Optimizer for SGD {
             let ptr = storage.data.as_mut_ptr() as *mut f32;
             let numel = param.numel() as usize;
 
-            let update_data = update.to_numpy();
+            let update_slice = update.as_f32_slice();
             for j in 0..numel {
                 unsafe {
                     let param_val = *ptr.add(j);
-                    *ptr.add(j) = param_val - update_data[j];
+                    *ptr.add(j) = param_val - update_slice[j];
                 }
             }
         }
     }
 
     fn zero_grad(&mut self) {
-        for param in &self.params {
-            let mut inner = param.inner.clone();
-            Arc::make_mut(&mut inner).autograd_meta = None;
+        for param in &mut self.params.iter_mut() {
+            let inner = Arc::make_mut(&mut param.inner);
+            if let Some(meta) = &mut inner.autograd_meta {
+                meta.grad = None;
+            }
         }
     }
 

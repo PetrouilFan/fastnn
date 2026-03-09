@@ -23,33 +23,45 @@ fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
     Tensor::new(crate::tensor::TensorImpl::new(storage, sizes))
 }
 
+#[inline]
+fn broadcast_shapes_simple(a: &[i64], b: &[i64]) -> Vec<i64> {
+    let ndim = std::cmp::max(a.len(), b.len());
+    let mut result = vec![1i64; ndim];
+    
+    let offset_a = ndim - a.len();
+    let offset_b = ndim - b.len();
+    
+    for i in 0..ndim {
+        let a_val = if i < offset_a { 1 } else { a[i - offset_a] };
+        let b_val = if i < offset_b { 1 } else { b[i - offset_b] };
+        result[i] = a_val.max(b_val);
+    }
+    result
+}
+
 fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    let iter = TensorIterator::build_for_binary(a, b);
-    let output_shape = iter.output_shape.to_vec();
+    let a_shape = a.inner.sizes.as_slice();
+    let b_shape = b.inner.sizes.as_slice();
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
+    let a_numel = a.inner.numel() as usize;
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 0 {
+        let output_shape = a_shape.to_vec();
+        let numel = a_numel;
+        
+        let mut output = Tensor::zeros(output_shape, a.dtype(), a.device());
+        
+        let a_ptr = a.data_ptr_f32();
+        let b_ptr = b.data_ptr_f32();
+        
+        let output_inner = Arc::make_mut(&mut output.inner);
+        let output_storage = Arc::make_mut(&mut output_inner.storage);
+        let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-    let b_ptr = b.data_ptr() as *const f32;
-
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
-
-    let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
-    let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
-    let out_shape = output_shape.clone();
-
-    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
-    let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
-    let a_storage_offset = a.inner.storage_offset as usize;
-    let b_storage_offset = b.inner.storage_offset as usize;
-
-    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -96,35 +108,57 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 }
             }
         }
-    } else {
-        for idx in 0..numel {
-            let mut remaining = idx;
-            let mut a_idx = 0;
-            let mut b_idx = 0;
+        return vec![output];
+    }
 
-            for i in (0..out_shape.len()).rev() {
-                let dim_idx = remaining % out_shape[i] as usize;
-                remaining /= out_shape[i] as usize;
+    let iter = TensorIterator::build_for_binary(a, b);
+    let output_shape = iter.output_shape.to_vec();
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
 
-                if i >= a_shape.len() || a_shape[i] == 1 {
-                } else {
-                    a_idx += dim_idx * a_strides[i] as usize;
-                }
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+    let b_ptr = b.data_ptr() as *const f32;
 
-                if i >= b_shape.len() || b_shape[i] == 1 {
-                } else {
-                    b_idx += dim_idx * b_strides[i] as usize;
-                }
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
+    let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
+    let out_shape = output_shape.clone();
+
+    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
+    let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
+    let a_storage_offset = a.inner.storage_offset as usize;
+    let b_storage_offset = b.inner.storage_offset as usize;
+
+    for idx in 0..numel {
+        let mut remaining = idx;
+        let mut a_idx = 0;
+        let mut b_idx = 0;
+
+        for i in (0..out_shape.len()).rev() {
+            let dim_idx = remaining % out_shape[i] as usize;
+            remaining /= out_shape[i] as usize;
+
+            if i >= a_shape.len() || a_shape[i] == 1 {
+            } else {
+                a_idx += dim_idx * a_strides[i] as usize;
             }
 
-            a_idx += a_storage_offset;
-            b_idx += b_storage_offset;
-
-            unsafe {
-                let a_val = *a_ptr.add(a_idx);
-                let b_val = *b_ptr.add(b_idx);
-                *out_ptr.add(idx) = a_val + b_val;
+            if i >= b_shape.len() || b_shape[i] == 1 {
+            } else {
+                b_idx += dim_idx * b_strides[i] as usize;
             }
+        }
+
+        a_idx += a_storage_offset;
+        b_idx += b_storage_offset;
+
+        unsafe {
+            let a_val = *a_ptr.add(a_idx);
+            let b_val = *b_ptr.add(b_idx);
+            *out_ptr.add(idx) = a_val + b_val;
         }
     }
 
@@ -157,7 +191,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -243,29 +277,25 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    let iter = TensorIterator::build_for_binary(a, b);
-    let output_shape = iter.output_shape.to_vec();
+    let a_shape = a.inner.sizes.as_slice();
+    let b_shape = b.inner.sizes.as_slice();
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
+    let a_numel = a.inner.numel() as usize;
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 0 {
+        let output_shape = a_shape.to_vec();
+        let numel = a_numel;
+        
+        let mut output = Tensor::zeros(output_shape, a.dtype(), a.device());
+        
+        let a_ptr = a.data_ptr_f32();
+        let b_ptr = b.data_ptr_f32();
+        
+        let output_inner = Arc::make_mut(&mut output.inner);
+        let output_storage = Arc::make_mut(&mut output_inner.storage);
+        let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-    let b_ptr = b.data_ptr() as *const f32;
-
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
-
-    let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
-    let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
-    let out_shape = output_shape.clone();
-
-    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
-    let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
-    let a_storage_offset = a.inner.storage_offset as usize;
-    let b_storage_offset = b.inner.storage_offset as usize;
-
-    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -312,35 +342,57 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 }
             }
         }
-    } else {
-        for idx in 0..numel {
-            let mut remaining = idx;
-            let mut a_idx = 0;
-            let mut b_idx = 0;
+        return vec![output];
+    }
 
-            for i in (0..out_shape.len()).rev() {
-                let dim_idx = remaining % out_shape[i] as usize;
-                remaining /= out_shape[i] as usize;
+    let iter = TensorIterator::build_for_binary(a, b);
+    let output_shape = iter.output_shape.to_vec();
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
 
-                if i >= a_shape.len() || a_shape[i] == 1 {
-                } else {
-                    a_idx += dim_idx * a_strides[i] as usize;
-                }
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+    let b_ptr = b.data_ptr() as *const f32;
 
-                if i >= b_shape.len() || b_shape[i] == 1 {
-                } else {
-                    b_idx += dim_idx * b_strides[i] as usize;
-                }
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
+    let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
+    let out_shape = output_shape.clone();
+
+    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
+    let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
+    let a_storage_offset = a.inner.storage_offset as usize;
+    let b_storage_offset = b.inner.storage_offset as usize;
+
+    for idx in 0..numel {
+        let mut remaining = idx;
+        let mut a_idx = 0;
+        let mut b_idx = 0;
+
+        for i in (0..out_shape.len()).rev() {
+            let dim_idx = remaining % out_shape[i] as usize;
+            remaining /= out_shape[i] as usize;
+
+            if i >= a_shape.len() || a_shape[i] == 1 {
+            } else {
+                a_idx += dim_idx * a_strides[i] as usize;
             }
 
-            a_idx += a_storage_offset;
-            b_idx += b_storage_offset;
-
-            unsafe {
-                let a_val = *a_ptr.add(a_idx);
-                let b_val = *b_ptr.add(b_idx);
-                *out_ptr.add(idx) = a_val * b_val;
+            if i >= b_shape.len() || b_shape[i] == 1 {
+            } else {
+                b_idx += dim_idx * b_strides[i] as usize;
             }
+        }
+
+        a_idx += a_storage_offset;
+        b_idx += b_storage_offset;
+
+        unsafe {
+            let a_val = *a_ptr.add(a_idx);
+            let b_val = *b_ptr.add(b_idx);
+            *out_ptr.add(idx) = a_val * b_val;
         }
     }
 
@@ -373,7 +425,7 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -470,7 +522,7 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -540,7 +592,7 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -585,7 +637,7 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -630,7 +682,7 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -675,7 +727,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -756,7 +808,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -803,7 +855,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -849,7 +901,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -895,7 +947,7 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -940,7 +992,7 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1476,6 +1528,38 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let total_blocks = (strides_before * strides_after) as usize;
     let a_numel = a.numel() as usize;
 
+    #[cfg(feature = "parallel")]
+    {
+        if total_blocks > 256 && dim_size > 32 {
+            use rayon::prelude::*;
+            let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
+            let results: Vec<f32> = (0..total_blocks)
+                .into_par_iter()
+                .map(|block| {
+                    let block_before = block / (strides_after as usize);
+                    let block_after = block % (strides_after as usize);
+
+                    let mut sum = 0.0f32;
+                    for d in 0..dim_size {
+                        let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
+                        let idx = a_storage_offset + linear_idx;
+                        if idx < a_numel {
+                            sum += a_slice[idx];
+                        }
+                    }
+                    sum
+                })
+                .collect();
+
+            for (i, &sum) in results.iter().enumerate() {
+                unsafe {
+                    *out_ptr.add(i) = sum;
+                }
+            }
+            return vec![output];
+        }
+    }
+
     for block in 0..total_blocks {
         let block_before = block / (strides_after as usize);
         let block_after = block % (strides_after as usize);
@@ -1580,6 +1664,38 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let total_blocks = (strides_before * strides_after) as usize;
     let a_numel = a.numel() as usize;
 
+    #[cfg(feature = "parallel")]
+    {
+        if total_blocks > 256 && dim_size > 32 {
+            use rayon::prelude::*;
+            let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
+            let results: Vec<f32> = (0..total_blocks)
+                .into_par_iter()
+                .map(|block| {
+                    let block_before = block / (strides_after as usize);
+                    let block_after = block % (strides_after as usize);
+
+                    let mut max_val = f32::MIN;
+                    for d in 0..dim_size {
+                        let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
+                        let idx = a_storage_offset + linear_idx;
+                        if idx < a_numel {
+                            max_val = max_val.max(a_slice[idx]);
+                        }
+                    }
+                    max_val
+                })
+                .collect();
+
+            for (i, &max_val) in results.iter().enumerate() {
+                unsafe {
+                    *out_ptr.add(i) = max_val;
+                }
+            }
+            return vec![output];
+        }
+    }
+
     for block in 0..total_blocks {
         let block_before = block / (strides_after as usize);
         let block_after = block % (strides_after as usize);
@@ -1653,6 +1769,38 @@ fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     }
 
     let total_blocks = (strides_before * strides_after) as usize;
+
+    #[cfg(feature = "parallel")]
+    {
+        if total_blocks > 256 && dim_size > 32 {
+            use rayon::prelude::*;
+            let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
+            let results: Vec<f32> = (0..total_blocks)
+                .into_par_iter()
+                .map(|block| {
+                    let block_before = block / (strides_after as usize);
+                    let block_after = block % (strides_after as usize);
+
+                    let mut min_val = f32::MAX;
+                    for d in 0..dim_size {
+                        let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
+                        let idx = a_storage_offset + linear_idx;
+                        if idx < a_numel {
+                            min_val = min_val.min(a_slice[idx]);
+                        }
+                    }
+                    min_val
+                })
+                .collect();
+
+            for (i, &min_val) in results.iter().enumerate() {
+                unsafe {
+                    *out_ptr.add(i) = min_val;
+                }
+            }
+            return vec![output];
+        }
+    }
 
     for block in 0..total_blocks {
         let block_before = block / (strides_after as usize);
@@ -1766,8 +1914,8 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         "mean"
     };
 
-    let logits_data = logits.to_numpy();
-    let targets_data = targets.to_numpy();
+    let logits_data = logits.as_f32_slice();
+    let targets_data = targets.as_f32_slice();
 
     let batch_size = logits.shape()[0] as usize;
     let num_classes = logits.shape()[1] as usize;
@@ -1776,21 +1924,98 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut losses = vec![0.0f32; batch_size];
 
     for b in 0..batch_size {
-        let max_logit = (0..num_classes)
-            .map(|c| logits_data[b * num_classes + c])
-            .fold(f32::MIN, f32::max);
+        let base_idx = b * num_classes;
+        
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            use std::arch::x86_64::*;
+            let mut max_logit = f32::MIN;
+            let mut i = 0;
+            
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    let ptr = logits_data.as_ptr().add(base_idx);
+                    let mut max_vec = _mm256_set1_ps(f32::MIN);
+                    for _ in 0..(num_classes / 8) {
+                        let vec = _mm256_loadu_ps(ptr.add(i));
+                        max_vec = _mm256_max_ps(max_vec, vec);
+                        i += 8;
+                    }
+                    let mut max_arr = [0.0f32; 8];
+                    _mm256_storeu_ps(max_arr.as_mut_ptr(), max_vec);
+                    for j in 0..8 {
+                        if max_arr[j] > max_logit {
+                            max_logit = max_arr[j];
+                        }
+                    }
+                }
+            }
+            for j in i..num_classes {
+                let val = logits_data[base_idx + j];
+                if val > max_logit {
+                    max_logit = val;
+                }
+            }
 
-        let mut sum_exp = 0.0f32;
-        for c in 0..num_classes {
-            sum_exp += (logits_data[b * num_classes + c] - max_logit).exp();
+            let mut sum_exp = 0.0f32;
+            i = 0;
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    let ptr = logits_data.as_ptr().add(base_idx);
+                    let mut sum_vec = _mm256_setzero_ps();
+                    for _ in 0..(num_classes / 8) {
+                        let vec = _mm256_loadu_ps(ptr.add(i));
+                        let diff = _mm256_sub_ps(vec, _mm256_set1_ps(max_logit));
+                        let x = std::slice::from_raw_parts(&diff as *const _ as *const f32, 8);
+                        let mut exp_res = [0.0f32; 8];
+                        for k in 0..8 {
+                            exp_res[k] = x[k].exp();
+                        }
+                        let exp_vec = _mm256_loadu_ps(exp_res.as_ptr());
+                        sum_vec = _mm256_add_ps(sum_vec, exp_vec);
+                        i += 8;
+                    }
+                    let mut sum_arr = [0.0f32; 8];
+                    _mm256_storeu_ps(sum_arr.as_mut_ptr(), sum_vec);
+                    for j in 0..8 {
+                        sum_exp += sum_arr[j];
+                    }
+                }
+            }
+            for j in i..num_classes {
+                sum_exp += (logits_data[base_idx + j] - max_logit).exp();
+            }
+            let log_sum_exp = sum_exp.ln();
+
+            let target_class = targets_data[b] as usize;
+            let class_logit = logits_data[base_idx + target_class];
+
+            losses[b] = log_sum_exp - class_logit;
+            total_loss += losses[b];
         }
-        let log_sum_exp = sum_exp.ln();
 
-        let target_class = targets_data[b] as usize;
-        let class_logit = logits_data[b * num_classes + target_class];
+        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+        {
+            let mut max_logit = f32::MIN;
+            for c in 0..num_classes {
+                let val = logits_data[base_idx + c];
+                if val > max_logit {
+                    max_logit = val;
+                }
+            }
 
-        losses[b] = log_sum_exp - class_logit;
-        total_loss += losses[b];
+            let mut sum_exp = 0.0f32;
+            for c in 0..num_classes {
+                sum_exp += (logits_data[base_idx + c] - max_logit).exp();
+            }
+            let log_sum_exp = sum_exp.ln();
+
+            let target_class = targets_data[b] as usize;
+            let class_logit = logits_data[base_idx + target_class];
+
+            losses[b] = log_sum_exp - class_logit;
+            total_loss += losses[b];
+        }
     }
 
     match reduction {
@@ -1802,9 +2027,6 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         "sum" | _ => vec![Tensor::from_scalar(total_loss)],
     }
 }
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use std::arch::x86_64::*;
 
 fn im2col_kernel(
     x: &Tensor,
@@ -2696,30 +2918,30 @@ fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 }
 
 fn zeros_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let shape = args[0]
-        .to_numpy()
-        .iter()
-        .map(|&x| x as i64)
-        .collect::<Vec<_>>();
-    let dtype = DType::from_str(
-        &args[1]
-            .to_numpy()
-            .iter()
-            .map(|&x| x as u8 as char)
-            .collect::<String>(),
-    )
-    .unwrap_or(DType::F32);
+    let shape = args[0].shape();
+    let dtype = if args.len() > 1 {
+        let dtype_slice = args[1].as_f32_slice();
+        if !dtype_slice.is_empty() {
+            DType::from_str(
+                &dtype_slice
+                    .iter()
+                    .map(|&x| x as u8 as char)
+                    .collect::<String>(),
+            )
+            .unwrap_or(DType::F32)
+        } else {
+            DType::F32
+        }
+    } else {
+        DType::F32
+    };
     let device = Device::Cpu;
 
     vec![Tensor::zeros(shape, dtype, device)]
 }
 
 fn ones_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let shape = args[0]
-        .to_numpy()
-        .iter()
-        .map(|&x| x as i64)
-        .collect::<Vec<_>>();
+    let shape = args[0].shape();
     let dtype = DType::F32;
     let device = Device::Cpu;
 
@@ -2727,11 +2949,7 @@ fn ones_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 }
 
 fn full_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let shape = args[0]
-        .to_numpy()
-        .iter()
-        .map(|&x| x as i64)
-        .collect::<Vec<_>>();
+    let shape = args[0].shape();
     let value = args[1].item();
     let dtype = DType::F32;
     let device = Device::Cpu;
@@ -2876,7 +3094,7 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -2923,7 +3141,7 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 1000 {
+    if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;

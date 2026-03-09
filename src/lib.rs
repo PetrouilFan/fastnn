@@ -16,8 +16,9 @@ use optim::Optimizer;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 use rand::Rng;
+use std::sync::Arc;
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
-use tensor::Tensor;
+use tensor::{Tensor, TensorImpl};
 
 #[pyclass(from_py_object)]
 #[derive(Clone)]
@@ -78,17 +79,19 @@ impl PyTensor {
 
     #[pyo3(signature = (requires_grad))]
     fn requires_grad_(&mut self, requires_grad: bool) {
-        let new_inner = self.inner.requires_grad_(requires_grad);
-        self.inner = new_inner;
+        let mut inner_clone: &mut TensorImpl = Arc::make_mut(&mut self.inner.inner);
+        inner_clone.set_requires_grad(requires_grad);
     }
 
+    #[getter]
     fn requires_grad(&self) -> bool {
         self.inner.requires_grad()
     }
 
     #[getter]
     fn grad(&self) -> Option<PyTensor> {
-        self.inner.grad().map(PyTensor::from_tensor)
+        let g = self.inner.grad();
+        g.map(PyTensor::from_tensor)
     }
 
     #[getter]
@@ -96,6 +99,7 @@ impl PyTensor {
         self.inner.grad_fn().map(|_| "grad_fn".to_string())
     }
 
+    #[getter]
     fn is_leaf(&self) -> bool {
         self.inner.is_leaf()
     }
@@ -326,6 +330,7 @@ fn sub(a: &PyTensor, b: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn mul(a: &PyTensor, b: &PyTensor) -> PyTensor {
+    eprintln!("DEBUG: pyfunction mul called");
     PyTensor::from_tensor(a.inner.mul(&b.inner))
 }
 
@@ -564,6 +569,9 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
 #[pyo3(signature = (pred, target, reduction = None))]
 fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
     use dispatcher::dispatch;
+    use autograd::AutogradMeta;
+    use std::sync::Arc;
+    
     let reduction = reduction.unwrap_or_else(|| "mean".to_string());
     let reduction_code = match reduction.as_str() {
         "none" => 0.0,
@@ -580,7 +588,22 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
             &Tensor::from_scalar(reduction_code),
         ],
     );
-    PyTensor::from_tensor(result[0].clone())
+    let output = result[0].clone();
+    
+    if pred.inner.requires_grad() {
+        let backward = autograd::CrossEntropyBackward::new(
+            pred.inner.clone(),
+            target.inner.clone(),
+            reduction.clone(),
+        );
+        let mut meta = AutogradMeta::new(false);
+        meta.grad_fn = Some(std::sync::Arc::new(backward));
+        let mut output = output.clone();
+        Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+        PyTensor::from_tensor(output)
+    } else {
+        PyTensor::from_tensor(output)
+    }
 }
 
 #[pyfunction]

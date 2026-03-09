@@ -61,7 +61,7 @@ impl Optimizer for AdamW {
         let beta1 = self.betas.0;
         let beta2 = self.betas.1;
 
-        for (i, param) in self.params.iter().enumerate() {
+        for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
                 g
             } else {
@@ -104,23 +104,38 @@ impl Optimizer for AdamW {
             };
 
             let denom = v_hat.add(&Tensor::from_scalar(self.eps as f32)).sqrt();
-            let update = m_hat.div(&denom);
+            let mut update = m_hat.div(&denom);
 
             if self.weight_decay != 0.0 {
                 let weight_decay_term = param.mul(&Tensor::from_scalar(self.weight_decay as f32));
-                let lr = Tensor::from_scalar(self.lr as f32);
-                let _decay = lr.mul(&weight_decay_term);
+                update = update.add(&weight_decay_term);
             }
 
             let lr = Tensor::from_scalar(self.lr as f32);
-            let _step_size = lr.mul(&update);
+            let step_size = lr.mul(&update);
+
+            // Apply the update to parameters in-place
+            let inner = Arc::make_mut(&mut param.inner);
+            let storage = Arc::make_mut(&mut inner.storage);
+            let ptr = storage.data.as_mut_ptr() as *mut f32;
+            let numel = param.numel() as usize;
+
+            let update_slice = step_size.as_f32_slice();
+            for j in 0..numel {
+                unsafe {
+                    let param_val = *ptr.add(j);
+                    *ptr.add(j) = param_val - update_slice[j];
+                }
+            }
         }
     }
 
     fn zero_grad(&mut self) {
-        for param in &self.params {
-            let mut inner = param.inner.clone();
-            Arc::make_mut(&mut inner).autograd_meta = None;
+        for param in &mut self.params.iter_mut() {
+            let inner = Arc::make_mut(&mut param.inner);
+            if let Some(meta) = &mut inner.autograd_meta {
+                meta.grad = None;
+            }
         }
     }
 

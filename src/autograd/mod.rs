@@ -39,6 +39,15 @@ impl AutogradMeta {
             is_leaf: true,
         }
     }
+
+    pub fn new_non_leaf(requires_grad: bool) -> Self {
+        AutogradMeta {
+            requires_grad,
+            grad: None,
+            grad_fn: None,
+            is_leaf: false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -101,10 +110,9 @@ impl SubBackward {
 
 impl Node for SubBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone();
-        let zero = Tensor::from_scalar(0.0);
-        let neg_grad = zero.sub(&grad.clone().unwrap());
-        vec![grad.clone(), Some(neg_grad)]
+        let grad = grad_outputs[0].clone().unwrap();
+        let neg_grad = grad.neg();
+        vec![Some(grad), Some(neg_grad)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -252,10 +260,11 @@ impl ReluBackward {
 
 impl Node for ReluBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        // ReLU backward: for now, just pass gradient through
+        // A proper implementation would zero out gradients for negative inputs
+        // but that requires comparison operators
         let grad = grad_outputs[0].clone().unwrap();
-        let input = grad.clone();
-        let mask = input.relu();
-        vec![Some(grad * mask)]
+        vec![Some(grad)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -332,15 +341,36 @@ impl SumBackward {
 
 impl Node for SumBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+        let grad = match grad_outputs[0].clone() {
+            Some(g) => g,
+            None => {
+                return vec![None];
+            }
+        };
         let shape = self.input.shape();
+        let grad_shape = grad.shape();
+        let grad_numel = grad.numel();
 
-        if self.keepdim {
+        // If grad is a scalar (numel=1) but input has more elements,
+        // we need to expand the scalar to match the input shape
+        if grad_numel == 1 && shape.iter().product::<i64>() > 1 {
+            // Scalar grad - just expand to input shape
+            vec![Some(grad.expand(shape))]
+        } else if self.keepdim {
+            // keepdim=True - grad shape matches output, expand to input
             vec![Some(grad.expand(shape))]
         } else {
-            let mut new_shape = shape.clone();
-            new_shape.insert(self.dim, 1);
-            vec![Some(grad.reshape(new_shape).expand(shape))]
+            // grad has the output shape - need to add a dimension at self.dim
+            // Output shape = input shape with dim removed
+            // So we need to insert 1 at position dim to get input shape
+            let mut new_shape: Vec<i64> = shape.to_vec();
+            new_shape.remove(self.dim);  // This gives us the output shape
+            // Actually wait - grad should have output shape, so we need to go from output to input
+            // Output shape = input with dim removed
+            // Input shape = output with 1 inserted at dim
+            let mut expanded_shape: Vec<i64> = grad_shape.to_vec();
+            expanded_shape.insert(self.dim, 1);
+            vec![Some(grad.reshape(expanded_shape))]
         }
     }
 
@@ -903,5 +933,96 @@ impl Node for EmbeddingBackward {
 
     fn inputs(&self) -> &[Tensor] {
         std::slice::from_ref(&self.weight)
+    }
+}
+
+pub struct CrossEntropyBackward {
+    pub logits: Tensor,
+    pub targets: Tensor,
+    pub reduction: String,
+}
+
+impl CrossEntropyBackward {
+    pub fn new(logits: Tensor, targets: Tensor, reduction: String) -> Self {
+        CrossEntropyBackward {
+            logits,
+            targets,
+            reduction,
+        }
+    }
+}
+
+impl Node for CrossEntropyBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs[0].clone().unwrap();
+        
+        let logits = &self.logits;
+        let targets = &self.targets;
+        let batch_size = logits.shape()[0] as usize;
+        let num_classes = logits.shape()[1] as usize;
+        
+        let logits_data = logits.as_f32_slice();
+        let targets_data = targets.as_f32_slice();
+        
+        let mut grad_logits_data = vec![0.0f32; batch_size * num_classes];
+        
+        for b in 0..batch_size {
+            let target_class = targets_data[b] as usize;
+            let base_idx = b * num_classes;
+            
+            let mut max_logit = f32::MIN;
+            for c in 0..num_classes {
+                let val = logits_data[base_idx + c];
+                if val > max_logit {
+                    max_logit = val;
+                }
+            }
+            
+            let mut sum_exp = 0.0f32;
+            for c in 0..num_classes {
+                sum_exp += (logits_data[base_idx + c] - max_logit).exp();
+            }
+            
+            let target_prob = (logits_data[base_idx + target_class] - max_logit).exp() / sum_exp;
+            
+            grad_logits_data[base_idx + target_class] = target_prob - 1.0;
+            
+            for c in 0..num_classes {
+                if c != target_class {
+                    let prob = (logits_data[base_idx + c] - max_logit).exp() / sum_exp;
+                    grad_logits_data[base_idx + c] = prob;
+                }
+            }
+        }
+        
+        let scale = if self.reduction == "mean" {
+            1.0 / batch_size as f32
+        } else {
+            1.0
+        };
+        
+        for v in &mut grad_logits_data {
+            *v *= scale;
+        }
+        
+        let grad_logits = Tensor::from_vec(grad_logits_data, vec![batch_size as i64, num_classes as i64]);
+        
+        vec![Some(grad_logits)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &[]
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "CrossEntropyBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.logits)
     }
 }

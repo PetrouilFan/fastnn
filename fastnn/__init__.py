@@ -9,7 +9,6 @@ from fastnn.callbacks import (
     LearningRateScheduler,
     CSVLogger,
 )
-from fastnn import models
 
 __all__ = [
     "no_grad",
@@ -25,6 +24,14 @@ __all__ = [
     "CSVLogger",
     "models",
 ]
+
+
+def __getattr__(name):
+    if name == "models":
+        import fastnn.models
+
+        return fastnn.models
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _flatten(nested):
@@ -108,7 +115,7 @@ BatchNorm1d = _core.BatchNorm1d
 Dropout = _core.Dropout
 Embedding = _core.Embedding
 ReLU = _core.ReLU
-GELU = _core.GELU
+GELU = _core.Gelu
 Sigmoid = _core.Sigmoid
 Tanh = _core.Tanh
 SiLU = _core.SiLU

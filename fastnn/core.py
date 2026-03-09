@@ -4,9 +4,14 @@ import fastnn._core as _core
 
 def sum(a, dim=None, keepdim=False):
     if dim is None:
-        result = _core.sum(a)
+        # For full sum, sum all dimensions with keepdim=True to preserve shape for backward
+        # Then squeeze all dimensions
+        result = a
+        for i in range(a.ndim):
+            result = _core.sum(result, 0, True)  # keepdim=True
+        # Now squeeze to get scalar
         while result.ndim > 0:
-            result = _core.sum(result)
+            result = _core.sum(result, 0, False)
         return result
     return _core.sum(a, dim, keepdim)
 

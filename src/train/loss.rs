@@ -24,8 +24,8 @@ impl LossFn for CrossEntropyLoss {
         match self.reduction.as_str() {
             "none" => Tensor::zeros(pred.shape(), pred.dtype(), pred.device()),
             "mean" | "sum" => {
-                let pred_data = pred.to_numpy();
-                let target_data = target.to_numpy();
+                let pred_data = pred.as_f32_slice();
+                let target_data = target.as_f32_slice();
 
                 let batch_size = pred.shape()[0] as usize;
                 let num_classes = pred.shape()[1] as usize;
@@ -33,18 +33,20 @@ impl LossFn for CrossEntropyLoss {
                 let mut total_loss = 0.0f32;
 
                 for b in 0..batch_size {
-                    let max_logit = (0..num_classes)
-                        .map(|c| pred_data[b * num_classes + c])
-                        .fold(f32::MIN, f32::max);
+                    let base_idx = b * num_classes;
+                    
+                    let max_logit = pred_data[base_idx..base_idx + num_classes]
+                        .iter()
+                        .fold(f32::MIN, |max, &x| if x > max { x } else { max });
 
                     let mut sum_exp = 0.0f32;
                     for c in 0..num_classes {
-                        sum_exp += (pred_data[b * num_classes + c] - max_logit).exp();
+                        sum_exp += (pred_data[base_idx + c] - max_logit).exp();
                     }
                     let log_sum_exp = sum_exp.ln();
 
                     let target_class = target_data[b] as usize;
-                    let class_logit = pred_data[b * num_classes + target_class];
+                    let class_logit = pred_data[base_idx + target_class];
 
                     total_loss += log_sum_exp - class_logit;
                 }
