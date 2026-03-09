@@ -36,22 +36,22 @@ fn relu_simd(input: &[f32], output: &mut [f32]) {
 
 #[cfg(feature = "simd")]
 fn gelu_simd(input: &[f32], output: &mut [f32]) {
-    let sqrt_2_over_pi = f32x8::new(
+    let sqrt_2_over_pi = f32x8::new([
         0.7978845608028654, 0.7978845608028654, 0.7978845608028654, 0.7978845608028654,
         0.7978845608028654, 0.7978845608028654, 0.7978845608028654, 0.7978845608028654,
-    );
-    let coeff = f32x8::new(
+    ]);
+    let coeff = f32x8::new([
         0.044715f32, 0.044715f32, 0.044715f32, 0.044715f32,
         0.044715f32, 0.044715f32, 0.044715f32, 0.044715f32,
-    );
-    let half = f32x8::new(
+    ]);
+    let half = f32x8::new([
         0.5f32, 0.5f32, 0.5f32, 0.5f32,
         0.5f32, 0.5f32, 0.5f32, 0.5f32,
-    );
-    let one = f32x8::new(
+    ]);
+    let one = f32x8::new([
         1.0f32, 1.0f32, 1.0f32, 1.0f32,
         1.0f32, 1.0f32, 1.0f32, 1.0f32,
-    );
+    ]);
     
     let (chunks, remainder) = input.as_chunks::<8>();
     let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
@@ -59,7 +59,9 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
     for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
         let x = f32x8::from(*in_chunk);
         let x3 = x * x * x;
-        let t = ((sqrt_2_over_pi * (x + coeff * x3)).tanh());
+        let y = sqrt_2_over_pi * (x + coeff * x3);
+        let exp_2y = (y + y).exp();
+        let t = (exp_2y - one) / (exp_2y + one);
         let result = half * x * (one + t);
         *out_chunk = result.into();
     }
@@ -74,17 +76,32 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
 
 #[cfg(feature = "simd")]
 fn tanh_simd(input: &[f32], output: &mut [f32]) {
+    let two = f32x8::new([2.0; 8]);
+    let one = f32x8::new([1.0; 8]);
+    
     let (chunks, remainder) = input.as_chunks::<8>();
     let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
     
     for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
         let v = f32x8::from(*in_chunk);
-        let result = v.tanh();
+        let abs_v = v.abs();
+        let neg_abs_v = -abs_v;
+        let exp_2x = (two * abs_v).exp();
+        let result = (exp_2x - one) / (exp_2x + one);
+        let sign = v.sign_bit();
+        let result = result.blend(-result, sign);
         *out_chunk = result.into();
     }
     
     for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
-        *out_val = in_val.tanh();
+        let x = *in_val;
+        let abs_x = x.abs();
+        let exp_2x = (2.0 * abs_x).exp();
+        let mut result = (exp_2x - 1.0) / (exp_2x + 1.0);
+        if x < 0.0 {
+            result = -result;
+        }
+        *out_val = result;
     }
 }
 
@@ -949,7 +966,9 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
-                *out = 0.5 * x * (1.0 + (x * x * 0.797_884_6).tanh());
+                let x3 = x * x * x;
+                let t = (0.7978845608028654 * (x + 0.044715 * x3)).tanh();
+                *out = 0.5 * x * (1.0 + t);
             });
         }
         #[cfg(not(feature = "parallel"))]
@@ -965,7 +984,9 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 for idx in 0..numel {
                     unsafe {
                         let x = *a_ptr.add(idx);
-                        *out_ptr.add(idx) = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+                        let x3 = x * x * x;
+                        let t = (0.7978845608028654 * (x + 0.044715 * x3)).tanh();
+                        *out_ptr.add(idx) = 0.5 * x * (1.0 + t);
                     }
                 }
             }
@@ -974,7 +995,9 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         for idx in 0..numel {
             unsafe {
                 let x = *a_ptr.add(idx);
-                *out_ptr.add(idx) = 0.5 * x * (1.0 + (x * x * 0.797_884_6).tanh());
+                let x3 = x * x * x;
+                let t = (0.7978845608028654 * (x + 0.044715 * x3)).tanh();
+                *out_ptr.add(idx) = 0.5 * x * (1.0 + t);
             }
         }
     }
@@ -1635,6 +1658,7 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let w_shape_full = w.shape();
     let w_stride_0 = w.inner.strides[0];
     let w_stride_1 = w.inner.strides[1];
+    debug_assert!(w.is_contiguous(), "fused_linear_relu: weight tensor must be contiguous");
 
     let output_shape: Vec<i64> = if x_shape.len() > 1 {
         let mut s = x_shape[..x_shape.len() - 1].to_vec();
@@ -1658,6 +1682,10 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         use rayon::prelude::*;
         let total = batch_size * out_features;
         
+        let x_usize = x_ptr as usize;
+        let w_usize = w_ptr as usize;
+        let out_usize = out_ptr as usize;
+        
         (0..total).into_par_iter().for_each(|idx| {
             let batch_idx = idx / out_features;
             let out_idx = idx % out_features;
@@ -1666,8 +1694,8 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             for k in 0..in_features {
                 let x_offset = batch_idx * in_features + k;
                 let w_offset = out_idx * in_features + k;
-                let x_val = unsafe { *x_ptr.add(x_offset) };
-                let w_val = unsafe { *w_ptr.add(w_offset) };
+                let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
+                let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                 sum += x_val * w_val;
             }
             
@@ -1676,7 +1704,7 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 sum += unsafe { *b_ptr.add(out_idx) };
             }
             
-            unsafe { *out_ptr.add(idx) = sum.max(0.0); };
+            unsafe { *((out_usize + idx * 4) as *mut f32) = sum.max(0.0); };
         });
     }
     #[cfg(not(feature = "parallel"))]
@@ -1723,6 +1751,7 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let x_ptr = x.data_ptr_f32();
     let w_ptr = w.data_ptr_f32();
+    debug_assert!(w.is_contiguous(), "fused_linear_gelu: weight tensor must be contiguous");
 
     let output_shape: Vec<i64> = if x_shape.len() > 1 {
         let mut s = x_shape[..x_shape.len() - 1].to_vec();
@@ -1748,6 +1777,10 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         use rayon::prelude::*;
         let total = batch_size * out_features;
         
+        let x_usize = x_ptr as usize;
+        let w_usize = w_ptr as usize;
+        let out_usize = out_ptr as usize;
+        
         (0..total).into_par_iter().for_each(|idx| {
             let batch_idx = idx / out_features;
             let out_idx = idx % out_features;
@@ -1756,8 +1789,8 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             for k in 0..in_features {
                 let x_offset = batch_idx * in_features + k;
                 let w_offset = out_idx * in_features + k;
-                let x_val = unsafe { *x_ptr.add(x_offset) };
-                let w_val = unsafe { *w_ptr.add(w_offset) };
+                let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
+                let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                 sum += x_val * w_val;
             }
             
@@ -1770,7 +1803,7 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
             let gelu = 0.5 * sum * (1.0 + t);
             
-            unsafe { *out_ptr.add(idx) = gelu; };
+            unsafe { *((out_usize + idx * 4) as *mut f32) = gelu; };
         });
     }
     #[cfg(not(feature = "parallel"))]

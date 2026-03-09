@@ -23,7 +23,6 @@ rand          = "0.8"
 matrixmultiply = "0.3"
 mimalloc      = "0.1"
 wide         = "0.7"
-bumpalo      = "3.14"
 
 [features]
 default = ["simd", "parallel", "simd_avx512"]
