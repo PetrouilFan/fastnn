@@ -10,23 +10,39 @@ A Python deep learning library with a Rust core, inspired by NVLabs/vibetensor a
 - **Training infrastructure**: Trainer with callbacks, metrics, checkpoints
 - **IO**: safetensors serialization, DLPack interop
 - **SIMD-optimized**: AVX2/AVX512 vectorization for maximum performance
+- **Parallel execution**: Rayon-based parallelism for multi-core utilization
 
 ## Performance
 
-Benchmark comparisons with PyTorch (lower is better):
+Benchmark comparisons with PyTorch (mean time in μs, lower is better):
 
 | Operation | Size | fastnn | PyTorch | Status |
 |-----------|------|--------|---------|--------|
-| ReLU | 2×100 | 2.3μs | 2.5μs | ✅ faster |
-| FusedAddReLU | 2×100 | 3.6μs | 5.2μs | ✅ faster |
-| MatMul | 106×64×128 | 106μs | 163μs | ✅ faster |
-| GELU | 2×100 | 42μs | 42μs | competitive |
-| Sigmoid | 2×100 | 28μs | 15μs | |
-| Tanh | 2×100 | 39μs | 7.9ms | ✅ faster |
-| Add | 2×100 | 40μs | 2.9μs | |
-| Mul | 2×100 | 43μs | 3.2μs | |
-| Conv2d | 1×64×56×56 | 873μs | 135μs | |
-| Linear | 1×256 | 679μs | 41μs | |
+| ReLU | 100×100 | 93.6μs | 2.7μs | |
+| ReLU | 1000×1000 | 551.7μs | 35.2μs | |
+| FusedAddReLU | 100×100 | 94.7μs | 5.5μs | |
+| FusedAddReLU | 1000×1000 | 639.5μs | 113.7μs | |
+| MatMul | 128×256×128 | 114.7μs | 27.5μs | |
+| MatMul | 256×512×256 | 868.5μs | 167.3μs | |
+| MatMul | 512×1024×512 | 7099.8μs | 1056.6μs | |
+| GELU | 100×100 | 105.4μs | 19.2μs | |
+| GELU | 1000×1000 | 895.6μs | 193.9μs | |
+| Sigmoid | 100×100 | 104.2μs | 8.5μs | |
+| Sigmoid | 1000×1000 | 689.1μs | 164.8μs | |
+| Tanh | 100×100 | 108.2μs | 2493.7μs | ✅ faster |
+| Tanh | 1000×1000 | 1025.9μs | 913.8μs | |
+| Add | 100×100 | 123.8μs | 4.3μs | |
+| Add | 1000×1000 | 1239.4μs | 109.5μs | |
+| Mul | 100×100 | 97.7μs | 3.3μs | |
+| Mul | 1000×1000 | 571.1μs | 59.5μs | |
+| Linear | 32×256×512 | 402.0μs | 371.5μs | |
+| Linear | 32×512×1024 | 989.0μs | 1368.9μs | ✅ faster |
+| Linear | 128×256×512 | 728.8μs | 176.0μs | |
+| Conv2d | 1×32×32×32 | 962.8μs | 173.7μs | |
+| Conv2d | 1×64×64×64 | 13810.2μs | 645.7μs | |
+| Sum | 1000×1000 | 138.9μs | 29.3μs | |
+| Mean | 1000×1000 | 205.0μs | 2885.0μs | ✅ faster |
+| Max | 1000×1000 | 302.4μs | 106.9μs | |
 
 Note: Performance varies by hardware and tensor size. Best results require AVX2/AVX512 support.
 
