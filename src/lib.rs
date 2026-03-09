@@ -79,7 +79,7 @@ impl PyTensor {
 
     #[pyo3(signature = (requires_grad))]
     fn requires_grad_(&mut self, requires_grad: bool) {
-        let mut inner_clone: &mut TensorImpl = Arc::make_mut(&mut self.inner.inner);
+        let inner_clone: &mut TensorImpl = Arc::make_mut(&mut self.inner.inner);
         inner_clone.set_requires_grad(requires_grad);
     }
 
@@ -425,6 +425,28 @@ fn relu(a: &PyTensor) -> PyTensor {
 fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
     use crate::dispatcher::{dispatch, DispatchKey};
     let result = dispatch("fused_add_relu", DispatchKey::Cpu, &[&a.inner, &b.inner]);
+    PyTensor::from_tensor(result.into_iter().next().unwrap())
+}
+
+#[pyfunction]
+fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
+    use crate::dispatcher::{dispatch, DispatchKey};
+    let args: Vec<_> = match bias {
+        Some(b) => vec![&x.inner, &w.inner, &b.inner],
+        None => vec![&x.inner, &w.inner],
+    };
+    let result = dispatch("fused_linear_relu", DispatchKey::Cpu, &args);
+    PyTensor::from_tensor(result.into_iter().next().unwrap())
+}
+
+#[pyfunction]
+fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
+    use crate::dispatcher::{dispatch, DispatchKey};
+    let args: Vec<_> = match bias {
+        Some(b) => vec![&x.inner, &w.inner, &b.inner],
+        None => vec![&x.inner, &w.inner],
+    };
+    let result = dispatch("fused_linear_gelu", DispatchKey::Cpu, &args);
     PyTensor::from_tensor(result.into_iter().next().unwrap())
 }
 
@@ -1184,6 +1206,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pow, py)?)?;
     m.add_function(wrap_pyfunction!(relu, py)?)?;
     m.add_function(wrap_pyfunction!(fused_add_relu, py)?)?;
+    m.add_function(wrap_pyfunction!(fused_linear_relu, py)?)?;
+    m.add_function(wrap_pyfunction!(fused_linear_gelu, py)?)?;
     m.add_function(wrap_pyfunction!(gelu, py)?)?;
     m.add_function(wrap_pyfunction!(sigmoid, py)?)?;
     m.add_function(wrap_pyfunction!(tanh, py)?)?;

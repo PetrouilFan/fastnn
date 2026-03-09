@@ -858,7 +858,7 @@ impl Tensor {
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         let result = dispatch("matmul", DispatchKey::Cpu, &[self, other]);
-        let mut output = result[0].clone();
+        let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
             let backward = autograd::MatmulBackward::new(self.clone(), other.clone());
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
