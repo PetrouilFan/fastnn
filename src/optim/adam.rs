@@ -122,9 +122,9 @@ impl Optimizer for Adam {
                 let storage = Arc::make_mut(&mut inner.storage);
                 let data_ptr = storage.data.as_mut_ptr() as *mut f32;
                 let update_slice = step_size.as_f32_slice();
-                for j in 0..numel {
+                for (j, update_val) in update_slice.iter().take(numel).enumerate() {
                     let param_val = *data_ptr.add(j);
-                    *data_ptr.add(j) = param_val - update_slice[j];
+                    *data_ptr.add(j) = param_val - update_val;
                 }
             }
         }
