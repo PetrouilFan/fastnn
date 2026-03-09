@@ -1,4 +1,5 @@
 from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d, Sequential as Seq
+import fastnn as fnn
 
 
 def create_mlp(
