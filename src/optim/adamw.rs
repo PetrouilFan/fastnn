@@ -121,10 +121,10 @@ impl Optimizer for AdamW {
             let numel = param.numel() as usize;
 
             let update_slice = step_size.as_f32_slice();
-            for j in 0..numel {
+            for (j, update_val) in update_slice.iter().take(numel).enumerate() {
                 unsafe {
                     let param_val = *ptr.add(j);
-                    *ptr.add(j) = param_val - update_slice[j];
+                    *ptr.add(j) = param_val - update_val;
                 }
             }
         }
