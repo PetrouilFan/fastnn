@@ -19,8 +19,8 @@ impl Dropout {
 impl Module for Dropout {
     fn forward(&self, x: &Tensor) -> Tensor {
         if self.training.load(std::sync::atomic::Ordering::SeqCst) {
-            let mask_data: Vec<f32> = x
-                .to_numpy()
+            let x_data = x.as_f32_slice();
+            let mask_data: Vec<f32> = x_data
                 .iter()
                 .map(|&v| {
                     if rand::random::<f64>() < (1.0 - self.p) {

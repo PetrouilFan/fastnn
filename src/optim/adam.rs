@@ -61,7 +61,7 @@ impl Optimizer for Adam {
         let beta1 = self.betas.0;
         let beta2 = self.betas.1;
 
-        for (i, param) in self.params.iter().enumerate() {
+        for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
                 g
             } else {
@@ -112,14 +112,32 @@ impl Optimizer for Adam {
             }
 
             let lr = Tensor::from_scalar(self.lr as f32);
-            let _step_size = lr.mul(&update);
+            let step_size = lr.mul(&update);
+
+            // Apply the update to parameters in-place using raw pointer
+            let ptr = Arc::as_ptr(&param.inner) as *mut crate::tensor::TensorImpl;
+            let numel = param.numel() as usize;
+            unsafe {
+                let inner = &mut *ptr;
+                let storage = Arc::make_mut(&mut inner.storage);
+                let data_ptr = storage.data.as_mut_ptr() as *mut f32;
+                let update_slice = step_size.as_f32_slice();
+                for j in 0..numel {
+                    let param_val = *data_ptr.add(j);
+                    *data_ptr.add(j) = param_val - update_slice[j];
+                }
+            }
         }
     }
 
     fn zero_grad(&mut self) {
         for param in &self.params {
-            let mut inner = param.inner.clone();
-            Arc::make_mut(&mut inner).autograd_meta = None;
+            let ptr = Arc::as_ptr(&param.inner) as *mut crate::tensor::TensorImpl;
+            unsafe {
+                if let Some(meta) = (*ptr).autograd_meta.as_mut() {
+                    meta.grad = None;
+                }
+            }
         }
     }
 

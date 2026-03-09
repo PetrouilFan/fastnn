@@ -19,12 +19,14 @@ impl Linear {
         let weight_data: Vec<f32> = (0..in_features * out_features)
             .map(|_| (rand::random::<f32>() - 0.5) * 2.0 * scale)
             .collect();
-        let weight = Tensor::from_vec(weight_data, vec![in_features, out_features]);
-        let weight = weight.requires_grad_(true);
+        let mut weight = Tensor::from_vec(weight_data, vec![in_features, out_features]);
+        weight.requires_grad_(true);
 
         let bias = if bias {
             let bias_data: Vec<f32> = (0..out_features).map(|_| 0.0).collect();
-            Some(Tensor::from_vec(bias_data, vec![out_features]).requires_grad_(true))
+            let mut b = Tensor::from_vec(bias_data, vec![out_features]);
+            b.requires_grad_(true);
+            Some(b)
         } else {
             None
         };
@@ -41,14 +43,13 @@ impl Linear {
 
 impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("matmul", DispatchKey::Cpu, &[x, &self.weight]);
-        let mut output = result[0].clone();
+        let output = x.matmul(&self.weight);
 
         if let Some(b) = &self.bias {
-            output = output.add(b);
+            output.add(b)
+        } else {
+            output
         }
-
-        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {
