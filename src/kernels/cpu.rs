@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use wide::f32x8;
 
 #[cfg(feature = "simd")]
+#[allow(dead_code)]
 fn relu_simd(input: &[f32], output: &mut [f32]) {
     let zero = f32x8::ZERO;
     let (chunks, remainder) = input.as_chunks::<8>();
@@ -35,10 +36,11 @@ fn relu_simd(input: &[f32], output: &mut [f32]) {
 }
 
 #[cfg(feature = "simd")]
+#[allow(dead_code)]
 fn gelu_simd(input: &[f32], output: &mut [f32]) {
     let sqrt_2_over_pi = f32x8::new([
-        0.7978845608028654, 0.7978845608028654, 0.7978845608028654, 0.7978845608028654,
-        0.7978845608028654, 0.7978845608028654, 0.7978845608028654, 0.7978845608028654,
+        0.797_884_6, 0.797_884_6, 0.797_884_6, 0.797_884_6,
+        0.797_884_6, 0.797_884_6, 0.797_884_6, 0.797_884_6,
     ]);
     let coeff = f32x8::new([
         0.044715f32, 0.044715f32, 0.044715f32, 0.044715f32,
@@ -69,12 +71,13 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
     for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
         let x = *in_val;
         let x3 = x * x * x;
-        let t = (0.7978845608028654 * (x + 0.044715 * x3)).tanh();
+        let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
         *out_val = 0.5 * x * (1.0 + t);
     }
 }
 
 #[cfg(feature = "simd")]
+#[allow(dead_code)]
 fn tanh_simd(input: &[f32], output: &mut [f32]) {
     let two = f32x8::new([2.0; 8]);
     let one = f32x8::new([1.0; 8]);
@@ -85,7 +88,6 @@ fn tanh_simd(input: &[f32], output: &mut [f32]) {
     for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
         let v = f32x8::from(*in_chunk);
         let abs_v = v.abs();
-        let neg_abs_v = -abs_v;
         let exp_2x = (two * abs_v).exp();
         let result = (exp_2x - one) / (exp_2x + one);
         let sign = v.sign_bit();
@@ -115,6 +117,7 @@ fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn broadcast_shapes_simple(a: &[i64], b: &[i64]) -> Vec<i64> {
     let ndim = std::cmp::max(a.len(), b.len());
     let mut result = vec![1i64; ndim];
@@ -967,7 +970,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
                 let x3 = x * x * x;
-                let t = (0.7978845608028654 * (x + 0.044715 * x3)).tanh();
+                let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
                 *out = 0.5 * x * (1.0 + t);
             });
         }
@@ -985,7 +988,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     unsafe {
                         let x = *a_ptr.add(idx);
                         let x3 = x * x * x;
-                        let t = (0.7978845608028654 * (x + 0.044715 * x3)).tanh();
+                        let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
                         *out_ptr.add(idx) = 0.5 * x * (1.0 + t);
                     }
                 }
@@ -996,7 +999,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             unsafe {
                 let x = *a_ptr.add(idx);
                 let x3 = x * x * x;
-                let t = (0.7978845608028654 * (x + 0.044715 * x3)).tanh();
+                let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
                 *out_ptr.add(idx) = 0.5 * x * (1.0 + t);
             }
         }
@@ -1271,7 +1274,7 @@ fn parallel_matmul(
     let m_usize = m as usize;
     let n_usize = n as usize;
     let k_usize = k as usize;
-    let batch_usize = batch;
+    let _batch_usize = batch;
 
     (0..total_outputs).into_par_iter().for_each(|idx| {
         let bat = idx / (m_usize * n_usize);
@@ -1655,9 +1658,6 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let x_ptr = x.data_ptr_f32();
     let w_ptr = w.data_ptr_f32();
-    let w_shape_full = w.shape();
-    let w_stride_0 = w.inner.strides[0];
-    let w_stride_1 = w.inner.strides[1];
     debug_assert!(w.is_contiguous(), "fused_linear_relu: weight tensor must be contiguous");
 
     let output_shape: Vec<i64> = if x_shape.len() > 1 {
@@ -2216,11 +2216,11 @@ fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 #[inline]
 fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
     let x_shape = x.shape();
-    let batch_size: i64 = x_shape[..x_shape.len() - 1].iter().product();
+    let _batch_size: i64 = x_shape[..x_shape.len() - 1].iter().product();
     
     let x_ptr = x.data_ptr() as *const f32;
     let numel = x.numel() as usize;
-    let num_rows = numel / dim_size;
+    let _num_rows = numel / dim_size;
     
     let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);

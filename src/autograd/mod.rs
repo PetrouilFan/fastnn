@@ -954,7 +954,7 @@ impl CrossEntropyBackward {
 
 impl Node for CrossEntropyBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+        let _grad = grad_outputs[0].clone().unwrap();
         
         let logits = &self.logits;
         let targets = &self.targets;
@@ -966,8 +966,8 @@ impl Node for CrossEntropyBackward {
         
         let mut grad_logits_data = vec![0.0f32; batch_size * num_classes];
         
-        for b in 0..batch_size {
-            let target_class = targets_data[b] as usize;
+        for (b, target_val) in targets_data.iter().take(batch_size).enumerate() {
+            let target_class = *target_val as usize;
             let base_idx = b * num_classes;
             
             let mut max_logit = f32::MIN;
