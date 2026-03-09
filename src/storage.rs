@@ -1,6 +1,5 @@
 use mimalloc::MiMalloc;
 use parking_lot::RwLock;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[global_allocator]

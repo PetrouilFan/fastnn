@@ -79,7 +79,7 @@ impl PyTensor {
 
     #[pyo3(signature = (requires_grad))]
     fn requires_grad_(&mut self, requires_grad: bool) {
-        let mut inner_clone: &mut TensorImpl = Arc::make_mut(&mut self.inner.inner);
+        let inner_clone: &mut TensorImpl = Arc::make_mut(&mut self.inner.inner);
         inner_clone.set_requires_grad(requires_grad);
     }
 
