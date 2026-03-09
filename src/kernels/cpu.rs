@@ -14,6 +14,80 @@ use std::arch::x86_64::*;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+#[cfg(feature = "simd")]
+use wide::f32x8;
+
+#[cfg(feature = "simd")]
+fn relu_simd(input: &[f32], output: &mut [f32]) {
+    let zero = f32x8::ZERO;
+    let (chunks, remainder) = input.as_chunks::<8>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
+    
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let v = f32x8::from(*in_chunk);
+        let result = v.max(zero);
+        *out_chunk = result.into();
+    }
+    
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        *out_val = in_val.max(0.0);
+    }
+}
+
+#[cfg(feature = "simd")]
+fn gelu_simd(input: &[f32], output: &mut [f32]) {
+    let sqrt_2_over_pi = f32x8::new(
+        0.7978845608028654, 0.7978845608028654, 0.7978845608028654, 0.7978845608028654,
+        0.7978845608028654, 0.7978845608028654, 0.7978845608028654, 0.7978845608028654,
+    );
+    let coeff = f32x8::new(
+        0.044715f32, 0.044715f32, 0.044715f32, 0.044715f32,
+        0.044715f32, 0.044715f32, 0.044715f32, 0.044715f32,
+    );
+    let half = f32x8::new(
+        0.5f32, 0.5f32, 0.5f32, 0.5f32,
+        0.5f32, 0.5f32, 0.5f32, 0.5f32,
+    );
+    let one = f32x8::new(
+        1.0f32, 1.0f32, 1.0f32, 1.0f32,
+        1.0f32, 1.0f32, 1.0f32, 1.0f32,
+    );
+    
+    let (chunks, remainder) = input.as_chunks::<8>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
+    
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let x = f32x8::from(*in_chunk);
+        let x3 = x * x * x;
+        let t = ((sqrt_2_over_pi * (x + coeff * x3)).tanh());
+        let result = half * x * (one + t);
+        *out_chunk = result.into();
+    }
+    
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        let x = *in_val;
+        let x3 = x * x * x;
+        let t = (0.7978845608028654 * (x + 0.044715 * x3)).tanh();
+        *out_val = 0.5 * x * (1.0 + t);
+    }
+}
+
+#[cfg(feature = "simd")]
+fn tanh_simd(input: &[f32], output: &mut [f32]) {
+    let (chunks, remainder) = input.as_chunks::<8>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
+    
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let v = f32x8::from(*in_chunk);
+        let result = v.tanh();
+        *out_chunk = result.into();
+    }
+    
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        *out_val = in_val.tanh();
+    }
+}
+
 #[allow(dead_code)]
 fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
     let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
@@ -49,7 +123,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 0 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 512 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
         
@@ -64,7 +138,6 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
@@ -194,7 +267,6 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && b.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
@@ -283,7 +355,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 0 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 512 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
         
@@ -298,7 +370,6 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
@@ -428,7 +499,6 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && b.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
@@ -525,7 +595,6 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
@@ -570,7 +639,6 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
@@ -642,7 +710,6 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
@@ -687,7 +754,6 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
@@ -732,7 +798,6 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
@@ -777,7 +842,6 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
@@ -786,35 +850,13 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            #[cfg(feature = "simd")]
             {
-                if is_x86_feature_detected!("avx2") {
-                    unsafe {
-                        let zero = _mm256_setzero_ps();
-                        let mut i = 0usize;
-                        while i + 8 <= numel {
-                            let a_vec = _mm256_loadu_ps(a_ptr.add(i));
-                            let mask = _mm256_cmp_ps(a_vec, zero, _CMP_GT_OQ);
-                            let result = _mm256_blendv_ps(zero, a_vec, mask);
-                            _mm256_storeu_ps(out_ptr.add(i), result);
-                            i += 8;
-                        }
-                        while i < numel {
-                            let val = *a_ptr.add(i);
-                            *out_ptr.add(i) = val.max(0.0);
-                            i += 1;
-                        }
-                    }
-                } else {
-                    for idx in 0..numel {
-                        unsafe {
-                            let val = *a_ptr.add(idx);
-                            *out_ptr.add(idx) = val.max(0.0);
-                        }
-                    }
-                }
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                relu_simd(a_slice, out_slice);
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(not(feature = "simd"))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -858,7 +900,6 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && b.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
@@ -905,7 +946,6 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
@@ -914,10 +954,19 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    let x = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+            #[cfg(feature = "simd")]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                gelu_simd(a_slice, out_slice);
+            }
+            #[cfg(not(feature = "simd"))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        let x = *a_ptr.add(idx);
+                        *out_ptr.add(idx) = 0.5 * x * (1.0 + (x * x * 0.7978845608028654).tanh());
+                    }
                 }
             }
         }
@@ -951,7 +1000,6 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
@@ -997,7 +1045,6 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
@@ -1006,9 +1053,18 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    *out_ptr.add(idx) = (*a_ptr.add(idx)).tanh();
+            #[cfg(feature = "simd")]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                tanh_simd(a_slice, out_slice);
+            }
+            #[cfg(not(feature = "simd"))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = (*a_ptr.add(idx)).tanh();
+                    }
                 }
             }
         }
@@ -1042,7 +1098,6 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
@@ -1185,7 +1240,6 @@ fn parallel_matmul(
     a_cols: usize,
     b_cols: usize,
 ) {
-    use rayon::prelude::*;
     let total_outputs = batch * m as usize * n as usize;
     
     let a_usize = a_ptr as usize;
@@ -1560,6 +1614,195 @@ fn linear_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![result]
 }
 
+fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let w = args[1];
+    let bias = if args.len() > 2 { Some(args[2]) } else { None };
+
+    let x_shape = x.shape();
+    let w_shape = w.shape();
+
+    let batch_size: i64 = if x_shape.len() > 1 {
+        x_shape[..x_shape.len() - 1].iter().product()
+    } else {
+        1
+    };
+    let in_features = x_shape[x_shape.len() - 1];
+    let out_features = w_shape[0];
+
+    let x_ptr = x.data_ptr_f32();
+    let w_ptr = w.data_ptr_f32();
+    let w_shape_full = w.shape();
+    let w_stride_0 = w.inner.strides[0];
+    let w_stride_1 = w.inner.strides[1];
+
+    let output_shape: Vec<i64> = if x_shape.len() > 1 {
+        let mut s = x_shape[..x_shape.len() - 1].to_vec();
+        s.push(out_features);
+        s
+    } else {
+        vec![out_features]
+    };
+
+    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    let batch_size = batch_size as usize;
+    let in_features = in_features as usize;
+    let out_features = out_features as usize;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let total = batch_size * out_features;
+        
+        (0..total).into_par_iter().for_each(|idx| {
+            let batch_idx = idx / out_features;
+            let out_idx = idx % out_features;
+            
+            let mut sum = 0.0f32;
+            for k in 0..in_features {
+                let x_offset = batch_idx * in_features + k;
+                let w_offset = out_idx * in_features + k;
+                let x_val = unsafe { *x_ptr.add(x_offset) };
+                let w_val = unsafe { *w_ptr.add(w_offset) };
+                sum += x_val * w_val;
+            }
+            
+            if let Some(b) = bias {
+                let b_ptr = b.data_ptr_f32();
+                sum += unsafe { *b_ptr.add(out_idx) };
+            }
+            
+            unsafe { *out_ptr.add(idx) = sum.max(0.0); };
+        });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for batch_idx in 0..batch_size {
+            for out_idx in 0..out_features {
+                let mut sum = 0.0f32;
+                for k in 0..in_features {
+                    let x_offset = batch_idx * in_features + k;
+                    let w_offset = out_idx * in_features + k;
+                    let x_val = unsafe { *x_ptr.add(x_offset) };
+                    let w_val = unsafe { *w_ptr.add(w_offset) };
+                    sum += x_val * w_val;
+                }
+                
+                if let Some(b) = bias {
+                    let b_ptr = b.data_ptr_f32();
+                    sum += unsafe { *b_ptr.add(out_idx) };
+                }
+                
+                unsafe { *out_ptr.add(batch_idx * out_features + out_idx) = sum.max(0.0); };
+            }
+        }
+    }
+
+    vec![output]
+}
+
+fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let w = args[1];
+    let bias = if args.len() > 2 { Some(args[2]) } else { None };
+
+    let x_shape = x.shape();
+    let w_shape = w.shape();
+
+    let batch_size: i64 = if x_shape.len() > 1 {
+        x_shape[..x_shape.len() - 1].iter().product()
+    } else {
+        1
+    };
+    let in_features = x_shape[x_shape.len() - 1];
+    let out_features = w_shape[0];
+
+    let x_ptr = x.data_ptr_f32();
+    let w_ptr = w.data_ptr_f32();
+
+    let output_shape: Vec<i64> = if x_shape.len() > 1 {
+        let mut s = x_shape[..x_shape.len() - 1].to_vec();
+        s.push(out_features);
+        s
+    } else {
+        vec![out_features]
+    };
+
+    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    let batch_size = batch_size as usize;
+    let in_features = in_features as usize;
+    let out_features = out_features as usize;
+    let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
+    let coeff = 0.044715f32;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let total = batch_size * out_features;
+        
+        (0..total).into_par_iter().for_each(|idx| {
+            let batch_idx = idx / out_features;
+            let out_idx = idx % out_features;
+            
+            let mut sum = 0.0f32;
+            for k in 0..in_features {
+                let x_offset = batch_idx * in_features + k;
+                let w_offset = out_idx * in_features + k;
+                let x_val = unsafe { *x_ptr.add(x_offset) };
+                let w_val = unsafe { *w_ptr.add(w_offset) };
+                sum += x_val * w_val;
+            }
+            
+            if let Some(b) = bias {
+                let b_ptr = b.data_ptr_f32();
+                sum += unsafe { *b_ptr.add(out_idx) };
+            }
+            
+            let x3 = sum * sum * sum;
+            let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
+            let gelu = 0.5 * sum * (1.0 + t);
+            
+            unsafe { *out_ptr.add(idx) = gelu; };
+        });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for batch_idx in 0..batch_size {
+            for out_idx in 0..out_features {
+                let mut sum = 0.0f32;
+                for k in 0..in_features {
+                    let x_offset = batch_idx * in_features + k;
+                    let w_offset = out_idx * in_features + k;
+                    let x_val = unsafe { *x_ptr.add(x_offset) };
+                    let w_val = unsafe { *w_ptr.add(w_offset) };
+                    sum += x_val * w_val;
+                }
+                
+                if let Some(b) = bias {
+                    let b_ptr = b.data_ptr_f32();
+                    sum += unsafe { *b_ptr.add(out_idx) };
+                }
+                
+                let x3 = sum * sum * sum;
+                let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
+                let gelu = 0.5 * sum * (1.0 + t);
+                
+                unsafe { *out_ptr.add(batch_idx * out_features + out_idx) = gelu; };
+            }
+        }
+    }
+
+    vec![output]
+}
+
 fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
@@ -1616,7 +1859,6 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     #[cfg(feature = "parallel")]
     {
         if total_blocks > 256 && dim_size > 32 {
-            use rayon::prelude::*;
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
             let results: Vec<f32> = (0..total_blocks)
                 .into_par_iter()
@@ -1752,7 +1994,6 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     #[cfg(feature = "parallel")]
     {
         if total_blocks > 256 && dim_size > 32 {
-            use rayon::prelude::*;
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
             let results: Vec<f32> = (0..total_blocks)
                 .into_par_iter()
@@ -1858,7 +2099,6 @@ fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     #[cfg(feature = "parallel")]
     {
         if total_blocks > 256 && dim_size > 32 {
-            use rayon::prelude::*;
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
             let results: Vec<f32> = (0..total_blocks)
                 .into_par_iter()
@@ -1956,7 +2196,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
     #[cfg(feature = "parallel")]
     {
-        use rayon::prelude::*;
         let a_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
         
@@ -2475,7 +2714,6 @@ fn winograd_conv3x3_kernel(
 
     #[cfg(feature = "parallel")]
     {
-        use rayon::prelude::*;
         let total = batch_size * out_channels * out_height * out_width;
 
         let x_data_owned = x_data;
@@ -2804,7 +3042,6 @@ fn depthwise_conv2d(
 
     #[cfg(feature = "parallel")]
     {
-        use rayon::prelude::*;
         let total = batch_size * in_channels * out_height * out_width;
 
         let x_data_owned = x_data;
@@ -3286,7 +3523,6 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &val)| {
@@ -3333,7 +3569,6 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a.is_contiguous() && numel > 512 {
         #[cfg(feature = "parallel")]
         {
-            use rayon::prelude::*;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
             out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &val)| {
@@ -3382,6 +3617,8 @@ fn register_kernels() {
     register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
     register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
     register("linear", DispatchKey::Cpu, linear_kernel as KernelFn);
+    register("fused_linear_relu", DispatchKey::Cpu, fused_linear_relu_kernel as KernelFn);
+    register("fused_linear_gelu", DispatchKey::Cpu, fused_linear_gelu_kernel as KernelFn);
     register("sum", DispatchKey::Cpu, sum_kernel as KernelFn);
     register("mean", DispatchKey::Cpu, mean_kernel as KernelFn);
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);
