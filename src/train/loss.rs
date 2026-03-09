@@ -32,7 +32,7 @@ impl LossFn for CrossEntropyLoss {
 
                 let mut total_loss = 0.0f32;
 
-                for b in 0..batch_size {
+                for (b, target_val) in target_data.iter().take(batch_size).enumerate() {
                     let base_idx = b * num_classes;
                     
                     let max_logit = pred_data[base_idx..base_idx + num_classes]
@@ -45,7 +45,7 @@ impl LossFn for CrossEntropyLoss {
                     }
                     let log_sum_exp = sum_exp.ln();
 
-                    let target_class = target_data[b] as usize;
+                    let target_class = *target_val as usize;
                     let class_logit = pred_data[base_idx + target_class];
 
                     total_loss += log_sum_exp - class_logit;
