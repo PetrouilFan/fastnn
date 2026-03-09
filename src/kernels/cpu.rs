@@ -567,10 +567,57 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    for idx in 0..numel {
-        unsafe {
-            let val = *a_ptr.add(idx);
-            *out_ptr.add(idx) = val.abs();
+    if a.is_contiguous() && numel > 512 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
+                *out = a_val.abs();
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let mut i = 0usize;
+                        while i + 8 <= numel {
+                            let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                            let abs_vec = _mm256_andnot_ps(_mm256_set1_ps(-0.0f32), a_vec);
+                            _mm256_storeu_ps(out_ptr.add(i), abs_vec);
+                            i += 8;
+                        }
+                        while i < numel {
+                            *out_ptr.add(i) = a_ptr.add(i).read().abs();
+                            i += 1;
+                        }
+                    }
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = (*a_ptr.add(idx)).abs();
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = (*a_ptr.add(idx)).abs();
+                    }
+                }
+            }
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let val = *a_ptr.add(idx);
+                *out_ptr.add(idx) = val.abs();
+            }
         }
     }
 
@@ -1080,7 +1127,9 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let use_blas = batch == 1
         && m as usize >= MIN_BLAS_SIZE
         && n as usize >= MIN_BLAS_SIZE
-        && k as usize >= MIN_BLAS_SIZE;
+        && k as usize >= MIN_BLAS_SIZE
+        && a.is_contiguous()
+        && b.is_contiguous();
 
     if use_blas {
         let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
@@ -1138,42 +1187,78 @@ fn parallel_matmul(
 ) {
     use rayon::prelude::*;
     let total_outputs = batch * m as usize * n as usize;
-    let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, batch * a_rows * a_cols) };
-    let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, batch * k as usize * b_cols) };
-    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_outputs) };
+    
+    let a_usize = a_ptr as usize;
+    let b_usize = b_ptr as usize;
+    let out_usize = out_ptr as usize;
+    let m_usize = m as usize;
+    let n_usize = n as usize;
+    let k_usize = k as usize;
+    let batch_usize = batch;
 
-    out_slice.par_iter_mut().enumerate().for_each(|(idx, out)| {
-        let bat = idx / (m as usize * n as usize);
-        let rem = idx % (m as usize * n as usize);
-        let i = rem / n as usize;
-        let j = rem % n as usize;
+    (0..total_outputs).into_par_iter().for_each(|idx| {
+        let bat = idx / (m_usize * n_usize);
+        let rem = idx % (m_usize * n_usize);
+        let i = rem / n_usize;
+        let j = rem % n_usize;
 
         let mut sum = 0.0f32;
         let mut kk = 0;
 
-        while kk + 4 <= k as usize {
-            let a_val = a_slice[bat * a_rows * a_cols + i * a_cols + kk];
-            let a_val1 = a_slice[bat * a_rows * a_cols + i * a_cols + kk + 1];
-            let a_val2 = a_slice[bat * a_rows * a_cols + i * a_cols + kk + 2];
-            let a_val3 = a_slice[bat * a_rows * a_cols + i * a_cols + kk + 3];
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("fma") {
+                unsafe {
+                    while kk + 8 <= k_usize {
+                        let a0 = _mm256_loadu_ps((a_usize + (bat * a_rows * a_cols + i * a_cols + kk) * 4) as *const f32);
+                        let a1 = _mm256_loadu_ps((a_usize + (bat * a_rows * a_cols + i * a_cols + kk + 8) * 4) as *const f32);
 
-            let b_val = b_slice[bat * k as usize * b_cols + kk * b_cols + j];
-            let b_val1 = b_slice[bat * k as usize * b_cols + (kk + 1) * b_cols + j];
-            let b_val2 = b_slice[bat * k as usize * b_cols + (kk + 2) * b_cols + j];
-            let b_val3 = b_slice[bat * k as usize * b_cols + (kk + 3) * b_cols + j];
+                        let b0 = _mm256_loadu_ps((b_usize + (bat * k_usize * b_cols + kk * b_cols + j) * 4) as *const f32);
+                        let b1 = _mm256_loadu_ps((b_usize + (bat * k_usize * b_cols + (kk + 8) * b_cols + j) * 4) as *const f32);
 
-            sum += a_val * b_val + a_val1 * b_val1 + a_val2 * b_val2 + a_val3 * b_val3;
+                        let acc0 = _mm256_mul_ps(a0, b0);
+                        let acc1 = _mm256_mul_ps(a1, b1);
+                        let acc = _mm256_add_ps(acc0, acc1);
+                        
+                        let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                        _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
+                        sum += acc_arr.assume_init().iter().sum::<f32>();
+                        
+                        kk += 16;
+                    }
+                }
+            }
+        }
+
+        while kk + 4 <= k_usize {
+            unsafe {
+                let bat_offset = bat * a_rows * a_cols + i * a_cols;
+                let a_val = *((a_usize + (bat_offset + kk) * 4) as *const f32);
+                let a_val1 = *((a_usize + (bat_offset + kk + 1) * 4) as *const f32);
+                let a_val2 = *((a_usize + (bat_offset + kk + 2) * 4) as *const f32);
+                let a_val3 = *((a_usize + (bat_offset + kk + 3) * 4) as *const f32);
+
+                let b_base = bat * k_usize * b_cols + kk * b_cols + j;
+                let b_val = *((b_usize + b_base * 4) as *const f32);
+                let b_val1 = *((b_usize + (b_base + b_cols) * 4) as *const f32);
+                let b_val2 = *((b_usize + (b_base + 2 * b_cols) * 4) as *const f32);
+                let b_val3 = *((b_usize + (b_base + 3 * b_cols) * 4) as *const f32);
+
+                sum += a_val * b_val + a_val1 * b_val1 + a_val2 * b_val2 + a_val3 * b_val3;
+            }
             kk += 4;
         }
 
-        while kk < k as usize {
-            let a_val = a_slice[bat * a_rows * a_cols + i * a_cols + kk];
-            let b_val = b_slice[bat * k as usize * b_cols + kk * b_cols + j];
-            sum += a_val * b_val;
+        while kk < k_usize {
+            unsafe {
+                let a_val = *((a_usize + (bat * a_rows * a_cols + i * a_cols + kk) * 4) as *const f32);
+                let b_val = *((b_usize + (bat * k_usize * b_cols + kk * b_cols + j) * 4) as *const f32);
+                sum += a_val * b_val;
+            }
             kk += 1;
         }
 
-        *out = sum;
+        unsafe { *((out_usize + idx * 4) as *mut f32) = sum; };
     });
 }
 
@@ -1837,7 +1922,11 @@ fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let ndim = x_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
-    let _dim_size = x_shape[dim] as usize;
+    let dim_size = x_shape[dim] as usize;
+
+    if dim == ndim - 1 && x.is_contiguous() && dim_size > 32 {
+        return vec![softmax_last_dim_simd(x, dim_size)];
+    }
 
     let max_vals = max_kernel(&[
         x,
@@ -1849,6 +1938,106 @@ fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let sum_exp = max_exp.sum(dim as i32, true);
 
     vec![max_exp.div(&sum_exp)]
+}
+
+#[inline]
+fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
+    let x_shape = x.shape();
+    let batch_size: i64 = x_shape[..x_shape.len() - 1].iter().product();
+    
+    let x_ptr = x.data_ptr() as *const f32;
+    let numel = x.numel() as usize;
+    let num_rows = numel / dim_size;
+    
+    let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let a_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+        
+        out_slice.par_chunks_mut(dim_size).zip(a_slice.par_chunks(dim_size)).for_each(|(out_row, x_row)| {
+            let mut max_val = f32::MIN;
+            
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let mut max_vec = _mm256_set1_ps(f32::MIN);
+                        let mut i = 0;
+                        while i + 8 <= dim_size {
+                            let vec = _mm256_loadu_ps(x_row.as_ptr().add(i));
+                            max_vec = _mm256_max_ps(max_vec, vec);
+                            i += 8;
+                        }
+                        let mut max_arr = [0.0f32; 8];
+                        _mm256_storeu_ps(max_arr.as_mut_ptr(), max_vec);
+                        for j in 0..8 {
+                            max_val = max_val.max(max_arr[j]);
+                        }
+                        for j in i..dim_size {
+                            max_val = max_val.max(x_row[j]);
+                        }
+                    }
+                } else {
+                    for j in 0..dim_size {
+                        max_val = max_val.max(x_row[j]);
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for j in 0..dim_size {
+                    max_val = max_val.max(x_row[j]);
+                }
+            }
+            
+            let mut sum_exp = 0.0f32;
+            
+            for j in 0..dim_size {
+                sum_exp += (x_row[j] - max_val).exp();
+            }
+            
+            let inv_sum = 1.0 / sum_exp;
+            
+            for j in 0..dim_size {
+                out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+            }
+        });
+    }
+    
+    #[cfg(not(feature = "parallel"))]
+    {
+        let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+        
+        for row in 0..num_rows {
+            let row_start = row * dim_size;
+            let x_row = &x_slice[row_start..row_start + dim_size];
+            let out_row = &mut out_slice[row_start..row_start + dim_size];
+            
+            let mut max_val = f32::MIN;
+            for j in 0..dim_size {
+                max_val = max_val.max(x_row[j]);
+            }
+            
+            let mut sum_exp = 0.0f32;
+            for j in 0..dim_size {
+                sum_exp += (x_row[j] - max_val).exp();
+            }
+            
+            let inv_sum = 1.0 / sum_exp;
+            for j in 0..dim_size {
+                out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+            }
+        }
+    }
+    
+    output
 }
 
 fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
