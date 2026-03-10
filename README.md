@@ -19,33 +19,40 @@ Benchmark comparisons with PyTorch (mean time in μs, lower is better):
 
 | Operation | Size | fastnn | PyTorch | Status |
 |-----------|------|--------|---------|--------|
-| ReLU | 100×100 | 93.6μs | 2.7μs | |
-| ReLU | 1000×1000 | 551.7μs | 35.2μs | |
-| FusedAddReLU | 100×100 | 94.7μs | 5.5μs | |
-| FusedAddReLU | 1000×1000 | 639.5μs | 113.7μs | |
-| MatMul | 128×256×128 | 114.7μs | 27.5μs | |
-| MatMul | 256×512×256 | 868.5μs | 167.3μs | |
-| MatMul | 512×1024×512 | 7099.8μs | 1056.6μs | |
-| GELU | 100×100 | 105.4μs | 19.2μs | |
-| GELU | 1000×1000 | 895.6μs | 193.9μs | |
-| Sigmoid | 100×100 | 104.2μs | 8.5μs | |
-| Sigmoid | 1000×1000 | 689.1μs | 164.8μs | |
-| Tanh | 100×100 | 108.2μs | 2493.7μs | ✅ faster |
-| Tanh | 1000×1000 | 1025.9μs | 913.8μs | |
-| Add | 100×100 | 123.8μs | 4.3μs | |
-| Add | 1000×1000 | 1239.4μs | 109.5μs | |
-| Mul | 100×100 | 97.7μs | 3.3μs | |
-| Mul | 1000×1000 | 571.1μs | 59.5μs | |
-| Linear | 32×256×512 | 402.0μs | 371.5μs | |
-| Linear | 32×512×1024 | 989.0μs | 1368.9μs | ✅ faster |
-| Linear | 128×256×512 | 728.8μs | 176.0μs | |
-| Conv2d | 1×32×32×32 | 962.8μs | 173.7μs | |
-| Conv2d | 1×64×64×64 | 13810.2μs | 645.7μs | |
-| Sum | 1000×1000 | 138.9μs | 29.3μs | |
-| Mean | 1000×1000 | 205.0μs | 2885.0μs | ✅ faster |
-| Max | 1000×1000 | 302.4μs | 106.9μs | |
+| ReLU | 100×100 | 104.3μs | 5.3μs | |
+| ReLU | 1000×1000 | 888.3μs | 71.3μs | |
+| FusedAddReLU | 100×100 | 27.3μs | 8.6μs | |
+| FusedAddReLU | 1000×1000 | 540.5μs | 1775.9μs | ✅ faster |
+| MatMul | 128×256×128 | 152.8μs | 47.8μs | |
+| MatMul | 256×512×256 | 1179.0μs | 198.8μs | |
+| MatMul | 512×1024×512 | 9143.2μs | 1474.6μs | |
+| GELU | 100×100 | 87.8μs | 15.8μs | |
+| GELU | 1000×1000 | 1466.9μs | 175.6μs | |
+| Sigmoid | 100×100 | 76.8μs | 11.3μs | |
+| Sigmoid | 1000×1000 | 967.9μs | 173.8μs | |
+| Tanh | 100×100 | 81.7μs | 16.4μs | |
+| Tanh | 1000×1000 | 1327.6μs | 514.3μs | |
+| Add | 100×100 | 43.4μs | 5.8μs | |
+| Add | 1000×1000 | 725.3μs | 52.9μs | |
+| Mul | 100×100 | 30.3μs | 5.1μs | |
+| Mul | 1000×1000 | 499.0μs | 76.9μs | |
+| Linear | 32×256×512 | 437.3μs | 70.8μs | |
+| Linear | 32×512×1024 | 1304.7μs | 202.6μs | |
+| Linear | 128×256×512 | 1277.1μs | 127.9μs | |
+| Conv2d | 1×32×32×32 | 1428.6μs | 159.5μs | |
+| Conv2d | 1×64×64×64 | 20696.0μs | 898.3μs | |
+| Sum | 1000×1000 | 184.8μs | 22.5μs | |
+| Mean | 1000×1000 | 223.7μs | 22.0μs | |
+| Max | 1000×1000 | 206.9μs | 283.5μs | ✅ faster |
 
 Note: Performance varies by hardware and tensor size. Best results require AVX2/AVX512 support.
+
+### Recent Optimizations (v0.2.0)
+
+- Added SIMD support to parallel add/mul kernels
+- Lowered parallelization threshold from 512 to 4096 elements
+- Improved parallel chunking strategy for element-wise operations
+- Added FMA (Fused Multiply-Add) support for linear layers
 
 ### New Fused Operations
 

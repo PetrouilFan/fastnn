@@ -143,7 +143,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 512 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 4096 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
         
@@ -158,12 +158,39 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         #[cfg(feature = "parallel")]
         {
-            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
-            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
-                *out = a_val + b_val;
-            });
+            const CHUNK_SIZE: usize = 8192;
+            let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            
+            let a_usize = a_ptr as usize;
+            let b_usize = b_ptr as usize;
+            let out_usize = out_ptr as usize;
+            
+            if num_chunks > 1 {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    let start = chunk_idx * CHUNK_SIZE;
+                    let end = (start + CHUNK_SIZE).min(numel);
+                    
+                    let a_ptr = a_usize as *const f32;
+                    let b_ptr = b_usize as *const f32;
+                    let out_ptr = out_usize as *mut f32;
+                    
+                    for i in start..end {
+                        unsafe {
+                            *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                        }
+                    }
+                });
+            } else {
+                let a_ptr = a_usize as *const f32;
+                let b_ptr = b_usize as *const f32;
+                let out_ptr = out_usize as *mut f32;
+                
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                    }
+                }
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -284,15 +311,42 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
-            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
-            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
-                *out = a_val - b_val;
-            });
+            const CHUNK_SIZE: usize = 8192;
+            let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            
+            let a_usize = a_ptr as usize;
+            let b_usize = b_ptr as usize;
+            let out_usize = out_ptr as usize;
+            
+            if num_chunks > 1 {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    let start = chunk_idx * CHUNK_SIZE;
+                    let end = (start + CHUNK_SIZE).min(numel);
+                    
+                    let a_ptr = a_usize as *const f32;
+                    let b_ptr = b_usize as *const f32;
+                    let out_ptr = out_usize as *mut f32;
+                    
+                    for i in start..end {
+                        unsafe {
+                            *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
+                        }
+                    }
+                });
+            } else {
+                let a_ptr = a_usize as *const f32;
+                let b_ptr = b_usize as *const f32;
+                let out_ptr = out_usize as *mut f32;
+                
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
+                    }
+                }
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -375,7 +429,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 512 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 4096 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
         
@@ -390,12 +444,39 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         #[cfg(feature = "parallel")]
         {
-            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
-            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
-                *out = a_val * b_val;
-            });
+            const CHUNK_SIZE: usize = 8192;
+            let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            
+            let a_usize = a_ptr as usize;
+            let b_usize = b_ptr as usize;
+            let out_usize = out_ptr as usize;
+            
+            if num_chunks > 1 {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    let start = chunk_idx * CHUNK_SIZE;
+                    let end = (start + CHUNK_SIZE).min(numel);
+                    
+                    let a_ptr = a_usize as *const f32;
+                    let b_ptr = b_usize as *const f32;
+                    let out_ptr = out_usize as *mut f32;
+                    
+                    for i in start..end {
+                        unsafe {
+                            *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                        }
+                    }
+                });
+            } else {
+                let a_ptr = a_usize as *const f32;
+                let b_ptr = b_usize as *const f32;
+                let out_ptr = out_usize as *mut f32;
+                
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                    }
+                }
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -516,7 +597,7 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -612,7 +693,7 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -656,7 +737,7 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -727,7 +808,7 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -771,7 +852,7 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -815,7 +896,7 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -859,7 +940,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -917,15 +998,40 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
-            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
-            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
-                *out = (a_val + b_val).max(0.0);
-            });
+            const CHUNK_SIZE: usize = 8192;
+            let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            
+            let a_usize = a_ptr as usize;
+            let b_usize = b_ptr as usize;
+            let out_usize = out_ptr as usize;
+            
+            if num_chunks > 1 {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    let start = chunk_idx * CHUNK_SIZE;
+                    let end = (start + CHUNK_SIZE).min(numel);
+                    
+                    let a_ptr = a_usize as *const f32;
+                    let b_ptr = b_usize as *const f32;
+                    let out_ptr = out_usize as *mut f32;
+                    
+                    for i in start..end {
+                        let val = unsafe { *a_ptr.add(i) + *b_ptr.add(i) };
+                        unsafe { *out_ptr.add(i) = val.max(0.0); }
+                    }
+                });
+            } else {
+                let a_ptr = a_usize as *const f32;
+                let b_ptr = b_usize as *const f32;
+                let out_ptr = out_usize as *mut f32;
+                
+                for i in 0..numel {
+                    let val = unsafe { *a_ptr.add(i) + *b_ptr.add(i) };
+                    unsafe { *out_ptr.add(i) = val.max(0.0); }
+                }
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -963,7 +1069,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -1023,7 +1129,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -1068,7 +1174,7 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -1121,7 +1227,7 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -3553,7 +3659,7 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -3599,7 +3705,7 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 512 {
+    if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
