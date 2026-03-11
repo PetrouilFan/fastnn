@@ -1,5 +1,5 @@
 use crate::autograd::{self, AutogradMeta};
-use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+use crate::dispatcher::{device_to_dispatch_key, dispatch};
 use crate::storage::{DType, Device, Storage};
 use smallvec::smallvec;
 use smallvec::SmallVec;
@@ -522,6 +522,12 @@ impl Tensor {
     pub fn from_vec(values: Vec<f32>, shape: Vec<i64>) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
+        Tensor::new(TensorImpl::new(storage, sizes))
+    }
+
+    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
+        let sizes: SmallVec<[i64; 8]> = shape.into();
+        let storage = Arc::new(Storage::from_vec(values, DType::F32, device));
         Tensor::new(TensorImpl::new(storage, sizes))
     }
 
