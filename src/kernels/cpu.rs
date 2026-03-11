@@ -3272,6 +3272,11 @@ fn conv2d_1x1(
     let w_data: Vec<f32> =
         unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels).to_vec() };
 
+    let bias_data: Option<Vec<f32>> = bias.map(|b| {
+        let b_ptr = b.data_ptr() as *const f32;
+        unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
+    });
+
     let _n = batch_size * in_height * in_width;
     let _k = in_channels;
     let _m = out_channels;
@@ -3287,25 +3292,10 @@ fn conv2d_1x1(
                 for oc in 0..out_channels {
                     let w_row = &w_data[oc * in_channels..];
                     let sum = simd_dot_product(x_row, w_row, in_channels);
+                    let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
 
                     let out_idx = ((b * out_channels + oc) * in_height + h) * in_width + w_idx;
-                    unsafe { *out_ptr.add(out_idx) = sum };
-                }
-            }
-        }
-    }
-
-    if let Some(b) = bias {
-        let b_ptr = b.data_ptr() as *const f32;
-        let b_data: Vec<f32> = unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() };
-
-        for n in 0..batch_size {
-            for oc in 0..out_channels {
-                for h in 0..in_height {
-                    for w_idx in 0..in_width {
-                        let out_idx = ((n * out_channels + oc) * in_height + h) * in_width + w_idx;
-                        unsafe { *out_ptr.add(out_idx) += b_data[oc] };
-                    }
+                    unsafe { *out_ptr.add(out_idx) = sum + bias_val };
                 }
             }
         }
@@ -3529,8 +3519,14 @@ fn conv2d_im2col(
     let col_slice = col_data.as_slice();
 
     // Use optimized matrix multiplication for large matrices
-    // Lower threshold to 16 to capture more cases
-    let use_gemm = col_rows >= 16 && out_channels >= 16 && col_cols >= 16;
+    // Lower threshold to 12 to capture more cases
+    let use_gemm = col_rows >= 12 && out_channels >= 12 && col_cols >= 12;
+
+    let bias_data: Option<Vec<f32>> = bias.map(|b| {
+        let b_ptr = b.data_ptr() as *const f32;
+        unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
+    });
+
     if use_gemm {
         // Transpose weights for GEMM (w: out_channels x col_cols -> w_t: col_cols x out_channels)
         let w_t: Vec<f32> = {
@@ -3550,12 +3546,14 @@ fn conv2d_im2col(
 
             for oc in 0..out_channels {
                 let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                unsafe { *out_ptr.add(out_idx) = result[row * out_channels + oc] };
+                let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
+                unsafe { *out_ptr.add(out_idx) = result[row * out_channels + oc] + bias_val };
             }
         }
     } else {
         for oc in 0..out_channels {
             let w_row = &w_data[oc * col_cols..(oc + 1) * col_cols];
+            let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
 
             for row in 0..col_rows {
                 let col_row = &col_slice[row * col_cols..(row + 1) * col_cols];
@@ -3567,23 +3565,7 @@ fn conv2d_im2col(
                 let ow = rem % out_width;
 
                 let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                unsafe { *out_ptr.add(out_idx) = sum };
-            }
-        }
-    }
-
-    if let Some(b) = bias {
-        let b_ptr = b.data_ptr() as *const f32;
-        let b_data: Vec<f32> = unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() };
-
-        for n in 0..batch_size {
-            for oc in 0..out_channels {
-                for oh in 0..out_height {
-                    for ow in 0..out_width {
-                        let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                        unsafe { *out_ptr.add(out_idx) += b_data[oc] };
-                    }
-                }
+                unsafe { *out_ptr.add(out_idx) = sum + bias_val };
             }
         }
     }
