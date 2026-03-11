@@ -451,7 +451,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (idx >= arrayLength(&output)) { return; }
     let x = input[idx];
     let x3 = x * x * x;
-    let t = (0.7978846 * (x + 0.044715 * x3)).tan();
+    let in_arg = 0.7978846 * (x + 0.044715 * x3);
+    let t = tan(in_arg);
     output[idx] = 0.5 * x * (1.0 + t);
 }
 "#;
@@ -477,7 +478,7 @@ const TANH_SHADER: &str = r#"
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
     if (idx >= arrayLength(&output)) { return; }
-    output[idx] = input[idx].tanh();
+    output[idx] = tanh(input[idx]);
 }
 "#;
 
@@ -540,11 +541,20 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
     let ctx = get_context(device_id);
     let shape = input.shape().to_vec();
     let numel = shape.iter().product::<i64>() as usize;
-    let input_buffer = input.inner.gpu_buffer().unwrap_or_else(|| {
-        // Input is on CPU, need to copy to GPU
+
+    // Get or create GPU buffer - check cache first
+    let input_buffer = if let Some(buffer) = input.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
+        // Need to transfer from CPU to GPU and cache it
         let input_data = get_tensor_data(input);
-        ctx.create_gpu_buffer_from_data(&input_data, "input").buffer
-    });
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&input_data, "input");
+        // Cache for future use
+        input
+            .inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
 
     let gpu_output = ctx.create_buffer(numel * 4, "output");
 
@@ -598,16 +608,26 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
     let shape = a.shape().to_vec();
     let numel = shape.iter().product::<i64>() as usize;
 
-    // Get or create GPU buffers - avoid copying if already on GPU
-    let a_buffer = a.inner.gpu_buffer().unwrap_or_else(|| {
+    // Get or create GPU buffers - use cache to avoid repeated CPU->GPU transfers
+    let a_buffer = if let Some(buffer) = a.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
         let a_data = get_tensor_data(a);
-        ctx.create_gpu_buffer_from_data(&a_data, "a").buffer
-    });
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&a_data, "a");
+        a.inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
 
-    let b_buffer = b.inner.gpu_buffer().unwrap_or_else(|| {
+    let b_buffer = if let Some(buffer) = b.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
         let b_data = get_tensor_data(b);
-        ctx.create_gpu_buffer_from_data(&b_data, "b").buffer
-    });
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&b_data, "b");
+        b.inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
 
     let gpu_output = ctx.create_buffer(numel * 4, "output");
 
@@ -744,16 +764,26 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
     output_shape.push(m as i64);
     output_shape.push(n as i64);
 
-    // Get or create GPU buffers - avoid copying if already on GPU
-    let a_buffer = a.inner.gpu_buffer().unwrap_or_else(|| {
+    // Get or create GPU buffers - use cache to avoid repeated CPU->GPU transfers
+    let a_buffer = if let Some(buffer) = a.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
         let a_data = get_tensor_data(a);
-        ctx.create_gpu_buffer_from_data(&a_data, "matmul_a").buffer
-    });
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&a_data, "matmul_a");
+        a.inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
 
-    let b_buffer = b.inner.gpu_buffer().unwrap_or_else(|| {
+    let b_buffer = if let Some(buffer) = b.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
         let b_data = get_tensor_data(b);
-        ctx.create_gpu_buffer_from_data(&b_data, "matmul_b").buffer
-    });
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&b_data, "matmul_b");
+        b.inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
 
     let gpu_out = ctx.create_buffer(m * n * 4, "matmul_output");
 
