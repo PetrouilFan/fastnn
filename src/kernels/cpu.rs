@@ -2910,9 +2910,9 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
                     let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
                     let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
                     let prod = _mm256_mul_ps(a_vec, b_vec);
-                    let sum_vec = _mm256_hadd_ps(prod, prod);
-                    let sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
-                    sum += _mm256_cvtss_f32(sum_vec);
+                    let prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                    _mm256_storeu_ps(prod_arr.as_ptr() as *mut f32, prod);
+                    sum += prod_arr.assume_init().iter().sum::<f32>();
                     i += 8;
                 }
             }
@@ -2986,262 +2986,6 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
         i += 1;
     }
     sum
-}
-
-// Winograd F(2x2, 3x3) transformation matrices
-// These transform 3x3 convolutions into smaller matrix multiplications
-// Winograd reduces 9 multiplications per output to 4
-
-const WINOGRAD_B: [[f32; 4]; 4] = [
-    [1.0, 0.0, -1.0, 0.0],
-    [0.0, 1.0, 1.0, 0.0],
-    [0.0, -1.0, 1.0, 0.0],
-    [0.0, 1.0, 0.0, -1.0],
-];
-
-const WINOGRAD_G: [[f32; 3]; 4] = [
-    [1.0, 0.0, 0.0],
-    [0.5, 0.5, 0.5],
-    [0.5, -0.5, 0.5],
-    [0.0, 0.0, 1.0],
-];
-
-const WINOGRAD_A: [[f32; 2]; 4] = [[1.0, 0.0], [1.0, 1.0], [1.0, -1.0], [0.0, 1.0]];
-
-#[inline]
-fn winograd_transform_weight(w: &[f32], out_channels: usize, in_channels: usize) -> Vec<f32> {
-    // Transform weights: U = G * W * G^T
-    // Input: [out_channels][in_channels][3][3]
-    // Output: [out_channels][in_channels][4][4]
-    let mut U = vec![0.0f32; out_channels * in_channels * 16];
-
-    for oc in 0..out_channels {
-        for ic in 0..in_channels {
-            // Get 3x3 weight block
-            let mut W = [[0.0f32; 3]; 3];
-            for kh in 0..3 {
-                for kw in 0..3 {
-                    let idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
-                    W[kh][kw] = w[idx];
-                }
-            }
-
-            // Transform: U = G * W * G^T
-            // First compute G * W (4x3 matrix)
-            let mut GW = [[0.0f32; 3]; 4];
-            for i in 0..4 {
-                for j in 0..3 {
-                    GW[i][j] = WINOGRAD_G[i][0] * W[0][j]
-                        + WINOGRAD_G[i][1] * W[1][j]
-                        + WINOGRAD_G[i][2] * W[2][j];
-                }
-            }
-
-            // Then compute (G * W) * G^T = U (4x4 matrix)
-            for i in 0..4 {
-                for j in 0..4 {
-                    let mut val = 0.0f32;
-                    for k in 0..3 {
-                        val += GW[i][k] * WINOGRAD_G[j][k];
-                    }
-                    let idx = ((oc * in_channels + ic) * 4 + i) * 4 + j;
-                    U[idx] = val;
-                }
-            }
-        }
-    }
-    U
-}
-
-#[inline]
-fn winograd_transform_input_tiles(
-    x: &[f32],
-    batch_size: usize,
-    in_channels: usize,
-    in_height: usize,
-    in_width: usize,
-    padding: usize,
-    tile_h: usize,
-    tile_w: usize,
-) -> Vec<f32> {
-    // Transform input tiles: V = B * d * B^T
-    // Process all 4x4 input tiles
-    let mut V = vec![0.0f32; batch_size * in_channels * tile_h * tile_w * 16];
-
-    for n in 0..batch_size {
-        for ic in 0..in_channels {
-            for th in 0..tile_h {
-                for tw in 0..tile_w {
-                    // Extract 4x4 patch (with padding)
-                    let mut d = [[0.0f32; 4]; 4];
-                    for ph in 0..4 {
-                        for pw in 0..4 {
-                            let ih = th * 2 + ph - padding;
-                            let iw = tw * 2 + pw - padding;
-                            if ih < in_height && iw < in_width && ih >= 0 && iw >= 0 {
-                                let idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
-                                d[ph][pw] = x[idx];
-                            }
-                        }
-                    }
-
-                    // Transform: V = B * d * B^T
-                    let mut Bd = [[0.0f32; 4]; 4];
-                    for i in 0..4 {
-                        for j in 0..4 {
-                            Bd[i][j] = WINOGRAD_B[i][0] * d[0][j]
-                                + WINOGRAD_B[i][1] * d[1][j]
-                                + WINOGRAD_B[i][2] * d[2][j]
-                                + WINOGRAD_B[i][3] * d[3][j];
-                        }
-                    }
-
-                    for i in 0..4 {
-                        for j in 0..4 {
-                            let mut val = 0.0f32;
-                            for k in 0..4 {
-                                val += Bd[i][k] * WINOGRAD_B[j][k];
-                            }
-                            let idx = (((n * in_channels + ic) * tile_h + th) * tile_w + tw) * 16
-                                + i * 4
-                                + j;
-                            V[idx] = val;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    V
-}
-
-#[inline]
-fn winograd_inverse_transform(
-    M: &[f32],
-    bias: Option<&[f32]>,
-    out_channels: usize,
-    tile_h: usize,
-    tile_w: usize,
-) -> (Vec<f32>, usize, usize) {
-    let out_height = tile_h * 2;
-    let out_width = tile_w * 2;
-    let mut output = vec![0.0f32; out_channels * out_height * out_width];
-
-    for oc in 0..out_channels {
-        for th in 0..tile_h {
-            for tw in 0..tile_w {
-                // Get 4x4 M block for this output tile
-                let m_offset = ((oc * tile_h + th) * tile_w + tw) * 16;
-
-                // Inverse transform: Y = A^T * M * A
-                // First compute M * A (4x2 matrix)
-                let mut MA = [[0.0f32; 2]; 4];
-                for i in 0..4 {
-                    for j in 0..2 {
-                        MA[i][j] = M[m_offset + i * 4 + 0] * WINOGRAD_A[0][j]
-                            + M[m_offset + i * 4 + 1] * WINOGRAD_A[1][j]
-                            + M[m_offset + i * 4 + 2] * WINOGRAD_A[2][j]
-                            + M[m_offset + i * 4 + 3] * WINOGRAD_A[3][j];
-                    }
-                }
-
-                // Then compute A^T * (M * A) = Y (2x2 matrix)
-                for i in 0..2 {
-                    for j in 0..2 {
-                        let mut val = 0.0f32;
-                        for k in 0..4 {
-                            val += WINOGRAD_A[k][i] * MA[k][j];
-                        }
-                        if let Some(b) = bias {
-                            val += b[oc];
-                        }
-                        let oh = th * 2 + i;
-                        let ow = tw * 2 + j;
-                        let idx = ((oc * out_height + oh) * out_width + ow);
-                        output[idx] = val;
-                    }
-                }
-            }
-        }
-    }
-    (output, out_height, out_width)
-}
-
-fn winograd_conv3x3_kernel(
-    x: &Tensor,
-    w: &Tensor,
-    bias: Option<&Tensor>,
-    batch_size: usize,
-    in_channels: usize,
-    out_channels: usize,
-    in_height: usize,
-    in_width: usize,
-    padding: usize,
-) -> Tensor {
-    // Calculate output size
-    let out_height = in_height + 2 * padding - 2;
-    let out_width = in_width + 2 * padding - 2;
-
-    // Number of 2x2 tiles
-    let tile_h = (out_height + 1) / 2;
-    let tile_w = (out_width + 1) / 2;
-
-    // Get input data
-    let x_ptr = x.data_ptr() as *const f32;
-    let x_data: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width).to_vec()
-    };
-
-    // Get weight data
-    let w_ptr = w.data_ptr() as *const f32;
-    let w_data: Vec<f32> =
-        unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels * 9).to_vec() };
-
-    // Get bias
-    let bias_data: Option<Vec<f32>> = bias.map(|b| {
-        let ptr = b.data_ptr() as *const f32;
-        unsafe { std::slice::from_raw_parts(ptr, out_channels).to_vec() }
-    });
-
-    // Transform weights: U = G * W * G^T
-    let U = winograd_transform_weight(&w_data, out_channels, in_channels);
-
-    // Transform input: V = B * d * B^T
-    let V = winograd_transform_input_tiles(
-        &x_data,
-        batch_size,
-        in_channels,
-        in_height,
-        in_width,
-        padding,
-        tile_h,
-        tile_w,
-    );
-
-    // Element-wise multiply: M = U ⊙ V
-    let m_size = batch_size * in_channels * tile_h * tile_w * 16;
-    let mut M = vec![0.0f32; m_size];
-    for i in 0..m_size {
-        M[i] = U[i] * V[i];
-    }
-
-    // Inverse transform: Y = A^T * M * A
-    let (output_flat, out_h, out_w) = if let Some(ref b) = bias_data {
-        winograd_inverse_transform(&M, Some(b.as_slice()), out_channels, tile_h, tile_w)
-    } else {
-        winograd_inverse_transform(&M, None, out_channels, tile_h, tile_w)
-    };
-
-    // Reshape output
-    let output_shape = vec![
-        batch_size as i64,
-        out_channels as i64,
-        out_h as i64,
-        out_w as i64,
-    ];
-    let mut output = Tensor::from_vec(output_flat, output_shape);
-
-    output
 }
 
 fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -3578,10 +3322,7 @@ fn conv2d_im2col(
     {
         use rayon::prelude::*;
 
-        let x_data_slice = unsafe {
-            std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width)
-        };
-        let x_data_arc = std::sync::Arc::new(x_data_slice.to_vec());
+        let x_usize = x_ptr as usize;
 
         col_data
             .par_chunks_mut(col_cols)
@@ -3609,7 +3350,8 @@ fn conv2d_im2col(
                                 let x_iw = iw - padding;
                                 let x_idx =
                                     ((n * in_channels + ic) * in_height + x_ih) * in_width + x_iw;
-                                col_chunk[col_col] = x_data_arc[x_idx];
+                                let x_ptr = x_usize as *const f32;
+                                col_chunk[col_col] = unsafe { *x_ptr.add(x_idx) };
                             }
                         }
                     }
