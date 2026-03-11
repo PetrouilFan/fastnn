@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::kernels::gpu;
 use crate::storage::{DType, Device, Storage};
@@ -441,7 +443,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     } else {
         1
     };
-    let batch = batch_a.max(batch_b);
+    let _batch = batch_a.max(batch_b);
 
     let mut output_shape: Vec<i64> = vec![];
     if a_shape.len() > 2 {
@@ -455,7 +457,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_data = a.data_ptr_f32();
     let b_data = b.data_ptr_f32();
 
-    let a_rows = a_shape[a_shape.len() - 2] as usize;
+    let _a_rows = a_shape[a_shape.len() - 2] as usize;
     let a_cols = a_shape[a_shape.len() - 1] as usize;
     let b_cols = b_shape[b_shape.len() - 1] as usize;
 
