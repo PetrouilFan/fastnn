@@ -9,22 +9,25 @@ use wgpu::{Buffer, ComputePipeline, Device, Queue, ShaderModule};
 // Import GPU operations module to register kernels
 mod ops;
 
-static GPU_CONTEXTS: std::sync::OnceLock<RwLock<HashMap<usize, GpuContext>>> =
+static GPU_CONTEXTS: std::sync::OnceLock<RwLock<HashMap<usize, Arc<GpuContext>>>> =
     std::sync::OnceLock::new();
 
-fn get_gpu_contexts() -> &'static RwLock<HashMap<usize, GpuContext>> {
+fn get_gpu_contexts() -> &'static RwLock<HashMap<usize, Arc<GpuContext>>> {
     GPU_CONTEXTS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
 pub fn get_context(device_id: usize) -> Arc<GpuContext> {
-    let mut contexts = get_gpu_contexts().write();
-    if let Some(ctx) = contexts.get(&device_id) {
-        return Arc::new(ctx.clone());
+    {
+        let contexts = get_gpu_contexts().read();
+        if let Some(ctx) = contexts.get(&device_id) {
+            return Arc::clone(ctx);
+        }
     }
-
-    let ctx = GpuContext::new(device_id);
-    contexts.insert(device_id, ctx.clone());
-    Arc::new(ctx)
+    let ctx = Arc::new(GpuContext::new(device_id));
+    get_gpu_contexts()
+        .write()
+        .insert(device_id, Arc::clone(&ctx));
+    ctx
 }
 
 pub struct GpuContext {
@@ -478,7 +481,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = input[idx];
     let x3 = x * x * x;
     let in_arg = 0.7978846 * (x + 0.044715 * x3);
-    let t = tan(in_arg);
+    let t = tanh(in_arg);
     output[idx] = 0.5 * x * (1.0 + t);
 }
 "#;

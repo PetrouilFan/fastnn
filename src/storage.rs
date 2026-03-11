@@ -10,12 +10,6 @@ static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
 static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
-// Forward declaration for GPU buffer type
-pub struct GpuBufferHandle {
-    pub buffer: Arc<wgpu::Buffer>,
-    pub device_id: usize,
-}
-
 #[allow(dead_code)]
 const MAX_CACHED_BLOCKS: usize = 64;
 const POOL_THRESHOLD: usize = 8 * 1024 * 1024;
@@ -267,7 +261,7 @@ impl Storage {
                 }
                 storage
             }
-            Device::Wgpu(device_id) => {
+            Device::Wgpu(_device_id) => {
                 // For GPU, create CPU storage first
                 // The actual GPU buffer will be created on-demand when needed
                 let mut cpu_storage = Storage::new_cpu(dtype, nbytes);
