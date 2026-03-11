@@ -319,7 +319,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     for i in 0..numel as usize {
         let x = unsafe { *a_data.add(i) };
         let x3 = x * x * x;
-        let t = (0.7978846 * (x + 0.044715 * x3)).tan();
+        let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
         output_data[i] = 0.5 * x * (1.0 + t);
     }
 
