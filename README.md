@@ -39,8 +39,8 @@ Benchmark comparisons with PyTorch (mean time in μs, lower is better):
 | Linear | 32×256×512 | 437.3μs | 70.8μs | |
 | Linear | 32×512×1024 | 1304.7μs | 202.6μs | |
 | Linear | 128×256×512 | 1277.1μs | 127.9μs | |
-| Conv2d | 1×32×32×32 | 1428.6μs | 159.5μs | |
-| Conv2d | 1×64×64×64 | 20696.0μs | 898.3μs | |
+| Conv2d | 1×32×32×32 | 940.0μs | 230.0μs | |
+| Conv2d | 1×64×64×64 | 12400.0μs | 1170.0μs | |
 | Sum | 1000×1000 | 184.8μs | 22.5μs | |
 | Mean | 1000×1000 | 223.7μs | 22.0μs | |
 | Max | 1000×1000 | 206.9μs | 283.5μs | ✅ faster |
@@ -53,6 +53,11 @@ Note: Performance varies by hardware and tensor size. Best results require AVX2/
 - Lowered parallelization threshold from 512 to 4096 elements
 - Improved parallel chunking strategy for element-wise operations
 - Added FMA (Fused Multiply-Add) support for linear layers
+- **Conv2d optimizations**:
+  - Inlined im2col operation to avoid intermediate tensor creation
+  - Added GEMM-based matrix multiplication for 3x3 convolutions
+  - Lowered GEMM threshold to 16 for better utilization
+  - Removed unnecessary data copies in convolution paths
 
 ### New Fused Operations
 
