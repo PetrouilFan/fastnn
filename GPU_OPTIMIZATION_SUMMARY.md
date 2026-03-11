@@ -56,13 +56,14 @@
 
 | Operation | CPU Time | GPU Time | Speedup |
 |-----------|----------|----------|---------|
-| Add 1000x1000 | 0.66ms | 0.58ms | **1.14x faster** |
-| Relu 1000x1000 | 3.05ms | 1.60ms | **1.9x faster** |
-| GELU 1000x1000 | 3.35ms | 1.74ms | **1.9x faster** |
-| Sigmoid 1000x1000 | 3.62ms | 1.61ms | **2.2x faster** |
-| Tanh 1000x1000 | 3.58ms | 1.52ms | **2.4x faster** |
-| Exp 1000x1000 | 3.35ms | 1.53ms | **2.2x faster** |
-| Sqrt 1000x1000 | 3.26ms | 1.51ms | **2.2x faster** |
+| Matmul | 1172.68ms | 17.23ms | **68x faster** |
+| Add | 1.90ms | 1.21ms | **1.6x faster** |
+| Sigmoid | 3.39ms | 2.37ms | **1.4x faster** |
+| Tanh | 3.50ms | 2.45ms | **1.4x faster** |
+| GELU | 3.73ms | 2.68ms | **1.4x faster** |
+| Exp | 3.18ms | 2.41ms | **1.3x faster** |
+| Sqrt | 2.69ms | 2.41ms | **1.1x faster** |
+| Relu | 2.67ms | 2.54ms | **1.1x faster** |
 
 ### How It Works Now
 
@@ -79,25 +80,24 @@
 
 ## Remaining Issues
 
-### 1. Matmul Kernel Hangs
-- The GPU matmul operation appears to hang
-- Need to investigate and fix the matmul WGSL shader
-
-### 2. Initial Transfer Overhead
+### 1. Initial Transfer Overhead
 - First GPU operation still has CPU→GPU transfer cost
 - For 1000x1000 tensors: ~12ms first add, 0.58ms subsequent
 - This is amortized over many operations
 
+### 2. Small Tensor Overhead
+- For very small tensors (e.g., 10x10), CPU is faster due to GPU launch overhead
+- GPU wins for larger tensors
+
 ### 3. Not All Operations Optimized
-- Only basic operations (add, sub, mul, relu, gelu, etc.) are GPU-accelerated
+- Only basic operations (add, sub, mul, matmul, relu, gelu, etc.) are GPU-accelerated
 - Other operations fall back to CPU
 
 ## Next Steps
 
-1. **Debug matmul kernel** - Fix the hanging issue
-2. **Optimize matmul** - Add shared memory and tiling for better performance
-3. **Add more GPU operations** - transpose, reshape, etc.
-4. **Model integration** - Test end-to-end model inference on GPU:
+1. **Optimize matmul** - Add shared memory and tiling for even better performance
+2. **Add more GPU operations** - transpose, reshape, softmax, etc.
+3. **Model integration** - Test end-to-end model inference on GPU:
 ```python
 model = fnn.models.MLP(...)
 model.to("gpu")  # Move all parameters to GPU
