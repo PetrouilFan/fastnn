@@ -651,7 +651,7 @@ impl Tensor {
         self.inner.id()
     }
 
-    pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
+    pub fn zeros(shape: Vec<i64>, dtype: DType, _device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let numel: i64 = sizes.iter().product();
         let nbytes = (numel * dtype.size() as i64) as usize;
