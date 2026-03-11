@@ -79,6 +79,42 @@ Note: Performance varies by hardware and tensor size. Best results require AVX2/
   - Lowered GEMM threshold to 16 for better utilization
   - Removed unnecessary data copies in convolution paths
 
+## GPU Support (wgpu)
+
+fastnn now supports GPU acceleration via wgpu! This provides cross-platform GPU support (Windows, Linux, macOS, WebGPU).
+
+### Supported Operations
+
+- **Element-wise**: add, sub, mul, div, neg, abs, exp, log, sqrt
+- **Activations**: ReLU, GELU, Sigmoid, Tanh, SiLU
+- **Fused ops**: fused_add_relu
+- **MatMul**: GPU-accelerated matrix multiplication
+
+### Usage
+
+```python
+import fastnn as fnn
+
+# Create GPU tensor
+x = fnn.tensor([[1.0, 2.0], [3.0, 4.0]], device="gpu")
+
+# Operations automatically dispatch to GPU
+y = x @ x.T  # MatMul on GPU
+z = y.relu()  # ReLU on GPU
+```
+
+### Requirements
+
+- GPU with Vulkan, Metal, or DirectX12 support
+- See wgpu requirements for your platform
+
+### Performance
+
+GPU benchmarks coming soon! Expected speedups:
+- **MatMul**: 10-50x faster than CPU
+- **Conv2d**: 10-30x faster than CPU
+- **Element-wise ops**: 2-5x faster (memory bandwidth bound)
+
 ### New Fused Operations
 
 ```python
