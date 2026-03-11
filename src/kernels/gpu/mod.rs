@@ -1,4 +1,4 @@
-use crate::storage::{DType, Device as TensorDevice, Storage};
+use crate::storage::{CpuStorage, DType, Device as TensorDevice, GpuStorage, Storage};
 use crate::tensor::Tensor;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -34,6 +34,8 @@ pub struct GpuContext {
     shader_modules: RwLock<HashMap<String, ShaderModule>>,
     pipelines: RwLock<HashMap<String, ComputePipeline>>,
     buffer_id_counter: AtomicUsize,
+    // Buffer pool for reusing GPU buffers by size
+    buffer_pool: RwLock<HashMap<usize, Vec<wgpu::Buffer>>>,
 }
 
 impl Clone for GpuContext {
@@ -45,6 +47,7 @@ impl Clone for GpuContext {
             shader_modules: RwLock::new(HashMap::new()),
             pipelines: RwLock::new(HashMap::new()),
             buffer_id_counter: AtomicUsize::new(0),
+            buffer_pool: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -77,6 +80,70 @@ impl GpuContext {
             shader_modules: RwLock::new(HashMap::new()),
             pipelines: RwLock::new(HashMap::new()),
             buffer_id_counter: AtomicUsize::new(0),
+            buffer_pool: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Acquire a buffer - create a new one (simplified for now)
+    pub fn acquire_buffer(&self, size: usize) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pooled_buffer"),
+            size: size as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Return a buffer to the pool for reuse
+    pub fn release_buffer(&self, _buffer: wgpu::Buffer, _size: usize) {
+        // Simplified: don't pool for now
+    }
+
+    /// Get or create a buffer from CPU data
+    pub fn get_or_create_gpu_buffer(&self, cpu_data: &[f32], label: &str) -> wgpu::Buffer {
+        let size = cpu_data.len() * std::mem::size_of::<f32>();
+        let buffer = self.acquire_buffer(size);
+
+        // Write data to buffer
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{}_staging", label)),
+            size: size as u64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
+        });
+
+        {
+            let mut range = staging.slice(..).get_mapped_range_mut();
+            range.copy_from_slice(bytemuck::cast_slice(cpu_data));
+        }
+
+        staging.unmap();
+
+        // Copy to actual buffer
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some(&format!("{}_copy", label)),
+            });
+        encoder.copy_buffer_to_buffer(&staging, 0, &buffer, 0, size as u64);
+        self.queue.submit(Some(encoder.finish()));
+
+        buffer
+    }
+
+    /// Create GPU buffer from CPU data (like create_buffer_from_data)
+    pub fn create_gpu_buffer_from_data(&self, data: &[f32], label: &str) -> GpuBuffer {
+        let size = data.len() * std::mem::size_of::<f32>();
+        let buffer = self.get_or_create_gpu_buffer(data, label);
+
+        let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
+        GpuBuffer {
+            id,
+            buffer: Arc::new(buffer),
+            size,
+            device_id: self.device_id,
         }
     }
 
@@ -93,7 +160,7 @@ impl GpuContext {
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
         GpuBuffer {
             id,
-            buffer,
+            buffer: Arc::new(buffer),
             size,
             device_id: self.device_id,
         }
@@ -119,7 +186,7 @@ impl GpuContext {
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
         GpuBuffer {
             id,
-            buffer,
+            buffer: Arc::new(buffer),
             size,
             device_id: self.device_id,
         }
@@ -145,14 +212,17 @@ impl GpuContext {
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
         GpuBuffer {
             id,
-            buffer,
+            buffer: Arc::new(buffer),
             size,
             device_id: self.device_id,
         }
     }
 
     pub fn read_buffer(&self, buffer: &GpuBuffer) -> Vec<f32> {
-        let size = buffer.size;
+        self.read_buffer_from_arc(&buffer.buffer, buffer.size)
+    }
+
+    pub fn read_buffer_from_arc(&self, buffer: &Arc<Buffer>, size: usize) -> Vec<f32> {
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging"),
             size: size as u64,
@@ -165,7 +235,7 @@ impl GpuContext {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("read_buffer"),
             });
-        encoder.copy_buffer_to_buffer(&buffer.buffer, 0, &staging, 0, size as u64);
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size as u64);
         self.queue.submit([encoder.finish()]);
 
         let slice = staging.slice(..);
@@ -228,7 +298,7 @@ impl GpuContext {
 #[derive(Clone)]
 pub struct GpuBuffer {
     pub id: usize,
-    pub buffer: Buffer,
+    pub buffer: Arc<Buffer>,
     pub size: usize,
     pub device_id: usize,
 }
@@ -470,9 +540,12 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
     let ctx = get_context(device_id);
     let shape = input.shape().to_vec();
     let numel = shape.iter().product::<i64>() as usize;
-    let input_data = get_tensor_data(input);
+    let input_buffer = input.inner.gpu_buffer().unwrap_or_else(|| {
+        // Input is on CPU, need to copy to GPU
+        let input_data = get_tensor_data(input);
+        ctx.create_gpu_buffer_from_data(&input_data, "input").buffer
+    });
 
-    let gpu_input = ctx.create_buffer_from_data(&input_data, "input");
     let gpu_output = ctx.create_buffer(numel * 4, "output");
 
     let pipeline = ctx.create_pipeline(name, shader);
@@ -483,7 +556,7 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: gpu_input.buffer.as_entire_binding(),
+                resource: input_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -507,19 +580,35 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
 
-    let output_data = ctx.read_buffer(&gpu_output);
-    create_output_tensor(output_data, shape, TensorDevice::Wgpu(device_id))
+    // Create tensor with GPU storage (no CPU copy!)
+    let storage = Arc::new(Storage::Wgpu(GpuStorage {
+        buffer: gpu_output.buffer,
+        nbytes: numel * 4,
+        device_id,
+        staging: RwLock::new(None),
+    }));
+    Tensor::new(crate::tensor::TensorImpl::new(
+        storage,
+        shape.iter().copied().collect(),
+    ))
 }
 
 fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id: usize) -> Tensor {
     let ctx = get_context(device_id);
     let shape = a.shape().to_vec();
     let numel = shape.iter().product::<i64>() as usize;
-    let a_data = get_tensor_data(a);
-    let b_data = get_tensor_data(b);
 
-    let gpu_a = ctx.create_buffer_from_data(&a_data, "a");
-    let gpu_b = ctx.create_buffer_from_data(&b_data, "b");
+    // Get or create GPU buffers - avoid copying if already on GPU
+    let a_buffer = a.inner.gpu_buffer().unwrap_or_else(|| {
+        let a_data = get_tensor_data(a);
+        ctx.create_gpu_buffer_from_data(&a_data, "a").buffer
+    });
+
+    let b_buffer = b.inner.gpu_buffer().unwrap_or_else(|| {
+        let b_data = get_tensor_data(b);
+        ctx.create_gpu_buffer_from_data(&b_data, "b").buffer
+    });
+
     let gpu_output = ctx.create_buffer(numel * 4, "output");
 
     let pipeline = ctx.create_pipeline(name, shader);
@@ -530,11 +619,11 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: gpu_a.buffer.as_entire_binding(),
+                resource: a_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: gpu_b.buffer.as_entire_binding(),
+                resource: b_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -558,8 +647,17 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
 
-    let output_data = ctx.read_buffer(&gpu_output);
-    create_output_tensor(output_data, shape, TensorDevice::Wgpu(device_id))
+    // Create tensor with GPU storage (no CPU copy!)
+    let storage = Arc::new(Storage::Wgpu(GpuStorage {
+        buffer: gpu_output.buffer,
+        nbytes: numel * 4,
+        device_id,
+        staging: RwLock::new(None),
+    }));
+    Tensor::new(crate::tensor::TensorImpl::new(
+        storage,
+        shape.iter().copied().collect(),
+    ))
 }
 
 pub fn gpu_add(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
@@ -637,9 +735,6 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
     let k = a_shape[a_shape.len() - 1] as usize;
     let n = b_shape[b_shape.len() - 1] as usize;
 
-    let a_data = get_tensor_data(a);
-    let b_data = get_tensor_data(b);
-
     let mut output_shape: Vec<i64> = vec![];
     if a_shape.len() > 2 {
         for i in 0..a_shape.len() - 2 {
@@ -649,8 +744,17 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
     output_shape.push(m as i64);
     output_shape.push(n as i64);
 
-    let gpu_a = ctx.create_buffer_from_data(&a_data, "matmul_a");
-    let gpu_b = ctx.create_buffer_from_data(&b_data, "matmul_b");
+    // Get or create GPU buffers - avoid copying if already on GPU
+    let a_buffer = a.inner.gpu_buffer().unwrap_or_else(|| {
+        let a_data = get_tensor_data(a);
+        ctx.create_gpu_buffer_from_data(&a_data, "matmul_a").buffer
+    });
+
+    let b_buffer = b.inner.gpu_buffer().unwrap_or_else(|| {
+        let b_data = get_tensor_data(b);
+        ctx.create_gpu_buffer_from_data(&b_data, "matmul_b").buffer
+    });
+
     let gpu_out = ctx.create_buffer(m * n * 4, "matmul_output");
 
     let params_data_f32: Vec<f32> = vec![m as f32, n as f32, k as f32, 0.0];
@@ -664,11 +768,11 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: gpu_a.buffer.as_entire_binding(),
+                resource: a_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: gpu_b.buffer.as_entire_binding(),
+                resource: b_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -700,10 +804,15 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
 
-    let output_data = ctx.read_buffer(&gpu_out);
-    vec![create_output_tensor(
-        output_data,
-        output_shape,
-        TensorDevice::Wgpu(device_id),
-    )]
+    // Create tensor with GPU storage (no CPU copy!)
+    let storage = Arc::new(Storage::Wgpu(GpuStorage {
+        buffer: gpu_out.buffer,
+        nbytes: m * n * 4,
+        device_id,
+        staging: RwLock::new(None),
+    }));
+    vec![Tensor::new(crate::tensor::TensorImpl::new(
+        storage,
+        output_shape.iter().copied().collect(),
+    ))]
 }

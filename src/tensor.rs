@@ -1,6 +1,7 @@
 use crate::autograd::{self, AutogradMeta};
 use crate::dispatcher::{device_to_dispatch_key, dispatch};
-use crate::storage::{DType, Device, Storage};
+use crate::storage::{CpuStorage, DType, Device, GpuStorage, Storage};
+use parking_lot::RwLock;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use std::ops::{Add, Div, Mul, Neg, Sub};
@@ -20,8 +21,32 @@ pub struct TensorImpl {
 
 impl TensorImpl {
     pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>) -> Self {
-        let dtype = storage.dtype;
-        let device = storage.device;
+        let dtype = DType::F32; // Default dtype for now
+        let device = storage.device(); // Get device from storage
+        let numel: i64 = sizes.iter().product();
+        let _nbytes = (numel * dtype.size() as i64) as usize;
+
+        let strides = compute_strides(&sizes);
+
+        TensorImpl {
+            storage,
+            sizes,
+            strides,
+            storage_offset: 0,
+            dtype,
+            device,
+            version_counter: Arc::new(AtomicU64::new(0)),
+            autograd_meta: None,
+        }
+    }
+
+    /// Create TensorImpl with specific device (ignoring storage device)
+    pub fn new_with_device(
+        storage: Arc<Storage>,
+        sizes: SmallVec<[i64; 8]>,
+        device: Device,
+    ) -> Self {
+        let dtype = DType::F32; // Default dtype for now
         let numel: i64 = sizes.iter().product();
         let _nbytes = (numel * dtype.size() as i64) as usize;
 
@@ -437,32 +462,87 @@ impl TensorImpl {
     }
 
     pub fn data_ptr(&self) -> *const u8 {
-        self.storage.data.as_ptr()
+        match &self.storage.as_ref() {
+            Storage::Cpu(cpu) => cpu.data.as_ptr(),
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+            }
+        }
     }
 
     pub fn data_ptr_f32(&self) -> *const f32 {
-        let ptr = self.storage.data.as_ptr() as *const f32;
-        unsafe { ptr.add(self.storage_offset as usize) }
+        match &self.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let ptr = cpu.data.as_ptr() as *const f32;
+                unsafe { ptr.add(self.storage_offset as usize) }
+            }
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+            }
+        }
     }
 
     pub fn data_ptr_f32_mut(&self) -> *mut f32 {
-        let ptr = self.storage.data.as_ptr() as *mut f32;
-        unsafe { ptr.add(self.storage_offset as usize) }
+        match &self.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let ptr = cpu.data.as_ptr() as *mut f32;
+                unsafe { ptr.add(self.storage_offset as usize) }
+            }
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+            }
+        }
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
-        unsafe {
-            let ptr = self.data_ptr_f32();
-            let numel = self.numel() as usize;
-            std::slice::from_raw_parts(ptr, numel)
+        match &self.storage.as_ref() {
+            Storage::Cpu(cpu) => unsafe {
+                let ptr = cpu.data.as_ptr() as *const f32;
+                let numel = self.numel() as usize;
+                std::slice::from_raw_parts(ptr, numel)
+            },
+            Storage::Wgpu(_) => {
+                panic!("Cannot slice GPU storage. Use .to_cpu() first.");
+            }
         }
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        unsafe {
-            let ptr = self.data_ptr_f32_mut();
-            let numel = self.numel() as usize;
-            std::slice::from_raw_parts_mut(ptr, numel)
+        match &self.storage.as_ref() {
+            Storage::Cpu(cpu) => unsafe {
+                let ptr = cpu.data.as_ptr() as *mut f32;
+                let numel = self.numel() as usize;
+                std::slice::from_raw_parts_mut(ptr, numel)
+            },
+            Storage::Wgpu(_) => {
+                panic!("Cannot slice GPU storage. Use .to_cpu() first.");
+            }
+        }
+    }
+
+    /// Check if storage is on GPU
+    pub fn is_gpu(&self) -> bool {
+        matches!(self.storage.as_ref(), Storage::Wgpu(_))
+    }
+
+    /// Check if storage is on CPU
+    pub fn is_cpu(&self) -> bool {
+        matches!(self.storage.as_ref(), Storage::Cpu(_))
+    }
+
+    /// Get GPU buffer reference if on GPU
+    pub fn gpu_buffer(&self) -> Option<Arc<wgpu::Buffer>> {
+        match self.storage.as_ref() {
+            Storage::Wgpu(gpu) => Some(gpu.buffer.clone()),
+            _ => None,
+        }
+    }
+
+    /// Get CPU data if available
+    pub fn cpu_data(&self) -> Option<&[u8]> {
+        match self.storage.as_ref() {
+            Storage::Cpu(cpu) => Some(&cpu.data),
+            _ => None,
         }
     }
 }
@@ -509,9 +589,12 @@ impl Tensor {
     }
 
     pub fn from_scalar(value: f32) -> Self {
-        let mut storage = Arc::new(Storage::new(DType::F32, Device::Cpu, 4));
+        let mut storage = Arc::new(Storage::new_cpu(DType::F32, 4));
         let storage_mut = Arc::make_mut(&mut storage);
-        let data = storage_mut.data.as_mut_ptr() as *mut f32;
+        let Storage::Cpu(cpu_storage) = storage_mut else {
+            panic!("Expected CPU storage");
+        };
+        let data = cpu_storage.data.as_mut_ptr() as *mut f32;
         unsafe {
             *data = value;
         }
@@ -527,15 +610,17 @@ impl Tensor {
 
     pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let storage = Arc::new(Storage::from_vec(values, DType::F32, device));
-        Tensor::new(TensorImpl::new(storage, sizes))
+        // Create CPU storage first (GPU buffer creation requires GpuContext)
+        let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
+        // Create tensor with requested device (not storage device)
+        Tensor::new(TensorImpl::new_with_device(storage, sizes, device))
     }
 
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let numel: i64 = sizes.iter().product();
         let nbytes = (numel * dtype.size() as i64) as usize;
-        let storage = Arc::new(Storage::new(dtype, device, nbytes));
+        let storage = Arc::new(Storage::new_cpu(dtype, nbytes));
         Tensor::new(TensorImpl::new(storage, sizes))
     }
 
@@ -544,7 +629,10 @@ impl Tensor {
         let numel = t.inner.numel() as usize;
         let inner = Arc::make_mut(&mut t.inner);
         let storage = Arc::make_mut(&mut inner.storage);
-        let ptr = storage.data.as_mut_ptr();
+        let Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage for ones()");
+        };
+        let ptr = cpu_storage.data.as_mut_ptr();
         match dtype {
             DType::F32 => {
                 let f32_ptr = ptr as *mut f32;
@@ -580,7 +668,10 @@ impl Tensor {
         let numel = t.inner.numel() as usize;
         let inner = Arc::make_mut(&mut t.inner);
         let storage = Arc::make_mut(&mut inner.storage);
-        let ptr = storage.data.as_mut_ptr();
+        let Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage for full()");
+        };
+        let ptr = cpu_storage.data.as_mut_ptr();
 
         match dtype {
             DType::F32 => {
@@ -721,7 +812,12 @@ impl Tensor {
             panic!("item() can only be called on tensors with one element");
         }
 
-        let ptr = self.inner.storage.data.as_ptr();
+        let ptr = match self.inner.storage.as_ref() {
+            Storage::Cpu(cpu) => cpu.data.as_ptr(),
+            Storage::Wgpu(_) => {
+                panic!("Cannot call item() on GPU tensor. Use .cpu() first.");
+            }
+        };
         match self.inner.dtype {
             DType::F32 => {
                 let f32_ptr = ptr as *const f32;
@@ -745,32 +841,39 @@ impl Tensor {
 
     pub fn to_numpy(&self) -> Vec<f32> {
         let numel = self.inner.numel() as usize;
-        let ptr = self.inner.storage.data.as_ptr();
 
-        match self.inner.dtype {
-            DType::F32 => {
-                let f32_ptr = ptr as *const f32;
-                (0..numel).map(|i| unsafe { *f32_ptr.add(i) }).collect()
+        match &self.inner.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let ptr = cpu.data.as_ptr();
+                match self.inner.dtype {
+                    DType::F32 => {
+                        let f32_ptr = ptr as *const f32;
+                        (0..numel).map(|i| unsafe { *f32_ptr.add(i) }).collect()
+                    }
+                    DType::F64 => {
+                        let f64_ptr = ptr as *const f64;
+                        (0..numel)
+                            .map(|i| unsafe { *f64_ptr.add(i) as f32 })
+                            .collect()
+                    }
+                    DType::I32 => {
+                        let i32_ptr = ptr as *const i32;
+                        (0..numel)
+                            .map(|i| unsafe { *i32_ptr.add(i) as f32 })
+                            .collect()
+                    }
+                    DType::I64 => {
+                        let i64_ptr = ptr as *const i64;
+                        (0..numel)
+                            .map(|i| unsafe { *i64_ptr.add(i) as f32 })
+                            .collect()
+                    }
+                    _ => panic!("Unsupported dtype for to_numpy"),
+                }
             }
-            DType::F64 => {
-                let f64_ptr = ptr as *const f64;
-                (0..numel)
-                    .map(|i| unsafe { *f64_ptr.add(i) as f32 })
-                    .collect()
+            Storage::Wgpu(_) => {
+                panic!("Cannot convert GPU tensor to numpy directly. Use .cpu() first.");
             }
-            DType::I32 => {
-                let i32_ptr = ptr as *const i32;
-                (0..numel)
-                    .map(|i| unsafe { *i32_ptr.add(i) as f32 })
-                    .collect()
-            }
-            DType::I64 => {
-                let i64_ptr = ptr as *const i64;
-                (0..numel)
-                    .map(|i| unsafe { *i64_ptr.add(i) as f32 })
-                    .collect()
-            }
-            _ => panic!("Unsupported dtype for to_numpy"),
         }
     }
 
@@ -800,6 +903,70 @@ impl Tensor {
 
     pub fn version(&self) -> u64 {
         self.inner.version()
+    }
+
+    /// Move tensor to CPU memory
+    pub fn to_cpu(&self) -> Tensor {
+        match self.inner.storage.as_ref() {
+            Storage::Cpu(_) => self.clone(),
+            Storage::Wgpu(gpu) => {
+                // Read GPU buffer to CPU
+                use crate::kernels::gpu::get_context;
+                let ctx = get_context(gpu.device_id);
+                let data = ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
+                let storage = Arc::new(Storage::Cpu(CpuStorage {
+                    data: bytemuck::cast_slice(&data).to_vec(),
+                    nbytes: gpu.nbytes,
+                }));
+                Tensor::new(TensorImpl {
+                    storage,
+                    sizes: self.inner.sizes.clone(),
+                    strides: self.inner.strides.clone(),
+                    storage_offset: self.inner.storage_offset,
+                    dtype: self.inner.dtype,
+                    device: Device::Cpu,
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: None,
+                })
+            }
+        }
+    }
+
+    /// Move tensor to GPU memory
+    pub fn to_gpu(&self, device_id: usize) -> Tensor {
+        match self.inner.storage.as_ref() {
+            Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),
+            _ => {
+                // Get CPU data
+                let cpu_data = self.as_f32_slice().to_vec();
+                let shape = self.shape();
+                let dtype = self.inner.dtype;
+
+                // Create GPU tensor
+                use crate::kernels::gpu::get_context;
+                let ctx = get_context(device_id);
+                let buffer = ctx.create_gpu_buffer_from_data(&cpu_data, "to_gpu");
+
+                let storage = Arc::new(Storage::Wgpu(GpuStorage {
+                    buffer: buffer.buffer,
+                    nbytes: cpu_data.len() * 4,
+                    device_id,
+                    staging: RwLock::new(None),
+                }));
+
+                let sizes: SmallVec<[i64; 8]> = shape.iter().copied().collect();
+                Tensor::new(TensorImpl {
+                    storage,
+                    sizes,
+                    strides: self.inner.strides.clone(),
+                    storage_offset: self.inner.storage_offset,
+                    dtype,
+                    device: Device::Wgpu(device_id),
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: None,
+                })
+            }
+        }
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
