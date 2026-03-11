@@ -1,5 +1,5 @@
 use crate::autograd::{self, AutogradMeta};
-use crate::dispatcher::{dispatch, DispatchKey};
+use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
 use crate::storage::{DType, Device, Storage};
 use smallvec::smallvec;
 use smallvec::SmallVec;
@@ -797,7 +797,8 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
-        let result = dispatch("add", DispatchKey::Cpu, &[self, other]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("add", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
             let backward = autograd::AddBackward::new(vec![self.clone(), other.clone()]);
@@ -812,7 +813,8 @@ impl Tensor {
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
-        let result = dispatch("sub", DispatchKey::Cpu, &[self, other]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("sub", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
             let backward = autograd::SubBackward::new(vec![self.clone(), other.clone()]);
@@ -827,7 +829,8 @@ impl Tensor {
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
-        let result = dispatch("mul", DispatchKey::Cpu, &[self, other]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("mul", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
             let backward = autograd::MulBackward::new(vec![self.clone(), other.clone()]);
@@ -842,7 +845,8 @@ impl Tensor {
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
-        let result = dispatch("div", DispatchKey::Cpu, &[self, other]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("div", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
             let backward = autograd::DivBackward::new(vec![self.clone(), other.clone()]);
@@ -857,7 +861,8 @@ impl Tensor {
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
-        let result = dispatch("matmul", DispatchKey::Cpu, &[self, other]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("matmul", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
             let backward = autograd::MatmulBackward::new(self.clone(), other.clone());
@@ -872,12 +877,14 @@ impl Tensor {
     }
 
     pub fn neg(&self) -> Tensor {
-        let result = dispatch("neg", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("neg", dispatch_key, &[self]);
         result[0].clone()
     }
 
     pub fn relu(&self) -> Tensor {
-        let result = dispatch("relu", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("relu", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::ReluBackward::new(self.clone());
@@ -892,17 +899,20 @@ impl Tensor {
     }
 
     pub fn exp(&self) -> Tensor {
-        let result = dispatch("exp", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("exp", dispatch_key, &[self]);
         result[0].clone()
     }
 
     pub fn ln(&self) -> Tensor {
-        let result = dispatch("log", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("log", dispatch_key, &[self]);
         result[0].clone()
     }
 
     pub fn sigmoid(&self) -> Tensor {
-        let result = dispatch("sigmoid", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("sigmoid", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::SigmoidBackward::new(self.clone());
@@ -917,7 +927,8 @@ impl Tensor {
     }
 
     pub fn tanh(&self) -> Tensor {
-        let result = dispatch("tanh", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("tanh", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::TanhBackward::new(self.clone());
@@ -932,7 +943,8 @@ impl Tensor {
     }
 
     pub fn silu(&self) -> Tensor {
-        let result = dispatch("silu", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("silu", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::SiLUBackward::new(self.clone());
@@ -947,7 +959,8 @@ impl Tensor {
     }
 
     pub fn gelu(&self) -> Tensor {
-        let result = dispatch("gelu", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("gelu", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
             let backward = autograd::GeluBackward::new(self.clone());
@@ -962,14 +975,16 @@ impl Tensor {
     }
 
     pub fn sqrt(&self) -> Tensor {
-        let result = dispatch("sqrt", DispatchKey::Cpu, &[self]);
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("sqrt", dispatch_key, &[self]);
         result[0].clone()
     }
 
     pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch(
             "clamp",
-            DispatchKey::Cpu,
+            dispatch_key,
             &[
                 self,
                 &Tensor::from_scalar(min_val),
@@ -980,18 +995,16 @@ impl Tensor {
     }
 
     pub fn pow(&self, exponent: f32) -> Tensor {
-        let result = dispatch(
-            "pow",
-            DispatchKey::Cpu,
-            &[self, &Tensor::from_scalar(exponent)],
-        );
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("pow", dispatch_key, &[self, &Tensor::from_scalar(exponent)]);
         result[0].clone()
     }
 
     pub fn sum(&self, dim: i32, keepdim: bool) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch(
             "sum",
-            DispatchKey::Cpu,
+            dispatch_key,
             &[
                 self,
                 &Tensor::from_scalar(dim as f32),
@@ -1012,9 +1025,10 @@ impl Tensor {
     }
 
     pub fn max(&self, dim: i32, keepdim: bool) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch(
             "max",
-            DispatchKey::Cpu,
+            dispatch_key,
             &[
                 self,
                 &Tensor::from_scalar(dim as f32),
@@ -1025,9 +1039,10 @@ impl Tensor {
     }
 
     pub fn mean(&self, dim: i32, keepdim: bool) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch(
             "mean",
-            DispatchKey::Cpu,
+            dispatch_key,
             &[
                 self,
                 &Tensor::from_scalar(dim as f32),

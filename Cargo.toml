@@ -23,7 +23,9 @@ rand          = "0.8"
 matrixmultiply = "0.3"
 mimalloc      = "0.1"
 wide         = "0.7"
-openblas-src  = { version = "0.10", optional = true }
+wgpu         = "24"
+pollster     = "0.4"
+openblas-src = { version = "0.10", optional = true }
 
 [features]
 default = ["simd", "parallel", "simd_avx512"]
