@@ -17,6 +17,8 @@ A Python deep learning library with a Rust core, inspired by NVLabs/vibetensor a
 
 Benchmark comparisons with PyTorch (mean time in μs, lower is better):
 
+### x86 (Intel/AMD)
+
 | Operation | Size | fastnn | PyTorch | Status |
 |-----------|------|--------|---------|--------|
 | ReLU | 100×100 | 104.3μs | 5.3μs | |
@@ -44,6 +46,24 @@ Benchmark comparisons with PyTorch (mean time in μs, lower is better):
 | Sum | 1000×1000 | 184.8μs | 22.5μs | |
 | Mean | 1000×1000 | 223.7μs | 22.0μs | |
 | Max | 1000×1000 | 206.9μs | 283.5μs | ✅ faster |
+
+### ARM (Raspberry Pi 5)
+
+| Operation | Size | fastnn | PyTorch | Status |
+|-----------|------|--------|---------|--------|
+| Mul | 100×100 | 8.3μs | 5.4μs | |
+| Add | 100×100 | 8.2μs | 6.0μs | |
+| ReLU | 100×100 | 14.8μs | 9.5μs | |
+| FusedAddReLU | 100×100 | 7.9μs | 15.2μs | ✅ faster |
+| Sigmoid | 100×100 | 32.9μs | 45.4μs | ✅ faster |
+| Tanh | 100×100 | 47.0μs | 66.2μs | ✅ faster |
+| GELU | 100×100 | 56.8μs | 38.4μs | |
+| MatMul | 128×256×128 | 301μs | 92μs | |
+| Linear | 32×256×512 | 3,735μs | 250μs | |
+| Conv2d | 1×32×32×32 | 5,439μs | 641μs | |
+| Max | 1000×1000 | 518μs | 644μs | ✅ faster |
+| Sum | 1000×1000 | 526μs | 429μs | |
+| Mean | 1000×1000 | 517μs | 389μs | |
 
 Note: Performance varies by hardware and tensor size. Best results require AVX2/AVX512 support.
 
@@ -73,8 +93,35 @@ output = fnn.fused_linear_gelu(x, weight, bias)
 
 ## Installation
 
+### Prerequisites
+
+- **Rust** (nightly) - Required for building the Rust core
+- **Python 3.12+** with uv package manager
+- **PyTorch** - Required for benchmark comparisons
+
+### Install Rust (nightly)
+
 ```bash
-make install
+# Install rustup if not already installed
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Install and set nightly as default
+source $HOME/.cargo/env
+rustup install nightly
+rustup default nightly
+```
+
+### Install fastnn
+
+```bash
+uv sync --all-extras
+uv run maturin develop --release
+```
+
+### Build only (without installing)
+
+```bash
+uv run maturin build --release
 ```
 
 ## Quick Start
@@ -103,14 +150,14 @@ trainer.fit(loader, epochs=100)
 
 ```bash
 # Build
-make build
+uv run maturin build --release
 
 # Test
-make test
+uv run pytest tests/ -v
 
 # Benchmark
-make bench
+uv run pytest tests/ -v --benchmark-only
 
 # Clean
-make clean
+cargo clean
 ```
