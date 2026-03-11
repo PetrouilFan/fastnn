@@ -16,9 +16,29 @@ use optim::Optimizer;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 use rand::Rng;
-use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
 use tensor::{Tensor, TensorImpl};
+
+// Thread-local default device storage
+static DEFAULT_DEVICE: OnceLock<RwLock<Device>> = OnceLock::new();
+
+fn get_default_device() -> Device {
+    let guard = DEFAULT_DEVICE
+        .get_or_init(|| RwLock::new(Device::Cpu))
+        .read()
+        .unwrap();
+    *guard
+}
+
+fn set_default_device_internal(device: Device) {
+    let mut guard = DEFAULT_DEVICE
+        .get_or_init(|| RwLock::new(Device::Cpu))
+        .write()
+        .unwrap();
+    *guard = device;
+}
 
 #[pyclass(from_py_object)]
 #[derive(Clone)]
@@ -183,14 +203,21 @@ impl PyTensor {
 }
 
 #[pyfunction]
-#[pyo3(signature = (data, shape))]
+#[pyo3(signature = (data, shape, device = None))]
 fn tensor_from_data<'py>(
     data: &Bound<'py, PyAny>,
     shape: &Bound<'py, PyAny>,
+    device: Option<String>,
 ) -> PyResult<PyTensor> {
     let data: Vec<f32> = data.extract()?;
     let shape: Vec<i64> = shape.extract()?;
-    Ok(PyTensor::from_tensor(Tensor::from_vec(data, shape)))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
+        data, shape, device,
+    )))
 }
 
 #[pyfunction]
@@ -204,65 +231,99 @@ fn tensor_from_list(data: Vec<f32>, shape: Vec<i64>) -> PyTensor {
 }
 
 #[pyfunction]
-#[pyo3(signature = (shape, dtype = None, _device = None))]
-fn zeros(shape: Vec<i64>, dtype: Option<String>, _device: Option<String>) -> PyTensor {
+#[pyo3(signature = (shape, dtype = None, device = None))]
+fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
         .and_then(|s| DType::from_str(&s))
         .unwrap_or(DType::F32);
-    PyTensor::from_tensor(Tensor::zeros(shape, dtype, Device::Cpu))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::zeros(shape, dtype, device))
 }
 
 #[pyfunction]
-#[pyo3(signature = (shape, dtype = None, _device = None))]
-fn ones(shape: Vec<i64>, dtype: Option<String>, _device: Option<String>) -> PyTensor {
+#[pyo3(signature = (shape, dtype = None, device = None))]
+fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
         .and_then(|s| DType::from_str(&s))
         .unwrap_or(DType::F32);
-    PyTensor::from_tensor(Tensor::ones(shape, dtype, Device::Cpu))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::ones(shape, dtype, device))
 }
 
 #[pyfunction]
-#[pyo3(signature = (shape, value, dtype = None, _device = None))]
-fn full(shape: Vec<i64>, value: f32, dtype: Option<String>, _device: Option<String>) -> PyTensor {
+#[pyo3(signature = (shape, value, dtype = None, device = None))]
+fn full(shape: Vec<i64>, value: f32, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
         .and_then(|s| DType::from_str(&s))
         .unwrap_or(DType::F32);
-    PyTensor::from_tensor(Tensor::full(shape, value, dtype, Device::Cpu))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::full(shape, value, dtype, device))
 }
 
 #[pyfunction]
-#[pyo3(signature = (start, end, step = None))]
-fn arange(start: f32, end: f32, step: Option<f32>) -> PyTensor {
+#[pyo3(signature = (start, end, step = None, device = None))]
+fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> PyTensor {
     let step = step.unwrap_or(1.0);
     let numel = ((end - start) / step).ceil() as usize;
     let values: Vec<f32> = (0..numel).map(|i| start + i as f32 * step).collect();
-    PyTensor::from_tensor(Tensor::from_vec(values, vec![numel as i64]))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::from_vec_with_device(
+        values,
+        vec![numel as i64],
+        device,
+    ))
 }
 
 #[pyfunction]
-fn linspace(start: f32, end: f32, steps: usize) -> PyTensor {
+#[pyo3(signature = (start, end, steps, device = None))]
+fn linspace(start: f32, end: f32, steps: usize, device: Option<String>) -> PyTensor {
     let values: Vec<f32> = (0..steps)
         .map(|i| {
             let t = i as f32 / (steps - 1) as f32;
             start * (1.0 - t) + end * t
         })
         .collect();
-    PyTensor::from_tensor(Tensor::from_vec(values, vec![steps as i64]))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::from_vec_with_device(
+        values,
+        vec![steps as i64],
+        device,
+    ))
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, m=None))]
-fn eye(n: i64, m: Option<i64>) -> PyTensor {
+#[pyo3(signature = (n, m=None, device=None))]
+fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyTensor {
     let m = m.unwrap_or(n);
     let mut values = vec![0.0f32; (n * m) as usize];
     for i in 0..n.min(m) {
         values[(i * m + i) as usize] = 1.0;
     }
-    PyTensor::from_tensor(Tensor::from_vec(values, vec![n, m]))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::from_vec_with_device(values, vec![n, m], device))
 }
 
 #[pyfunction]
-fn randn(shape: Vec<i64>) -> PyTensor {
+#[pyo3(signature = (shape, device = None))]
+fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     let numel: i64 = shape.iter().product();
     let mut values = vec![0.0f32; numel as usize];
     let mut rng = rand::thread_rng();
@@ -271,23 +332,37 @@ fn randn(shape: Vec<i64>) -> PyTensor {
         let u2: f32 = rng.gen();
         *v = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
     }
-    PyTensor::from_tensor(Tensor::from_vec(values, shape))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
 
 #[pyfunction]
-fn rand_uniform(shape: Vec<i64>) -> PyTensor {
+#[pyo3(signature = (shape, device = None))]
+fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     let numel: i64 = shape.iter().product();
     let values: Vec<f32> = (0..numel as usize).map(|_| rand::random()).collect();
-    PyTensor::from_tensor(Tensor::from_vec(values, shape))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
 
 #[pyfunction]
-fn randint(shape: Vec<i64>, low: i32, high: i32) -> PyTensor {
+#[pyo3(signature = (shape, low, high, device = None))]
+fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyTensor {
     let numel: i64 = shape.iter().product();
     let values: Vec<f32> = (0..numel as usize)
         .map(|_| (rand::random::<i32>() % (high - low) + low) as f32)
         .collect();
-    PyTensor::from_tensor(Tensor::from_vec(values, shape))
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
 
 #[pyfunction]
@@ -427,7 +502,7 @@ fn relu(a: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+    use crate::dispatcher::{device_to_dispatch_key, dispatch};
     let dispatch_key = device_to_dispatch_key(a.inner.device());
     let result = dispatch("fused_add_relu", dispatch_key, &[&a.inner, &b.inner]);
     PyTensor::from_tensor(result.into_iter().next().unwrap())
@@ -435,7 +510,7 @@ fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+    use crate::dispatcher::{device_to_dispatch_key, dispatch};
     let dispatch_key = device_to_dispatch_key(x.inner.device());
     let args: Vec<_> = match bias {
         Some(b) => vec![&x.inner, &w.inner, &b.inner],
@@ -447,7 +522,7 @@ fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyT
 
 #[pyfunction]
 fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+    use crate::dispatcher::{device_to_dispatch_key, dispatch};
     let dispatch_key = device_to_dispatch_key(x.inner.device());
     let args: Vec<_> = match bias {
         Some(b) => vec![&x.inner, &w.inner, &b.inner],
@@ -686,7 +761,11 @@ fn _get_num_threads() -> usize {
 }
 
 #[pyfunction]
-fn _set_default_device(_device: String) {}
+fn _set_default_device(device: String) {
+    if let Some(device) = Device::from_str(&device) {
+        set_default_device_internal(device);
+    }
+}
 
 #[pyfunction]
 fn allocator_stats() -> String {
