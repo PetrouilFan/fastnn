@@ -12,19 +12,27 @@ def benchmark_single(op_name, device, size, iterations=5):
     if op_name == "add":
         a = fnn.rand(list(size), device=device)
         b = fnn.rand(list(size), device=device)
-        op = lambda: a + b
+
+        def op():
+            return a + b
     elif op_name == "mul":
         a = fnn.rand(list(size), device=device)
         b = fnn.rand(list(size), device=device)
-        op = lambda: a * b
+
+        def op():
+            return a * b
     elif op_name == "relu":
         a = fnn.rand(list(size), device=device)
-        op = lambda: fnn.relu(a)
+
+        def op():
+            return fnn.relu(a)
     elif op_name.startswith("matmul"):
         m, k, n = size
         a = fnn.rand([m, k], device=device)
         b = fnn.rand([k, n], device=device)
-        op = lambda: a @ b
+
+        def op():
+            return a @ b
     else:
         return None
 
