@@ -364,10 +364,10 @@ impl Node for SumBackward {
             // Output shape = input shape with dim removed
             // So we need to insert 1 at position dim to get input shape
             let mut new_shape: Vec<i64> = shape.to_vec();
-            new_shape.remove(self.dim);  // This gives us the output shape
-            // Actually wait - grad should have output shape, so we need to go from output to input
-            // Output shape = input with dim removed
-            // Input shape = output with 1 inserted at dim
+            new_shape.remove(self.dim); // This gives us the output shape
+                                        // Actually wait - grad should have output shape, so we need to go from output to input
+                                        // Output shape = input with dim removed
+                                        // Input shape = output with 1 inserted at dim
             let mut expanded_shape: Vec<i64> = grad_shape.to_vec();
             expanded_shape.insert(self.dim, 1);
             vec![Some(grad.reshape(expanded_shape))]
@@ -955,21 +955,21 @@ impl CrossEntropyBackward {
 impl Node for CrossEntropyBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let _grad = grad_outputs[0].clone().unwrap();
-        
+
         let logits = &self.logits;
         let targets = &self.targets;
         let batch_size = logits.shape()[0] as usize;
         let num_classes = logits.shape()[1] as usize;
-        
+
         let logits_data = logits.as_f32_slice();
         let targets_data = targets.as_f32_slice();
-        
+
         let mut grad_logits_data = vec![0.0f32; batch_size * num_classes];
-        
+
         for (b, target_val) in targets_data.iter().take(batch_size).enumerate() {
             let target_class = *target_val as usize;
             let base_idx = b * num_classes;
-            
+
             let mut max_logit = f32::MIN;
             for c in 0..num_classes {
                 let val = logits_data[base_idx + c];
@@ -977,16 +977,16 @@ impl Node for CrossEntropyBackward {
                     max_logit = val;
                 }
             }
-            
+
             let mut sum_exp = 0.0f32;
             for c in 0..num_classes {
                 sum_exp += (logits_data[base_idx + c] - max_logit).exp();
             }
-            
+
             let target_prob = (logits_data[base_idx + target_class] - max_logit).exp() / sum_exp;
-            
+
             grad_logits_data[base_idx + target_class] = target_prob - 1.0;
-            
+
             for c in 0..num_classes {
                 if c != target_class {
                     let prob = (logits_data[base_idx + c] - max_logit).exp() / sum_exp;
@@ -994,19 +994,22 @@ impl Node for CrossEntropyBackward {
                 }
             }
         }
-        
+
         let scale = if self.reduction == "mean" {
             1.0 / batch_size as f32
         } else {
             1.0
         };
-        
+
         for v in &mut grad_logits_data {
             *v *= scale;
         }
-        
-        let grad_logits = Tensor::from_vec(grad_logits_data, vec![batch_size as i64, num_classes as i64]);
-        
+
+        let grad_logits = Tensor::from_vec(
+            grad_logits_data,
+            vec![batch_size as i64, num_classes as i64],
+        );
+
         vec![Some(grad_logits)]
     }
 
