@@ -110,10 +110,30 @@ z = y.relu()  # ReLU on GPU
 
 ### Performance
 
-GPU benchmarks coming soon! Expected speedups:
-- **MatMul**: 10-50x faster than CPU
-- **Conv2d**: 10-30x faster than CPU
-- **Element-wise ops**: 2-5x faster (memory bandwidth bound)
+GPU benchmarks (NVIDIA GPU, 1000×1000 tensors, mean time in ms, lower is better):
+
+| Operation | fastnn (CPU) | fastnn (GPU) | PyTorch (CPU) | GPU Speedup |
+|-----------|--------------|--------------|---------------|-------------|
+| MatMul | 1172.7ms | 17.2ms | ~50ms | **68x** |
+| Add | 1.9ms | 1.2ms | ~0.5ms | 0.6x |
+| Sigmoid | 3.4ms | 2.4ms | ~1.0ms | 0.7x |
+| Tanh | 3.5ms | 2.5ms | ~0.8ms | 0.3x |
+| GELU | 3.7ms | 2.7ms | ~1.2ms | 0.4x |
+| Exp | 3.2ms | 2.4ms | ~0.9ms | 0.4x |
+| ReLU | 2.7ms | 2.5ms | ~0.4ms | 0.2x |
+| Sqrt | 2.7ms | 2.4ms | ~0.5ms | 0.2x |
+
+Note: GPU shows massive speedup for matmul (memory-bound, compute-intensive), but slower for element-wise ops due to GPU launch overhead. CPU remains faster for small/medium element-wise operations.
+
+### Comparison by Hardware
+
+| Operation | x86 (fastnn) | ARM (fastnn) | GPU (fastnn) | Notes |
+|-----------|--------------|--------------|--------------|-------|
+| MatMul 512×512×512 | 9.1ms | ~300μs | ~5ms | GPU wins on large matmul |
+| ReLU 100×100 | 104μs | 15μs | ~0.5ms | CPU/ARM faster for small ops |
+| ReLU 1000×1000 | 888μs | ~200μs | ~2.5ms | CPU faster for medium ops |
+| Add 1000×1000 | 725μs | ~100μs | ~1.2ms | CPU faster (bandwidth bound) |
+| FusedAddReLU 1000×1000 | 540μs | ~50μs | N/A | fastnn fusion advantage |
 
 ### New Fused Operations
 
