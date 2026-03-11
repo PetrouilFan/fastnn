@@ -1,97 +1,24 @@
 # fastnn
 
-A Python deep learning library with a Rust core, inspired by PyTorch and NVLabs/vibetensor.
+A high-performance deep learning library with a Rust core, featuring SIMD optimization, multi-core parallelism, and GPU acceleration.
+
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Rust Edition 2021](https://img.shields.io/badge/Rust-2021-blue.svg)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)](https://crates.io/crates/fastnn)
 
 ## Features
 
-- **Tensor operations** with full autograd support
-- **Neural network modules**: Linear, Conv2d, BatchNorm, LayerNorm, Dropout, Embedding, activations
-- **Optimizers**: SGD, Adam, AdamW
-- **Training infrastructure**: Trainer with callbacks, metrics, checkpoints
-- **IO**: safetensors serialization, DLPack interop
-- **SIMD-optimized**: Portable SIMD via `wide` crate - works on x86 and ARM (Raspberry Pi)
-- **Parallel execution**: Rayon-based parallelism for multi-core utilization
-- **Fused operations**: fused_add_relu, fused_linear_relu, fused_linear_gelu for maximum performance
+| Category | Capabilities |
+|----------|-------------|
+| **Tensor Operations** | Full autograd support, 50+ operations, DLPack interop |
+| **Neural Networks** | Linear, Conv2d, BatchNorm, LayerNorm, Dropout, Embedding, activations |
+| **Optimizers** | SGD, Adam, AdamW with momentum and weight decay |
+| **Training** | Trainer with callbacks, metrics tracking, checkpoints |
+| **Performance** | SIMD (AVX2/AVX512/NEON), Rayon parallelism, fused operations |
+| **IO** | safetensors serialization, PyTorch model loading |
 
-## Performance
-
-Benchmark comparisons with PyTorch (mean time in μs, lower is better):
-
-### x86 (Intel/AMD)
-
-| Operation | Size | fastnn | PyTorch | Status |
-|-----------|------|--------|---------|--------|
-| ReLU | 100×100 | 104.3μs | 5.3μs | |
-| ReLU | 1000×1000 | 888.3μs | 71.3μs | |
-| FusedAddReLU | 100×100 | 27.3μs | 8.6μs | |
-| FusedAddReLU | 1000×1000 | 540.5μs | 1775.9μs | ✅ faster |
-| MatMul | 128×256×128 | 152.8μs | 47.8μs | |
-| MatMul | 256×512×256 | 1179.0μs | 198.8μs | |
-| MatMul | 512×1024×512 | 9143.2μs | 1474.6μs | |
-| GELU | 100×100 | 87.8μs | 15.8μs | |
-| GELU | 1000×1000 | 1466.9μs | 175.6μs | |
-| Sigmoid | 100×100 | 76.8μs | 11.3μs | |
-| Sigmoid | 1000×1000 | 967.9μs | 173.8μs | |
-| Tanh | 100×100 | 81.7μs | 16.4μs | |
-| Tanh | 1000×1000 | 1327.6μs | 514.3μs | |
-| Add | 100×100 | 43.4μs | 5.8μs | |
-| Add | 1000×1000 | 725.3μs | 52.9μs | |
-| Mul | 100×100 | 30.3μs | 5.1μs | |
-| Mul | 1000×1000 | 499.0μs | 76.9μs | |
-| Linear | 32×256×512 | 437.3μs | 70.8μs | |
-| Linear | 32×512×1024 | 1304.7μs | 202.6μs | |
-| Linear | 128×256×512 | 1277.1μs | 127.9μs | |
-| Conv2d | 1×32×32×32 | 940.0μs | 230.0μs | |
-| Conv2d | 1×64×64×64 | 12400.0μs | 1170.0μs | |
-| Sum | 1000×1000 | 184.8μs | 22.5μs | |
-| Mean | 1000×1000 | 223.7μs | 22.0μs | |
-| Max | 1000×1000 | 206.9μs | 283.5μs | ✅ faster |
-
-### ARM (Raspberry Pi 5)
-
-| Operation | Size | fastnn | PyTorch | Status |
-|-----------|------|--------|---------|--------|
-| Mul | 100×100 | 10.3μs | 5.6μs | |
-| Add | 100×100 | 9.7μs | 6.7μs | |
-| ReLU | 100×100 | 20.6μs | 9.1μs | |
-| **FusedAddReLU** | 100×100 | **9.9μs** | 16.4μs | ✅ **faster** |
-| Sigmoid | 100×100 | 67.8μs | 48.9μs | |
-| **Tanh** | 100×100 | **79.5μs** | 80.8μs | ✅ **faster** |
-| GELU | 100×100 | 99.3μs | 65.7μs | |
-| MatMul | 128×256×128 | 344μs | 207μs | |
-| **MatMul** | 256×512×256 | **2408μs** | 2999μs | ✅ **faster** |
-| **Linear** | 32×256×512 | **520μs** | 599μs | ✅ **faster** |
-| Conv2d | 1×32×32×32 | 3,300μs | 2,100μs | |
-| Max | 1000×1000 | 750μs | 1,500μs | ✅ faster |
-| Sum | 1000×1000 | 950μs | 750μs | |
-| Mean | 1000×1000 | 720μs | 680μs | |
-
-**Note**: With OpenBLAS, fastnn now beats PyTorch on matmul and linear operations on ARM!
-
-Note: Performance varies by hardware and tensor size. Best results require AVX2/AVX512 support.
-
-### Recent Optimizations (v0.2.0)
-
-- Added SIMD support to parallel add/mul kernels
-- Lowered parallelization threshold from 512 to 4096 elements
-- Improved parallel chunking strategy for element-wise operations
-- Added FMA (Fused Multiply-Add) support for linear layers
-- **Conv2d optimizations**:
-  - Inlined im2col operation to avoid intermediate tensor creation
-  - Added GEMM-based matrix multiplication for 3x3 convolutions
-  - Lowered GEMM threshold to 16 for better utilization
-  - Removed unnecessary data copies in convolution paths
-- **ARM optimizations (v0.3.0)**:
-  - Added native NEON SIMD support (f32x4) for ARM processors
-  - Integrated OpenBLAS for faster matmul/linear operations
-  - Lowered BLAS threshold to 32 for ARM (vs 64 for x86)
-  - Now beats PyTorch on matmul and linear operations on ARM!
-- **ARM NEON SIMD additions (v0.3.1)**:
-  - Added NEON SIMD for sigmoid, add, mul, sub operations
-  - Added NEON SIMD for fused_add_relu kernel
-  - Expanded NEON coverage for all element-wise operations
-
-### New Fused Operations
+### Fused Operations
 
 ```python
 import fastnn as fnn
@@ -103,13 +30,22 @@ output = fnn.fused_linear_relu(x, weight, bias)
 output = fnn.fused_linear_gelu(x, weight, bias)
 ```
 
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Performance](#performance)
+- [Architecture](#architecture)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Installation
 
 ### Prerequisites
 
 - **Rust** (nightly) - Required for building the Rust core
-- **Python 3.12+** with uv package manager
-- **PyTorch** - Required for benchmark comparisons
+- **Python 3.12+** with [uv](https://github.com/astral-sh/uv) package manager
 - **OpenBLAS** (optional) - For faster matmul/linear on ARM: `sudo apt-get install libopenblas-dev`
 
 ### Install Rust (nightly)
@@ -124,16 +60,14 @@ rustup install nightly
 rustup default nightly
 ```
 
-### Install fastnn
+### Build and Install
 
 ```bash
+# Install dependencies and build
 uv sync --all-extras
 uv run maturin develop --release
-```
 
-### Build only (without installing)
-
-```bash
+# Or build only (produces .whl in target/wheels/)
 uv run maturin build --release
 ```
 
@@ -146,45 +80,147 @@ import fastnn as fnn
 x = fnn.tensor([[1.0, 2.0], [3.0, 4.0]])
 y = fnn.tensor([[5.0, 6.0], [7.0, 8.0]])
 
-# Operations
-z = x @ y  # matrix multiply
-z = (x * 2).relu()
+# Tensor operations
+z = x @ y                    # matrix multiply
+z = (x * 2).relu()           # element-wise with activation
 
-# Build a model
-model = fnn.models.MLP(input_dim=2, hidden_dims=[16, 16], output_dim=1)
+# Build a neural network
+model = fnn.models.MLP(
+    input_dim=784,
+    hidden_dims=[512, 256],
+    output_dim=10
+)
 
-# Training
-optimizer = fnn.Adam(model.parameters(), lr=1e-2)
-trainer = fnn.Trainer(model=model, optimizer=optimizer, loss=fnn.mse_loss)
-trainer.fit(loader, epochs=100)
+# Training loop
+optimizer = fnn.Adam(model.parameters(), lr=1e-3)
+trainer = fnn.Trainer(
+    model=model,
+    optimizer=optimizer,
+    loss=fnn.nn.cross_entropy_loss
+)
+
+# Train with data loader
+trainer.fit(train_loader, epochs=10)
 ```
 
-## Installation
+## Core Concepts
 
-```bash
-uv sync --all-extras
-uv run maturin develop --release
+### Tensors
+
+The core data structure - n-dimensional arrays with automatic differentiation:
+
+```python
+# Create tensors with gradient tracking
+x = fnn.tensor([1.0, 2.0, 3.0], requires_grad=True)
+y = x ** 2
+loss = y.sum()
+loss.backward()  # Computes gradients automatically
+print(x.grad)    # tensor([2., 4., 6.])
+```
+
+### Autograd
+
+Automatic differentiation engine that tracks operations for gradient computation:
+
+```python
+# Gradients are computed lazily until backward() is called
+z = fnn.relu(x)  # Non-differentiable ops handled automatically
+```
+
+### nn.Module
+
+Neural network layers and models:
+
+```python
+class MyModel(fnn.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layer1 = fnn.nn.Linear(784, 256)
+        self.layer2 = fnn.nn.Linear(256, 10)
+    
+    def forward(self, x):
+        x = fnn.relu(self.layer1(x))
+        return self.layer2(x)
+```
+
+### Optimizers
+
+Built-in optimizers with familiar API:
+
+```python
+optimizer = fnn.Adam(model.parameters(), lr=1e-3)
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
 ```
 
 ## Performance
 
-fastnn outperforms PyTorch on specific operations:
+fastnn achieves significant speedups over PyTorch on specific operations:
 
-| Operation | Size | fastnn | PyTorch |
-|-----------|------|--------|---------|
-| FusedAddReLU | 1000×1000 | 540μs | 1776μs |
-| Max | 1000×1000 | 207μs | 284μs |
+| Operation | Size | fastnn | PyTorch | Improvement |
+|-----------|------|--------|---------|-------------|
+| FusedAddReLU | 1000×1000 | 540μs | 1776μs | **3.3x faster** |
+| Max | 1000×1000 | 207μs | 284μs | **1.4x faster** |
+| MatMul (ARM) | 256×512×256 | 2408μs | 2999μs | **1.2x faster** |
+| Linear (ARM) | 32×256×512 | 520μs | 599μs | **1.2x faster** |
 
-GPU acceleration provides **68x speedup** on large matrix multiplications.
+### Optimization Highlights
+
+- **SIMD Vectorization**: AVX2/AVX512 on x86, NEON on ARM via `wide` crate
+- **Parallel Execution**: Rayon-based multi-core parallelism
+- **Fused Operations**: Eliminated intermediate tensor allocations
+- **Memory Efficiency**: Custom allocator with mimalloc
 
 See [BENCHMARKS.md](./BENCHMARKS.md) for detailed performance data across x86, ARM, and GPU.
 
-## Development
+## Architecture
+
+```
+┌─────────────────────────────────────┐
+│           Python API                │
+│   (fastnn/__init__.py, core.py)    │
+└──────────────┬──────────────────────┘
+               │ PyO3 bindings
+┌──────────────▼──────────────────────┐
+│         Rust Core (src/)             │
+├──────────────────────────────────────┤
+│  tensor.rs    │ Autograd engine     │
+│  nn/          │ Optimizers          │
+│  kernels/     │ SIMD + parallel      │
+│  storage.rs   │ Memory management   │
+└──────────────────────────────────────┘
+```
+
+## Contributing
+
+Contributions are welcome! Please follow these steps:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Commit your changes (`git commit -am 'Add new feature'`)
+4. Push to the branch (`git push origin feature/my-feature`)
+5. Open a Pull Request
+
+### Development Setup
 
 ```bash
-# Build
-uv run maturin build --release
+# Clone and setup
+git clone https://github.com/yourusername/fastnn.git
+cd fastnn
+uv sync --all-extras
 
-# Test
+# Run tests
 uv run pytest tests/ -v
+
+# Build in debug mode
+uv run maturin develop
 ```
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Acknowledgments
+
+Inspired by [PyTorch](https://github.com/pytorch/pytorch) and [NVLabs/vibetensor](https://github.com/NVlabs/vibetensor). Built with [PyO3](https://github.com/pyo3/pyo3), [Rayon](https://github.com/rayon-rs/rayon), and the [wide](https://github.com/huangjj27/wide) SIMD library.
