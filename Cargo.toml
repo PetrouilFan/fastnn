@@ -23,11 +23,13 @@ rand          = "0.8"
 matrixmultiply = "0.3"
 mimalloc      = "0.1"
 wide         = "0.7"
-openblas-src  = { version = "0.10", optional = true }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libc = "0.2"
 
 [features]
 default = ["simd", "parallel", "simd_avx512"]
-openblas = ["openblas-src"]
+openblas = []
 parallel = []
 simd = []
 prefetch = []

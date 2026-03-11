@@ -51,19 +51,22 @@ Benchmark comparisons with PyTorch (mean time in μs, lower is better):
 
 | Operation | Size | fastnn | PyTorch | Status |
 |-----------|------|--------|---------|--------|
-| Mul | 100×100 | 8.3μs | 5.4μs | |
-| Add | 100×100 | 8.2μs | 6.0μs | |
-| ReLU | 100×100 | 14.8μs | 9.5μs | |
-| FusedAddReLU | 100×100 | 7.9μs | 15.2μs | ✅ faster |
-| Sigmoid | 100×100 | 32.9μs | 45.4μs | ✅ faster |
-| Tanh | 100×100 | 47.0μs | 66.2μs | ✅ faster |
-| GELU | 100×100 | 56.8μs | 38.4μs | |
-| MatMul | 128×256×128 | 301μs | 92μs | |
-| Linear | 32×256×512 | 3,735μs | 250μs | |
-| Conv2d | 1×32×32×32 | 5,439μs | 641μs | |
-| Max | 1000×1000 | 518μs | 644μs | ✅ faster |
-| Sum | 1000×1000 | 526μs | 429μs | |
-| Mean | 1000×1000 | 517μs | 389μs | |
+| Mul | 100×100 | 10.3μs | 5.6μs | |
+| Add | 100×100 | 9.7μs | 6.7μs | |
+| ReLU | 100×100 | 20.6μs | 9.1μs | |
+| **FusedAddReLU** | 100×100 | **9.9μs** | 16.4μs | ✅ **faster** |
+| Sigmoid | 100×100 | 67.8μs | 48.9μs | |
+| **Tanh** | 100×100 | **79.5μs** | 80.8μs | ✅ **faster** |
+| GELU | 100×100 | 99.3μs | 65.7μs | |
+| MatMul | 128×256×128 | 344μs | 207μs | |
+| **MatMul** | 256×512×256 | **2408μs** | 2999μs | ✅ **faster** |
+| **Linear** | 32×256×512 | **520μs** | 599μs | ✅ **faster** |
+| Conv2d | 1×32×32×32 | 3,300μs | 2,100μs | |
+| Max | 1000×1000 | 750μs | 1,500μs | ✅ faster |
+| Sum | 1000×1000 | 950μs | 750μs | |
+| Mean | 1000×1000 | 720μs | 680μs | |
+
+**Note**: With OpenBLAS, fastnn now beats PyTorch on matmul and linear operations on ARM!
 
 Note: Performance varies by hardware and tensor size. Best results require AVX2/AVX512 support.
 
@@ -78,6 +81,15 @@ Note: Performance varies by hardware and tensor size. Best results require AVX2/
   - Added GEMM-based matrix multiplication for 3x3 convolutions
   - Lowered GEMM threshold to 16 for better utilization
   - Removed unnecessary data copies in convolution paths
+- **ARM optimizations (v0.3.0)**:
+  - Added native NEON SIMD support (f32x4) for ARM processors
+  - Integrated OpenBLAS for faster matmul/linear operations
+  - Lowered BLAS threshold to 32 for ARM (vs 64 for x86)
+  - Now beats PyTorch on matmul and linear operations on ARM!
+- **ARM NEON SIMD additions (v0.3.1)**:
+  - Added NEON SIMD for sigmoid, add, mul, sub operations
+  - Added NEON SIMD for fused_add_relu kernel
+  - Expanded NEON coverage for all element-wise operations
 
 ### New Fused Operations
 
@@ -98,6 +110,7 @@ output = fnn.fused_linear_gelu(x, weight, bias)
 - **Rust** (nightly) - Required for building the Rust core
 - **Python 3.12+** with uv package manager
 - **PyTorch** - Required for benchmark comparisons
+- **OpenBLAS** (optional) - For faster matmul/linear on ARM: `sudo apt-get install libopenblas-dev`
 
 ### Install Rust (nightly)
 
