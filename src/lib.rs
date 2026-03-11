@@ -405,7 +405,6 @@ fn sub(a: &PyTensor, b: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn mul(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    eprintln!("DEBUG: pyfunction mul called");
     PyTensor::from_tensor(a.inner.mul(&b.inner))
 }
 

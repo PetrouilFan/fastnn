@@ -1,4 +1,5 @@
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
+use crate::storage::Storage;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
@@ -77,7 +78,10 @@ impl Optimizer for SGD {
 
             let inner = Arc::make_mut(&mut param.inner);
             let storage = Arc::make_mut(&mut inner.storage);
-            let ptr = storage.data.as_mut_ptr() as *mut f32;
+            let Storage::Cpu(cpu_storage) = storage else {
+                panic!("Optimizer only supports CPU tensors");
+            };
+            let ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
             let numel = param.numel() as usize;
 
             let update_slice = update.as_f32_slice();
