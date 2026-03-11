@@ -229,7 +229,7 @@ fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
     let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
     let numel: i64 = sizes.iter().product();
     let nbytes = (numel * tensor.dtype().size() as i64) as usize;
-    let storage = Arc::new(Storage::new(tensor.dtype(), tensor.device(), nbytes));
+    let storage = Arc::new(Storage::new_cpu(tensor.dtype(), nbytes));
     Tensor::new(crate::tensor::TensorImpl::new(storage, sizes))
 }
 
@@ -271,7 +271,10 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         let output_inner = Arc::make_mut(&mut output.inner);
         let output_storage = Arc::make_mut(&mut output_inner.storage);
-        let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+        let Storage::Cpu(cpu_storage) = output_storage else {
+            panic!("Expected CPU storage");
+        };
+        let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
         #[cfg(feature = "parallel")]
         {
@@ -387,7 +390,10 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
     let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
@@ -446,7 +452,10 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
     let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
@@ -615,7 +624,10 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         let output_inner = Arc::make_mut(&mut output.inner);
         let output_storage = Arc::make_mut(&mut output_inner.storage);
-        let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+        let Storage::Cpu(cpu_storage) = output_storage else {
+            panic!("Expected CPU storage");
+        };
+        let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
         #[cfg(feature = "parallel")]
         {
@@ -731,7 +743,10 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
     let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
@@ -790,7 +805,10 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
     let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
@@ -899,7 +917,10 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -946,7 +967,10 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1020,7 +1044,10 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1067,7 +1094,10 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1114,7 +1144,10 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1161,7 +1194,10 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1222,7 +1258,10 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1328,7 +1367,10 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1391,7 +1433,10 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1448,7 +1493,10 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1504,7 +1552,10 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -1587,7 +1638,10 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let a_rows = a_shape[a_shape.len() - 2] as usize;
     let a_cols = a_shape[a_shape.len() - 1] as usize;
@@ -2167,7 +2221,10 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let batch_size = batch_size as usize;
     let in_features = in_features as usize;
@@ -2267,7 +2324,10 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let batch_size = batch_size as usize;
     let in_features = in_features as usize;
@@ -2380,7 +2440,10 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let dim_size = a_shape[dim] as usize;
     let mut strides_before = 1i64;
@@ -2516,7 +2579,10 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let dim_size = a_shape[dim] as usize;
     let mut strides_before = 1i64;
@@ -2623,7 +2689,10 @@ fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let dim_size = a_shape[dim] as usize;
     let mut strides_before = 1i64;
@@ -2735,7 +2804,10 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
     let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     #[cfg(feature = "parallel")]
     {
@@ -3356,7 +3428,10 @@ fn conv2d_1x1(
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     let w_data: Vec<f32> =
         unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels).to_vec() };
@@ -3426,7 +3501,10 @@ fn depthwise_conv2d(
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     // Use direct pointers instead of copying data
     let w_data: Vec<f32> = unsafe {
@@ -3645,7 +3723,10 @@ fn conv2d_im2col(
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     // Use the col_data Vec directly as a slice
     let col_slice = col_data.as_slice();
@@ -3818,7 +3899,10 @@ fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     for i in 0..batch_size as usize {
         let idx = unsafe { *indices_ptr.add(i) } as usize;
@@ -4011,7 +4095,10 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]
@@ -4060,7 +4147,10 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
     if a.is_contiguous() && numel > 4096 {
         #[cfg(feature = "parallel")]

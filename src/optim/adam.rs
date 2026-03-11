@@ -1,4 +1,5 @@
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
+use crate::storage::Storage;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
@@ -120,7 +121,10 @@ impl Optimizer for Adam {
             unsafe {
                 let inner = &mut *ptr;
                 let storage = Arc::make_mut(&mut inner.storage);
-                let data_ptr = storage.data.as_mut_ptr() as *mut f32;
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!("Optimizer only supports CPU tensors");
+                };
+                let data_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
                 let update_slice = step_size.as_f32_slice();
                 for (j, update_val) in update_slice.iter().take(numel).enumerate() {
                     let param_val = *data_ptr.add(j);
