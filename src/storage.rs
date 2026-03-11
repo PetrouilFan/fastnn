@@ -14,8 +14,8 @@ const POOL_THRESHOLD: usize = 8 * 1024 * 1024;
 
 const NUM_SIZE_CLASSES: usize = 16;
 const SIZE_CLASSES: &[usize] = &[
-    64, 128, 256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152,
+    64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288,
+    1048576, 2097152,
 ];
 
 fn get_size_class(size: usize) -> usize {
@@ -139,19 +139,21 @@ impl DType {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
     Cpu,
-    // Cuda(u32),    // TODO(gpu): add CUDA device
-    // Metal,        // TODO(gpu): add Metal device
-    // Wgpu,         // TODO(gpu): add WebGPU device
+    Wgpu(usize),
 }
 
 impl Device {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "cpu" | "CPU" => Some(Device::Cpu),
+            "gpu" | "GPU" | "wgpu" | "Wgpu" => Some(Device::Wgpu(0)),
+            s if s.starts_with("gpu:") || s.starts_with("wgpu:") => {
+                let idx: usize = s[4..].parse().ok()?;
+                Some(Device::Wgpu(idx))
+            }
             _ => None,
         }
     }
@@ -159,6 +161,7 @@ impl Device {
     pub fn as_str(&self) -> &'static str {
         match self {
             Device::Cpu => "cpu",
+            Device::Wgpu(_) => "wgpu",
         }
     }
 }

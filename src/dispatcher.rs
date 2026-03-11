@@ -1,3 +1,4 @@
+use crate::storage::Device;
 use crate::tensor::Tensor;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -6,8 +7,14 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DispatchKey {
     Cpu,
-    // Autograd,     // TODO(gpu): add autograd dispatch
-    // AutocastCpu,  // TODO(gpu): add mixed precision dispatch
+    Wgpu,
+}
+
+pub fn device_to_dispatch_key(device: Device) -> DispatchKey {
+    match device {
+        Device::Cpu => DispatchKey::Cpu,
+        Device::Wgpu(_) => DispatchKey::Wgpu,
+    }
 }
 
 pub type KernelFn = fn(&[&Tensor]) -> Vec<Tensor>;
