@@ -1,4 +1,8 @@
-#![allow(clippy::too_many_arguments, clippy::needless_range_loop, clippy::wildcard_in_or_patterns)]
+#![allow(
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::wildcard_in_or_patterns
+)]
 #![allow(unused_imports)]
 
 use crate::dispatcher::{register, DispatchKey, KernelFn};
@@ -23,13 +27,13 @@ fn relu_simd(input: &[f32], output: &mut [f32]) {
     let zero = f32x8::ZERO;
     let (chunks, remainder) = input.as_chunks::<8>();
     let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
-    
+
     for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
         let v = f32x8::from(*in_chunk);
         let result = v.max(zero);
         *out_chunk = result.into();
     }
-    
+
     for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
         *out_val = in_val.max(0.0);
     }
@@ -39,25 +43,35 @@ fn relu_simd(input: &[f32], output: &mut [f32]) {
 #[allow(dead_code)]
 fn gelu_simd(input: &[f32], output: &mut [f32]) {
     let sqrt_2_over_pi = f32x8::new([
-        0.797_884_6, 0.797_884_6, 0.797_884_6, 0.797_884_6,
-        0.797_884_6, 0.797_884_6, 0.797_884_6, 0.797_884_6,
+        0.797_884_6,
+        0.797_884_6,
+        0.797_884_6,
+        0.797_884_6,
+        0.797_884_6,
+        0.797_884_6,
+        0.797_884_6,
+        0.797_884_6,
     ]);
     let coeff = f32x8::new([
-        0.044715f32, 0.044715f32, 0.044715f32, 0.044715f32,
-        0.044715f32, 0.044715f32, 0.044715f32, 0.044715f32,
+        0.044715f32,
+        0.044715f32,
+        0.044715f32,
+        0.044715f32,
+        0.044715f32,
+        0.044715f32,
+        0.044715f32,
+        0.044715f32,
     ]);
     let half = f32x8::new([
-        0.5f32, 0.5f32, 0.5f32, 0.5f32,
-        0.5f32, 0.5f32, 0.5f32, 0.5f32,
+        0.5f32, 0.5f32, 0.5f32, 0.5f32, 0.5f32, 0.5f32, 0.5f32, 0.5f32,
     ]);
     let one = f32x8::new([
-        1.0f32, 1.0f32, 1.0f32, 1.0f32,
-        1.0f32, 1.0f32, 1.0f32, 1.0f32,
+        1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32,
     ]);
-    
+
     let (chunks, remainder) = input.as_chunks::<8>();
     let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
-    
+
     for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
         let x = f32x8::from(*in_chunk);
         let x3 = x * x * x;
@@ -67,7 +81,7 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
         let result = half * x * (one + t);
         *out_chunk = result.into();
     }
-    
+
     for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
         let x = *in_val;
         let x3 = x * x * x;
@@ -81,10 +95,10 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
 fn tanh_simd(input: &[f32], output: &mut [f32]) {
     let two = f32x8::new([2.0; 8]);
     let one = f32x8::new([1.0; 8]);
-    
+
     let (chunks, remainder) = input.as_chunks::<8>();
     let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
-    
+
     for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
         let v = f32x8::from(*in_chunk);
         let abs_v = v.abs();
@@ -94,7 +108,7 @@ fn tanh_simd(input: &[f32], output: &mut [f32]) {
         let result = result.blend(-result, sign);
         *out_chunk = result.into();
     }
-    
+
     for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
         let x = *in_val;
         let abs_x = x.abs();
@@ -121,10 +135,10 @@ fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
 fn broadcast_shapes_simple(a: &[i64], b: &[i64]) -> Vec<i64> {
     let ndim = std::cmp::max(a.len(), b.len());
     let mut result = vec![1i64; ndim];
-    
+
     let offset_a = ndim - a.len();
     let offset_b = ndim - b.len();
-    
+
     for i in 0..ndim {
         let a_val = if i < offset_a { 1 } else { a[i - offset_a] };
         let b_val = if i < offset_b { 1 } else { b[i - offset_b] };
@@ -146,12 +160,12 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a_contig && b_contig && a_shape == b_shape && a_numel > 4096 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
-        
+
         let mut output = Tensor::zeros(output_shape, a.dtype(), a.device());
-        
+
         let a_ptr = a.data_ptr_f32();
         let b_ptr = b.data_ptr_f32();
-        
+
         let output_inner = Arc::make_mut(&mut output.inner);
         let output_storage = Arc::make_mut(&mut output_inner.storage);
         let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
@@ -160,20 +174,20 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             const CHUNK_SIZE: usize = 8192;
             let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
-            
+
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
             let out_usize = out_ptr as usize;
-            
+
             if num_chunks > 1 {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * CHUNK_SIZE;
                     let end = (start + CHUNK_SIZE).min(numel);
-                    
+
                     let a_ptr = a_usize as *const f32;
                     let b_ptr = b_usize as *const f32;
                     let out_ptr = out_usize as *mut f32;
-                    
+
                     for i in start..end {
                         unsafe {
                             *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
@@ -184,7 +198,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let a_ptr = a_usize as *const f32;
                 let b_ptr = b_usize as *const f32;
                 let out_ptr = out_usize as *mut f32;
-                
+
                 for i in 0..numel {
                     unsafe {
                         *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
@@ -316,20 +330,20 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             const CHUNK_SIZE: usize = 8192;
             let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
-            
+
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
             let out_usize = out_ptr as usize;
-            
+
             if num_chunks > 1 {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * CHUNK_SIZE;
                     let end = (start + CHUNK_SIZE).min(numel);
-                    
+
                     let a_ptr = a_usize as *const f32;
                     let b_ptr = b_usize as *const f32;
                     let out_ptr = out_usize as *mut f32;
-                    
+
                     for i in start..end {
                         unsafe {
                             *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
@@ -340,7 +354,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let a_ptr = a_usize as *const f32;
                 let b_ptr = b_usize as *const f32;
                 let out_ptr = out_usize as *mut f32;
-                
+
                 for i in 0..numel {
                     unsafe {
                         *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
@@ -432,12 +446,12 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     if a_contig && b_contig && a_shape == b_shape && a_numel > 4096 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
-        
+
         let mut output = Tensor::zeros(output_shape, a.dtype(), a.device());
-        
+
         let a_ptr = a.data_ptr_f32();
         let b_ptr = b.data_ptr_f32();
-        
+
         let output_inner = Arc::make_mut(&mut output.inner);
         let output_storage = Arc::make_mut(&mut output_inner.storage);
         let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
@@ -446,20 +460,20 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             const CHUNK_SIZE: usize = 8192;
             let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
-            
+
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
             let out_usize = out_ptr as usize;
-            
+
             if num_chunks > 1 {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * CHUNK_SIZE;
                     let end = (start + CHUNK_SIZE).min(numel);
-                    
+
                     let a_ptr = a_usize as *const f32;
                     let b_ptr = b_usize as *const f32;
                     let out_ptr = out_usize as *mut f32;
-                    
+
                     for i in start..end {
                         unsafe {
                             *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
@@ -470,7 +484,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let a_ptr = a_usize as *const f32;
                 let b_ptr = b_usize as *const f32;
                 let out_ptr = out_usize as *mut f32;
-                
+
                 for i in 0..numel {
                     unsafe {
                         *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
@@ -603,9 +617,13 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).zip(b_slice.par_iter()).for_each(|((out, &a_val), &b_val)| {
-                *out = a_val / b_val;
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .zip(b_slice.par_iter())
+                .for_each(|((out, &a_val), &b_val)| {
+                    *out = a_val / b_val;
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -698,9 +716,12 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
-                *out = -a_val;
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &a_val)| {
+                    *out = -a_val;
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -742,9 +763,12 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
-                *out = a_val.abs();
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &a_val)| {
+                    *out = a_val.abs();
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -813,9 +837,12 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
-                *out = a_val.exp();
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &a_val)| {
+                    *out = a_val.exp();
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -857,9 +884,12 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
-                *out = a_val.ln();
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &a_val)| {
+                    *out = a_val.ln();
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -901,9 +931,12 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
-                *out = a_val.sqrt();
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &a_val)| {
+                    *out = a_val.sqrt();
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -945,9 +978,12 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
-                *out = a_val.max(0.0);
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &a_val)| {
+                    *out = a_val.max(0.0);
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -1003,33 +1039,37 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             const CHUNK_SIZE: usize = 8192;
             let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
-            
+
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
             let out_usize = out_ptr as usize;
-            
+
             if num_chunks > 1 {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * CHUNK_SIZE;
                     let end = (start + CHUNK_SIZE).min(numel);
-                    
+
                     let a_ptr = a_usize as *const f32;
                     let b_ptr = b_usize as *const f32;
                     let out_ptr = out_usize as *mut f32;
-                    
+
                     for i in start..end {
                         let val = unsafe { *a_ptr.add(i) + *b_ptr.add(i) };
-                        unsafe { *out_ptr.add(i) = val.max(0.0); }
+                        unsafe {
+                            *out_ptr.add(i) = val.max(0.0);
+                        }
                     }
                 });
             } else {
                 let a_ptr = a_usize as *const f32;
                 let b_ptr = b_usize as *const f32;
                 let out_ptr = out_usize as *mut f32;
-                
+
                 for i in 0..numel {
                     let val = unsafe { *a_ptr.add(i) + *b_ptr.add(i) };
-                    unsafe { *out_ptr.add(i) = val.max(0.0); }
+                    unsafe {
+                        *out_ptr.add(i) = val.max(0.0);
+                    }
                 }
             }
         }
@@ -1074,11 +1114,14 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
-                let x3 = x * x * x;
-                let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
-                *out = 0.5 * x * (1.0 + t);
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &x)| {
+                    let x3 = x * x * x;
+                    let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
+                    *out = 0.5 * x * (1.0 + t);
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -1134,9 +1177,12 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
-                *out = 1.0 / (1.0 + (-x).exp());
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &x)| {
+                    *out = 1.0 / (1.0 + (-x).exp());
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -1179,9 +1225,12 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &a_val)| {
-                *out = a_val.tanh();
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &a_val)| {
+                    *out = a_val.tanh();
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -1232,9 +1281,12 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &x)| {
-                *out = x / (1.0 + (-x).exp());
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &x)| {
+                    *out = x / (1.0 + (-x).exp());
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -1373,7 +1425,7 @@ fn parallel_matmul(
     b_cols: usize,
 ) {
     let total_outputs = batch * m as usize * n as usize;
-    
+
     let a_usize = a_ptr as usize;
     let b_usize = b_ptr as usize;
     let out_usize = out_ptr as usize;
@@ -1396,20 +1448,31 @@ fn parallel_matmul(
             if is_x86_feature_detected!("fma") {
                 unsafe {
                     while kk + 8 <= k_usize {
-                        let a0 = _mm256_loadu_ps((a_usize + (bat * a_rows * a_cols + i * a_cols + kk) * 4) as *const f32);
-                        let a1 = _mm256_loadu_ps((a_usize + (bat * a_rows * a_cols + i * a_cols + kk + 8) * 4) as *const f32);
+                        let a0 = _mm256_loadu_ps(
+                            (a_usize + (bat * a_rows * a_cols + i * a_cols + kk) * 4) as *const f32,
+                        );
+                        let a1 = _mm256_loadu_ps(
+                            (a_usize + (bat * a_rows * a_cols + i * a_cols + kk + 8) * 4)
+                                as *const f32,
+                        );
 
-                        let b0 = _mm256_loadu_ps((b_usize + (bat * k_usize * b_cols + kk * b_cols + j) * 4) as *const f32);
-                        let b1 = _mm256_loadu_ps((b_usize + (bat * k_usize * b_cols + (kk + 8) * b_cols + j) * 4) as *const f32);
+                        let b0 = _mm256_loadu_ps(
+                            (b_usize + (bat * k_usize * b_cols + kk * b_cols + j) * 4)
+                                as *const f32,
+                        );
+                        let b1 = _mm256_loadu_ps(
+                            (b_usize + (bat * k_usize * b_cols + (kk + 8) * b_cols + j) * 4)
+                                as *const f32,
+                        );
 
                         let acc0 = _mm256_mul_ps(a0, b0);
                         let acc1 = _mm256_mul_ps(a1, b1);
                         let acc = _mm256_add_ps(acc0, acc1);
-                        
+
                         let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
                         _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
                         sum += acc_arr.assume_init().iter().sum::<f32>();
-                        
+
                         kk += 16;
                     }
                 }
@@ -1437,14 +1500,18 @@ fn parallel_matmul(
 
         while kk < k_usize {
             unsafe {
-                let a_val = *((a_usize + (bat * a_rows * a_cols + i * a_cols + kk) * 4) as *const f32);
-                let b_val = *((b_usize + (bat * k_usize * b_cols + kk * b_cols + j) * 4) as *const f32);
+                let a_val =
+                    *((a_usize + (bat * a_rows * a_cols + i * a_cols + kk) * 4) as *const f32);
+                let b_val =
+                    *((b_usize + (bat * k_usize * b_cols + kk * b_cols + j) * 4) as *const f32);
                 sum += a_val * b_val;
             }
             kk += 1;
         }
 
-        unsafe { *((out_usize + idx * 4) as *mut f32) = sum; };
+        unsafe {
+            *((out_usize + idx * 4) as *mut f32) = sum;
+        };
     });
 }
 
@@ -1475,11 +1542,19 @@ fn small_matrix_matmul(
                             let mut kk = 0usize;
 
                             while kk + 8 <= k as usize {
-                                let a0 = _mm256_loadu_ps(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk));
-                                let a1 = _mm256_loadu_ps(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 8));
+                                let a0 = _mm256_loadu_ps(
+                                    a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk),
+                                );
+                                let a1 = _mm256_loadu_ps(
+                                    a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 8),
+                                );
 
-                                let b0 = _mm256_loadu_ps(b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j));
-                                let b1 = _mm256_loadu_ps(b_ptr.add(bat * k as usize * b_cols + (kk + 8) * b_cols + j));
+                                let b0 = _mm256_loadu_ps(
+                                    b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j),
+                                );
+                                let b1 = _mm256_loadu_ps(
+                                    b_ptr.add(bat * k as usize * b_cols + (kk + 8) * b_cols + j),
+                                );
 
                                 acc0 = _mm256_fmadd_ps(a0, b0, acc0);
                                 acc1 = _mm256_fmadd_ps(a1, b1, acc1);
@@ -1510,9 +1585,12 @@ fn small_matrix_matmul(
 
                         while kk + 4 <= k_limit {
                             let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                            let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
-                            let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
-                            let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+                            let a1 =
+                                unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
+                            let a2 =
+                                unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
+                            let a3 =
+                                unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
 
                             let b_base = bat * k as usize * b_cols + kk * b_cols + j;
                             let b0 = unsafe { *b_ptr.add(b_base) };
@@ -1530,8 +1608,10 @@ fn small_matrix_matmul(
                         sum = sum0 + sum1 + sum2 + sum3;
 
                         while kk < k_limit {
-                            let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                            let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                            let a_val =
+                                unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
+                            let b_val =
+                                unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
                             sum += a_val * b_val;
                             kk += 1;
                         }
@@ -1571,7 +1651,8 @@ fn small_matrix_matmul(
 
                     while kk < k_limit {
                         let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                        let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                        let b_val =
+                            unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
                         sum += a_val * b_val;
                         kk += 1;
                     }
@@ -1620,19 +1701,44 @@ fn single_threaded_matmul(
                                         let mut kk = k_tile;
 
                                         while kk + 8 <= k_max {
-                                            let a0 = _mm256_loadu_ps(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk));
-                                            let a1 = _mm256_loadu_ps(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 8));
+                                            let a0 = _mm256_loadu_ps(
+                                                a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk),
+                                            );
+                                            let a1 =
+                                                _mm256_loadu_ps(a_ptr.add(
+                                                    bat * a_rows * a_cols + i * a_cols + kk + 8,
+                                                ));
 
-                                            let b0 = _mm256_loadu_ps(b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j));
-                                            let b1 = _mm256_loadu_ps(b_ptr.add(bat * k as usize * b_cols + (kk + 8) * b_cols + j));
+                                            let b0 =
+                                                _mm256_loadu_ps(b_ptr.add(
+                                                    bat * k as usize * b_cols + kk * b_cols + j,
+                                                ));
+                                            let b1 = _mm256_loadu_ps(b_ptr.add(
+                                                bat * k as usize * b_cols + (kk + 8) * b_cols + j,
+                                            ));
 
                                             acc0 = _mm256_fmadd_ps(a0, b0, acc0);
                                             acc1 = _mm256_fmadd_ps(a1, b1, acc1);
 
                                             #[cfg(feature = "prefetch")]
                                             {
-                                                _mm_prefetch(b_ptr.add(bat * k as usize * b_cols + (kk + TILE_SIZE) * b_cols + j), _MM_HINT_T0);
-                                                _mm_prefetch(a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + TILE_SIZE), _MM_HINT_T0);
+                                                _mm_prefetch(
+                                                    b_ptr.add(
+                                                        bat * k as usize * b_cols
+                                                            + (kk + TILE_SIZE) * b_cols
+                                                            + j,
+                                                    ),
+                                                    _MM_HINT_T0,
+                                                );
+                                                _mm_prefetch(
+                                                    a_ptr.add(
+                                                        bat * a_rows * a_cols
+                                                            + i * a_cols
+                                                            + kk
+                                                            + TILE_SIZE,
+                                                    ),
+                                                    _MM_HINT_T0,
+                                                );
                                             }
 
                                             kk += 16;
@@ -1644,8 +1750,10 @@ fn single_threaded_matmul(
                                         sum += acc_arr.assume_init().iter().sum::<f32>();
 
                                         while kk < k_max {
-                                            let a_val = *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk);
-                                            let b_val = *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j);
+                                            let a_val =
+                                                *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk);
+                                            let b_val = *b_ptr
+                                                .add(bat * k as usize * b_cols + kk * b_cols + j);
                                             sum += a_val * b_val;
                                             kk += 1;
                                         }
@@ -1653,23 +1761,49 @@ fn single_threaded_matmul(
                                 } else {
                                     let mut kk = k_tile;
                                     while kk + 4 <= k_max {
-                                        let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                                        let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
-                                        let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
-                                        let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+                                        let a0 = unsafe {
+                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk)
+                                        };
+                                        let a1 = unsafe {
+                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1)
+                                        };
+                                        let a2 = unsafe {
+                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2)
+                                        };
+                                        let a3 = unsafe {
+                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3)
+                                        };
 
-                                        let b0 = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
-                                        let b1 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 1) * b_cols + j) };
-                                        let b2 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 2) * b_cols + j) };
-                                        let b3 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 3) * b_cols + j) };
+                                        let b0 = unsafe {
+                                            *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
+                                        };
+                                        let b1 = unsafe {
+                                            *b_ptr.add(
+                                                bat * k as usize * b_cols + (kk + 1) * b_cols + j,
+                                            )
+                                        };
+                                        let b2 = unsafe {
+                                            *b_ptr.add(
+                                                bat * k as usize * b_cols + (kk + 2) * b_cols + j,
+                                            )
+                                        };
+                                        let b3 = unsafe {
+                                            *b_ptr.add(
+                                                bat * k as usize * b_cols + (kk + 3) * b_cols + j,
+                                            )
+                                        };
 
                                         sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
                                         kk += 4;
                                     }
 
                                     while kk < k_max {
-                                        let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                                        let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                        let a_val = unsafe {
+                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk)
+                                        };
+                                        let b_val = unsafe {
+                                            *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
+                                        };
                                         sum += a_val * b_val;
                                         kk += 1;
                                     }
@@ -1680,23 +1814,46 @@ fn single_threaded_matmul(
                             {
                                 let mut kk = k_tile;
                                 while kk + 4 <= k_max {
-                                    let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                                    let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
-                                    let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
-                                    let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+                                    let a0 = unsafe {
+                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk)
+                                    };
+                                    let a1 = unsafe {
+                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1)
+                                    };
+                                    let a2 = unsafe {
+                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2)
+                                    };
+                                    let a3 = unsafe {
+                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3)
+                                    };
 
-                                    let b0 = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
-                                    let b1 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 1) * b_cols + j) };
-                                    let b2 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 2) * b_cols + j) };
-                                    let b3 = unsafe { *b_ptr.add(bat * k as usize * b_cols + (kk + 3) * b_cols + j) };
+                                    let b0 = unsafe {
+                                        *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
+                                    };
+                                    let b1 = unsafe {
+                                        *b_ptr
+                                            .add(bat * k as usize * b_cols + (kk + 1) * b_cols + j)
+                                    };
+                                    let b2 = unsafe {
+                                        *b_ptr
+                                            .add(bat * k as usize * b_cols + (kk + 2) * b_cols + j)
+                                    };
+                                    let b3 = unsafe {
+                                        *b_ptr
+                                            .add(bat * k as usize * b_cols + (kk + 3) * b_cols + j)
+                                    };
 
                                     sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
                                     kk += 4;
                                 }
 
                                 while kk < k_max {
-                                    let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                                    let b_val = unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                                    let a_val = unsafe {
+                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk)
+                                    };
+                                    let b_val = unsafe {
+                                        *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
+                                    };
                                     sum += a_val * b_val;
                                     kk += 1;
                                 }
@@ -1764,7 +1921,10 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let x_ptr = x.data_ptr_f32();
     let w_ptr = w.data_ptr_f32();
-    debug_assert!(w.is_contiguous(), "fused_linear_relu: weight tensor must be contiguous");
+    debug_assert!(
+        w.is_contiguous(),
+        "fused_linear_relu: weight tensor must be contiguous"
+    );
 
     let output_shape: Vec<i64> = if x_shape.len() > 1 {
         let mut s = x_shape[..x_shape.len() - 1].to_vec();
@@ -1787,15 +1947,15 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     {
         use rayon::prelude::*;
         let total = batch_size * out_features;
-        
+
         let x_usize = x_ptr as usize;
         let w_usize = w_ptr as usize;
         let out_usize = out_ptr as usize;
-        
+
         (0..total).into_par_iter().for_each(|idx| {
             let batch_idx = idx / out_features;
             let out_idx = idx % out_features;
-            
+
             let mut sum = 0.0f32;
             for k in 0..in_features {
                 let x_offset = batch_idx * in_features + k;
@@ -1804,13 +1964,15 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                 sum += x_val * w_val;
             }
-            
+
             if let Some(b) = bias {
                 let b_ptr = b.data_ptr_f32();
                 sum += unsafe { *b_ptr.add(out_idx) };
             }
-            
-            unsafe { *((out_usize + idx * 4) as *mut f32) = sum.max(0.0); };
+
+            unsafe {
+                *((out_usize + idx * 4) as *mut f32) = sum.max(0.0);
+            };
         });
     }
     #[cfg(not(feature = "parallel"))]
@@ -1825,13 +1987,15 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let w_val = unsafe { *w_ptr.add(w_offset) };
                     sum += x_val * w_val;
                 }
-                
+
                 if let Some(b) = bias {
                     let b_ptr = b.data_ptr_f32();
                     sum += unsafe { *b_ptr.add(out_idx) };
                 }
-                
-                unsafe { *out_ptr.add(batch_idx * out_features + out_idx) = sum.max(0.0); };
+
+                unsafe {
+                    *out_ptr.add(batch_idx * out_features + out_idx) = sum.max(0.0);
+                };
             }
         }
     }
@@ -1857,7 +2021,10 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let x_ptr = x.data_ptr_f32();
     let w_ptr = w.data_ptr_f32();
-    debug_assert!(w.is_contiguous(), "fused_linear_gelu: weight tensor must be contiguous");
+    debug_assert!(
+        w.is_contiguous(),
+        "fused_linear_gelu: weight tensor must be contiguous"
+    );
 
     let output_shape: Vec<i64> = if x_shape.len() > 1 {
         let mut s = x_shape[..x_shape.len() - 1].to_vec();
@@ -1882,15 +2049,15 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     {
         use rayon::prelude::*;
         let total = batch_size * out_features;
-        
+
         let x_usize = x_ptr as usize;
         let w_usize = w_ptr as usize;
         let out_usize = out_ptr as usize;
-        
+
         (0..total).into_par_iter().for_each(|idx| {
             let batch_idx = idx / out_features;
             let out_idx = idx % out_features;
-            
+
             let mut sum = 0.0f32;
             for k in 0..in_features {
                 let x_offset = batch_idx * in_features + k;
@@ -1899,17 +2066,19 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                 sum += x_val * w_val;
             }
-            
+
             if let Some(b) = bias {
                 let b_ptr = b.data_ptr_f32();
                 sum += unsafe { *b_ptr.add(out_idx) };
             }
-            
+
             let x3 = sum * sum * sum;
             let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
             let gelu = 0.5 * sum * (1.0 + t);
-            
-            unsafe { *((out_usize + idx * 4) as *mut f32) = gelu; };
+
+            unsafe {
+                *((out_usize + idx * 4) as *mut f32) = gelu;
+            };
         });
     }
     #[cfg(not(feature = "parallel"))]
@@ -1924,17 +2093,19 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let w_val = unsafe { *w_ptr.add(w_offset) };
                     sum += x_val * w_val;
                 }
-                
+
                 if let Some(b) = bias {
                     let b_ptr = b.data_ptr_f32();
                     sum += unsafe { *b_ptr.add(out_idx) };
                 }
-                
+
                 let x3 = sum * sum * sum;
                 let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
                 let gelu = 0.5 * sum * (1.0 + t);
-                
-                unsafe { *out_ptr.add(batch_idx * out_features + out_idx) = gelu; };
+
+                unsafe {
+                    *out_ptr.add(batch_idx * out_features + out_idx) = gelu;
+                };
             }
         }
     }
@@ -2007,7 +2178,8 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
                     let mut sum = 0.0f32;
                     for d in 0..dim_size {
-                        let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
+                        let linear_idx =
+                            (block_before * dim_size + d) * strides_after as usize + block_after;
                         let idx = a_storage_offset + linear_idx;
                         if idx < a_numel {
                             sum += a_slice[idx];
@@ -2142,7 +2314,8 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
                     let mut max_val = f32::MIN;
                     for d in 0..dim_size {
-                        let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
+                        let linear_idx =
+                            (block_before * dim_size + d) * strides_after as usize + block_after;
                         let idx = a_storage_offset + linear_idx;
                         if idx < a_numel {
                             max_val = max_val.max(a_slice[idx]);
@@ -2247,7 +2420,8 @@ fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
                     let mut min_val = f32::MAX;
                     for d in 0..dim_size {
-                        let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
+                        let linear_idx =
+                            (block_before * dim_size + d) * strides_after as usize + block_after;
                         let idx = a_storage_offset + linear_idx;
                         if idx < a_numel {
                             min_val = min_val.min(a_slice[idx]);
@@ -2323,11 +2497,11 @@ fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
     let x_shape = x.shape();
     let _batch_size: i64 = x_shape[..x_shape.len() - 1].iter().product();
-    
+
     let x_ptr = x.data_ptr() as *const f32;
     let numel = x.numel() as usize;
     let _num_rows = numel / dim_size;
-    
+
     let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2337,84 +2511,87 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
     {
         let a_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-        
-        out_slice.par_chunks_mut(dim_size).zip(a_slice.par_chunks(dim_size)).for_each(|(out_row, x_row)| {
-            let mut max_val = f32::MIN;
-            
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("avx2") {
-                    unsafe {
-                        let mut max_vec = _mm256_set1_ps(f32::MIN);
-                        let mut i = 0;
-                        while i + 8 <= dim_size {
-                            let vec = _mm256_loadu_ps(x_row.as_ptr().add(i));
-                            max_vec = _mm256_max_ps(max_vec, vec);
-                            i += 8;
+
+        out_slice
+            .par_chunks_mut(dim_size)
+            .zip(a_slice.par_chunks(dim_size))
+            .for_each(|(out_row, x_row)| {
+                let mut max_val = f32::MIN;
+
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        unsafe {
+                            let mut max_vec = _mm256_set1_ps(f32::MIN);
+                            let mut i = 0;
+                            while i + 8 <= dim_size {
+                                let vec = _mm256_loadu_ps(x_row.as_ptr().add(i));
+                                max_vec = _mm256_max_ps(max_vec, vec);
+                                i += 8;
+                            }
+                            let mut max_arr = [0.0f32; 8];
+                            _mm256_storeu_ps(max_arr.as_mut_ptr(), max_vec);
+                            for j in 0..8 {
+                                max_val = max_val.max(max_arr[j]);
+                            }
+                            for j in i..dim_size {
+                                max_val = max_val.max(x_row[j]);
+                            }
                         }
-                        let mut max_arr = [0.0f32; 8];
-                        _mm256_storeu_ps(max_arr.as_mut_ptr(), max_vec);
-                        for j in 0..8 {
-                            max_val = max_val.max(max_arr[j]);
-                        }
-                        for j in i..dim_size {
+                    } else {
+                        for j in 0..dim_size {
                             max_val = max_val.max(x_row[j]);
                         }
                     }
-                } else {
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
                     for j in 0..dim_size {
                         max_val = max_val.max(x_row[j]);
                     }
                 }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
+
+                let mut sum_exp = 0.0f32;
+
                 for j in 0..dim_size {
-                    max_val = max_val.max(x_row[j]);
+                    sum_exp += (x_row[j] - max_val).exp();
                 }
-            }
-            
-            let mut sum_exp = 0.0f32;
-            
-            for j in 0..dim_size {
-                sum_exp += (x_row[j] - max_val).exp();
-            }
-            
-            let inv_sum = 1.0 / sum_exp;
-            
-            for j in 0..dim_size {
-                out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
-            }
-        });
+
+                let inv_sum = 1.0 / sum_exp;
+
+                for j in 0..dim_size {
+                    out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                }
+            });
     }
-    
+
     #[cfg(not(feature = "parallel"))]
     {
         let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-        
+
         for row in 0..num_rows {
             let row_start = row * dim_size;
             let x_row = &x_slice[row_start..row_start + dim_size];
             let out_row = &mut out_slice[row_start..row_start + dim_size];
-            
+
             let mut max_val = f32::MIN;
             for j in 0..dim_size {
                 max_val = max_val.max(x_row[j]);
             }
-            
+
             let mut sum_exp = 0.0f32;
             for j in 0..dim_size {
                 sum_exp += (x_row[j] - max_val).exp();
             }
-            
+
             let inv_sum = 1.0 / sum_exp;
             for j in 0..dim_size {
                 out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
             }
         }
     }
-    
+
     output
 }
 
@@ -2492,13 +2669,13 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     for b in 0..batch_size {
         let base_idx = b * num_classes;
-        
+
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
             use std::arch::x86_64::*;
             let mut max_logit = f32::MIN;
             let mut i = 0;
-            
+
             if is_x86_feature_detected!("avx2") {
                 unsafe {
                     let ptr = logits_data.as_ptr().add(base_idx);
@@ -2733,9 +2910,9 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
                     let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
                     let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
                     let prod = _mm256_mul_ps(a_vec, b_vec);
-                    let sum_vec = _mm256_hadd_ps(prod, prod);
-                    let sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
-                    sum += _mm256_cvtss_f32(sum_vec);
+                    let prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                    _mm256_storeu_ps(prod_arr.as_ptr() as *mut f32, prod);
+                    sum += prod_arr.assume_init().iter().sum::<f32>();
                     i += 8;
                 }
             }
@@ -2778,9 +2955,9 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
                     let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
                     let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
                     let prod = _mm256_mul_ps(a_vec, b_vec);
-                    let sum_vec = _mm256_hadd_ps(prod, prod);
-                    let sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
-                    sum += _mm256_cvtss_f32(sum_vec);
+                    let prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                    _mm256_storeu_ps(prod_arr.as_ptr() as *mut f32, prod);
+                    sum += prod_arr.assume_init().iter().sum::<f32>();
                     i += 8;
                 }
             }
@@ -2809,150 +2986,6 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
         i += 1;
     }
     sum
-}
-
-fn winograd_conv3x3_kernel(
-    x: &Tensor,
-    w: &Tensor,
-    bias: Option<&Tensor>,
-    batch_size: usize,
-    in_channels: usize,
-    out_channels: usize,
-    in_height: usize,
-    in_width: usize,
-    padding: usize,
-) -> Tensor {
-    let out_height = in_height + 2 * padding - 2;
-    let out_width = in_width + 2 * padding - 2;
-    let output_shape = vec![
-        batch_size as i64,
-        out_channels as i64,
-        out_height as i64,
-        out_width as i64,
-    ];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
-
-    let x_ptr = x.data_ptr() as *const f32;
-    let w_ptr = w.data_ptr() as *const f32;
-
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
-
-    let w_data: Vec<f32> =
-        unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels * 9).to_vec() };
-
-    let x_data: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width).to_vec()
-    };
-
-    let bias_data: Option<Vec<f32>> = bias.map(|b| {
-        let ptr = b.data_ptr() as *const f32;
-        unsafe { std::slice::from_raw_parts(ptr, out_channels).to_vec() }
-    });
-
-    #[cfg(feature = "parallel")]
-    {
-        let total = batch_size * out_channels * out_height * out_width;
-
-        let x_data_owned = x_data;
-        let w_data_owned = w_data;
-        let bias_data_owned = bias_data;
-
-        let results: Vec<f32> = (0..total)
-            .into_par_iter()
-            .map(|idx| {
-                let n = idx / (out_channels * out_height * out_width);
-                let rem = idx % (out_channels * out_height * out_width);
-                let oc = rem / (out_height * out_width);
-                let rem2 = rem % (out_height * out_width);
-                let oh = rem2 / out_width;
-                let ow = rem2 % out_width;
-
-                let ih_start = oh.saturating_sub(padding);
-                let iw_start = ow.saturating_sub(padding);
-
-                let mut sum = 0.0f32;
-
-                for ic in 0..in_channels {
-                    let w_offset = oc * in_channels * 9 + ic * 9;
-                    let mut patch_values = [0.0f32; 9];
-                    let mut patch_idx = 0;
-
-                    for kh in 0..3 {
-                        for kw in 0..3 {
-                            let ih = ih_start + kh;
-                            let iw = iw_start + kw;
-                            if ih < in_height && iw < in_width {
-                                let x_idx =
-                                    ((n * in_channels + ic) * in_height + ih) * in_width + iw;
-                                patch_values[patch_idx] = x_data_owned[x_idx];
-                            }
-                            patch_idx += 1;
-                        }
-                    }
-
-                    for kw in 0..9 {
-                        sum += patch_values[kw] * w_data_owned[w_offset + kw];
-                    }
-                }
-
-                if let Some(ref b) = bias_data_owned {
-                    sum += b[oc];
-                }
-
-                sum
-            })
-            .collect();
-
-        unsafe {
-            std::ptr::copy_nonoverlapping(results.as_ptr(), out_ptr, total);
-        }
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for n in 0..batch_size {
-            for oc in 0..out_channels {
-                for oh in 0..out_height {
-                    for ow in 0..out_width {
-                        let mut sum = 0.0f32;
-
-                        let ih_start = oh.saturating_sub(padding);
-                        let iw_start = ow.saturating_sub(padding);
-
-                        for ic in 0..in_channels {
-                            let w_base = (oc * in_channels + ic) * 9;
-
-                            for kh in 0..3 {
-                                for kw in 0..3 {
-                                    let ih = ih_start + kh;
-                                    let iw = iw_start + kw;
-
-                                    if ih < in_height && iw < in_width {
-                                        let x_idx = ((n * in_channels + ic) * in_height + ih)
-                                            * in_width
-                                            + iw;
-                                        let w_idx = w_base + kh * 3 + kw;
-                                        sum += x_data[x_idx] * w_data[w_idx];
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(ref b) = bias_data {
-                            sum += b[oc];
-                        }
-
-                        let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                        unsafe { *out_ptr.add(out_idx) = sum };
-                    }
-                }
-            }
-        }
-    }
-
-    output
 }
 
 fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -3029,17 +3062,25 @@ fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         )];
     }
 
+    // Use im2col for all 3x3 convolutions
+    // Winograd F(2x2,3x3) was implemented but has too much overhead
+    // The transforms add latency that exceeds the arithmetic savings
     if kernel_height == 3 && kernel_width == 3 && stride == 1 && dilation == 1 && groups == 1 {
-        return vec![winograd_conv3x3_kernel(
+        return vec![conv2d_im2col(
             x,
             w,
             bias,
+            stride,
+            padding,
+            dilation,
+            out_height,
+            out_width,
             batch_size,
             in_channels,
             out_channels,
-            in_height,
-            in_width,
-            padding,
+            kernel_height,
+            kernel_width,
+            groups,
         )];
     }
 
@@ -3089,6 +3130,11 @@ fn conv2d_1x1(
     let w_data: Vec<f32> =
         unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels).to_vec() };
 
+    let bias_data: Option<Vec<f32>> = bias.map(|b| {
+        let b_ptr = b.data_ptr() as *const f32;
+        unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
+    });
+
     let _n = batch_size * in_height * in_width;
     let _k = in_channels;
     let _m = out_channels;
@@ -3104,25 +3150,10 @@ fn conv2d_1x1(
                 for oc in 0..out_channels {
                     let w_row = &w_data[oc * in_channels..];
                     let sum = simd_dot_product(x_row, w_row, in_channels);
+                    let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
 
                     let out_idx = ((b * out_channels + oc) * in_height + h) * in_width + w_idx;
-                    unsafe { *out_ptr.add(out_idx) = sum };
-                }
-            }
-        }
-    }
-
-    if let Some(b) = bias {
-        let b_ptr = b.data_ptr() as *const f32;
-        let b_data: Vec<f32> = unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() };
-
-        for n in 0..batch_size {
-            for oc in 0..out_channels {
-                for h in 0..in_height {
-                    for w_idx in 0..in_width {
-                        let out_idx = ((n * out_channels + oc) * in_height + h) * in_width + w_idx;
-                        unsafe { *out_ptr.add(out_idx) += b_data[oc] };
-                    }
+                    unsafe { *out_ptr.add(out_idx) = sum + bias_val };
                 }
             }
         }
@@ -3162,16 +3193,17 @@ fn depthwise_conv2d(
     let x_ptr = x.data_ptr() as *const f32;
     let w_ptr = w.data_ptr() as *const f32;
 
-    let x_data: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width).to_vec()
-    };
-
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
+    // Use direct pointers instead of copying data
     let w_data: Vec<f32> = unsafe {
         std::slice::from_raw_parts(w_ptr, in_channels * kernel_height * kernel_width).to_vec()
+    };
+
+    let x_data: Vec<f32> = unsafe {
+        std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width).to_vec()
     };
 
     let bias_data: Option<Vec<f32>> = bias.map(|b| {
@@ -3181,11 +3213,9 @@ fn depthwise_conv2d(
 
     #[cfg(feature = "parallel")]
     {
-        let total = batch_size * in_channels * out_height * out_width;
+        use rayon::prelude::*;
 
-        let x_data_owned = x_data;
-        let w_data_owned = w_data;
-        let bias_data_owned = bias_data;
+        let total = batch_size * in_channels * out_height * out_width;
 
         let results: Vec<f32> = (0..total)
             .into_par_iter()
@@ -3207,12 +3237,12 @@ fn depthwise_conv2d(
                         if ih < in_height && iw < in_width {
                             let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
                             let w_idx = ((ic * kernel_height) + kh) * kernel_width + kw;
-                            sum += x_data_owned[x_idx] * w_data_owned[w_idx];
+                            sum += x_data[x_idx] * w_data[w_idx];
                         }
                     }
                 }
 
-                if let Some(ref b) = bias_data_owned {
+                if let Some(ref b) = bias_data {
                     sum += b[ic];
                 }
 
@@ -3278,19 +3308,92 @@ fn conv2d_im2col(
     kernel_width: usize,
     groups: usize,
 ) -> Tensor {
-    let col = im2col_kernel(
-        x,
-        kernel_height,
-        kernel_width,
-        stride,
-        padding,
-        dilation,
-        out_height,
-        out_width,
-    );
-    let col_shape = col.shape();
-    let col_rows = col_shape[0] as usize;
-    let col_cols = col_shape[1] as usize;
+    let x_shape = x.shape();
+    let in_height = x_shape[2] as usize;
+    let in_width = x_shape[3] as usize;
+
+    let col_rows = batch_size * out_height * out_width;
+    let col_cols = in_channels * kernel_height * kernel_width;
+    let mut col_data = vec![0.0f32; col_rows * col_cols];
+
+    let x_ptr = x.data_ptr() as *const f32;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+
+        let x_usize = x_ptr as usize;
+
+        col_data
+            .par_chunks_mut(col_cols)
+            .enumerate()
+            .for_each(|(row, col_chunk)| {
+                let n = row / (out_height * out_width);
+                let rem = row % (out_height * out_width);
+                let oh = rem / out_width;
+                let ow = rem % out_width;
+
+                for ic in 0..in_channels {
+                    for kh in 0..kernel_height {
+                        for kw in 0..kernel_width {
+                            let ih = oh * stride + kh * dilation;
+                            let iw = ow * stride + kw * dilation;
+
+                            let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
+
+                            if ih >= padding
+                                && ih < padding + in_height
+                                && iw >= padding
+                                && iw < padding + in_width
+                            {
+                                let x_ih = ih - padding;
+                                let x_iw = iw - padding;
+                                let x_idx =
+                                    ((n * in_channels + ic) * in_height + x_ih) * in_width + x_iw;
+                                let x_ptr = x_usize as *const f32;
+                                col_chunk[col_col] = unsafe { *x_ptr.add(x_idx) };
+                            }
+                        }
+                    }
+                }
+            });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for n in 0..batch_size {
+            for oh in 0..out_height {
+                for ow in 0..out_width {
+                    let col_row = (n * out_height + oh) * out_width + ow;
+
+                    for ic in 0..in_channels {
+                        for kh in 0..kernel_height {
+                            for kw in 0..kernel_width {
+                                let ih = oh * stride + kh * dilation;
+                                let iw = ow * stride + kw * dilation;
+
+                                let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
+
+                                if ih >= padding
+                                    && ih < padding + in_height
+                                    && iw >= padding
+                                    && iw < padding + in_width
+                                {
+                                    let x_ih = ih - padding;
+                                    let x_iw = iw - padding;
+                                    let x_idx = ((n * in_channels + ic) * in_height + x_ih)
+                                        * in_width
+                                        + x_iw;
+                                    col_data[col_row * col_cols + col_col] =
+                                        unsafe { *x_ptr.add(x_idx) };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let w_data: Vec<f32> = unsafe {
         let w_ptr = w.data_ptr() as *const f32;
@@ -3313,39 +3416,59 @@ fn conv2d_im2col(
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
 
-    let col_ptr = col.data_ptr() as *const f32;
-    let col_data: Vec<f32> =
-        unsafe { std::slice::from_raw_parts(col_ptr, col_rows * col_cols).to_vec() };
+    // Use the col_data Vec directly as a slice
+    let col_slice = col_data.as_slice();
 
-    for oc in 0..out_channels {
-        let w_row = &w_data[oc * col_cols..(oc + 1) * col_cols];
+    // Use optimized matrix multiplication for large matrices
+    // Threshold: use GEMM when all dimensions >= 12
+    const GEMM_MIN_SIZE: usize = 12;
+    let use_gemm =
+        col_rows >= GEMM_MIN_SIZE && out_channels >= GEMM_MIN_SIZE && col_cols >= GEMM_MIN_SIZE;
+
+    let bias_data: Option<Vec<f32>> = bias.map(|b| {
+        let b_ptr = b.data_ptr() as *const f32;
+        unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
+    });
+
+    if use_gemm {
+        // Transpose weights for GEMM: (out_channels, col_cols) -> (col_cols, out_channels)
+        let w_t: Vec<f32> = {
+            let w = &w_data;
+            (0..col_cols)
+                .flat_map(|i| (0..out_channels).map(move |j| w[j * col_cols + i]))
+                .collect()
+        };
+
+        let result = matmul_blas(col_slice, &w_t, col_rows, col_cols, out_channels);
 
         for row in 0..col_rows {
-            let col_row = &col_data[row * col_cols..(row + 1) * col_cols];
-            let sum = simd_dot_product(col_row, w_row, col_cols);
-
             let n = row / (out_height * out_width);
             let rem = row % (out_height * out_width);
             let oh = rem / out_width;
             let ow = rem % out_width;
 
-            let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-            unsafe { *out_ptr.add(out_idx) = sum };
-        }
-    }
-
-    if let Some(b) = bias {
-        let b_ptr = b.data_ptr() as *const f32;
-        let b_data: Vec<f32> = unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() };
-
-        for n in 0..batch_size {
             for oc in 0..out_channels {
-                for oh in 0..out_height {
-                    for ow in 0..out_width {
-                        let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                        unsafe { *out_ptr.add(out_idx) += b_data[oc] };
-                    }
-                }
+                let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
+                unsafe { *out_ptr.add(out_idx) = result[row * out_channels + oc] + bias_val };
+            }
+        }
+    } else {
+        for oc in 0..out_channels {
+            let w_row = &w_data[oc * col_cols..(oc + 1) * col_cols];
+            let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
+
+            for row in 0..col_rows {
+                let col_row = &col_slice[row * col_cols..(row + 1) * col_cols];
+                let sum = simd_dot_product(col_row, w_row, col_cols);
+
+                let n = row / (out_height * out_width);
+                let rem = row % (out_height * out_width);
+                let oh = rem / out_width;
+                let ow = rem % out_width;
+
+                let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                unsafe { *out_ptr.add(out_idx) = sum + bias_val };
             }
         }
     }
@@ -3664,9 +3787,12 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &val)| {
-                *out = val.clamp(min_val, max_val);
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &val)| {
+                    *out = val.clamp(min_val, max_val);
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -3710,9 +3836,12 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice.par_iter_mut().zip(a_slice.par_iter()).for_each(|(out, &val)| {
-                *out = val.powf(exponent);
-            });
+            out_slice
+                .par_iter_mut()
+                .zip(a_slice.par_iter())
+                .for_each(|(out, &val)| {
+                    *out = val.powf(exponent);
+                });
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -3747,7 +3876,11 @@ fn register_kernels() {
     register("log", DispatchKey::Cpu, log_kernel as KernelFn);
     register("sqrt", DispatchKey::Cpu, sqrt_kernel as KernelFn);
     register("relu", DispatchKey::Cpu, relu_kernel as KernelFn);
-    register("fused_add_relu", DispatchKey::Cpu, fused_add_relu_kernel as KernelFn);
+    register(
+        "fused_add_relu",
+        DispatchKey::Cpu,
+        fused_add_relu_kernel as KernelFn,
+    );
     register("gelu", DispatchKey::Cpu, gelu_kernel as KernelFn);
     register("sigmoid", DispatchKey::Cpu, sigmoid_kernel as KernelFn);
     register("tanh", DispatchKey::Cpu, tanh_kernel as KernelFn);
@@ -3756,8 +3889,16 @@ fn register_kernels() {
     register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
     register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
     register("linear", DispatchKey::Cpu, linear_kernel as KernelFn);
-    register("fused_linear_relu", DispatchKey::Cpu, fused_linear_relu_kernel as KernelFn);
-    register("fused_linear_gelu", DispatchKey::Cpu, fused_linear_gelu_kernel as KernelFn);
+    register(
+        "fused_linear_relu",
+        DispatchKey::Cpu,
+        fused_linear_relu_kernel as KernelFn,
+    );
+    register(
+        "fused_linear_gelu",
+        DispatchKey::Cpu,
+        fused_linear_gelu_kernel as KernelFn,
+    );
     register("sum", DispatchKey::Cpu, sum_kernel as KernelFn);
     register("mean", DispatchKey::Cpu, mean_kernel as KernelFn);
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);

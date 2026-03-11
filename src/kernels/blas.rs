@@ -2,7 +2,7 @@ pub const MIN_BLAS_SIZE: usize = 64;
 
 #[cfg(feature = "openblas")]
 pub fn matmul_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    use openblas_src::cblas::{sgemm, Transpose, Layout};
+    use openblas_src::cblas::{sgemm, Layout, Transpose};
 
     let mut c = vec![0.0f32; m * n];
 
