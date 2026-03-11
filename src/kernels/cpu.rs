@@ -276,7 +276,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             const CHUNK_SIZE: usize = 8192;
-            let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            let num_chunks = numel.div_ceil(CHUNK_SIZE);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -461,7 +461,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             const CHUNK_SIZE: usize = 8192;
-            let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            let num_chunks = numel.div_ceil(CHUNK_SIZE);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -620,7 +620,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             const CHUNK_SIZE: usize = 8192;
-            let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            let num_chunks = numel.div_ceil(CHUNK_SIZE);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -1228,7 +1228,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             const CHUNK_SIZE: usize = 8192;
-            let num_chunks = (numel + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            let num_chunks = numel.div_ceil(CHUNK_SIZE);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -3002,6 +3002,7 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     }
 }
 
+#[allow(dead_code)]
 fn im2col_kernel(
     x: &Tensor,
     kernel_height: usize,
