@@ -27,9 +27,12 @@ wgpu         = "24"
 pollster     = "0.4"
 openblas-src = { version = "0.10", optional = true }
 
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["simd", "parallel", "simd_avx512"]
-openblas = ["openblas-src"]
+openblas = []
 parallel = []
 simd = []
 prefetch = []
