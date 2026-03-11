@@ -18,10 +18,30 @@ use std::arch::x86_64::*;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+use wide::f32x4;
+
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 use wide::f32x8;
 
-#[cfg(feature = "simd")]
+#[allow(dead_code)]
+fn relu_simd(input: &[f32], output: &mut [f32]) {
+    let zero = f32x4::ZERO;
+    let (chunks, remainder) = input.as_chunks::<4>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<4>();
+
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let v = f32x4::from(*in_chunk);
+        let result = v.max(zero);
+        *out_chunk = result.into();
+    }
+
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        *out_val = in_val.max(0.0);
+    }
+}
+
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 #[allow(dead_code)]
 fn relu_simd(input: &[f32], output: &mut [f32]) {
     let zero = f32x8::ZERO;
@@ -39,7 +59,36 @@ fn relu_simd(input: &[f32], output: &mut [f32]) {
     }
 }
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+fn gelu_simd(input: &[f32], output: &mut [f32]) {
+    let sqrt_2_over_pi = f32x4::new([0.797_884_6, 0.797_884_6, 0.797_884_6, 0.797_884_6]);
+    let coeff = f32x4::new([0.044715f32, 0.044715f32, 0.044715f32, 0.044715f32]);
+    let half = f32x4::new([0.5f32, 0.5f32, 0.5f32, 0.5f32]);
+    let one = f32x4::new([1.0f32, 1.0f32, 1.0f32, 1.0f32]);
+
+    let (chunks, remainder) = input.as_chunks::<4>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<4>();
+
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let x = f32x4::from(*in_chunk);
+        let x3 = x * x * x;
+        let y = sqrt_2_over_pi * (x + coeff * x3);
+        let exp_2y = (y + y).exp();
+        let t = (exp_2y - one) / (exp_2y + one);
+        let result = half * x * (one + t);
+        *out_chunk = result.into();
+    }
+
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        let x = *in_val;
+        let x3 = x * x * x;
+        let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
+        *out_val = 0.5 * x * (1.0 + t);
+    }
+}
+
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 #[allow(dead_code)]
 fn gelu_simd(input: &[f32], output: &mut [f32]) {
     let sqrt_2_over_pi = f32x8::new([
@@ -90,7 +139,38 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
     }
 }
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+fn tanh_simd(input: &[f32], output: &mut [f32]) {
+    let two = f32x4::new([2.0; 4]);
+    let one = f32x4::new([1.0; 4]);
+
+    let (chunks, remainder) = input.as_chunks::<4>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<4>();
+
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let v = f32x4::from(*in_chunk);
+        let abs_v = v.abs();
+        let exp_2x = (two * abs_v).exp();
+        let result = (exp_2x - one) / (exp_2x + one);
+        let sign = v.sign_bit();
+        let result = result.blend(-result, sign);
+        *out_chunk = result.into();
+    }
+
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        let x = *in_val;
+        let abs_x = x.abs();
+        let exp_2x = (2.0 * abs_x).exp();
+        let mut result = (exp_2x - 1.0) / (exp_2x + 1.0);
+        if x < 0.0 {
+            result = -result;
+        }
+        *out_val = result;
+    }
+}
+
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 #[allow(dead_code)]
 fn tanh_simd(input: &[f32], output: &mut [f32]) {
     let two = f32x8::new([2.0; 8]);
