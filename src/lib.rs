@@ -368,17 +368,20 @@ fn batched_mlp_forward(
             match act.as_str() {
                 "relu" => {
                     use dispatcher::dispatch;
-                    let result = dispatch("relu", dispatcher::DispatchKey::Cpu, &[&x]);
+                    let dispatch_key = dispatcher::device_to_dispatch_key(x.device());
+                    let result = dispatch("relu", dispatch_key, &[&x]);
                     x = result[0].clone();
                 }
                 "sigmoid" => {
                     use dispatcher::dispatch;
-                    let result = dispatch("sigmoid", dispatcher::DispatchKey::Cpu, &[&x]);
+                    let dispatch_key = dispatcher::device_to_dispatch_key(x.device());
+                    let result = dispatch("sigmoid", dispatch_key, &[&x]);
                     x = result[0].clone();
                 }
                 "tanh" => {
                     use dispatcher::dispatch;
-                    let result = dispatch("tanh", dispatcher::DispatchKey::Cpu, &[&x]);
+                    let dispatch_key = dispatcher::device_to_dispatch_key(x.device());
+                    let result = dispatch("tanh", dispatch_key, &[&x]);
                     x = result[0].clone();
                 }
                 _ => {}
@@ -397,7 +400,8 @@ fn neg(a: &PyTensor) -> PyTensor {
 #[pyfunction]
 fn abs(a: &PyTensor) -> PyTensor {
     use dispatcher::dispatch;
-    let result = dispatch("abs", dispatcher::DispatchKey::Cpu, &[&a.inner]);
+    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
+    let result = dispatch("abs", dispatch_key, &[&a.inner]);
     PyTensor::from_tensor(result[0].clone())
 }
 
@@ -423,30 +427,33 @@ fn relu(a: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    use crate::dispatcher::{dispatch, DispatchKey};
-    let result = dispatch("fused_add_relu", DispatchKey::Cpu, &[&a.inner, &b.inner]);
+    use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+    let dispatch_key = device_to_dispatch_key(a.inner.device());
+    let result = dispatch("fused_add_relu", dispatch_key, &[&a.inner, &b.inner]);
     PyTensor::from_tensor(result.into_iter().next().unwrap())
 }
 
 #[pyfunction]
 fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    use crate::dispatcher::{dispatch, DispatchKey};
+    use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+    let dispatch_key = device_to_dispatch_key(x.inner.device());
     let args: Vec<_> = match bias {
         Some(b) => vec![&x.inner, &w.inner, &b.inner],
         None => vec![&x.inner, &w.inner],
     };
-    let result = dispatch("fused_linear_relu", DispatchKey::Cpu, &args);
+    let result = dispatch("fused_linear_relu", dispatch_key, &args);
     PyTensor::from_tensor(result.into_iter().next().unwrap())
 }
 
 #[pyfunction]
 fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    use crate::dispatcher::{dispatch, DispatchKey};
+    use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+    let dispatch_key = device_to_dispatch_key(x.inner.device());
     let args: Vec<_> = match bias {
         Some(b) => vec![&x.inner, &w.inner, &b.inner],
         None => vec![&x.inner, &w.inner],
     };
-    let result = dispatch("fused_linear_gelu", DispatchKey::Cpu, &args);
+    let result = dispatch("fused_linear_gelu", dispatch_key, &args);
     PyTensor::from_tensor(result.into_iter().next().unwrap())
 }
 
@@ -473,9 +480,10 @@ fn silu(a: &PyTensor) -> PyTensor {
 #[pyfunction]
 fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
     use dispatcher::dispatch;
+    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
         "softmax",
-        dispatcher::DispatchKey::Cpu,
+        dispatch_key,
         &[&a.inner, &Tensor::from_scalar(dim as f32)],
     );
     PyTensor::from_tensor(result[0].clone())
@@ -484,9 +492,10 @@ fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
 #[pyfunction]
 fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
     use dispatcher::dispatch;
+    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
         "log_softmax",
-        dispatcher::DispatchKey::Cpu,
+        dispatch_key,
         &[&a.inner, &Tensor::from_scalar(dim as f32)],
     );
     PyTensor::from_tensor(result[0].clone())
@@ -518,9 +527,10 @@ fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
 fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let dim = dim.unwrap_or(0);
     use dispatcher::dispatch;
+    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
         "min",
-        dispatcher::DispatchKey::Cpu,
+        dispatch_key,
         &[
             &a.inner,
             &Tensor::from_scalar(dim as f32),
@@ -535,9 +545,10 @@ fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
 fn argmax(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     let dim = dim.unwrap_or(0);
     use dispatcher::dispatch;
+    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
         "max",
-        dispatcher::DispatchKey::Cpu,
+        dispatch_key,
         &[
             &a.inner,
             &Tensor::from_scalar(dim as f32),
@@ -552,9 +563,10 @@ fn argmax(a: &PyTensor, dim: Option<i32>) -> PyTensor {
 fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     let dim = dim.unwrap_or(0);
     use dispatcher::dispatch;
+    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
         "min",
-        dispatcher::DispatchKey::Cpu,
+        dispatch_key,
         &[
             &a.inner,
             &Tensor::from_scalar(dim as f32),
@@ -568,6 +580,7 @@ fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
 #[pyo3(signature = (pred, target, reduction = None))]
 fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
     use dispatcher::dispatch;
+    let dispatch_key = dispatcher::device_to_dispatch_key(pred.inner.device());
     let reduction = reduction.unwrap_or_else(|| "mean".to_string());
     let reduction_code = match reduction.as_str() {
         "none" => 0.0,
@@ -577,7 +590,7 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
     };
     let result = dispatch(
         "mse_loss",
-        dispatcher::DispatchKey::Cpu,
+        dispatch_key,
         &[
             &pred.inner,
             &target.inner,
@@ -590,10 +603,11 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
 #[pyfunction]
 #[pyo3(signature = (pred, target, reduction = None))]
 fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
-    use dispatcher::dispatch;
     use autograd::AutogradMeta;
+    use dispatcher::dispatch;
     use std::sync::Arc;
-    
+    let dispatch_key = dispatcher::device_to_dispatch_key(pred.inner.device());
+
     let reduction = reduction.unwrap_or_else(|| "mean".to_string());
     let reduction_code = match reduction.as_str() {
         "none" => 0.0,
@@ -603,7 +617,7 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
     };
     let result = dispatch(
         "cross_entropy_loss",
-        dispatcher::DispatchKey::Cpu,
+        dispatch_key,
         &[
             &pred.inner,
             &target.inner,
@@ -611,7 +625,7 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
         ],
     );
     let output = result[0].clone();
-    
+
     if pred.inner.requires_grad() {
         let backward = autograd::CrossEntropyBackward::new(
             pred.inner.clone(),
