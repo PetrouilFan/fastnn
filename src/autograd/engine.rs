@@ -13,7 +13,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
 
     // Map from tensor data pointer to gradient
     let mut grads: HashMap<usize, Tensor> = HashMap::new();
-    
+
     // Set gradient for root
     let root_ptr = root.data_ptr() as usize;
     grads.insert(root_ptr, grad_output);
@@ -36,7 +36,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
 
         // Get gradient for this tensor's output
         let grad_output_for_node = grads.get(&tensor_ptr).cloned();
-        
+
         // Compute gradients for inputs
         let grad_inputs = node.apply(&[grad_output_for_node]);
 
@@ -44,7 +44,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         for (i, input_tensor) in input_tensors.iter().enumerate() {
             if let Some(grad) = grad_inputs.get(i).and_then(|g| g.as_ref()) {
                 let input_ptr = input_tensor.data_ptr() as usize;
-                
+
                 // Store gradient in the input tensor's autograd_meta if it's a leaf
                 if input_tensor.is_leaf() {
                     // Get the TensorImpl pointer from the Arc
@@ -61,7 +61,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                         queue.push_back((input_grad_fn, input_ptr));
                     }
                 }
-                
+
                 // Also store in grads map for subsequent nodes
                 let new_grad = if let Some(existing) = grads.get(&input_ptr) {
                     let existing_slice = existing.as_f32_slice();

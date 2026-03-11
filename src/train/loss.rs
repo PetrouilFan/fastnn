@@ -34,7 +34,7 @@ impl LossFn for CrossEntropyLoss {
 
                 for (b, target_val) in target_data.iter().take(batch_size).enumerate() {
                     let base_idx = b * num_classes;
-                    
+
                     let max_logit = pred_data[base_idx..base_idx + num_classes]
                         .iter()
                         .fold(f32::MIN, |max, &x| if x > max { x } else { max });
