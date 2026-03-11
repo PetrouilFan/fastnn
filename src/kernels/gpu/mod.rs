@@ -1,4 +1,4 @@
-use crate::storage::{CpuStorage, DType, Device as TensorDevice, GpuStorage, Storage};
+use crate::storage::{DType, Device as TensorDevice, GpuStorage, Storage};
 use crate::tensor::Tensor;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ pub struct GpuContext {
     shader_modules: RwLock<HashMap<String, ShaderModule>>,
     pipelines: RwLock<HashMap<String, ComputePipeline>>,
     buffer_id_counter: AtomicUsize,
-    // Buffer pool for reusing GPU buffers by size
+    #[allow(dead_code)]
     buffer_pool: RwLock<HashMap<usize, Vec<wgpu::Buffer>>>,
 }
 
@@ -55,6 +55,7 @@ impl Clone for GpuContext {
     }
 }
 
+#[allow(dead_code)]
 impl GpuContext {
     fn new(device_id: usize) -> Self {
         let instance = wgpu::Instance::default();
@@ -106,7 +107,7 @@ impl GpuContext {
 
     /// Get or create a buffer from CPU data
     pub fn get_or_create_gpu_buffer(&self, cpu_data: &[f32], label: &str) -> wgpu::Buffer {
-        let size = cpu_data.len() * std::mem::size_of::<f32>();
+        let size = std::mem::size_of_val(cpu_data);
         let buffer = self.acquire_buffer(size);
 
         // Write data to buffer
@@ -138,7 +139,7 @@ impl GpuContext {
 
     /// Create GPU buffer from CPU data (like create_buffer_from_data)
     pub fn create_gpu_buffer_from_data(&self, data: &[f32], label: &str) -> GpuBuffer {
-        let size = data.len() * std::mem::size_of::<f32>();
+        let size = std::mem::size_of_val(data);
         let buffer = self.get_or_create_gpu_buffer(data, label);
 
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
@@ -170,7 +171,7 @@ impl GpuContext {
     }
 
     pub fn create_buffer_from_data(&self, data: &[f32], label: &str) -> GpuBuffer {
-        let size = data.len() * std::mem::size_of::<f32>();
+        let size = std::mem::size_of_val(data);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: size as u64,
@@ -196,7 +197,7 @@ impl GpuContext {
     }
 
     pub fn create_uniform_buffer(&self, data: &[f32], label: &str) -> GpuBuffer {
-        let size = data.len() * std::mem::size_of::<f32>();
+        let size = std::mem::size_of_val(data);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: size as u64,
@@ -222,7 +223,7 @@ impl GpuContext {
     }
 
     pub fn create_uniform_buffer_u32(&self, data: &[u32], label: &str) -> GpuBuffer {
-        let size = data.len() * std::mem::size_of::<u32>();
+        let size = std::mem::size_of_val(data);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: size as u64,
@@ -273,7 +274,7 @@ impl GpuContext {
 
         let data = slice.get_mapped_range().to_vec();
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-        drop(slice);
+        let _ = slice;
         staging.unmap();
         result
     }
@@ -325,6 +326,7 @@ impl GpuContext {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct GpuBuffer {
     pub id: usize,
     pub buffer: Arc<Buffer>,
@@ -338,6 +340,7 @@ fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
     unsafe { std::slice::from_raw_parts(ptr, numel).to_vec() }
 }
 
+#[allow(dead_code)]
 fn create_output_tensor(data: Vec<f32>, shape: Vec<i64>, device: TensorDevice) -> Tensor {
     let storage = Arc::new(Storage::from_vec(data, DType::F32, device));
     Tensor::new(crate::tensor::TensorImpl::new(
@@ -621,7 +624,7 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(((numel as u64 + 255) / 256) as u32, 1, 1);
+        compute_pass.dispatch_workgroups((numel as u64).div_ceil(256) as u32, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
@@ -698,7 +701,7 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(((numel as u64 + 255) / 256) as u32, 1, 1);
+        compute_pass.dispatch_workgroups((numel as u64).div_ceil(256) as u32, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
@@ -793,9 +796,7 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
 
     let mut output_shape: Vec<i64> = vec![];
     if a_shape.len() > 2 {
-        for i in 0..a_shape.len() - 2 {
-            output_shape.push(a_shape[i]);
-        }
+        output_shape.extend_from_slice(&a_shape[..a_shape.len() - 2]);
     }
     output_shape.push(m as i64);
     output_shape.push(n as i64);
@@ -863,8 +864,8 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        let x_groups = (n + 7) / 8;
-        let y_groups = (m + 7) / 8;
+        let x_groups = n.div_ceil(8);
+        let y_groups = m.div_ceil(8);
         compute_pass.dispatch_workgroups(x_groups as u32, y_groups as u32, 1);
     }
     ctx.queue.submit([encoder.finish()]);

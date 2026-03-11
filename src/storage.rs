@@ -7,6 +7,7 @@ use std::sync::Arc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
 
+#[allow(dead_code)]
 static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
@@ -215,7 +216,7 @@ impl Clone for Storage {
 
 impl Storage {
     // Create CPU storage
-    pub fn new_cpu(dtype: DType, nbytes: usize) -> Self {
+    pub fn new_cpu(_dtype: DType, nbytes: usize) -> Self {
         let data = if nbytes > 0 {
             let pool = get_memory_pool();
             pool.write().allocate(nbytes)
@@ -313,7 +314,7 @@ impl Storage {
     pub fn get_or_create_gpu_buffer(&self, device_id: usize) -> Option<Arc<wgpu::Buffer>> {
         match self {
             Storage::Cpu(cpu) => {
-                let mut cache = cpu.gpu_buffer_cache.write();
+                let cache = cpu.gpu_buffer_cache.write();
                 if let Some(buffer) = cache.get(&device_id) {
                     return Some(buffer.clone());
                 }
