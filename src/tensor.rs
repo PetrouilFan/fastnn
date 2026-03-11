@@ -74,6 +74,11 @@ impl TensorImpl {
         TensorImpl::new(storage, sizes)
     }
 
+    pub fn id(&self) -> usize {
+        let ptr = self as *const TensorImpl;
+        ptr as usize
+    }
+
     pub fn ndim(&self) -> usize {
         self.sizes.len()
     }
@@ -640,6 +645,10 @@ impl Tensor {
         let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
         // Create tensor with requested device (not storage device)
         Tensor::new(TensorImpl::new_with_device(storage, sizes, device))
+    }
+
+    pub fn id(&self) -> usize {
+        self.inner.id()
     }
 
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
