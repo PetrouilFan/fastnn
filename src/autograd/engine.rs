@@ -11,23 +11,23 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     // grad_output for root - default is 1.0 if not specified
     let grad_output = grad_output.unwrap_or_else(|| Tensor::from_scalar(1.0));
 
-    // Map from tensor data pointer to gradient
+    // Map from tensor ID to gradient
     let mut grads: HashMap<usize, Tensor> = HashMap::new();
 
     // Set gradient for root
-    let root_ptr = root.data_ptr() as usize;
-    grads.insert(root_ptr, grad_output);
+    let root_id = root.id();
+    grads.insert(root_id, grad_output);
 
-    // Queue of (node, tensor_ptr) - node produces tensor with data_ptr
+    // Queue of (node, tensor_id) - node produces tensor with tensor ID
     let mut queue: VecDeque<(Arc<dyn Node>, usize)> = VecDeque::new();
     let mut visited: HashSet<usize> = HashSet::new();
 
     // Start with root's grad_fn
     if let Some(grad_fn) = root.grad_fn() {
-        queue.push_back((grad_fn, root_ptr));
+        queue.push_back((grad_fn, root_id));
     }
 
-    while let Some((node, tensor_ptr)) = queue.pop_front() {
+    while let Some((node, tensor_id)) = queue.pop_front() {
         let node_ptr = (&*node) as *const _ as *const () as usize;
         if visited.contains(&node_ptr) {
             continue;
@@ -35,7 +35,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         visited.insert(node_ptr);
 
         // Get gradient for this tensor's output
-        let grad_output_for_node = grads.get(&tensor_ptr).cloned();
+        let grad_output_for_node = grads.get(&tensor_id).cloned();
 
         // Compute gradients for inputs
         let grad_inputs = node.apply(&[grad_output_for_node]);
@@ -43,7 +43,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         let input_tensors = node.inputs();
         for (i, input_tensor) in input_tensors.iter().enumerate() {
             if let Some(grad) = grad_inputs.get(i).and_then(|g| g.as_ref()) {
-                let input_ptr = input_tensor.data_ptr() as usize;
+                let input_id = input_tensor.id();
 
                 // Store gradient in the input tensor's autograd_meta if it's a leaf
                 if input_tensor.is_leaf() {
@@ -58,23 +58,23 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 } else {
                     // If not a leaf, add its grad_fn to the queue
                     if let Some(input_grad_fn) = input_tensor.grad_fn() {
-                        queue.push_back((input_grad_fn, input_ptr));
+                        queue.push_back((input_grad_fn, input_id));
                     }
                 }
 
                 // Also store in grads map for subsequent nodes
-                let new_grad = if let Some(existing) = grads.get(&input_ptr) {
-                    let existing_slice = existing.as_f32_slice();
-                    let grad_slice = grad.as_f32_slice();
-                    let mut result: Vec<f32> = existing_slice.to_vec();
-                    for (j, &v) in grad_slice.iter().enumerate() {
+                let new_grad = if let Some(existing) = grads.get(&input_id) {
+                    let existing_data = existing.to_numpy();
+                    let grad_data = grad.to_numpy();
+                    let mut result = existing_data;
+                    for (j, &v) in grad_data.iter().enumerate() {
                         result[j] += v;
                     }
                     Tensor::from_vec(result, existing.shape())
                 } else {
                     grad.clone()
                 };
-                grads.insert(input_ptr, new_grad);
+                grads.insert(input_id, new_grad);
             }
         }
     }
