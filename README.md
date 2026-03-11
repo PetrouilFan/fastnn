@@ -1,6 +1,6 @@
 # fastnn
 
-A Python deep learning library with a Rust core, inspired by NVLabs/vibetensor and PyTorch.
+A Python deep learning library with a Rust core, inspired by PyTorch and NVLabs/vibetensor.
 
 ## Features
 
@@ -159,6 +159,26 @@ trainer = fnn.Trainer(model=model, optimizer=optimizer, loss=fnn.mse_loss)
 trainer.fit(loader, epochs=100)
 ```
 
+## Installation
+
+```bash
+uv sync --all-extras
+uv run maturin develop --release
+```
+
+## Performance
+
+fastnn outperforms PyTorch on specific operations:
+
+| Operation | Size | fastnn | PyTorch |
+|-----------|------|--------|---------|
+| FusedAddReLU | 1000×1000 | 540μs | 1776μs |
+| Max | 1000×1000 | 207μs | 284μs |
+
+GPU acceleration provides **68x speedup** on large matrix multiplications.
+
+See [BENCHMARKS.md](./BENCHMARKS.md) for detailed performance data across x86, ARM, and GPU.
+
 ## Development
 
 ```bash
@@ -167,10 +187,4 @@ uv run maturin build --release
 
 # Test
 uv run pytest tests/ -v
-
-# Benchmark
-uv run pytest tests/ -v --benchmark-only
-
-# Clean
-cargo clean
 ```

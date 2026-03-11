@@ -1,10 +1,13 @@
 use mimalloc::MiMalloc;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
 
+#[allow(dead_code)]
 static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
@@ -14,8 +17,8 @@ const POOL_THRESHOLD: usize = 8 * 1024 * 1024;
 
 const NUM_SIZE_CLASSES: usize = 16;
 const SIZE_CLASSES: &[usize] = &[
-    64, 128, 256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152,
+    64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288,
+    1048576, 2097152,
 ];
 
 fn get_size_class(size: usize) -> usize {
@@ -139,19 +142,21 @@ impl DType {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
     Cpu,
-    // Cuda(u32),    // TODO(gpu): add CUDA device
-    // Metal,        // TODO(gpu): add Metal device
-    // Wgpu,         // TODO(gpu): add WebGPU device
+    Wgpu(usize),
 }
 
 impl Device {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "cpu" | "CPU" => Some(Device::Cpu),
+            "gpu" | "GPU" | "wgpu" | "Wgpu" => Some(Device::Wgpu(0)),
+            s if s.starts_with("gpu:") || s.starts_with("wgpu:") => {
+                let idx: usize = s[4..].parse().ok()?;
+                Some(Device::Wgpu(idx))
+            }
             _ => None,
         }
     }
@@ -159,23 +164,59 @@ impl Device {
     pub fn as_str(&self) -> &'static str {
         match self {
             Device::Cpu => "cpu",
+            Device::Wgpu(_) => "wgpu",
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Storage {
+// CPU storage variant - with optional lazy GPU buffer cache
+#[derive(Debug)]
+pub struct CpuStorage {
     pub data: Vec<u8>,
     pub nbytes: usize,
-    pub dtype: DType,
-    pub device: Device,
-    pub id: u64,
+    // Lazy GPU buffer cache: maps device_id -> GPU buffer
+    // This avoids repeated CPU->GPU transfers for tensors used in multiple GPU ops
+    pub gpu_buffer_cache: RwLock<HashMap<usize, Arc<wgpu::Buffer>>>,
+}
+
+// GPU storage variant - keeps data on GPU
+#[derive(Debug)]
+pub struct GpuStorage {
+    pub buffer: Arc<wgpu::Buffer>,
+    pub nbytes: usize,
+    pub device_id: usize,
+    // Staging buffer for async readback (filled on demand)
+    pub staging: RwLock<Option<Vec<u8>>>,
+}
+
+// Main storage enum - can be CPU or GPU resident
+#[derive(Debug)]
+pub enum Storage {
+    Cpu(CpuStorage),
+    Wgpu(GpuStorage),
+}
+
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        match self {
+            Storage::Cpu(cpu) => Storage::Cpu(CpuStorage {
+                data: cpu.data.clone(),
+                nbytes: cpu.nbytes,
+                gpu_buffer_cache: RwLock::new(HashMap::new()),
+            }),
+            Storage::Wgpu(gpu) => Storage::Wgpu(GpuStorage {
+                buffer: gpu.buffer.clone(),
+                nbytes: gpu.nbytes,
+                device_id: gpu.device_id,
+                staging: RwLock::new(None),
+            }),
+        }
+    }
 }
 
 impl Storage {
-    pub fn new(dtype: DType, device: Device, nbytes: usize) -> Self {
-        let id = STORAGE_COUNTER.fetch_add(1, Ordering::SeqCst);
-
+    // Create CPU storage
+    pub fn new_cpu(_dtype: DType, nbytes: usize) -> Self {
         let data = if nbytes > 0 {
             let pool = get_memory_pool();
             pool.write().allocate(nbytes)
@@ -187,38 +228,115 @@ impl Storage {
             stats.add_alloc(nbytes);
         }
 
-        Storage {
+        Storage::Cpu(CpuStorage {
             data,
             nbytes,
-            dtype,
-            device,
-            id,
+            gpu_buffer_cache: RwLock::new(HashMap::new()),
+        })
+    }
+
+    // Create GPU storage (buffer must be created separately)
+    pub fn new_gpu(buffer: Arc<wgpu::Buffer>, nbytes: usize, device_id: usize) -> Self {
+        if let Some(stats) = ALLOC_STATS.get() {
+            stats.add_alloc(nbytes);
         }
+
+        Storage::Wgpu(GpuStorage {
+            buffer,
+            nbytes,
+            device_id,
+            staging: RwLock::new(None),
+        })
     }
 
     pub fn from_vec<T: bytemuck::Pod>(data: Vec<T>, dtype: DType, device: Device) -> Self {
         let nbytes = std::mem::size_of::<T>() * data.len();
-        let mut storage = Storage::new(dtype, device, nbytes);
-        let ptr = storage.data.as_mut_ptr() as *mut T;
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        match device {
+            Device::Cpu => {
+                let mut storage = Storage::new_cpu(dtype, nbytes);
+                if let Storage::Cpu(cpu) = &mut storage {
+                    let ptr = cpu.data.as_mut_ptr() as *mut T;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+                    }
+                }
+                storage
+            }
+            Device::Wgpu(_device_id) => {
+                // For GPU, create CPU storage first
+                // The actual GPU buffer will be created on-demand when needed
+                let mut cpu_storage = Storage::new_cpu(dtype, nbytes);
+                if let Storage::Cpu(cpu) = &mut cpu_storage {
+                    let ptr = cpu.data.as_mut_ptr() as *mut T;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+                    }
+                }
+                cpu_storage
+            }
         }
-        storage
     }
 
     pub fn as_ptr<T>(&self) -> *const T {
-        self.data.as_ptr() as *const T
+        match self {
+            Storage::Cpu(cpu) => cpu.data.as_ptr() as *const T,
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use to_cpu() first.")
+            }
+        }
     }
 
     pub fn as_mut_ptr<T>(&mut self) -> *mut T {
-        self.data.as_mut_ptr() as *mut T
+        match self {
+            Storage::Cpu(cpu) => cpu.data.as_mut_ptr() as *mut T,
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use to_cpu() first.")
+            }
+        }
+    }
+
+    pub fn nbytes(&self) -> usize {
+        match self {
+            Storage::Cpu(cpu) => cpu.nbytes,
+            Storage::Wgpu(gpu) => gpu.nbytes,
+        }
+    }
+
+    pub fn device(&self) -> Device {
+        match self {
+            Storage::Cpu(_) => Device::Cpu,
+            Storage::Wgpu(gpu) => Device::Wgpu(gpu.device_id),
+        }
+    }
+
+    /// Get or create a cached GPU buffer for this CPU storage
+    /// This enables lazy GPU buffer creation - only transfer to GPU when needed
+    pub fn get_or_create_gpu_buffer(&self, device_id: usize) -> Option<Arc<wgpu::Buffer>> {
+        match self {
+            Storage::Cpu(cpu) => {
+                let cache = cpu.gpu_buffer_cache.write();
+                if let Some(buffer) = cache.get(&device_id) {
+                    return Some(buffer.clone());
+                }
+                None
+            }
+            Storage::Wgpu(gpu) => Some(gpu.buffer.clone()),
+        }
+    }
+
+    /// Cache a GPU buffer for this CPU storage
+    pub fn cache_gpu_buffer(&self, device_id: usize, buffer: Arc<wgpu::Buffer>) {
+        if let Storage::Cpu(cpu) = self {
+            let mut cache = cpu.gpu_buffer_cache.write();
+            cache.insert(device_id, buffer);
+        }
     }
 }
 
 impl Drop for Storage {
     fn drop(&mut self) {
         if let Some(stats) = ALLOC_STATS.get() {
-            stats.add_freed(self.nbytes);
+            stats.add_freed(self.nbytes());
         }
     }
 }

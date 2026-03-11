@@ -23,6 +23,9 @@ rand          = "0.8"
 matrixmultiply = "0.3"
 mimalloc      = "0.1"
 wide         = "0.7"
+wgpu         = "24"
+pollster     = "0.4"
+openblas-src = { version = "0.10", optional = true }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"
