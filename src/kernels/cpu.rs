@@ -2988,6 +2988,185 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
     sum
 }
 
+// Winograd F(2x2, 3x3) transformation matrices
+// These transform 3x3 convolutions into smaller matrix multiplications
+// Winograd reduces 9 multiplications per output to 4
+
+const WINOGRAD_B: [[f32; 4]; 4] = [
+    [1.0, 0.0, -1.0, 0.0],
+    [0.0, 1.0, 1.0, 0.0],
+    [0.0, -1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0, -1.0],
+];
+
+const WINOGRAD_G: [[f32; 3]; 4] = [
+    [1.0, 0.0, 0.0],
+    [0.5, 0.5, 0.5],
+    [0.5, -0.5, 0.5],
+    [0.0, 0.0, 1.0],
+];
+
+const WINOGRAD_A: [[f32; 2]; 4] = [[1.0, 0.0], [1.0, 1.0], [1.0, -1.0], [0.0, 1.0]];
+
+#[inline]
+fn winograd_transform_weight(w: &[f32], out_channels: usize, in_channels: usize) -> Vec<f32> {
+    // Transform weights: U = G * W * G^T
+    // Input: [out_channels][in_channels][3][3]
+    // Output: [out_channels][in_channels][4][4]
+    let mut U = vec![0.0f32; out_channels * in_channels * 16];
+
+    for oc in 0..out_channels {
+        for ic in 0..in_channels {
+            // Get 3x3 weight block
+            let mut W = [[0.0f32; 3]; 3];
+            for kh in 0..3 {
+                for kw in 0..3 {
+                    let idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
+                    W[kh][kw] = w[idx];
+                }
+            }
+
+            // Transform: U = G * W * G^T
+            // First compute G * W (4x3 matrix)
+            let mut GW = [[0.0f32; 3]; 4];
+            for i in 0..4 {
+                for j in 0..3 {
+                    GW[i][j] = WINOGRAD_G[i][0] * W[0][j]
+                        + WINOGRAD_G[i][1] * W[1][j]
+                        + WINOGRAD_G[i][2] * W[2][j];
+                }
+            }
+
+            // Then compute (G * W) * G^T = U (4x4 matrix)
+            for i in 0..4 {
+                for j in 0..4 {
+                    let mut val = 0.0f32;
+                    for k in 0..3 {
+                        val += GW[i][k] * WINOGRAD_G[j][k];
+                    }
+                    let idx = ((oc * in_channels + ic) * 4 + i) * 4 + j;
+                    U[idx] = val;
+                }
+            }
+        }
+    }
+    U
+}
+
+#[inline]
+fn winograd_transform_input_tiles(
+    x: &[f32],
+    batch_size: usize,
+    in_channels: usize,
+    in_height: usize,
+    in_width: usize,
+    padding: usize,
+    tile_h: usize,
+    tile_w: usize,
+) -> Vec<f32> {
+    // Transform input tiles: V = B * d * B^T
+    // Process all 4x4 input tiles
+    let mut V = vec![0.0f32; batch_size * in_channels * tile_h * tile_w * 16];
+
+    for n in 0..batch_size {
+        for ic in 0..in_channels {
+            for th in 0..tile_h {
+                for tw in 0..tile_w {
+                    // Extract 4x4 patch (with padding)
+                    let mut d = [[0.0f32; 4]; 4];
+                    for ph in 0..4 {
+                        for pw in 0..4 {
+                            let ih = th * 2 + ph - padding;
+                            let iw = tw * 2 + pw - padding;
+                            if ih < in_height && iw < in_width && ih >= 0 && iw >= 0 {
+                                let idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
+                                d[ph][pw] = x[idx];
+                            }
+                        }
+                    }
+
+                    // Transform: V = B * d * B^T
+                    let mut Bd = [[0.0f32; 4]; 4];
+                    for i in 0..4 {
+                        for j in 0..4 {
+                            Bd[i][j] = WINOGRAD_B[i][0] * d[0][j]
+                                + WINOGRAD_B[i][1] * d[1][j]
+                                + WINOGRAD_B[i][2] * d[2][j]
+                                + WINOGRAD_B[i][3] * d[3][j];
+                        }
+                    }
+
+                    for i in 0..4 {
+                        for j in 0..4 {
+                            let mut val = 0.0f32;
+                            for k in 0..4 {
+                                val += Bd[i][k] * WINOGRAD_B[j][k];
+                            }
+                            let idx = (((n * in_channels + ic) * tile_h + th) * tile_w + tw) * 16
+                                + i * 4
+                                + j;
+                            V[idx] = val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    V
+}
+
+#[inline]
+fn winograd_inverse_transform(
+    M: &[f32],
+    bias: Option<&[f32]>,
+    out_channels: usize,
+    tile_h: usize,
+    tile_w: usize,
+) -> (Vec<f32>, usize, usize) {
+    let out_height = tile_h * 2;
+    let out_width = tile_w * 2;
+    let mut output = vec![0.0f32; out_channels * out_height * out_width];
+
+    for oc in 0..out_channels {
+        for th in 0..tile_h {
+            for tw in 0..tile_w {
+                // Get 4x4 M block for this output tile
+                let m_offset = ((oc * tile_h + th) * tile_w + tw) * 16;
+
+                // Inverse transform: Y = A^T * M * A
+                // First compute M * A (4x2 matrix)
+                let mut MA = [[0.0f32; 2]; 4];
+                for i in 0..4 {
+                    for j in 0..2 {
+                        MA[i][j] = M[m_offset + i * 4 + 0] * WINOGRAD_A[0][j]
+                            + M[m_offset + i * 4 + 1] * WINOGRAD_A[1][j]
+                            + M[m_offset + i * 4 + 2] * WINOGRAD_A[2][j]
+                            + M[m_offset + i * 4 + 3] * WINOGRAD_A[3][j];
+                    }
+                }
+
+                // Then compute A^T * (M * A) = Y (2x2 matrix)
+                for i in 0..2 {
+                    for j in 0..2 {
+                        let mut val = 0.0f32;
+                        for k in 0..4 {
+                            val += WINOGRAD_A[k][i] * MA[k][j];
+                        }
+                        if let Some(b) = bias {
+                            val += b[oc];
+                        }
+                        let oh = th * 2 + i;
+                        let ow = tw * 2 + j;
+                        let idx = ((oc * out_height + oh) * out_width + ow);
+                        output[idx] = val;
+                    }
+                }
+            }
+        }
+    }
+    (output, out_height, out_width)
+}
+
 fn winograd_conv3x3_kernel(
     x: &Tensor,
     w: &Tensor,
@@ -2999,135 +3178,68 @@ fn winograd_conv3x3_kernel(
     in_width: usize,
     padding: usize,
 ) -> Tensor {
+    // Calculate output size
     let out_height = in_height + 2 * padding - 2;
     let out_width = in_width + 2 * padding - 2;
-    let output_shape = vec![
-        batch_size as i64,
-        out_channels as i64,
-        out_height as i64,
-        out_width as i64,
-    ];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
 
+    // Number of 2x2 tiles
+    let tile_h = (out_height + 1) / 2;
+    let tile_w = (out_width + 1) / 2;
+
+    // Get input data
     let x_ptr = x.data_ptr() as *const f32;
-    let w_ptr = w.data_ptr() as *const f32;
-
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let out_ptr = output_storage.data.as_mut_ptr() as *mut f32;
-
-    let w_data: Vec<f32> =
-        unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels * 9).to_vec() };
-
     let x_data: Vec<f32> = unsafe {
         std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width).to_vec()
     };
 
+    // Get weight data
+    let w_ptr = w.data_ptr() as *const f32;
+    let w_data: Vec<f32> =
+        unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels * 9).to_vec() };
+
+    // Get bias
     let bias_data: Option<Vec<f32>> = bias.map(|b| {
         let ptr = b.data_ptr() as *const f32;
         unsafe { std::slice::from_raw_parts(ptr, out_channels).to_vec() }
     });
 
-    #[cfg(feature = "parallel")]
-    {
-        let total = batch_size * out_channels * out_height * out_width;
+    // Transform weights: U = G * W * G^T
+    let U = winograd_transform_weight(&w_data, out_channels, in_channels);
 
-        let x_data_owned = x_data;
-        let w_data_owned = w_data;
-        let bias_data_owned = bias_data;
+    // Transform input: V = B * d * B^T
+    let V = winograd_transform_input_tiles(
+        &x_data,
+        batch_size,
+        in_channels,
+        in_height,
+        in_width,
+        padding,
+        tile_h,
+        tile_w,
+    );
 
-        let results: Vec<f32> = (0..total)
-            .into_par_iter()
-            .map(|idx| {
-                let n = idx / (out_channels * out_height * out_width);
-                let rem = idx % (out_channels * out_height * out_width);
-                let oc = rem / (out_height * out_width);
-                let rem2 = rem % (out_height * out_width);
-                let oh = rem2 / out_width;
-                let ow = rem2 % out_width;
-
-                let ih_start = oh.saturating_sub(padding);
-                let iw_start = ow.saturating_sub(padding);
-
-                let mut sum = 0.0f32;
-
-                for ic in 0..in_channels {
-                    let w_offset = oc * in_channels * 9 + ic * 9;
-                    let mut patch_values = [0.0f32; 9];
-                    let mut patch_idx = 0;
-
-                    for kh in 0..3 {
-                        for kw in 0..3 {
-                            let ih = ih_start + kh;
-                            let iw = iw_start + kw;
-                            if ih < in_height && iw < in_width {
-                                let x_idx =
-                                    ((n * in_channels + ic) * in_height + ih) * in_width + iw;
-                                patch_values[patch_idx] = x_data_owned[x_idx];
-                            }
-                            patch_idx += 1;
-                        }
-                    }
-
-                    for kw in 0..9 {
-                        sum += patch_values[kw] * w_data_owned[w_offset + kw];
-                    }
-                }
-
-                if let Some(ref b) = bias_data_owned {
-                    sum += b[oc];
-                }
-
-                sum
-            })
-            .collect();
-
-        unsafe {
-            std::ptr::copy_nonoverlapping(results.as_ptr(), out_ptr, total);
-        }
+    // Element-wise multiply: M = U ⊙ V
+    let m_size = batch_size * in_channels * tile_h * tile_w * 16;
+    let mut M = vec![0.0f32; m_size];
+    for i in 0..m_size {
+        M[i] = U[i] * V[i];
     }
 
-    #[cfg(not(feature = "parallel"))]
-    {
-        for n in 0..batch_size {
-            for oc in 0..out_channels {
-                for oh in 0..out_height {
-                    for ow in 0..out_width {
-                        let mut sum = 0.0f32;
+    // Inverse transform: Y = A^T * M * A
+    let (output_flat, out_h, out_w) = if let Some(ref b) = bias_data {
+        winograd_inverse_transform(&M, Some(b.as_slice()), out_channels, tile_h, tile_w)
+    } else {
+        winograd_inverse_transform(&M, None, out_channels, tile_h, tile_w)
+    };
 
-                        let ih_start = oh.saturating_sub(padding);
-                        let iw_start = ow.saturating_sub(padding);
-
-                        for ic in 0..in_channels {
-                            let w_base = (oc * in_channels + ic) * 9;
-
-                            for kh in 0..3 {
-                                for kw in 0..3 {
-                                    let ih = ih_start + kh;
-                                    let iw = iw_start + kw;
-
-                                    if ih < in_height && iw < in_width {
-                                        let x_idx = ((n * in_channels + ic) * in_height + ih)
-                                            * in_width
-                                            + iw;
-                                        let w_idx = w_base + kh * 3 + kw;
-                                        sum += x_data[x_idx] * w_data[w_idx];
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(ref b) = bias_data {
-                            sum += b[oc];
-                        }
-
-                        let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                        unsafe { *out_ptr.add(out_idx) = sum };
-                    }
-                }
-            }
-        }
-    }
+    // Reshape output
+    let output_shape = vec![
+        batch_size as i64,
+        out_channels as i64,
+        out_h as i64,
+        out_w as i64,
+    ];
+    let mut output = Tensor::from_vec(output_flat, output_shape);
 
     output
 }
@@ -3206,7 +3318,9 @@ fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         )];
     }
 
-    // Use im2col for 3x3 convolutions (better than winograd for most sizes)
+    // Use im2col for all 3x3 convolutions
+    // Winograd F(2x2,3x3) was implemented but has too much overhead
+    // The transforms add latency that exceeds the arithmetic savings
     if kernel_height == 3 && kernel_width == 3 && stride == 1 && dilation == 1 && groups == 1 {
         return vec![conv2d_im2col(
             x,
@@ -3564,8 +3678,10 @@ fn conv2d_im2col(
     let col_slice = col_data.as_slice();
 
     // Use optimized matrix multiplication for large matrices
-    // Lower threshold to 12 to capture more cases
-    let use_gemm = col_rows >= 12 && out_channels >= 12 && col_cols >= 12;
+    // Threshold: use GEMM when all dimensions >= 12
+    const GEMM_MIN_SIZE: usize = 12;
+    let use_gemm =
+        col_rows >= GEMM_MIN_SIZE && out_channels >= GEMM_MIN_SIZE && col_cols >= GEMM_MIN_SIZE;
 
     let bias_data: Option<Vec<f32>> = bias.map(|b| {
         let b_ptr = b.data_ptr() as *const f32;
@@ -3573,7 +3689,7 @@ fn conv2d_im2col(
     });
 
     if use_gemm {
-        // Transpose weights for GEMM (w: out_channels x col_cols -> w_t: col_cols x out_channels)
+        // Transpose weights for GEMM: (out_channels, col_cols) -> (col_cols, out_channels)
         let w_t: Vec<f32> = {
             let w = &w_data;
             (0..col_cols)
