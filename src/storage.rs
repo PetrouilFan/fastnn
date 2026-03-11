@@ -1,5 +1,6 @@
 use mimalloc::MiMalloc;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -173,11 +174,14 @@ impl Device {
     }
 }
 
-// CPU storage variant
+// CPU storage variant - with optional lazy GPU buffer cache
 #[derive(Debug)]
 pub struct CpuStorage {
     pub data: Vec<u8>,
     pub nbytes: usize,
+    // Lazy GPU buffer cache: maps device_id -> GPU buffer
+    // This avoids repeated CPU->GPU transfers for tensors used in multiple GPU ops
+    pub gpu_buffer_cache: RwLock<HashMap<usize, Arc<wgpu::Buffer>>>,
 }
 
 // GPU storage variant - keeps data on GPU
@@ -203,6 +207,7 @@ impl Clone for Storage {
             Storage::Cpu(cpu) => Storage::Cpu(CpuStorage {
                 data: cpu.data.clone(),
                 nbytes: cpu.nbytes,
+                gpu_buffer_cache: RwLock::new(HashMap::new()),
             }),
             Storage::Wgpu(gpu) => Storage::Wgpu(GpuStorage {
                 buffer: gpu.buffer.clone(),
@@ -228,7 +233,11 @@ impl Storage {
             stats.add_alloc(nbytes);
         }
 
-        Storage::Cpu(CpuStorage { data, nbytes })
+        Storage::Cpu(CpuStorage {
+            data,
+            nbytes,
+            gpu_buffer_cache: RwLock::new(HashMap::new()),
+        })
     }
 
     // Create GPU storage (buffer must be created separately)
@@ -302,6 +311,29 @@ impl Storage {
         match self {
             Storage::Cpu(_) => Device::Cpu,
             Storage::Wgpu(gpu) => Device::Wgpu(gpu.device_id),
+        }
+    }
+
+    /// Get or create a cached GPU buffer for this CPU storage
+    /// This enables lazy GPU buffer creation - only transfer to GPU when needed
+    pub fn get_or_create_gpu_buffer(&self, device_id: usize) -> Option<Arc<wgpu::Buffer>> {
+        match self {
+            Storage::Cpu(cpu) => {
+                let mut cache = cpu.gpu_buffer_cache.write();
+                if let Some(buffer) = cache.get(&device_id) {
+                    return Some(buffer.clone());
+                }
+                None
+            }
+            Storage::Wgpu(gpu) => Some(gpu.buffer.clone()),
+        }
+    }
+
+    /// Cache a GPU buffer for this CPU storage
+    pub fn cache_gpu_buffer(&self, device_id: usize, buffer: Arc<wgpu::Buffer>) {
+        if let Storage::Cpu(cpu) = self {
+            let mut cache = cpu.gpu_buffer_cache.write();
+            cache.insert(device_id, buffer);
         }
     }
 }

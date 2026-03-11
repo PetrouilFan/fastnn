@@ -4,6 +4,7 @@ use crate::storage::{CpuStorage, DType, Device, GpuStorage, Storage};
 use parking_lot::RwLock;
 use smallvec::smallvec;
 use smallvec::SmallVec;
+use std::collections::HashMap;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -534,8 +535,33 @@ impl TensorImpl {
     pub fn gpu_buffer(&self) -> Option<Arc<wgpu::Buffer>> {
         match self.storage.as_ref() {
             Storage::Wgpu(gpu) => Some(gpu.buffer.clone()),
-            _ => None,
+            Storage::Cpu(cpu) => {
+                // Check cached GPU buffers
+                let cache = cpu.gpu_buffer_cache.read();
+                // Return any cached buffer (just use first one for now)
+                cache.values().next().cloned()
+            }
         }
+    }
+
+    /// Get GPU buffer for specific device, creating if needed
+    pub fn get_or_create_gpu_buffer(&self, device_id: usize) -> Option<Arc<wgpu::Buffer>> {
+        match self.storage.as_ref() {
+            Storage::Wgpu(gpu) if gpu.device_id == device_id => Some(gpu.buffer.clone()),
+            Storage::Wgpu(_) => None, // Wrong device
+            Storage::Cpu(_) => {
+                // Check cache first
+                if let Some(buffer) = self.storage.get_or_create_gpu_buffer(device_id) {
+                    return Some(buffer);
+                }
+                None
+            }
+        }
+    }
+
+    /// Cache a GPU buffer for this tensor
+    pub fn cache_gpu_buffer(&self, device_id: usize, buffer: Arc<wgpu::Buffer>) {
+        self.storage.cache_gpu_buffer(device_id, buffer);
     }
 
     /// Get CPU data if available
@@ -917,6 +943,7 @@ impl Tensor {
                 let storage = Arc::new(Storage::Cpu(CpuStorage {
                     data: bytemuck::cast_slice(&data).to_vec(),
                     nbytes: gpu.nbytes,
+                    gpu_buffer_cache: RwLock::new(HashMap::new()),
                 }));
                 Tensor::new(TensorImpl {
                     storage,
