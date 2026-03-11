@@ -24,6 +24,7 @@ use wide::f32x4;
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 use wide::f32x8;
 
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
 #[allow(dead_code)]
 fn relu_simd(input: &[f32], output: &mut [f32]) {
     let zero = f32x4::ZERO;
