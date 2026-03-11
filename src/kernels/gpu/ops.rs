@@ -1,9 +1,8 @@
 use crate::dispatcher::{register, DispatchKey, KernelFn};
+use crate::kernels::gpu;
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
-
-mod gpu;
 
 fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
@@ -468,7 +467,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             for p in 0..k as usize {
                 let a_idx = i * a_cols + p;
                 let b_idx = p * b_cols + j;
-                sum += unsafe { *a_data.add(a_idx) * b_data.add(b_idx) };
+                sum += unsafe { *a_data.add(a_idx) * *b_data.add(b_idx) };
             }
             output_data[i * n as usize + j] = sum;
         }
@@ -494,7 +493,11 @@ fn register_kernels() {
     register("log", DispatchKey::Wgpu, log_kernel as KernelFn);
     register("sqrt", DispatchKey::Wgpu, sqrt_kernel as KernelFn);
     register("relu", DispatchKey::Wgpu, relu_kernel as KernelFn);
-    register("fused_add_relu", DispatchKey::Wgpu, fused_add_relu_kernel as KernelFn);
+    register(
+        "fused_add_relu",
+        DispatchKey::Wgpu,
+        fused_add_relu_kernel as KernelFn,
+    );
     register("gelu", DispatchKey::Wgpu, gelu_kernel as KernelFn);
     register("sigmoid", DispatchKey::Wgpu, sigmoid_kernel as KernelFn);
     register("tanh", DispatchKey::Wgpu, tanh_kernel as KernelFn);
