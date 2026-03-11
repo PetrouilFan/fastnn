@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use wgpu::{Buffer, ComputePipeline, Device, Queue, ShaderModule};
 
+// Import GPU operations module to register kernels
+mod ops;
+
 static GPU_CONTEXTS: std::sync::OnceLock<RwLock<HashMap<usize, GpuContext>>> =
     std::sync::OnceLock::new();
 
@@ -102,6 +105,32 @@ impl GpuContext {
             label: Some(label),
             size: size as u64,
             usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+
+        buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(bytemuck::cast_slice(data));
+        buffer.unmap();
+
+        let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
+        GpuBuffer {
+            id,
+            buffer,
+            size,
+            device_id: self.device_id,
+        }
+    }
+
+    pub fn create_uniform_buffer(&self, data: &[f32], label: &str) -> GpuBuffer {
+        let size = data.len() * std::mem::size_of::<f32>();
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: size as u64,
+            usage: wgpu::BufferUsages::UNIFORM
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: true,
@@ -625,7 +654,7 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
     let gpu_out = ctx.create_buffer(m * n * 4, "matmul_output");
 
     let params_data_f32: Vec<f32> = vec![m as f32, n as f32, k as f32, 0.0];
-    let params_buffer = ctx.create_buffer_from_data(&params_data_f32, "params");
+    let params_buffer = ctx.create_uniform_buffer(&params_data_f32, "params");
 
     let pipeline = ctx.create_pipeline("matmul", MATMUL_SHADER);
 

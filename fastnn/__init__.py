@@ -44,9 +44,9 @@ def _flatten(nested):
     return result
 
 
-def tensor(data, shape):
+def tensor(data, shape, device=None):
     flat_data = _flatten(data)
-    return _core.tensor_from_data(flat_data, shape)
+    return _core.tensor_from_data(flat_data, shape, device)
 
 
 def _patch_numpy(tensor_cls):
