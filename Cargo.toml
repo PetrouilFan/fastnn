@@ -27,7 +27,7 @@ openblas-src  = { version = "0.10", optional = true }
 
 [features]
 default = ["simd", "parallel", "simd_avx512"]
-openblas = []
+openblas = ["openblas-src"]
 parallel = []
 simd = []
 prefetch = []
