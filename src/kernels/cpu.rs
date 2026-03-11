@@ -2955,9 +2955,9 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
                     let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
                     let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
                     let prod = _mm256_mul_ps(a_vec, b_vec);
-                    let sum_vec = _mm256_hadd_ps(prod, prod);
-                    let sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
-                    sum += _mm256_cvtss_f32(sum_vec);
+                    let prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                    _mm256_storeu_ps(prod_arr.as_ptr() as *mut f32, prod);
+                    sum += prod_arr.assume_init().iter().sum::<f32>();
                     i += 8;
                 }
             }
@@ -3355,11 +3355,9 @@ fn depthwise_conv2d(
 
     #[cfg(feature = "parallel")]
     {
-        let total = batch_size * in_channels * out_height * out_width;
+        use rayon::prelude::*;
 
-        let x_data_owned = x_data;
-        let w_data_owned = w_data;
-        let bias_data_owned = bias_data;
+        let total = batch_size * in_channels * out_height * out_width;
 
         let results: Vec<f32> = (0..total)
             .into_par_iter()
@@ -3381,12 +3379,12 @@ fn depthwise_conv2d(
                         if ih < in_height && iw < in_width {
                             let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
                             let w_idx = ((ic * kernel_height) + kh) * kernel_width + kw;
-                            sum += x_data_owned[x_idx] * w_data_owned[w_idx];
+                            sum += x_data[x_idx] * w_data[w_idx];
                         }
                     }
                 }
 
-                if let Some(ref b) = bias_data_owned {
+                if let Some(ref b) = bias_data {
                     sum += b[ic];
                 }
 
@@ -3462,10 +3460,23 @@ fn conv2d_im2col(
 
     let x_ptr = x.data_ptr() as *const f32;
 
-    for n in 0..batch_size {
-        for oh in 0..out_height {
-            for ow in 0..out_width {
-                let col_row = (n * out_height + oh) * out_width + ow;
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+
+        let x_data_slice = unsafe {
+            std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width)
+        };
+        let x_data_arc = std::sync::Arc::new(x_data_slice.to_vec());
+
+        col_data
+            .par_chunks_mut(col_cols)
+            .enumerate()
+            .for_each(|(row, col_chunk)| {
+                let n = row / (out_height * out_width);
+                let rem = row % (out_height * out_width);
+                let oh = rem / out_width;
+                let ow = rem % out_width;
 
                 for ic in 0..in_channels {
                     for kh in 0..kernel_height {
@@ -3484,8 +3495,42 @@ fn conv2d_im2col(
                                 let x_iw = iw - padding;
                                 let x_idx =
                                     ((n * in_channels + ic) * in_height + x_ih) * in_width + x_iw;
-                                col_data[col_row * col_cols + col_col] =
-                                    unsafe { *x_ptr.add(x_idx) };
+                                col_chunk[col_col] = x_data_arc[x_idx];
+                            }
+                        }
+                    }
+                }
+            });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for n in 0..batch_size {
+            for oh in 0..out_height {
+                for ow in 0..out_width {
+                    let col_row = (n * out_height + oh) * out_width + ow;
+
+                    for ic in 0..in_channels {
+                        for kh in 0..kernel_height {
+                            for kw in 0..kernel_width {
+                                let ih = oh * stride + kh * dilation;
+                                let iw = ow * stride + kw * dilation;
+
+                                let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
+
+                                if ih >= padding
+                                    && ih < padding + in_height
+                                    && iw >= padding
+                                    && iw < padding + in_width
+                                {
+                                    let x_ih = ih - padding;
+                                    let x_iw = iw - padding;
+                                    let x_idx = ((n * in_channels + ic) * in_height + x_ih)
+                                        * in_width
+                                        + x_iw;
+                                    col_data[col_row * col_cols + col_col] =
+                                        unsafe { *x_ptr.add(x_idx) };
+                                }
                             }
                         }
                     }
