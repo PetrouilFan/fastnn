@@ -218,6 +218,32 @@ impl GpuContext {
         }
     }
 
+    pub fn create_uniform_buffer_u32(&self, data: &[u32], label: &str) -> GpuBuffer {
+        let size = data.len() * std::mem::size_of::<u32>();
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: size as u64,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+
+        buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(bytemuck::cast_slice(data));
+        buffer.unmap();
+
+        let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
+        GpuBuffer {
+            id,
+            buffer: Arc::new(buffer),
+            size,
+            device_id: self.device_id,
+        }
+    }
+
     pub fn read_buffer(&self, buffer: &GpuBuffer) -> Vec<f32> {
         self.read_buffer_from_arc(&buffer.buffer, buffer.size)
     }
@@ -510,18 +536,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 "#;
 
 const MATMUL_SHADER: &str = r#"
+struct Params {
+    m: u32,
+    n: u32,
+    k: u32,
+    pad: u32,
+}
+
 @group(0) @binding(0) var<storage, read> a: array<f32>;
 @group(0) @binding(1) var<storage, read> b: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
-@group(0) @binding(3) var<uniform> params: vec4<u32>;
+@group(0) @binding(3) var<uniform> params: Params;
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let col = global_id.x;
     let row = global_id.y;
-    let m = params.x;
-    let n = params.y;
-    let k = params.z;
+    let m = params.m;
+    let n = params.n;
+    let k = params.k;
 
     if (row >= m || col >= n) { return; }
 
@@ -787,10 +820,10 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
 
     let gpu_out = ctx.create_buffer(m * n * 4, "matmul_output");
 
-    let params_data_f32: Vec<f32> = vec![m as f32, n as f32, k as f32, 0.0];
-    let params_buffer = ctx.create_uniform_buffer(&params_data_f32, "params");
+    let params_data: Vec<u32> = vec![m as u32, n as u32, k as u32, 0];
+    let params_buffer = ctx.create_uniform_buffer_u32(&params_data, "params");
 
-    let pipeline = ctx.create_pipeline("matmul", MATMUL_SHADER);
+    let pipeline = ctx.create_pipeline(&format!("matmul_{}", m * n), MATMUL_SHADER);
 
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("matmul"),
