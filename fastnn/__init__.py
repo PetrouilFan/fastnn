@@ -79,6 +79,19 @@ randint = _core.randint
 zeros_like = _core.zeros_like
 ones_like = _core.ones_like
 full_like = _core.full_like
+
+
+# Re-export with proper device handling
+def rand(shape, device=None):
+    """Generate random tensor with uniform distribution."""
+    return _core.rand_uniform(shape, device=device)
+
+
+def randn(shape, device=None):
+    """Generate random tensor with normal distribution."""
+    return _core.randn(shape, device=device)
+
+
 add = _core.add
 sub = _core.sub
 mul = _core.mul

@@ -164,7 +164,12 @@ impl TensorIterator {
                     offset += dim_idx as i64 * stride;
                 }
 
-                let ptr = input.tensor.inner.storage.data.as_ptr();
+                let ptr = match input.tensor.inner.storage.as_ref() {
+                    crate::storage::Storage::Cpu(cpu) => cpu.data.as_ptr(),
+                    crate::storage::Storage::Wgpu(_) => {
+                        panic!("Iterator doesn't support GPU storage. Use .to_cpu() first.");
+                    }
+                };
                 let nbytes = input.tensor.inner.dtype.size();
                 let slice = unsafe {
                     std::slice::from_raw_parts(ptr.add(offset as usize * nbytes), nbytes)
@@ -206,7 +211,12 @@ impl TensorIterator {
                     offset += dim_idx as i64 * stride;
                 }
 
-                let ptr = input.tensor.inner.storage.data.as_ptr();
+                let ptr = match input.tensor.inner.storage.as_ref() {
+                    crate::storage::Storage::Cpu(cpu) => cpu.data.as_ptr(),
+                    crate::storage::Storage::Wgpu(_) => {
+                        panic!("Iterator doesn't support GPU storage. Use .to_cpu() first.");
+                    }
+                };
                 let nbytes = input.tensor.inner.dtype.size();
                 let slice = unsafe {
                     std::slice::from_raw_parts(ptr.add(offset as usize * nbytes), nbytes)
