@@ -201,6 +201,28 @@ fn tanh_simd(input: &[f32], output: &mut [f32]) {
     }
 }
 
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+fn sigmoid_simd(input: &[f32], output: &mut [f32]) {
+    let one = f32x4::new([1.0; 4]);
+
+    let (chunks, remainder) = input.as_chunks::<4>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<4>();
+
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let x = f32x4::from(*in_chunk);
+        let neg_x = -x;
+        let exp_neg_x = neg_x.exp();
+        let result = one / (one + exp_neg_x);
+        *out_chunk = result.into();
+    }
+
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        let x = *in_val;
+        *out_val = 1.0 / (1.0 + (-x).exp());
+    }
+}
+
 #[allow(dead_code)]
 fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
     let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
@@ -313,7 +335,36 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+                let (a_chunks, a_rem) = a_slice.as_chunks::<4>();
+                let (b_chunks, b_rem) = b_slice.as_chunks::<4>();
+                let (out_chunks, out_rem) = out_slice.as_chunks_mut::<4>();
+
+                for ((a_chunk, b_chunk), out_chunk) in a_chunks
+                    .iter()
+                    .zip(b_chunks.iter())
+                    .zip(out_chunks.iter_mut())
+                {
+                    let a_vec = f32x4::from(*a_chunk);
+                    let b_vec = f32x4::from(*b_chunk);
+                    let result = a_vec + b_vec;
+                    *out_chunk = result.into();
+                }
+                for ((a_val, b_val), out_val) in
+                    a_rem.iter().zip(b_rem.iter()).zip(out_rem.iter_mut())
+                {
+                    *out_val = *a_val + *b_val;
+                }
+            }
+            #[cfg(not(all(
+                feature = "simd",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -469,7 +520,36 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+                let (a_chunks, a_rem) = a_slice.as_chunks::<4>();
+                let (b_chunks, b_rem) = b_slice.as_chunks::<4>();
+                let (out_chunks, out_rem) = out_slice.as_chunks_mut::<4>();
+
+                for ((a_chunk, b_chunk), out_chunk) in a_chunks
+                    .iter()
+                    .zip(b_chunks.iter())
+                    .zip(out_chunks.iter_mut())
+                {
+                    let a_vec = f32x4::from(*a_chunk);
+                    let b_vec = f32x4::from(*b_chunk);
+                    let result = a_vec - b_vec;
+                    *out_chunk = result.into();
+                }
+                for ((a_val, b_val), out_val) in
+                    a_rem.iter().zip(b_rem.iter()).zip(out_rem.iter_mut())
+                {
+                    *out_val = *a_val - *b_val;
+                }
+            }
+            #[cfg(not(all(
+                feature = "simd",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -599,7 +679,36 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+                let (a_chunks, a_rem) = a_slice.as_chunks::<4>();
+                let (b_chunks, b_rem) = b_slice.as_chunks::<4>();
+                let (out_chunks, out_rem) = out_slice.as_chunks_mut::<4>();
+
+                for ((a_chunk, b_chunk), out_chunk) in a_chunks
+                    .iter()
+                    .zip(b_chunks.iter())
+                    .zip(out_chunks.iter_mut())
+                {
+                    let a_vec = f32x4::from(*a_chunk);
+                    let b_vec = f32x4::from(*b_chunk);
+                    let result = a_vec * b_vec;
+                    *out_chunk = result.into();
+                }
+                for ((a_val, b_val), out_val) in
+                    a_rem.iter().zip(b_rem.iter()).zip(out_rem.iter_mut())
+                {
+                    *out_val = *a_val * *b_val;
+                }
+            }
+            #[cfg(not(all(
+                feature = "simd",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -1155,10 +1264,41 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    let val = *a_ptr.add(idx) + *b_ptr.add(idx);
-                    *out_ptr.add(idx) = val.max(0.0);
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let zero = f32x4::ZERO;
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+                let (a_chunks, a_rem) = a_slice.as_chunks::<4>();
+                let (b_chunks, b_rem) = b_slice.as_chunks::<4>();
+                let (out_chunks, out_rem) = out_slice.as_chunks_mut::<4>();
+
+                for ((a_chunk, b_chunk), out_chunk) in a_chunks
+                    .iter()
+                    .zip(b_chunks.iter())
+                    .zip(out_chunks.iter_mut())
+                {
+                    let a_vec = f32x4::from(*a_chunk);
+                    let b_vec = f32x4::from(*b_chunk);
+                    let sum = a_vec + b_vec;
+                    let result = sum.max(zero);
+                    *out_chunk = result.into();
+                }
+                for ((a_val, b_val), out_val) in
+                    a_rem.iter().zip(b_rem.iter()).zip(out_rem.iter_mut())
+                {
+                    *out_val = (*a_val + *b_val).max(0.0);
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "aarch64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        let val = *a_ptr.add(idx) + *b_ptr.add(idx);
+                        *out_ptr.add(idx) = val.max(0.0);
+                    }
                 }
             }
         }
@@ -1266,10 +1406,19 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    let x = *a_ptr.add(idx);
-                    *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                sigmoid_simd(a_slice, out_slice);
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "aarch64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        let x = *a_ptr.add(idx);
+                        *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
+                    }
                 }
             }
         }
