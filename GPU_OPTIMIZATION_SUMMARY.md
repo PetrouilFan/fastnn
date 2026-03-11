@@ -27,18 +27,28 @@
   - If not, copy from CPU to GPU
   - Create output with GPU storage (no CPU copy)
 
-**Added Buffer Pooling**
-- `GpuContext` now has `buffer_pool` for buffer reuse
-- Simplified implementation (no complex pooling for now)
-
 ### Phase 3: Python API Updates
 
 **Updated Factory Functions (`fastnn/__init__.py`)**
 - All factory functions (`rand`, `randn`, `zeros`, `ones`, etc.) now accept `device` parameter
 - Device can be `"cpu"`, `"gpu"`, `"wgpu"`, or `"wgpu:0"`
 
-**Updated `set_default_device()`**
-- Now actually stores and uses the default device
+### Phase 4: Lazy GPU Buffer Caching (COMMITTED)
+
+**Lazy Buffer Creation (`src/storage.rs`, `src/tensor.rs`)**
+- Added `gpu_buffer_cache: RwLock<HashMap<usize, Arc<wgpu::Buffer>>>` to `CpuStorage`
+- Added `get_or_create_gpu_buffer()` and `cache_gpu_buffer()` methods to Storage
+- Added methods to TensorImpl to get/create/cache GPU buffers
+
+**Updated GPU Kernels**
+- `run_unary_kernel()`, `run_binary_kernel()`, `gpu_matmul()` now:
+  1. Check if tensor has cached GPU buffer for the device
+  2. If yes, use it directly (no CPU→GPU copy)
+  3. If no, create GPU buffer, cache it, then use it
+
+**Fixed WGSL Shader Bugs**
+- Fixed GELU shader: changed `.tan()` method call to `tan()` function
+- Fixed TANH shader: changed `.tanh()` method call to `tanh()` function
 
 ## Current Performance
 
@@ -46,72 +56,59 @@
 
 | Operation | CPU Time | GPU Time | Speedup |
 |-----------|----------|----------|---------|
-| Add 100x100 | 0.8ms | 257.4ms | 0.00x (GPU slower) |
-| Add 500x500 | 0.2ms | 6.6ms | 0.03x (GPU slower) |
-| Add 1000x1000 | 0.8ms | 12.0ms | 0.07x (GPU slower) |
+| Add 1000x1000 | 0.66ms | 0.58ms | **1.14x faster** |
+| Relu 1000x1000 | 3.05ms | 1.60ms | **1.9x faster** |
+| GELU 1000x1000 | 3.35ms | 1.74ms | **1.9x faster** |
+| Sigmoid 1000x1000 | 3.62ms | 1.61ms | **2.2x faster** |
+| Tanh 1000x1000 | 3.58ms | 1.52ms | **2.4x faster** |
+| Exp 1000x1000 | 3.35ms | 1.53ms | **2.2x faster** |
+| Sqrt 1000x1000 | 3.26ms | 1.51ms | **2.2x faster** |
 
-### Why GPU is Slower
+### How It Works Now
 
-The current implementation still has **data transfer overhead**:
-1. CPU tensor → GPU buffer copy (every operation)
-2. GPU compute
-3. GPU buffer → CPU result (if needed)
-4. Result stays on GPU storage
+1. **First GPU operation** on a tensor:
+   - Tensor has CPU storage with device="wgpu"
+   - GPU kernel creates GPU buffer from CPU data
+   - GPU buffer is cached in the tensor's storage
+   - Operation runs on GPU
 
-**Key Issue:** Tensors created with `device="gpu"` still have CPU storage internally because GPU buffer creation requires GpuContext.
+2. **Subsequent GPU operations**:
+   - GPU kernel finds cached GPU buffer
+   - Uses it directly (no CPU→GPU transfer!)
+   - Output is also GPU-resident
 
-## What Needs to Be Done Next
+## Remaining Issues
 
-### Phase 4: Eliminate Data Transfer Overhead
+### 1. Matmul Kernel Hangs
+- The GPU matmul operation appears to hang
+- Need to investigate and fix the matmul WGSL shader
 
-**Option A: Lazy GPU Buffer Creation**
-1. Store CPU data in tensor with `device="gpu"` metadata
-2. On first GPU operation:
-   - Create GPU buffer from CPU data
-   - Replace storage with GPU storage
-   - Cache the GPU buffer
-3. Subsequent operations use GPU storage directly
+### 2. Initial Transfer Overhead
+- First GPU operation still has CPU→GPU transfer cost
+- For 1000x1000 tensors: ~12ms first add, 0.58ms subsequent
+- This is amortized over many operations
 
-**Option B: Immediate GPU Buffer Creation**
-1. Modify `Storage::from_vec()` to create GPU buffers directly
-2. Requires passing GpuContext through tensor creation
-3. More complex but better performance
+### 3. Not All Operations Optimized
+- Only basic operations (add, sub, mul, relu, gelu, etc.) are GPU-accelerated
+- Other operations fall back to CPU
 
-### Phase 5: Optimize GPU Kernels
+## Next Steps
 
-**Current Kernels:**
-- Simple parallel computation
-- No shared memory optimization
-- No tiling for large matrices
-
-**Needed:**
-- Optimize matmul with shared memory
-- Add more fused operations
-- Benchmark and tune workgroup sizes
-
-### Phase 6: Model Integration
-
-**Move entire models to GPU:**
+1. **Debug matmul kernel** - Fix the hanging issue
+2. **Optimize matmul** - Add shared memory and tiling for better performance
+3. **Add more GPU operations** - transpose, reshape, etc.
+4. **Model integration** - Test end-to-end model inference on GPU:
 ```python
 model = fnn.models.MLP(...)
 model.to("gpu")  # Move all parameters to GPU
-
 x = fnn.rand([batch, input_dim], device="gpu")
 y = model(x)  # Entirely on GPU
-result = y.cpu()  # Move to CPU only when needed
+result = y.cpu()  # Only transfer final result to CPU
 ```
 
 ## Architecture Benefits
 
-1. **Minimized Transfers**: Data stays on device once transferred
+1. **Minimized Transfers**: Data stays on GPU once transferred (cached)
 2. **Explicit Device Management**: Clear CPU vs GPU distinction
 3. **Future-Proof**: Easy to add new devices (e.g., MPS for Apple Silicon)
-4. **Memory Efficient**: No unnecessary copies
-
-## Next Steps
-
-1. Implement lazy GPU buffer creation (Phase 4)
-2. Benchmark matmul on GPU (currently hangs - need to debug)
-3. Add buffer caching to avoid reallocation
-4. Optimize GPU kernels for better performance
-5. Test end-to-end model inference on GPU
+4. **Memory Efficient**: No unnecessary copies after initial transfer
