@@ -54,18 +54,6 @@ output = fnn.fused_linear_gelu(x, weight, bias)
 Python API → PyO3 → Rust Core → SIMD/Parallel/GPU Kernels
 ```
 
-### Fused Operations
-
-```python
-import fastnn as fnn
-
-# Fused linear + ReLU (single pass, no intermediate tensors)
-output = fnn.fused_linear_relu(x, weight, bias)
-
-# Fused linear + GELU (single pass, no intermediate tensors)  
-output = fnn.fused_linear_gelu(x, weight, bias)
-```
-
 ## Table of Contents
 
 - [What Makes fastnn Different](#what-makes-fastnn-different)
