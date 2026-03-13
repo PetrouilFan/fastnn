@@ -33,14 +33,14 @@ def test_no_grad_context():
     x = fnn.tensor([1.0, 2.0, 3.0], [3])
     x.requires_grad_(True)
     with fnn.no_grad():
-        y = x.mul_scalar(2.0)
+        y = 2 * x  # Uses __rmul__
     assert y.grad_fn is None
 
 
 def test_detach():
     x = fnn.tensor([1.0, 2.0, 3.0], [3])
     x.requires_grad_(True)
-    y = x.mul_scalar(2.0)
+    y = 2 * x  # Uses __rmul__
     z = y.detach()
     assert z.grad_fn is None
 
