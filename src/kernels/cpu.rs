@@ -411,6 +411,136 @@ fn fused_add_relu_parallel_scalar(
     }
 }
 
+// Parallel sigmoid AVX2 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+fn sigmoid_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    unsafe {
+        let mut i = start;
+        while i + 8 <= end {
+            let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+
+            // Compute sigmoid using scalar exp per lane
+            let mut arr: [f32; 8] = std::mem::zeroed();
+            _mm256_storeu_ps(arr.as_mut_ptr(), x);
+
+            for j in 0..8 {
+                arr[j] = 1.0 / (1.0 + (-arr[j]).exp());
+            }
+
+            let result = _mm256_loadu_ps(arr.as_ptr());
+            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+            i += 8;
+        }
+
+        while i < end {
+            let x = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+            i += 1;
+        }
+    }
+}
+
+// Parallel scalar fallback for sigmoid
+#[cfg(feature = "parallel")]
+fn sigmoid_parallel_scalar(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    for i in start..end {
+        unsafe {
+            let x = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+        }
+    }
+}
+
+// Parallel tanh AVX2 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+fn tanh_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    unsafe {
+        let two = _mm256_set1_ps(2.0f32);
+        let one = _mm256_set1_ps(1.0f32);
+
+        let mut i = start;
+        while i + 8 <= end {
+            let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+            let abs_x = _mm256_andnot_ps(_mm256_set1_ps(-0.0f32), x);
+
+            // Compute 2*abs(x) and then exp(2*abs(x))
+            let two_abs_x = _mm256_mul_ps(two, abs_x);
+
+            // For exp, use scalar computation for each lane
+            let mut arr: [f32; 8] = std::mem::zeroed();
+            _mm256_storeu_ps(arr.as_mut_ptr(), two_abs_x);
+
+            for j in 0..8 {
+                let exp_2x = arr[j].exp();
+                let mut result = (exp_2x - 1.0) / (exp_2x + 1.0);
+                // Apply sign from original x
+                let orig_x = *((a_usize + (i + j) * 4) as *const f32);
+                if orig_x < 0.0 {
+                    result = -result;
+                }
+                arr[j] = result;
+            }
+
+            let result = _mm256_loadu_ps(arr.as_ptr());
+            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+            i += 8;
+        }
+
+        while i < end {
+            let x = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = x.tanh();
+            i += 1;
+        }
+    }
+}
+
+// Parallel scalar fallback for tanh
+#[cfg(feature = "parallel")]
+fn tanh_parallel_scalar(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    for i in start..end {
+        unsafe {
+            let x = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = x.tanh();
+        }
+    }
+}
+
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 #[allow(dead_code)]
 fn relu_simd(input: &[f32], output: &mut [f32]) {
@@ -647,6 +777,35 @@ fn sigmoid_simd(input: &[f32], output: &mut [f32]) {
     }
 }
 
+// Sigmoid SIMD for x86_64 using AVX2
+#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+#[allow(dead_code)]
+fn sigmoid_simd_x86(input: &[f32], output: &mut [f32]) {
+    unsafe {
+        let (chunks, remainder) = input.as_chunks::<8>();
+        let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
+
+        for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+            let x = _mm256_loadu_ps(in_chunk.as_ptr());
+
+            // Compute 1.0 / (1.0 + (-x).exp()) using scalar exp per lane
+            let mut arr: [f32; 8] = std::mem::zeroed();
+            _mm256_storeu_ps(arr.as_mut_ptr(), x);
+
+            for i in 0..8 {
+                arr[i] = 1.0 / (1.0 + (-arr[i]).exp());
+            }
+
+            let result = _mm256_loadu_ps(arr.as_ptr());
+            _mm256_storeu_ps(out_chunk.as_mut_ptr(), result);
+        }
+
+        for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+            *out_val = 1.0 / (1.0 + (-*in_val).exp());
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
     let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
@@ -683,7 +842,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 4096 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
@@ -843,7 +1002,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             const CHUNK_SIZE: usize = 8192;
@@ -990,7 +1149,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 4096 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
@@ -1150,7 +1309,7 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1259,7 +1418,7 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1321,7 +1480,7 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1383,7 +1542,7 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1453,7 +1612,7 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1523,7 +1682,7 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1593,7 +1752,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1670,7 +1829,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1791,7 +1950,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1868,17 +2027,29 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
-            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice
-                .par_iter_mut()
-                .zip(a_slice.par_iter())
-                .for_each(|(out, &x)| {
-                    *out = 1.0 / (1.0 + (-x).exp());
-                });
+            use rayon::prelude::*;
+            let chunk_size = 1024 * 16;
+            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            match SIMD_LEVEL {
+                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+                SimdLevel::Avx2 => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        sigmoid_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+                }
+                _ => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        sigmoid_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+                }
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -1888,7 +2059,16 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 sigmoid_simd(a_slice, out_slice);
             }
-            #[cfg(not(all(feature = "simd", target_arch = "aarch64")))]
+            #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                sigmoid_simd_x86(a_slice, out_slice);
+            }
+            #[cfg(not(all(
+                feature = "simd",
+                any(target_arch = "aarch64", target_arch = "x86_64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -1928,7 +2108,7 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -1938,18 +2118,19 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            // tanh is transcendental, use scalar for parallel path
-            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                let start = chunk_idx * chunk_size;
-                let end = std::cmp::min(start + chunk_size, numel);
-
-                for i in start..end {
-                    unsafe {
-                        *((out_usize + i * 4) as *mut f32) =
-                            (*((a_usize + i * 4) as *const f32)).tanh();
-                    }
+            match SIMD_LEVEL {
+                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+                SimdLevel::Avx2 => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        tanh_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
                 }
-            });
+                _ => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+                }
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -1998,7 +2179,7 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -4561,7 +4742,7 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -4613,7 +4794,7 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
