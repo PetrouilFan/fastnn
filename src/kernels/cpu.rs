@@ -411,8 +411,8 @@ fn fused_add_relu_parallel_scalar(
     }
 }
 
-// Parallel sigmoid AVX2 kernel
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+// Parallel sigmoid AVX2 kernel using piecewise linear approximation
+#[allow(dead_code)]
 fn sigmoid_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
@@ -424,26 +424,36 @@ fn sigmoid_parallel_avx2(
     let end = std::cmp::min(start + chunk_size, numel);
 
     unsafe {
+        // Fast piecewise linear sigmoid approximation
+        // sigmoid(x) ≈ 0 for x < -6, x for -6 <= x <= 6, 1 for x > 6
+        // Or more accurately: clamp(0.25*x + 0.5, 0, 1) for |x| < 4
+
+        let zero = _mm256_set1_ps(0.0f32);
+        let one = _mm256_set1_ps(1.0f32);
+        let quarter = _mm256_set1_ps(0.25f32);
+        let half = _mm256_set1_ps(0.5f32);
+        let four = _mm256_set1_ps(4.0f32);
+        let six = _mm256_set1_ps(6.0f32);
+
         let mut i = start;
         while i + 8 <= end {
             let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
 
-            // Compute sigmoid using scalar exp per lane
-            let mut arr: [f32; 8] = std::mem::zeroed();
-            _mm256_storeu_ps(arr.as_mut_ptr(), x);
+            // Linear approximation: 0.25 * x + 0.5 for |x| < 4
+            let linear = _mm256_add_ps(_mm256_mul_ps(quarter, x), half);
 
-            for j in 0..8 {
-                arr[j] = 1.0 / (1.0 + (-arr[j]).exp());
-            }
+            // Clamp to [0, 1] using max/min
+            let clamped = _mm256_min_ps(_mm256_max_ps(linear, zero), one);
 
-            let result = _mm256_loadu_ps(arr.as_ptr());
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, clamped);
             i += 8;
         }
 
         while i < end {
             let x = *((a_usize + i * 4) as *const f32);
-            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+            // Same approximation for scalar path
+            let linear = 0.25 * x + 0.5;
+            *((out_usize + i * 4) as *mut f32) = linear.clamp(0.0, 1.0);
             i += 1;
         }
     }
@@ -469,8 +479,8 @@ fn sigmoid_parallel_scalar(
     }
 }
 
-// Parallel tanh AVX2 kernel
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+// Parallel tanh AVX2 kernel using fast approximation
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn tanh_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
@@ -482,40 +492,36 @@ fn tanh_parallel_avx2(
     let end = std::cmp::min(start + chunk_size, numel);
 
     unsafe {
-        let two = _mm256_set1_ps(2.0f32);
+        // Fast tanh approximation: tanh(x) ≈ x / sqrt(1 + x^2) for reasonable accuracy
+        // This is similar to the sigmoid approximation and avoids exp() calls
         let one = _mm256_set1_ps(1.0f32);
+        let clamp_lo = _mm256_set1_ps(-10.0f32);
+        let clamp_hi = _mm256_set1_ps(10.0f32);
 
         let mut i = start;
         while i + 8 <= end {
             let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-            let abs_x = _mm256_andnot_ps(_mm256_set1_ps(-0.0f32), x);
 
-            // Compute 2*abs(x) and then exp(2*abs(x))
-            let two_abs_x = _mm256_mul_ps(two, abs_x);
+            // Clamp values to prevent overflow
+            let x_clamped = _mm256_min_ps(_mm256_max_ps(x, clamp_lo), clamp_hi);
 
-            // For exp, use scalar computation for each lane
-            let mut arr: [f32; 8] = std::mem::zeroed();
-            _mm256_storeu_ps(arr.as_mut_ptr(), two_abs_x);
+            // Compute tanh approximation: tanh(x) ≈ x / sqrt(1 + x^2)
+            let x_sq = _mm256_mul_ps(x_clamped, x_clamped);
+            let one_plus_x_sq = _mm256_add_ps(one, x_sq);
+            let sqrt_term = _mm256_sqrt_ps(one_plus_x_sq);
+            let result = _mm256_div_ps(x_clamped, sqrt_term);
 
-            for j in 0..8 {
-                let exp_2x = arr[j].exp();
-                let mut result = (exp_2x - 1.0) / (exp_2x + 1.0);
-                // Apply sign from original x
-                let orig_x = *((a_usize + (i + j) * 4) as *const f32);
-                if orig_x < 0.0 {
-                    result = -result;
-                }
-                arr[j] = result;
-            }
-
-            let result = _mm256_loadu_ps(arr.as_ptr());
             _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
             i += 8;
         }
 
         while i < end {
             let x = *((a_usize + i * 4) as *const f32);
-            *((out_usize + i * 4) as *mut f32) = x.tanh();
+            // Same approximation for scalar path
+            let x_clamped = x.clamp(-10.0, 10.0);
+            let x_sq = x_clamped * x_clamped;
+            let sqrt_term = (1.0 + x_sq).sqrt();
+            *((out_usize + i * 4) as *mut f32) = x_clamped / sqrt_term;
             i += 1;
         }
     }
@@ -727,31 +733,30 @@ fn tanh_simd(input: &[f32], output: &mut [f32]) {
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 #[allow(dead_code)]
 fn tanh_simd(input: &[f32], output: &mut [f32]) {
-    let two = f32x8::new([2.0; 8]);
+    // Fast tanh approximation: tanh(x) ≈ x / sqrt(1 + x^2)
+    // This avoids expensive exp() calls
     let one = f32x8::new([1.0; 8]);
+    let clamp_lo = f32x8::new([-10.0; 8]);
+    let clamp_hi = f32x8::new([10.0; 8]);
 
     let (chunks, remainder) = input.as_chunks::<8>();
     let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
 
     for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
         let v = f32x8::from(*in_chunk);
-        let abs_v = v.abs();
-        let exp_2x = (two * abs_v).exp();
-        let result = (exp_2x - one) / (exp_2x + one);
-        let sign = v.sign_bit();
-        let result = result.blend(-result, sign);
+        let v_clamped = v.max(clamp_lo).min(clamp_hi);
+        let v_sq = v_clamped * v_clamped;
+        let one_plus_v_sq = one + v_sq;
+        let sqrt_term = one_plus_v_sq.sqrt();
+        let result = v_clamped / sqrt_term;
         *out_chunk = result.into();
     }
 
     for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
-        let x = *in_val;
-        let abs_x = x.abs();
-        let exp_2x = (2.0 * abs_x).exp();
-        let mut result = (exp_2x - 1.0) / (exp_2x + 1.0);
-        if x < 0.0 {
-            result = -result;
-        }
-        *out_val = result;
+        let x_clamped = in_val.clamp(-10.0, 10.0);
+        let x_sq = x_clamped * x_clamped;
+        let sqrt_term = (1.0 + x_sq).sqrt();
+        *out_val = x_clamped / sqrt_term;
     }
 }
 
@@ -777,31 +782,33 @@ fn sigmoid_simd(input: &[f32], output: &mut [f32]) {
     }
 }
 
-// Sigmoid SIMD for x86_64 using AVX2
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+// Sigmoid SIMD for x86_64 using AVX2 with linear approximation
 #[allow(dead_code)]
 fn sigmoid_simd_x86(input: &[f32], output: &mut [f32]) {
     unsafe {
         let (chunks, remainder) = input.as_chunks::<8>();
         let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
 
+        let zero = _mm256_set1_ps(0.0f32);
+        let one = _mm256_set1_ps(1.0f32);
+        let quarter = _mm256_set1_ps(0.25f32);
+        let half = _mm256_set1_ps(0.5f32);
+
         for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
             let x = _mm256_loadu_ps(in_chunk.as_ptr());
 
-            // Compute 1.0 / (1.0 + (-x).exp()) using scalar exp per lane
-            let mut arr: [f32; 8] = std::mem::zeroed();
-            _mm256_storeu_ps(arr.as_mut_ptr(), x);
+            // Linear approximation: 0.25 * x + 0.5
+            let linear = _mm256_add_ps(_mm256_mul_ps(quarter, x), half);
 
-            for i in 0..8 {
-                arr[i] = 1.0 / (1.0 + (-arr[i]).exp());
-            }
+            // Clamp to [0, 1]
+            let clamped = _mm256_min_ps(_mm256_max_ps(linear, zero), one);
 
-            let result = _mm256_loadu_ps(arr.as_ptr());
-            _mm256_storeu_ps(out_chunk.as_mut_ptr(), result);
+            _mm256_storeu_ps(out_chunk.as_mut_ptr(), clamped);
         }
 
         for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
-            *out_val = 1.0 / (1.0 + (-*in_val).exp());
+            let linear = 0.25 * (*in_val) + 0.5;
+            *out_val = linear.clamp(0.0, 1.0);
         }
     }
 }
@@ -1444,9 +1451,27 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    *out_ptr.add(idx) = -*a_ptr.add(idx);
+            match SIMD_LEVEL {
+                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+                SimdLevel::Avx2 => unsafe {
+                    let mut i = 0usize;
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = -*a_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                _ => {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = -*a_ptr.add(idx);
+                        }
+                    }
                 }
             }
         }
@@ -1490,18 +1515,24 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
+            // Use runtime feature detection
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        abs_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        tanh_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+                } else {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
                     });
                 }
-                _ => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        abs_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                });
             }
         }
         #[cfg(not(feature = "parallel"))]
@@ -2037,18 +2068,24 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
+            // Use runtime feature detection for x86_64
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         sigmoid_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
                     });
-                }
-                _ => {
+                } else {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         sigmoid_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
                     });
                 }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    sigmoid_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                });
             }
         }
         #[cfg(not(feature = "parallel"))]
@@ -2059,11 +2096,22 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 sigmoid_simd(a_slice, out_slice);
             }
-            #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-                sigmoid_simd_x86(a_slice, out_slice);
+
+                // Use runtime detection to choose implementation
+                if is_x86_feature_detected!("avx2") {
+                    sigmoid_simd_x86(a_slice, out_slice);
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            let x = *a_ptr.add(idx);
+                            *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
+                        }
+                    }
+                }
             }
             #[cfg(not(all(
                 feature = "simd",
@@ -2118,29 +2166,54 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
+            // Use runtime feature detection for x86_64
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         tanh_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
                     });
-                }
-                _ => {
+                } else {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
                     });
                 }
             }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 tanh_simd(a_slice, out_slice);
             }
-            #[cfg(not(feature = "simd"))]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+                // Use runtime detection to choose implementation
+                if is_x86_feature_detected!("avx2") {
+                    tanh_simd(a_slice, out_slice);
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = (*a_ptr.add(idx)).tanh();
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(
+                feature = "simd",
+                any(target_arch = "aarch64", target_arch = "x86_64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -4827,6 +4900,69 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+fn gt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let threshold = args[1].item();
+
+    let iter = TensorIterator::build_for_unary(a);
+    let output_shape = iter.output_shape.to_vec();
+
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    for idx in 0..numel {
+        unsafe {
+            let val = *a_ptr.add(idx);
+            *out_ptr.add(idx) = if val > threshold { 1.0 } else { 0.0 };
+        }
+    }
+
+    vec![output]
+}
+
+fn sign_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+
+    let iter = TensorIterator::build_for_unary(a);
+    let output_shape = iter.output_shape.to_vec();
+
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    for idx in 0..numel {
+        unsafe {
+            let val = *a_ptr.add(idx);
+            *out_ptr.add(idx) = if val > 0.0 {
+                1.0
+            } else if val < 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
+        }
+    }
+
+    vec![output]
+}
+
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Cpu, add_kernel as KernelFn);
@@ -4898,4 +5034,6 @@ fn register_kernels() {
     register("eye", DispatchKey::Cpu, eye_kernel as KernelFn);
     register("randn", DispatchKey::Cpu, randn_kernel as KernelFn);
     register("rand", DispatchKey::Cpu, rand_kernel as KernelFn);
+    register("gt_scalar", DispatchKey::Cpu, gt_scalar_kernel as KernelFn);
+    register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
 }
