@@ -18,12 +18,12 @@ def numerical_grad(f, x, eps=1e-4):
         x_plus_data.flat[i] += eps
         x_minus_data.flat[i] -= eps
 
-        f_plus = f(fnn.from_numpy(x_plus_data)).numpy()
-        f_minus = f(fnn.from_numpy(x_minus_data)).numpy()
+        f_plus = f(fnn.tensor(x_plus_data.flatten(), x_plus_data.shape)).numpy()
+        f_minus = f(fnn.tensor(x_minus_data.flatten(), x_minus_data.shape)).numpy()
 
         grad_flat[i] = (f_plus.flat[0] - f_minus.flat[0]) / (2 * eps)
 
-    return fnn.from_numpy(grad)
+    return fnn.tensor(grad.flatten(), grad.shape)
 
 
 def numerical_grad_elementwise(f, x, eps=1e-4):
@@ -38,12 +38,12 @@ def numerical_grad_elementwise(f, x, eps=1e-4):
         x_plus.flat[i] += eps
         x_minus.flat[i] -= eps
 
-        f_plus = f(fnn.from_numpy(x_plus)).numpy()
-        f_minus = f(fnn.from_numpy(x_minus)).numpy()
+        f_plus = f(fnn.tensor(x_plus.flatten(), x_plus.shape)).numpy()
+        f_minus = f(fnn.tensor(x_minus.flatten(), x_minus.shape)).numpy()
 
         grad.flat[i] = (f_plus.flat[0] - f_minus.flat[0]) / (2 * eps)
 
-    return fnn.from_numpy(grad)
+    return fnn.tensor(grad.flatten(), grad.shape)
 
 
 def check_grad(op, *inputs, eps=1e-4, atol=1e-3, rtol=1e-3, reduction="sum"):
@@ -60,7 +60,7 @@ def check_grad(op, *inputs, eps=1e-4, atol=1e-3, rtol=1e-3, reduction="sum"):
     # Clone inputs and enable gradients
     input_tensors = []
     for inp in inputs:
-        t = fnn.from_numpy(inp.numpy().copy())
+        t = fnn.tensor(inp.numpy().flatten(), inp.numpy().shape)
         t.requires_grad_(True)
         input_tensors.append(t)
 
@@ -138,15 +138,15 @@ def check_unary_grad(op_name, x_data, atol=1e-3, rtol=1e-3):
         raise ValueError(f"Unknown op: {op_name}")
 
     op = ops[op_name]
-    x = fnn.from_numpy(x_data.copy())
+    x = fnn.tensor(x_data.flatten(), x_data.shape)
     x.requires_grad_(True)
 
     y = op(x)
     y.sum().backward()
 
     # Numerical gradient
-    x_plus = fnn.from_numpy(x_data.copy())
-    x_minus = fnn.from_numpy(x_data.copy())
+    x_plus = fnn.tensor(x_data.flatten(), x_data.shape)
+    x_minus = fnn.tensor(x_data.flatten(), x_data.shape)
     x_plus.requires_grad_(True)
     x_minus.requires_grad_(True)
 
@@ -182,8 +182,8 @@ def check_binary_grad(op_name, a_data, b_data, atol=1e-3, rtol=1e-3):
 
     op = ops[op_name]
 
-    a = fnn.from_numpy(a_data.copy())
-    b = fnn.from_numpy(b_data.copy())
+    a = fnn.tensor(a_data.flatten(), a_data.shape)
+    b = fnn.tensor(b_data.flatten(), b_data.shape)
     a.requires_grad_(True)
     b.requires_grad_(True)
 
@@ -191,8 +191,8 @@ def check_binary_grad(op_name, a_data, b_data, atol=1e-3, rtol=1e-3):
     y.sum().backward()
 
     # Numerical gradient for a
-    a_plus = fnn.from_numpy(a_data.copy())
-    a_minus = fnn.from_numpy(a_data.copy())
+    a_plus = fnn.tensor(a_data.flatten(), a_data.shape)
+    a_minus = fnn.tensor(a_data.flatten(), a_data.shape)
     a_plus.requires_grad_(True)
     a_minus.requires_grad_(True)
 
@@ -202,8 +202,8 @@ def check_binary_grad(op_name, a_data, b_data, atol=1e-3, rtol=1e-3):
     numerical_a = (y_plus.sum().numpy() - y_minus.sum().numpy()) / (2 * 1e-4)
 
     # Numerical gradient for b
-    b_plus = fnn.from_numpy(b_data.copy())
-    b_minus = fnn.from_numpy(b_data.copy())
+    b_plus = fnn.tensor(b_data.flatten(), b_data.shape)
+    b_minus = fnn.tensor(b_data.flatten(), b_data.shape)
     b_plus.requires_grad_(True)
     b_minus.requires_grad_(True)
 
@@ -423,12 +423,13 @@ def test_layer_norm_grad():
     """Test layer norm gradient."""
     x = fnn.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [2, 3])
     x.requires_grad_(True)
-    y, mean, var = fnn.layer_norm(x, [3], None, None, 1e-5)
+    ln = fnn.LayerNorm(3)
+    y = ln(x)
     y.sum().backward()
 
     # Layer norm backward is complex, just check gradient exists and is not all zeros
-    assert x.grad is not None
-    assert not np.allclose(x.grad.numpy(), 0), "LayerNorm gradient is all zeros"
+    assert ln.weight.grad is not None
+    assert not np.allclose(ln.weight.grad.numpy(), 0), "LayerNorm gradient is all zeros"
 
 
 def test_embedding_grad():
@@ -443,7 +444,7 @@ def test_embedding_grad():
 
     indices = fnn.tensor([[1, 2, 3], [4, 5, 1]], [batch_size, seq_len])
 
-    embedded = fnn.embedding(embedding, indices)
+    embedded = fnn.Embedding(embedding, indices)
     embedded.sum().backward()
 
     # Check that gradient exists for embedding
