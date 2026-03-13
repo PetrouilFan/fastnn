@@ -1009,7 +1009,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("add", dispatch_key, &[self, other]);
         let output = result[0].clone();
-        if self.requires_grad() || other.requires_grad() {
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
                 edges.extend(autograd::make_edge(other));
@@ -1030,7 +1030,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("sub", dispatch_key, &[self, other]);
         let output = result[0].clone();
-        if self.requires_grad() || other.requires_grad() {
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
                 edges.extend(autograd::make_edge(other));
@@ -1051,7 +1051,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("mul", dispatch_key, &[self, other]);
         let output = result[0].clone();
-        if self.requires_grad() || other.requires_grad() {
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
                 edges.extend(autograd::make_edge(other));
@@ -1072,7 +1072,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("div", dispatch_key, &[self, other]);
         let output = result[0].clone();
-        if self.requires_grad() || other.requires_grad() {
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
                 edges.extend(autograd::make_edge(other));
@@ -1093,7 +1093,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("matmul", dispatch_key, &[self, other]);
         let output = result[0].clone();
-        if self.requires_grad() || other.requires_grad() {
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
                 edges.extend(autograd::make_edge(other));
@@ -1120,7 +1120,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("relu", dispatch_key, &[self]);
         let output = result[0].clone();
-        if self.requires_grad() {
+        if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = autograd::ReluBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
@@ -1149,7 +1149,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("sigmoid", dispatch_key, &[self]);
         let output = result[0].clone();
-        if self.requires_grad() {
+        if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = autograd::SigmoidBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
@@ -1166,7 +1166,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("tanh", dispatch_key, &[self]);
         let output = result[0].clone();
-        if self.requires_grad() {
+        if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = autograd::TanhBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
@@ -1183,7 +1183,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("silu", dispatch_key, &[self]);
         let output = result[0].clone();
-        if self.requires_grad() {
+        if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = autograd::SiLUBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
@@ -1200,7 +1200,7 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("gelu", dispatch_key, &[self]);
         let output = result[0].clone();
-        if self.requires_grad() {
+        if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = autograd::GeluBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
@@ -1251,7 +1251,7 @@ impl Tensor {
             ],
         );
         let output = result[0].clone();
-        if self.requires_grad() {
+        if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = autograd::SumBackward::new(self.clone(), dim as usize, keepdim, edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
@@ -1290,7 +1290,7 @@ impl Tensor {
             ],
         );
         let output = result[0].clone();
-        if self.requires_grad() {
+        if autograd::is_grad_enabled() && self.requires_grad() {
             let numel: i64 = self.shape().iter().product();
             let edges = autograd::make_edge(self);
             let backward =
