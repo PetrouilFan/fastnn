@@ -411,8 +411,8 @@ fn fused_add_relu_parallel_scalar(
     }
 }
 
-// Parallel sigmoid AVX2 kernel using piecewise linear approximation
-#[allow(dead_code)]
+// Parallel sigmoid AVX2 kernel using a fast approximation
+#[cfg(all(feature = "parallel", feature = "simd", target_arch = "x86_64"))]
 fn sigmoid_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
@@ -424,28 +424,29 @@ fn sigmoid_parallel_avx2(
     let end = std::cmp::min(start + chunk_size, numel);
 
     unsafe {
-        // Fast piecewise linear sigmoid approximation
-        // sigmoid(x) ≈ 0 for x < -6, x for -6 <= x <= 6, 1 for x > 6
-        // Or more accurately: clamp(0.25*x + 0.5, 0, 1) for |x| < 4
+        // Sigmoid approximation using clamp
+        // For |x| < 4: sigmoid(x) ≈ 0.25*x + 0.5 (linear approximation)
+        // For x > 4: sigmoid ≈ 1.0
+        // For x < -4: sigmoid ≈ 0.0
 
         let zero = _mm256_set1_ps(0.0f32);
         let one = _mm256_set1_ps(1.0f32);
         let quarter = _mm256_set1_ps(0.25f32);
         let half = _mm256_set1_ps(0.5f32);
         let four = _mm256_set1_ps(4.0f32);
-        let six = _mm256_set1_ps(6.0f32);
+        let four_neg = _mm256_set1_ps(-4.0f32);
 
         let mut i = start;
         while i + 8 <= end {
             let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
 
-            // Linear approximation: 0.25 * x + 0.5 for |x| < 4
+            // Linear approximation for |x| < 4
             let linear = _mm256_add_ps(_mm256_mul_ps(quarter, x), half);
 
-            // Clamp to [0, 1] using max/min
-            let clamped = _mm256_min_ps(_mm256_max_ps(linear, zero), one);
+            // Clamp to [0, 1]
+            let result = _mm256_min_ps(_mm256_max_ps(linear, zero), one);
 
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, clamped);
+            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
             i += 8;
         }
 
@@ -635,9 +636,10 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
         let x = f32x8::from(*in_chunk);
         let x3 = x * x * x;
         let y = sqrt_2_over_pi * (x + coeff * x3);
-        let exp_2y = (y + y).exp();
-        let t = (exp_2y - one) / (exp_2y + one);
-        let result = half * x * (one + t);
+        // Using exp to compute tanh
+        let exp_y = y.exp();
+        let t = (exp_y - one.clone()) / (exp_y + one.clone());
+        let result = half * x * (one.clone() + t);
         *out_chunk = result.into();
     }
 
@@ -685,9 +687,10 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
         let x = f32x4::from(*in_chunk);
         let x3 = x * x * x;
         let y = sqrt_2_over_pi * (x + coeff * x3);
-        let exp_2y = (y + y).exp();
-        let t = (exp_2y - one) / (exp_2y + one);
-        let result = half * x * (one + t);
+        // Using exp to compute tanh
+        let exp_y = y.exp();
+        let t = (exp_y - one.clone()) / (exp_y + one.clone());
+        let result = half * x * (one.clone() + t);
         *out_chunk = result.into();
     }
 
