@@ -173,10 +173,8 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.sub(&other.inner))
     }
 
-    fn __mul__(&self, other: f32) -> PyResult<PyTensor> {
-        Ok(PyTensor::from_tensor(
-            self.inner.mul(&Tensor::from_scalar(other)),
-        ))
+    fn __mul__(&self, other: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.mul(&other.inner))
     }
 
     fn __rmul__(&self, other: f32) -> PyTensor {
