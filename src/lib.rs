@@ -15,6 +15,7 @@ use nn::Module;
 use optim::Optimizer;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
+use pyo3::PyAny;
 use rand::Rng;
 use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
@@ -172,8 +173,14 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.sub(&other.inner))
     }
 
-    fn __mul__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.mul(&other.inner))
+    fn __mul__(&self, other: f32) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner.mul(&Tensor::from_scalar(other)),
+        ))
+    }
+
+    fn __rmul__(&self, other: f32) -> PyTensor {
+        PyTensor::from_tensor(self.inner.mul(&Tensor::from_scalar(other)))
     }
 
     fn mul_scalar(&self, other: f32) -> PyTensor {
