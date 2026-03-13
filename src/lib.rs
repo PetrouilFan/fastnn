@@ -701,12 +701,14 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
     let output = result[0].clone();
 
     if pred.inner.requires_grad() {
+        let edges = autograd::make_edge(&pred.inner);
         let backward = autograd::CrossEntropyBackward::new(
             pred.inner.clone(),
             target.inner.clone(),
             reduction.clone(),
+            edges,
         );
-        let mut meta = AutogradMeta::new(false);
+        let mut meta = AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(std::sync::Arc::new(backward));
         let mut output = output.clone();
         Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
