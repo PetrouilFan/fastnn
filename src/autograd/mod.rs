@@ -53,6 +53,25 @@ impl AutogradMeta {
 #[derive(Clone)]
 pub struct Edge(pub Arc<dyn Node>, pub usize);
 
+pub fn make_edge(tensor: &Tensor) -> Vec<Edge> {
+    tensor
+        .grad_fn()
+        .map(|node| Edge(node, 0))
+        .map(|e| vec![e])
+        .unwrap_or_else(Vec::new)
+}
+
+pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    if let Some(node) = tensor_a.grad_fn() {
+        edges.push(Edge(node, 0));
+    }
+    if let Some(node) = tensor_b.grad_fn() {
+        edges.push(Edge(node, 1));
+    }
+    edges
+}
+
 #[allow(clippy::len_zero)]
 pub trait Node: Send + Sync {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>>;
@@ -60,17 +79,22 @@ pub trait Node: Send + Sync {
     fn num_inputs(&self) -> usize;
     fn name(&self) -> &str;
     fn inputs(&self) -> &[Tensor];
+    fn id(&self) -> usize {
+        let ptr = self as *const _ as *const ();
+        ptr as usize
+    }
 }
 
 #[allow(dead_code)]
 pub struct AddBackward {
     pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
 }
 
 impl AddBackward {
     #[allow(dead_code)]
-    pub fn new(inputs: Vec<Tensor>) -> Self {
-        AddBackward { inputs }
+    pub fn new(inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
+        AddBackward { inputs, edges }
     }
 }
 
@@ -81,7 +105,7 @@ impl Node for AddBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -100,11 +124,12 @@ impl Node for AddBackward {
 #[allow(dead_code)]
 pub struct SubBackward {
     pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
 }
 
 impl SubBackward {
-    pub fn new(inputs: Vec<Tensor>) -> Self {
-        SubBackward { inputs }
+    pub fn new(inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
+        SubBackward { inputs, edges }
     }
 }
 
@@ -116,7 +141,7 @@ impl Node for SubBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -135,11 +160,12 @@ impl Node for SubBackward {
 #[allow(dead_code)]
 pub struct MulBackward {
     pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
 }
 
 impl MulBackward {
-    pub fn new(inputs: Vec<Tensor>) -> Self {
-        MulBackward { inputs }
+    pub fn new(inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
+        MulBackward { inputs, edges }
     }
 }
 
@@ -156,7 +182,7 @@ impl Node for MulBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -175,11 +201,12 @@ impl Node for MulBackward {
 #[allow(dead_code)]
 pub struct DivBackward {
     pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
 }
 
 impl DivBackward {
-    pub fn new(inputs: Vec<Tensor>) -> Self {
-        DivBackward { inputs }
+    pub fn new(inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
+        DivBackward { inputs, edges }
     }
 }
 
@@ -197,7 +224,7 @@ impl Node for DivBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -216,11 +243,12 @@ impl Node for DivBackward {
 #[allow(dead_code)]
 pub struct NegBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl NegBackward {
-    pub fn new(input: Tensor) -> Self {
-        NegBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        NegBackward { input, edges }
     }
 }
 
@@ -232,7 +260,7 @@ impl Node for NegBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -250,25 +278,25 @@ impl Node for NegBackward {
 
 pub struct ReluBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl ReluBackward {
-    pub fn new(input: Tensor) -> Self {
-        ReluBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        ReluBackward { input, edges }
     }
 }
 
 impl Node for ReluBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        // ReLU backward: for now, just pass gradient through
-        // A proper implementation would zero out gradients for negative inputs
-        // but that requires comparison operators
         let grad = grad_outputs[0].clone().unwrap();
-        vec![Some(grad)]
+        let mask = self.input.gt_scalar(0.0);
+        let result = grad.mul(&mask);
+        vec![Some(result)]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -286,11 +314,15 @@ impl Node for ReluBackward {
 
 pub struct MatmulBackward {
     pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
 }
 
 impl MatmulBackward {
-    pub fn new(a: Tensor, b: Tensor) -> Self {
-        MatmulBackward { inputs: vec![a, b] }
+    pub fn new(a: Tensor, b: Tensor, edges: Vec<Edge>) -> Self {
+        MatmulBackward {
+            inputs: vec![a, b],
+            edges,
+        }
     }
 }
 
@@ -300,14 +332,16 @@ impl Node for MatmulBackward {
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
-        let grad_a = grad.matmul(&b.transpose(0, 1));
-        let grad_b = a.transpose(0, 1).matmul(&grad);
+        let ndim_b = b.ndim();
+        let ndim_a = a.ndim();
+        let grad_a = grad.matmul(&b.transpose(ndim_b - 2, ndim_b - 1));
+        let grad_b = a.transpose(ndim_a - 2, ndim_a - 1).matmul(&grad);
 
         vec![Some(grad_a), Some(grad_b)]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -327,14 +361,16 @@ pub struct SumBackward {
     pub input: Tensor,
     pub dim: usize,
     pub keepdim: bool,
+    pub edges: Vec<Edge>,
 }
 
 impl SumBackward {
-    pub fn new(input: Tensor, dim: usize, keepdim: bool) -> Self {
+    pub fn new(input: Tensor, dim: usize, keepdim: bool, edges: Vec<Edge>) -> Self {
         SumBackward {
             input,
             dim,
             keepdim,
+            edges,
         }
     }
 }
@@ -349,25 +385,16 @@ impl Node for SumBackward {
         };
         let shape = self.input.shape();
         let grad_shape = grad.shape();
-        let grad_numel = grad.numel();
 
-        // If grad is a scalar (numel=1) but input has more elements,
-        // we need to expand the scalar to match the input shape
-        if grad_numel == 1 && shape.iter().product::<i64>() > 1 {
-            // Scalar grad - just expand to input shape
-            vec![Some(grad.expand(shape))]
+        if grad_shape.is_empty() {
+            let ones = Tensor::from_vec(
+                vec![1.0; shape.iter().product::<i64>() as usize],
+                shape.clone(),
+            );
+            vec![Some(grad.mul(&ones))]
         } else if self.keepdim {
-            // keepdim=True - grad shape matches output, expand to input
             vec![Some(grad.expand(shape))]
         } else {
-            // grad has the output shape - need to add a dimension at self.dim
-            // Output shape = input shape with dim removed
-            // So we need to insert 1 at position dim to get input shape
-            let mut new_shape: Vec<i64> = shape.to_vec();
-            new_shape.remove(self.dim); // This gives us the output shape
-                                        // Actually wait - grad should have output shape, so we need to go from output to input
-                                        // Output shape = input with dim removed
-                                        // Input shape = output with 1 inserted at dim
             let mut expanded_shape: Vec<i64> = grad_shape.to_vec();
             expanded_shape.insert(self.dim, 1);
             vec![Some(grad.reshape(expanded_shape))]
@@ -375,7 +402,7 @@ impl Node for SumBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -396,15 +423,17 @@ pub struct MeanBackward {
     pub dim: usize,
     pub keepdim: bool,
     pub numel: i64,
+    pub edges: Vec<Edge>,
 }
 
 impl MeanBackward {
-    pub fn new(input: Tensor, dim: usize, keepdim: bool, numel: i64) -> Self {
+    pub fn new(input: Tensor, dim: usize, keepdim: bool, numel: i64, edges: Vec<Edge>) -> Self {
         MeanBackward {
             input,
             dim,
             keepdim,
             numel,
+            edges,
         }
     }
 }
@@ -412,22 +441,33 @@ impl MeanBackward {
 impl Node for MeanBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
-        let scale = Tensor::from_scalar(1.0 / self.numel as f32);
-        let scaled_grad = grad.mul(&scale);
+        let scale = 1.0 / self.numel as f32;
 
         let shape = self.input.shape();
+        let grad_shape = grad_outputs[0]
+            .as_ref()
+            .map(|g| g.shape())
+            .unwrap_or_default();
 
-        if self.keepdim {
-            vec![Some(scaled_grad.expand(shape))]
+        let result = if grad_shape.is_empty() {
+            let ones = Tensor::from_vec(vec![1.0; self.numel as usize], shape.clone());
+            grad.mul(&ones).mul(&Tensor::from_scalar(scale))
+        } else if self.keepdim {
+            let scaled_grad = grad.mul(&Tensor::from_scalar(scale));
+            scaled_grad.expand(shape)
         } else {
             let mut new_shape = shape.clone();
-            new_shape.insert(self.dim, 1);
-            vec![Some(scaled_grad.reshape(new_shape).expand(shape))]
-        }
+            new_shape[self.dim] = 1;
+            let reshaped = grad.reshape(new_shape);
+            let scaled_grad = reshaped.mul(&Tensor::from_scalar(scale));
+            scaled_grad.expand(shape)
+        };
+
+        vec![Some(result)]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -446,11 +486,12 @@ impl Node for MeanBackward {
 #[allow(dead_code)]
 pub struct ExpBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl ExpBackward {
-    pub fn new(input: Tensor) -> Self {
-        ExpBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        ExpBackward { input, edges }
     }
 }
 
@@ -462,7 +503,7 @@ impl Node for ExpBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -481,11 +522,12 @@ impl Node for ExpBackward {
 #[allow(dead_code)]
 pub struct LogBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl LogBackward {
-    pub fn new(input: Tensor) -> Self {
-        LogBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        LogBackward { input, edges }
     }
 }
 
@@ -498,7 +540,7 @@ impl Node for LogBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -517,11 +559,12 @@ impl Node for LogBackward {
 #[allow(dead_code)]
 pub struct SqrtBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl SqrtBackward {
-    pub fn new(input: Tensor) -> Self {
-        SqrtBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        SqrtBackward { input, edges }
     }
 }
 
@@ -534,7 +577,7 @@ impl Node for SqrtBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -553,21 +596,24 @@ impl Node for SqrtBackward {
 #[allow(dead_code)]
 pub struct AbsBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl AbsBackward {
-    pub fn new(input: Tensor) -> Self {
-        AbsBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        AbsBackward { input, edges }
     }
 }
 
 impl Node for AbsBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let sign = self.input.sign();
+        vec![Some(grad.mul(&sign))]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -585,11 +631,12 @@ impl Node for AbsBackward {
 
 pub struct GeluBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl GeluBackward {
-    pub fn new(input: Tensor) -> Self {
-        GeluBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        GeluBackward { input, edges }
     }
 }
 
@@ -597,35 +644,25 @@ impl Node for GeluBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let x = &self.input;
+        let sqrt_2_over_pi = Tensor::from_scalar((2.0_f32 / std::f32::consts::PI).sqrt());
+        let coeff = Tensor::from_scalar(0.044715_f32);
+        let d_inner_coeff = Tensor::from_scalar(0.134145_f32);
 
-        let sqrt_2_over_pi = (2.0_f32 / std::f32::consts::PI).sqrt();
         let x2 = x.mul(x);
         let x3 = x2.mul(x);
-        let tanh_arg = x
-            .mul(&Tensor::from_scalar(sqrt_2_over_pi))
-            .add(&x3.mul(&Tensor::from_scalar(0.044715)));
-        let tanh_arg_tanh = tanh_arg.tanh();
-
-        let exp_term = x
-            .mul(&Tensor::from_scalar(sqrt_2_over_pi))
-            .add(&x2.mul(&Tensor::from_scalar(0.134)));
-        let exp_term_exp = exp_term.exp();
-        let sigmoid_term =
-            Tensor::from_scalar(1.0).div(&Tensor::from_scalar(1.0).add(&exp_term_exp));
-
+        let inner = sqrt_2_over_pi.mul(&x.add(&coeff.mul(&x3)));
+        let t = inner.tanh();
+        let t2 = t.mul(&t);
+        let sech2 = Tensor::from_scalar(1.0).sub(&t2);
+        let d_inner_dx = sqrt_2_over_pi.mul(&Tensor::from_scalar(1.0).add(&d_inner_coeff.mul(&x2)));
         let derivative = Tensor::from_scalar(0.5)
-            .mul(&Tensor::from_scalar(1.0).add(&tanh_arg_tanh))
-            .add(
-                &x.mul(&Tensor::from_scalar(0.5))
-                    .mul(&tanh_arg_tanh.tanh())
-                    .mul(&sigmoid_term),
-            );
-
+            .mul(&Tensor::from_scalar(1.0).add(&t))
+            .add(&Tensor::from_scalar(0.5).mul(x).mul(&sech2).mul(&d_inner_dx));
         vec![Some(grad.mul(&derivative))]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -643,11 +680,12 @@ impl Node for GeluBackward {
 
 pub struct SigmoidBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl SigmoidBackward {
-    pub fn new(input: Tensor) -> Self {
-        SigmoidBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        SigmoidBackward { input, edges }
     }
 }
 
@@ -655,12 +693,12 @@ impl Node for SigmoidBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let sigmoid_x = self.input.sigmoid();
-        let derivative = sigmoid_x.mul(&sigmoid_x.neg().add(&Tensor::from_scalar(1.0)));
+        let derivative = sigmoid_x.mul(&Tensor::from_scalar(1.0).sub(&sigmoid_x));
         vec![Some(grad.mul(&derivative))]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -678,11 +716,12 @@ impl Node for SigmoidBackward {
 
 pub struct TanhBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl TanhBackward {
-    pub fn new(input: Tensor) -> Self {
-        TanhBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        TanhBackward { input, edges }
     }
 }
 
@@ -695,7 +734,7 @@ impl Node for TanhBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -713,29 +752,27 @@ impl Node for TanhBackward {
 
 pub struct SiLUBackward {
     pub input: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl SiLUBackward {
-    pub fn new(input: Tensor) -> Self {
-        SiLUBackward { input }
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        SiLUBackward { input, edges }
     }
 }
 
 impl Node for SiLUBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
-        let sigmoid_x = self.input.sigmoid();
-        let silu_x = self.input.mul(&sigmoid_x);
-        let derivative = silu_x.add(
-            &sigmoid_x
-                .mul(&Tensor::from_scalar(1.0))
-                .sub(&silu_x.div(&self.input)),
-        );
+        let x = &self.input;
+        let s = x.sigmoid();
+        let one_minus_s = Tensor::from_scalar(1.0).sub(&s);
+        let derivative = s.mul(&Tensor::from_scalar(1.0).add(&x.mul(&one_minus_s)));
         vec![Some(grad.mul(&derivative))]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -753,22 +790,29 @@ impl Node for SiLUBackward {
 
 #[allow(dead_code)]
 pub struct SoftmaxBackward {
-    pub input: Tensor,
+    pub output: Tensor,
+    pub dim: usize,
+    pub edges: Vec<Edge>,
 }
 
 impl SoftmaxBackward {
-    pub fn new(input: Tensor) -> Self {
-        SoftmaxBackward { input }
+    pub fn new(output: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
+        SoftmaxBackward { output, dim, edges }
     }
 }
 
 impl Node for SoftmaxBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let s = &self.output;
+        let dim_i32 = self.dim as i32;
+        let dot = grad.mul(s).sum(dim_i32, true);
+        let grad_input = s.mul(&grad.sub(&dot));
+        vec![Some(grad_input)]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -780,28 +824,35 @@ impl Node for SoftmaxBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        std::slice::from_ref(&self.input)
+        std::slice::from_ref(&self.output)
     }
 }
 
 #[allow(dead_code)]
 pub struct LogSoftmaxBackward {
-    pub input: Tensor,
+    pub output: Tensor,
+    pub dim: usize,
+    pub edges: Vec<Edge>,
 }
 
 impl LogSoftmaxBackward {
-    pub fn new(input: Tensor) -> Self {
-        LogSoftmaxBackward { input }
+    pub fn new(output: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
+        LogSoftmaxBackward { output, dim, edges }
     }
 }
 
 impl Node for LogSoftmaxBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+        let softmax = self.output.exp();
+        let dim_i32 = self.dim as i32;
+        let grad_sum = grad.sum(dim_i32, true);
+        let grad_input = grad.sub(&softmax.mul(&grad_sum));
+        vec![Some(grad_input)]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -813,7 +864,7 @@ impl Node for LogSoftmaxBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        std::slice::from_ref(&self.input)
+        std::slice::from_ref(&self.output)
     }
 }
 
@@ -825,6 +876,7 @@ pub struct Conv2dBackward {
     pub padding: i64,
     pub dilation: i64,
     pub groups: i64,
+    pub edges: Vec<Edge>,
 }
 
 impl Conv2dBackward {
@@ -835,6 +887,7 @@ impl Conv2dBackward {
         padding: i64,
         dilation: i64,
         groups: i64,
+        edges: Vec<Edge>,
     ) -> Self {
         Conv2dBackward {
             input,
@@ -843,6 +896,7 @@ impl Conv2dBackward {
             padding,
             dilation,
             groups,
+            edges,
         }
     }
 }
@@ -850,11 +904,13 @@ impl Conv2dBackward {
 impl Node for Conv2dBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
-        vec![Some(grad.clone()), Some(grad)]
+        let grad_input = grad.clone();
+        let grad_weight = grad.clone();
+        vec![Some(grad_input), Some(grad_weight)]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -873,21 +929,87 @@ impl Node for Conv2dBackward {
 #[allow(dead_code)]
 pub struct LayerNormBackward {
     pub input: Tensor,
+    pub normalized: Tensor,
+    pub gamma: Option<Tensor>,
+    pub mean: Tensor,
+    pub variance: Tensor,
+    pub eps: f32,
+    pub edges: Vec<Edge>,
 }
 
 impl LayerNormBackward {
-    pub fn new(input: Tensor) -> Self {
-        LayerNormBackward { input }
+    pub fn new(
+        input: Tensor,
+        normalized: Tensor,
+        gamma: Option<Tensor>,
+        mean: Tensor,
+        variance: Tensor,
+        eps: f32,
+        edges: Vec<Edge>,
+    ) -> Self {
+        LayerNormBackward {
+            input,
+            normalized,
+            gamma,
+            mean,
+            variance,
+            eps,
+            edges,
+        }
     }
 }
 
 impl Node for LayerNormBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+        let grad = grad_outputs[0].clone().unwrap();
+
+        let std = self.variance.add(&Tensor::from_scalar(self.eps)).sqrt();
+        let grad_x_hat = if let Some(ref g) = self.gamma {
+            grad.mul(g)
+        } else {
+            grad.clone()
+        };
+
+        let mean_grad_x_hat = grad_x_hat
+            .sum(1, true)
+            .div(&Tensor::from_scalar(self.normalized.shape()[1] as f32));
+        let mean_grad_x_hat_x_hat = grad_x_hat
+            .mul(&self.normalized)
+            .sum(1, true)
+            .div(&Tensor::from_scalar(self.normalized.shape()[1] as f32));
+        let grad_input = grad_x_hat
+            .sub(&mean_grad_x_hat)
+            .sub(&self.normalized.mul(&mean_grad_x_hat_x_hat))
+            .div(&std);
+
+        let grad_gamma = if let Some(ref g) = self.gamma {
+            Some(grad.mul(&self.normalized).sum(0, false))
+        } else {
+            None
+        };
+        let grad_beta = Some(grad.sum(0, false));
+
+        vec![
+            Some(grad_input),
+            grad_gamma.or_else(|| {
+                Some(Tensor::zeros(
+                    vec![1],
+                    crate::storage::DType::F32,
+                    crate::storage::Device::Cpu,
+                ))
+            }),
+            grad_beta.or_else(|| {
+                Some(Tensor::zeros(
+                    vec![1],
+                    crate::storage::DType::F32,
+                    crate::storage::Device::Cpu,
+                ))
+            }),
+        ]
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -906,11 +1028,17 @@ impl Node for LayerNormBackward {
 #[allow(dead_code)]
 pub struct EmbeddingBackward {
     pub weight: Tensor,
+    pub indices: Tensor,
+    pub edges: Vec<Edge>,
 }
 
 impl EmbeddingBackward {
-    pub fn new(weight: Tensor) -> Self {
-        EmbeddingBackward { weight }
+    pub fn new(weight: Tensor, indices: Tensor, edges: Vec<Edge>) -> Self {
+        EmbeddingBackward {
+            weight,
+            indices,
+            edges,
+        }
     }
 }
 
@@ -920,7 +1048,7 @@ impl Node for EmbeddingBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {
@@ -940,14 +1068,16 @@ pub struct CrossEntropyBackward {
     pub logits: Tensor,
     pub targets: Tensor,
     pub reduction: String,
+    pub edges: Vec<Edge>,
 }
 
 impl CrossEntropyBackward {
-    pub fn new(logits: Tensor, targets: Tensor, reduction: String) -> Self {
+    pub fn new(logits: Tensor, targets: Tensor, reduction: String, edges: Vec<Edge>) -> Self {
         CrossEntropyBackward {
             logits,
             targets,
             reduction,
+            edges,
         }
     }
 }
@@ -1014,7 +1144,7 @@ impl Node for CrossEntropyBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.edges
     }
 
     fn num_inputs(&self) -> usize {

@@ -1010,7 +1010,12 @@ impl Tensor {
         let result = dispatch("add", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
-            let backward = autograd::AddBackward::new(vec![self.clone(), other.clone()]);
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = autograd::AddBackward::new(vec![self.clone(), other.clone()], edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1026,7 +1031,12 @@ impl Tensor {
         let result = dispatch("sub", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
-            let backward = autograd::SubBackward::new(vec![self.clone(), other.clone()]);
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = autograd::SubBackward::new(vec![self.clone(), other.clone()], edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1042,7 +1052,12 @@ impl Tensor {
         let result = dispatch("mul", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
-            let backward = autograd::MulBackward::new(vec![self.clone(), other.clone()]);
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = autograd::MulBackward::new(vec![self.clone(), other.clone()], edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1058,7 +1073,12 @@ impl Tensor {
         let result = dispatch("div", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
-            let backward = autograd::DivBackward::new(vec![self.clone(), other.clone()]);
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = autograd::DivBackward::new(vec![self.clone(), other.clone()], edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1074,7 +1094,12 @@ impl Tensor {
         let result = dispatch("matmul", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if self.requires_grad() || other.requires_grad() {
-            let backward = autograd::MatmulBackward::new(self.clone(), other.clone());
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = autograd::MatmulBackward::new(self.clone(), other.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1096,7 +1121,8 @@ impl Tensor {
         let result = dispatch("relu", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
-            let backward = autograd::ReluBackward::new(self.clone());
+            let edges = autograd::make_edge(self);
+            let backward = autograd::ReluBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1124,7 +1150,8 @@ impl Tensor {
         let result = dispatch("sigmoid", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
-            let backward = autograd::SigmoidBackward::new(self.clone());
+            let edges = autograd::make_edge(self);
+            let backward = autograd::SigmoidBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1140,7 +1167,8 @@ impl Tensor {
         let result = dispatch("tanh", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
-            let backward = autograd::TanhBackward::new(self.clone());
+            let edges = autograd::make_edge(self);
+            let backward = autograd::TanhBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1156,7 +1184,8 @@ impl Tensor {
         let result = dispatch("silu", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
-            let backward = autograd::SiLUBackward::new(self.clone());
+            let edges = autograd::make_edge(self);
+            let backward = autograd::SiLUBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1172,7 +1201,8 @@ impl Tensor {
         let result = dispatch("gelu", dispatch_key, &[self]);
         let output = result[0].clone();
         if self.requires_grad() {
-            let backward = autograd::GeluBackward::new(self.clone());
+            let edges = autograd::make_edge(self);
+            let backward = autograd::GeluBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1222,7 +1252,8 @@ impl Tensor {
         );
         let output = result[0].clone();
         if self.requires_grad() {
-            let backward = autograd::SumBackward::new(self.clone(), dim as usize, keepdim);
+            let edges = autograd::make_edge(self);
+            let backward = autograd::SumBackward::new(self.clone(), dim as usize, keepdim, edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1261,7 +1292,9 @@ impl Tensor {
         let output = result[0].clone();
         if self.requires_grad() {
             let numel: i64 = self.shape().iter().product();
-            let backward = autograd::MeanBackward::new(self.clone(), dim as usize, keepdim, numel);
+            let edges = autograd::make_edge(self);
+            let backward =
+                autograd::MeanBackward::new(self.clone(), dim as usize, keepdim, numel, edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -1363,5 +1396,23 @@ impl std::fmt::Debug for Tensor {
             self.dtype().as_str(),
             self.device().as_str()
         )
+    }
+}
+
+impl Tensor {
+    pub fn gt_scalar(&self, threshold: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch(
+            "gt_scalar",
+            dispatch_key,
+            &[self, &Tensor::from_scalar(threshold)],
+        );
+        result[0].clone()
+    }
+
+    pub fn sign(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("sign", dispatch_key, &[self]);
+        result[0].clone()
     }
 }
