@@ -7,6 +7,57 @@ A high-performance deep learning library with a Rust core, featuring SIMD optimi
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)](https://crates.io/crates/fastnn)
 
+## Installation
+
+```bash
+pip install fastnn
+```
+
+Or from source:
+```bash
+git clone https://github.com/anomalyco/fastnn
+cd fastnn
+pip install maturin
+maturin develop --release
+```
+
+## Quick Start
+
+```python
+import fastnn as f
+
+# Create tensors
+x = f.tensor([1.0, 2.0, 3.0], [3])
+x.requires_grad_(True)
+
+# Forward pass
+y = x.relu()
+z = y * 2  # Supports scalar multiplication
+w = z.sum()
+
+# Backward pass
+w.backward()
+
+# Access gradients
+print(x.grad)  # [1., 1., 1.]
+
+# Neural network example
+model = f.Sequential(
+    f.Linear(784, 256),
+    f.ReLU(),
+    f.Linear(256, 10)
+)
+
+# Training loop
+optimizer = f.Adam(model.parameters(), lr=0.001)
+for x, y in dataloader:
+    pred = model(x)
+    loss = f.cross_entropy_loss(pred, y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
 ## Features
 
 | Category | Capabilities |
@@ -17,6 +68,7 @@ A high-performance deep learning library with a Rust core, featuring SIMD optimi
 | **Training** | Trainer with callbacks, metrics tracking, checkpoints |
 | **Performance** | SIMD (AVX2/AVX512/NEON), Rayon parallelism, fused operations |
 | **IO** | safetensors serialization, PyTorch model loading |
+| **Autograd** | Correct gradient propagation through all operations |
 
 ## What Makes fastnn Different
 
@@ -30,6 +82,7 @@ fastnn is architected from the ground up for performance, combining Python's sim
 | **Fused Ops** | Single-pass kernels | No intermediate allocations |
 | **GPU** | wGPU compute shaders | 68x speedup on matmul |
 | **Memory** | mimalloc custom allocator | Reduced fragmentation |
+| **Correctness** | Numerically stable activations | Verified against PyTorch |
 
 ### Key Differentiators
 
@@ -47,6 +100,11 @@ output = fnn.fused_linear_gelu(x, weight, bias)
 - **x86**: AVX2/AVX512 SIMD instructions
 - **ARM**: NEON SIMD (Raspberry Pi 5, Apple Silicon)  
 - **GPU**: wGPU compute shaders for large operations
+
+**Numerical Correctness:**
+- All autograd operations verified with numerical gradient checking
+- Stable sigmoid/tanh approximations using `0.5 * (1 + tanh(x/2))`
+- GELU approximation matches PyTorch reference implementation
 
 ### Architecture
 
