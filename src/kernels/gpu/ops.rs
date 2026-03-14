@@ -499,6 +499,89 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim = if args.len() > 1 {
+        args[1].item() as usize
+    } else {
+        0
+    };
+    let keepdim = if args.len() > 2 {
+        args[2].item() != 0.0
+    } else {
+        false
+    };
+
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_sum(a, dim, keepdim, device_id);
+    }
+
+    // CPU fallback
+    // This would call the CPU sum kernel, but for now we'll just panic
+    // since the CPU implementation is already in cpu.rs
+    panic!("CPU sum kernel not implemented in gpu/ops.rs - should use cpu.rs");
+}
+
+fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim = if args.len() > 1 {
+        args[1].item() as usize
+    } else {
+        0
+    };
+    let keepdim = if args.len() > 2 {
+        args[2].item() != 0.0
+    } else {
+        false
+    };
+
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_mean(a, dim, keepdim, device_id);
+    }
+
+    panic!("CPU mean kernel not implemented in gpu/ops.rs");
+}
+
+fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim = if args.len() > 1 {
+        args[1].item() as usize
+    } else {
+        0
+    };
+    let keepdim = if args.len() > 2 {
+        args[2].item() != 0.0
+    } else {
+        false
+    };
+
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_max(a, dim, keepdim, device_id);
+    }
+
+    panic!("CPU max kernel not implemented in gpu/ops.rs");
+}
+
+fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim = if args.len() > 1 {
+        args[1].item() as usize
+    } else {
+        0
+    };
+    let keepdim = if args.len() > 2 {
+        args[2].item() != 0.0
+    } else {
+        false
+    };
+
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_min(a, dim, keepdim, device_id);
+    }
+
+    panic!("CPU min kernel not implemented in gpu/ops.rs");
+}
+
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Wgpu, add_kernel as KernelFn);
@@ -521,4 +604,8 @@ fn register_kernels() {
     register("tanh", DispatchKey::Wgpu, tanh_kernel as KernelFn);
     register("silu", DispatchKey::Wgpu, silu_kernel as KernelFn);
     register("matmul", DispatchKey::Wgpu, matmul_kernel as KernelFn);
+    register("sum", DispatchKey::Wgpu, sum_kernel as KernelFn);
+    register("mean", DispatchKey::Wgpu, mean_kernel as KernelFn);
+    register("max", DispatchKey::Wgpu, max_kernel as KernelFn);
+    register("min", DispatchKey::Wgpu, min_kernel as KernelFn);
 }
