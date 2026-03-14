@@ -6,20 +6,18 @@ use crate::tensor::Tensor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-thread_local! {
-    static NO_GRAD: AtomicBool = const { AtomicBool::new(false) };
-}
+static NO_GRAD_GLOBAL: AtomicBool = AtomicBool::new(false);
 
 pub fn is_grad_enabled() -> bool {
-    NO_GRAD.with(|g| !g.load(Ordering::SeqCst))
+    !NO_GRAD_GLOBAL.load(Ordering::Relaxed)
 }
 
 pub fn no_grad_enter() {
-    NO_GRAD.with(|g| g.store(true, Ordering::SeqCst));
+    NO_GRAD_GLOBAL.store(true, Ordering::SeqCst);
 }
 
 pub fn no_grad_exit() {
-    NO_GRAD.with(|g| g.store(false, Ordering::SeqCst));
+    NO_GRAD_GLOBAL.store(false, Ordering::SeqCst);
 }
 
 #[derive(Clone)]
