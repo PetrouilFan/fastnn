@@ -98,6 +98,10 @@ impl PyTensor {
         self.inner.to_numpy()
     }
 
+    fn debug_strides(&self) -> Vec<i64> {
+        self.inner.strides()
+    }
+
     #[pyo3(signature = (requires_grad))]
     fn requires_grad_(&mut self, requires_grad: bool) {
         let inner_clone: &mut TensorImpl = Arc::make_mut(&mut self.inner.inner);
@@ -478,10 +482,7 @@ fn neg(a: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn abs(a: &PyTensor) -> PyTensor {
-    use dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
-    let result = dispatch("abs", dispatch_key, &[&a.inner]);
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(a.inner.abs())
 }
 
 #[pyfunction]
@@ -577,6 +578,14 @@ fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
         dispatch_key,
         &[&a.inner, &Tensor::from_scalar(dim as f32)],
     );
+    PyTensor::from_tensor(result[0].clone())
+}
+
+#[pyfunction]
+fn embedding(weight: &PyTensor, indices: &PyTensor) -> PyTensor {
+    use dispatcher::dispatch;
+    let dispatch_key = dispatcher::device_to_dispatch_key(weight.inner.device());
+    let result = dispatch("embedding", dispatch_key, &[&weight.inner, &indices.inner]);
     PyTensor::from_tensor(result[0].clone())
 }
 
@@ -920,9 +929,10 @@ struct LayerNorm {
 #[pymethods]
 impl LayerNorm {
     #[new]
-    fn new(normalized_shape: i64, eps: Option<f64>) -> Self {
+    #[pyo3(signature = (normalized_shape, eps = 1e-5))]
+    fn new(normalized_shape: i64, eps: f64) -> Self {
         LayerNorm {
-            inner: nn::norm::LayerNorm::new(normalized_shape, eps.unwrap_or(1e-5)),
+            inner: nn::norm::LayerNorm::new(normalized_shape, eps),
         }
     }
 
@@ -1313,6 +1323,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(silu, py)?)?;
     m.add_function(wrap_pyfunction!(softmax, py)?)?;
     m.add_function(wrap_pyfunction!(log_softmax, py)?)?;
+    m.add_function(wrap_pyfunction!(embedding, py)?)?;
     m.add_function(wrap_pyfunction!(sum, py)?)?;
     m.add_function(wrap_pyfunction!(mean, py)?)?;
     m.add_function(wrap_pyfunction!(max, py)?)?;

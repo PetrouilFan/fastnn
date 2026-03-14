@@ -21,8 +21,7 @@ pub struct TensorImpl {
 }
 
 impl TensorImpl {
-    pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>) -> Self {
-        let dtype = DType::F32; // Default dtype for now
+    pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>, dtype: DType) -> Self {
         let device = storage.device(); // Get device from storage
         let numel: i64 = sizes.iter().product();
         let _nbytes = (numel * dtype.size() as i64) as usize;
@@ -46,8 +45,8 @@ impl TensorImpl {
         storage: Arc<Storage>,
         sizes: SmallVec<[i64; 8]>,
         device: Device,
+        dtype: DType,
     ) -> Self {
-        let dtype = DType::F32; // Default dtype for now
         let numel: i64 = sizes.iter().product();
         let _nbytes = (numel * dtype.size() as i64) as usize;
 
@@ -71,7 +70,7 @@ impl TensorImpl {
             DType::F32 => Arc::new(Storage::from_vec(data.to_vec(), DType::F32, device)),
             _ => panic!("Unsupported dtype for from_data"),
         };
-        TensorImpl::new(storage, sizes)
+        TensorImpl::new(storage, sizes, dtype)
     }
 
     pub fn id(&self) -> usize {
@@ -180,6 +179,7 @@ impl TensorImpl {
 
         let mut sizes = self.sizes.clone();
         let mut strides = self.strides.clone();
+
         sizes.swap(dim0, dim1);
         strides.swap(dim0, dim1);
 
@@ -630,13 +630,13 @@ impl Tensor {
             *data = value;
         }
         let sizes: SmallVec<[i64; 8]> = smallvec![];
-        Tensor::new(TensorImpl::new(storage, sizes))
+        Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 
     pub fn from_vec(values: Vec<f32>, shape: Vec<i64>) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
-        Tensor::new(TensorImpl::new(storage, sizes))
+        Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 
     pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
@@ -644,19 +644,31 @@ impl Tensor {
         // Create CPU storage first (GPU buffer creation requires GpuContext)
         let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
         // Create tensor with requested device (not storage device)
-        Tensor::new(TensorImpl::new_with_device(storage, sizes, device))
+        Tensor::new(TensorImpl::new_with_device(
+            storage,
+            sizes,
+            device,
+            DType::F32,
+        ))
     }
 
     pub fn id(&self) -> usize {
         self.inner.id()
     }
 
-    pub fn zeros(shape: Vec<i64>, dtype: DType, _device: Device) -> Self {
+    pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let numel: i64 = sizes.iter().product();
         let nbytes = (numel * dtype.size() as i64) as usize;
+        // Create CPU storage first (GPU buffers are created on-demand)
         let storage = Arc::new(Storage::new_cpu(dtype, nbytes));
-        Tensor::new(TensorImpl::new(storage, sizes))
+        // Use new_with_device for GPU tensors to track the target device
+        match device {
+            Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
+            Device::Wgpu(_) => {
+                Tensor::new(TensorImpl::new_with_device(storage, sizes, device, dtype))
+            }
+        }
     }
 
     pub fn ones(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
@@ -875,33 +887,92 @@ impl Tensor {
     }
 
     pub fn to_numpy(&self) -> Vec<f32> {
-        let numel = self.inner.numel() as usize;
-
         match &self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ptr();
                 match self.inner.dtype {
                     DType::F32 => {
-                        let f32_ptr = ptr as *const f32;
-                        (0..numel).map(|i| unsafe { *f32_ptr.add(i) }).collect()
+                        // Use stride-aware indexing
+                        let mut result = Vec::with_capacity(self.inner.numel() as usize);
+                        let data = cpu.data.as_ptr() as *const f32;
+
+                        // Create an iterator over all elements using strides
+                        let mut indices = vec![0i64; self.inner.ndim()];
+
+                        for _ in 0..self.inner.numel() {
+                            // Calculate linear index from multi-dimensional indices using strides
+                            let mut linear_idx = self.inner.storage_offset;
+                            for (i, &stride) in self.inner.strides.iter().enumerate() {
+                                linear_idx += indices[i] * stride;
+                            }
+
+                            unsafe {
+                                result.push(*data.add(linear_idx as usize));
+                            }
+
+                            // Increment indices
+                            for dim in (0..self.inner.ndim()).rev() {
+                                indices[dim] += 1;
+                                if indices[dim] < self.inner.sizes[dim] {
+                                    break;
+                                }
+                                indices[dim] = 0;
+                            }
+                        }
+                        result
                     }
                     DType::F64 => {
-                        let f64_ptr = ptr as *const f64;
-                        (0..numel)
-                            .map(|i| unsafe { *f64_ptr.add(i) as f32 })
-                            .collect()
+                        // Similar for F64
+                        let mut result = Vec::with_capacity(self.inner.numel() as usize);
+                        let data = cpu.data.as_ptr() as *const f64;
+
+                        let mut indices = vec![0i64; self.inner.ndim()];
+
+                        for _ in 0..self.inner.numel() {
+                            let mut linear_idx = self.inner.storage_offset;
+                            for (i, &stride) in self.inner.strides.iter().enumerate() {
+                                linear_idx += indices[i] * stride;
+                            }
+
+                            unsafe {
+                                result.push(*data.add(linear_idx as usize) as f32);
+                            }
+
+                            for dim in (0..self.inner.ndim()).rev() {
+                                indices[dim] += 1;
+                                if indices[dim] < self.inner.sizes[dim] {
+                                    break;
+                                }
+                                indices[dim] = 0;
+                            }
+                        }
+                        result
                     }
                     DType::I32 => {
-                        let i32_ptr = ptr as *const i32;
-                        (0..numel)
-                            .map(|i| unsafe { *i32_ptr.add(i) as f32 })
-                            .collect()
-                    }
-                    DType::I64 => {
-                        let i64_ptr = ptr as *const i64;
-                        (0..numel)
-                            .map(|i| unsafe { *i64_ptr.add(i) as f32 })
-                            .collect()
+                        // Similar for I32
+                        let mut result = Vec::with_capacity(self.inner.numel() as usize);
+                        let data = cpu.data.as_ptr() as *const i32;
+
+                        let mut indices = vec![0i64; self.inner.ndim()];
+
+                        for _ in 0..self.inner.numel() {
+                            let mut linear_idx = self.inner.storage_offset;
+                            for (i, &stride) in self.inner.strides.iter().enumerate() {
+                                linear_idx += indices[i] * stride;
+                            }
+
+                            unsafe {
+                                result.push(*data.add(linear_idx as usize) as f32);
+                            }
+
+                            for dim in (0..self.inner.ndim()).rev() {
+                                indices[dim] += 1;
+                                if indices[dim] < self.inner.sizes[dim] {
+                                    break;
+                                }
+                                indices[dim] = 0;
+                            }
+                        }
+                        result
                     }
                     _ => panic!("Unsupported dtype for to_numpy"),
                 }
@@ -1026,6 +1097,50 @@ impl Tensor {
         }
     }
 
+    /// In-place addition for gradient accumulation
+    /// This is used internally by the autograd engine to accumulate gradients
+    pub fn add_(&mut self, other: &Tensor) -> &mut Self {
+        let self_inner = Arc::make_mut(&mut self.inner);
+        let dtype = self_inner.dtype;
+        let numel = self_inner.numel() as usize;
+        let self_storage = Arc::make_mut(&mut self_inner.storage);
+
+        match (self_storage, other.inner.storage.as_ref()) {
+            (Storage::Cpu(cpu_self), Storage::Cpu(cpu_other)) => match dtype {
+                DType::F32 => {
+                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut f32;
+                    let other_ptr = cpu_other.data.as_ptr() as *const f32;
+                    for i in 0..numel {
+                        unsafe {
+                            *self_ptr.add(i) += *other_ptr.add(i);
+                        }
+                    }
+                }
+                DType::F64 => {
+                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut f64;
+                    let other_ptr = cpu_other.data.as_ptr() as *const f64;
+                    for i in 0..numel {
+                        unsafe {
+                            *self_ptr.add(i) += *other_ptr.add(i);
+                        }
+                    }
+                }
+                DType::I32 => {
+                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut i32;
+                    let other_ptr = cpu_other.data.as_ptr() as *const i32;
+                    for i in 0..numel {
+                        unsafe {
+                            *self_ptr.add(i) += *other_ptr.add(i);
+                        }
+                    }
+                }
+                _ => unimplemented!("add_ for dtype {:?}", dtype),
+            },
+            _ => unimplemented!("add_ for non-CPU storage"),
+        }
+        self
+    }
+
     pub fn sub(&self, other: &Tensor) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("sub", dispatch_key, &[self, other]);
@@ -1113,7 +1228,18 @@ impl Tensor {
     pub fn neg(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("neg", dispatch_key, &[self]);
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::NegBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn relu(&self) -> Tensor {
@@ -1136,13 +1262,35 @@ impl Tensor {
     pub fn exp(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("exp", dispatch_key, &[self]);
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::ExpBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn ln(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("log", dispatch_key, &[self]);
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::LogBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn sigmoid(&self) -> Tensor {
@@ -1216,7 +1364,18 @@ impl Tensor {
     pub fn sqrt(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("sqrt", dispatch_key, &[self]);
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::SqrtBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {
@@ -1237,6 +1396,23 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("pow", dispatch_key, &[self, &Tensor::from_scalar(exponent)]);
         result[0].clone()
+    }
+
+    pub fn abs(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("abs", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::AbsBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn sum(&self, dim: i32, keepdim: bool) -> Tensor {
