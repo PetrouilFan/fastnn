@@ -11,6 +11,7 @@ use crate::kernels::blas::{matmul_blas, MIN_BLAS_SIZE};
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
@@ -23,6 +24,18 @@ use wide::f32x4;
 
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 use wide::f32x8;
+
+// Memory-bound elementwise ops: 64KB working set
+const CHUNK_MEMBOUND: usize = 1024 * 16; // 16K f32 = 64KB (L1 cache fit)
+
+// Compute-bound transcendental ops: smaller for better load balancing
+const CHUNK_TRANSCENDENTAL: usize = 1024 * 4; // 4K f32 = 16KB
+
+// Matrix ops: larger chunks for better BLAS-level locality
+// SIMD-only threshold (non-parallel)
+// This constant is used to determine when to use SIMD operations
+#[allow(dead_code)]
+const SIMD_THRESHOLD: usize = 256;
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 #[allow(dead_code)]
@@ -42,19 +55,7 @@ fn relu_simd(input: &[f32], output: &mut [f32]) {
     }
 }
 
-// Compile-time SIMD level detection for x86
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[cfg(target_feature = "avx512f")]
-const SIMD_LEVEL: SimdLevel = SimdLevel::Avx512;
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[cfg(all(target_feature = "avx2", not(target_feature = "avx512f")))]
-const SIMD_LEVEL: SimdLevel = SimdLevel::Avx2;
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[cfg(not(target_feature = "avx2"))]
-const SIMD_LEVEL: SimdLevel = SimdLevel::Scalar;
-
+// Runtime SIMD level detection
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[derive(Clone, Copy, PartialEq)]
 enum SimdLevel {
@@ -63,9 +64,163 @@ enum SimdLevel {
     Avx512,
 }
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+static SIMD_LEVEL: OnceLock<SimdLevel> = OnceLock::new();
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn detect_simd_level() -> SimdLevel {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx512f") {
+            return SimdLevel::Avx512;
+        }
+        if is_x86_feature_detected!("avx2") {
+            return SimdLevel::Avx2;
+        }
+    }
+    SimdLevel::Scalar
+}
+
+// Fast exp approximation using Cephes-style algorithm
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+unsafe fn fast_exp_avx2(x: __m256) -> __m256 {
+    // Cephes-style fast exp approximation accurate to ~1 ULP for f32
+    // Algorithm: exp(x) = 2^(x/ln2) = 2^floor(x/ln2) * 2^frac(x/ln2)
+    // Then approximate 2^frac using a degree-5 polynomial.
+    let ln2_rcp = _mm256_set1_ps(std::f32::consts::LOG2_E); // 1/ln(2)
+    let ln2_hi = _mm256_set1_ps(0.693_359_4_f32);
+    let ln2_lo = _mm256_set1_ps(-2.121_944_4e-4_f32);
+    let half = _mm256_set1_ps(0.5_f32);
+    let one = _mm256_set1_ps(1.0_f32);
+    let clamp_hi = _mm256_set1_ps(88.376_26_f32); // max before f32 overflow
+    let clamp_lo = _mm256_set1_ps(-88.376_26_f32);
+
+    // Polynomial coefficients for 2^x on [0,1]: from Cephes
+    let p0 = _mm256_set1_ps(1.987_569_3e-4_f32);
+    let p1 = _mm256_set1_ps(1.398_199e-3_f32);
+    let p2 = _mm256_set1_ps(8.333_452e-3_f32);
+    let p3 = _mm256_set1_ps(4.166_579_5e-2_f32);
+    let p4 = _mm256_set1_ps(1.666_666_7e-1_f32);
+    let p5 = _mm256_set1_ps(5.0e-1_f32);
+
+    let x = _mm256_min_ps(_mm256_max_ps(x, clamp_lo), clamp_hi);
+    // n = round(x / ln2)
+    let t = _mm256_fmadd_ps(x, ln2_rcp, half);
+    let n = _mm256_floor_ps(t);
+    // x = x - n*ln2 (range reduction)
+    let x = _mm256_fnmadd_ps(n, ln2_hi, x);
+    let x = _mm256_fnmadd_ps(n, ln2_lo, x);
+    // Polynomial evaluation: p(x) = 1 + x*(p5 + x*(p4 + x*(p3 + x*(p2 + x*(p1 + x*p0)))))
+    let r = p0;
+    let r = _mm256_fmadd_ps(r, x, p1);
+    let r = _mm256_fmadd_ps(r, x, p2);
+    let r = _mm256_fmadd_ps(r, x, p3);
+    let r = _mm256_fmadd_ps(r, x, p4);
+    let r = _mm256_fmadd_ps(r, x, p5);
+    let r = _mm256_fmadd_ps(r, x, one);
+    // Scale by 2^n using integer exponent trick
+    let n_int = _mm256_cvtps_epi32(n);
+    let bias = _mm256_set1_epi32(127);
+    let n_biased = _mm256_add_epi32(n_int, bias);
+    let n_shifted = _mm256_slli_epi32(n_biased, 23);
+    let scale = _mm256_castsi256_ps(n_shifted);
+    _mm256_mul_ps(r, scale)
+}
+
+// Fast exp approximation for AVX512
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn fast_exp_avx512(x: __m512) -> __m512 {
+    // For now, use a simpler approach: process 16 floats as 2x 8 floats with AVX2
+    // This is a temporary implementation - Section 3 will improve this
+    let x_lo = _mm512_castps512_ps256(x);
+    let x_hi = _mm512_extractf32x4_ps(x, 1);
+
+    let exp_lo = fast_exp_avx2(x_lo);
+    let exp_hi = fast_exp_avx2(_mm256_castps128_ps256(x_hi));
+
+    let result_lo = _mm512_castps256_ps512(exp_lo);
+    let result_hi = _mm256_castps256_ps128(exp_hi);
+
+    _mm512_insertf32x4(result_lo, result_hi, 1)
+}
+
+// Fast log approximation using integer exponent extraction
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn fast_log_avx2(x: __m256) -> __m256 {
+    // ln(x) = log2(x) * ln(2)
+    // log2(x) = (exponent - 127) + log2(mantissa)
+    // log2(mantissa) approximated with polynomial on [1,2]
+    let one = _mm256_set1_ps(1.0f32);
+    let ln2 = _mm256_set1_ps(std::f32::consts::LN_2);
+    let clamp_hi = _mm256_set1_ps(1e30f32);
+    let clamp_lo = _mm256_set1_ps(1e-30f32);
+
+    // Clamp to avoid issues with denormals
+    let x = _mm256_min_ps(_mm256_max_ps(x, clamp_lo), clamp_hi);
+
+    // Extract exponent and mantissa
+    let x_i = _mm256_castps_si256(x);
+    let exp_i = _mm256_srli_epi32(x_i, 23);
+    let exp_f = _mm256_cvtepi32_ps(exp_i);
+    let exp = _mm256_sub_ps(exp_f, _mm256_set1_ps(127.0f32));
+
+    // Mask mantissa bits
+    let mantissa_i = _mm256_and_si256(x_i, _mm256_set1_epi32(0x007fffff));
+    let mantissa_i = _mm256_or_si256(mantissa_i, _mm256_set1_epi32(0x3f800000));
+    let mantissa = _mm256_castsi256_ps(mantissa_i);
+
+    // Polynomial approximation for log2(mantissa) on [1,2]
+    // log2(y) ≈ ((y-1)/(y+1)) * (a0 + a2*(y-1)^2 + ...)
+    let y = mantissa;
+    let y_minus_1 = _mm256_sub_ps(y, one);
+    let y_plus_1 = _mm256_add_ps(y, one);
+    let z = _mm256_div_ps(y_minus_1, y_plus_1);
+    let z2 = _mm256_mul_ps(z, z);
+
+    let a0 = _mm256_set1_ps(std::f32::consts::LOG2_E);
+    let a1 = _mm256_set1_ps(0.721205f32);
+    let a2 = _mm256_set1_ps(0.480898f32);
+    let a3 = _mm256_set1_ps(0.252011f32);
+    let a4 = _mm256_set1_ps(0.152576f32);
+
+    let log2_mantissa = _mm256_fmadd_ps(z2, a4, a3);
+    let log2_mantissa = _mm256_fmadd_ps(z2, log2_mantissa, a2);
+    let log2_mantissa = _mm256_fmadd_ps(z2, log2_mantissa, a1);
+    let log2_mantissa = _mm256_fmadd_ps(z2, log2_mantissa, a0);
+    let log2_mantissa = _mm256_mul_ps(z, log2_mantissa);
+
+    let log2_x = _mm256_add_ps(exp, log2_mantissa);
+    _mm256_mul_ps(log2_x, ln2)
+}
+
+// Fast log approximation for AVX512
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn fast_log_avx512(x: __m512) -> __m512 {
+    // Use fast_log_avx2 on each 256-bit half
+    let x_lo = _mm512_castps512_ps256(x);
+    let x_hi = _mm512_extractf32x4_ps(x, 1);
+
+    let log_lo = fast_log_avx2(x_lo);
+    let log_hi = fast_log_avx2(_mm256_castps128_ps256(x_hi));
+
+    let result_lo = _mm512_castps256_ps512(log_lo);
+    let result_hi = _mm256_castps256_ps128(log_hi);
+
+    _mm512_insertf32x4(result_lo, result_hi, 1)
+}
+
 // Parallel SIMD kernels - AVX2 version
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-fn add_parallel_avx2(
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn add_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
     numel: usize,
@@ -76,20 +231,65 @@ fn add_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
-    unsafe {
-        let mut i = start;
-        while i + 8 <= end {
-            let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-            let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
-            let result = _mm256_add_ps(a_vec, b_vec);
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-            i += 8;
-        }
-        while i < end {
-            *((out_usize + i * 4) as *mut f32) =
-                *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
-            i += 1;
-        }
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let a1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let b0 = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let b1 = _mm256_loadu_ps((b_usize + (i + 8) * 4) as *const f32);
+        let r0 = _mm256_add_ps(a0, b0);
+        let r1 = _mm256_add_ps(a1, b1);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, r0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
+        i += 16;
+    }
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm256_add_ps(a_vec, b_vec);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
+// Parallel SIMD kernels - AVX512 version
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn add_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a_vec = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm512_add_ps(a_vec, b_vec);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, _mm256_add_ps(a_vec, b_vec));
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
+        i += 1;
     }
 }
 
@@ -115,8 +315,9 @@ fn add_parallel_scalar(
 }
 
 // Mul parallel AVX2 kernel
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-fn mul_parallel_avx2(
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn mul_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
     numel: usize,
@@ -127,20 +328,65 @@ fn mul_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
-    unsafe {
-        let mut i = start;
-        while i + 8 <= end {
-            let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-            let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
-            let result = _mm256_mul_ps(a_vec, b_vec);
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-            i += 8;
-        }
-        while i < end {
-            *((out_usize + i * 4) as *mut f32) =
-                *((a_usize + i * 4) as *const f32) * *((b_usize + i * 4) as *const f32);
-            i += 1;
-        }
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let a1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let b0 = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let b1 = _mm256_loadu_ps((b_usize + (i + 8) * 4) as *const f32);
+        let r0 = _mm256_mul_ps(a0, b0);
+        let r1 = _mm256_mul_ps(a1, b1);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, r0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
+        i += 16;
+    }
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm256_mul_ps(a_vec, b_vec);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) * *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
+// Mul parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn mul_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a_vec = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm512_mul_ps(a_vec, b_vec);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, _mm256_mul_ps(a_vec, b_vec));
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) * *((b_usize + i * 4) as *const f32);
+        i += 1;
     }
 }
 
@@ -166,8 +412,9 @@ fn mul_parallel_scalar(
 }
 
 // Relu parallel AVX2 kernel
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-fn relu_parallel_avx2(
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn relu_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
     numel: usize,
@@ -177,20 +424,62 @@ fn relu_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
-    unsafe {
-        let zero = _mm256_set1_ps(0.0f32);
-        let mut i = start;
-        while i + 8 <= end {
-            let v = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-            let result = _mm256_max_ps(v, zero);
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-            i += 8;
-        }
-        while i < end {
-            let val = *((a_usize + i * 4) as *const f32);
-            *((out_usize + i * 4) as *mut f32) = val.max(0.0);
-            i += 1;
-        }
+    let zero = _mm256_set1_ps(0.0f32);
+    let mut i = start;
+    while i + 16 <= end {
+        let v0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let v1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let r0 = _mm256_max_ps(v0, zero);
+        let r1 = _mm256_max_ps(v1, zero);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, r0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
+        i += 16;
+    }
+    while i + 8 <= end {
+        let v = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm256_max_ps(v, zero);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        let val = *((a_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = val.max(0.0);
+        i += 1;
+    }
+}
+
+// Relu parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn relu_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let zero = _mm512_set1_ps(0.0f32);
+    let mut i = start;
+    while i + 16 <= end {
+        let v = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm512_max_ps(v, zero);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let v = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm256_max_ps(v, _mm256_set1_ps(0.0f32));
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        let val = *((a_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = val.max(0.0);
+        i += 1;
     }
 }
 
@@ -215,8 +504,9 @@ fn relu_parallel_scalar(
 }
 
 // Div parallel AVX2 kernel
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-fn div_parallel_avx2(
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn div_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
     numel: usize,
@@ -227,20 +517,65 @@ fn div_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
-    unsafe {
-        let mut i = start;
-        while i + 8 <= end {
-            let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-            let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
-            let result = _mm256_div_ps(a_vec, b_vec);
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-            i += 8;
-        }
-        while i < end {
-            *((out_usize + i * 4) as *mut f32) =
-                *((a_usize + i * 4) as *const f32) / *((b_usize + i * 4) as *const f32);
-            i += 1;
-        }
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let a1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let b0 = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let b1 = _mm256_loadu_ps((b_usize + (i + 8) * 4) as *const f32);
+        let r0 = _mm256_div_ps(a0, b0);
+        let r1 = _mm256_div_ps(a1, b1);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, r0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
+        i += 16;
+    }
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm256_div_ps(a_vec, b_vec);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) / *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
+// Div parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn div_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a_vec = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm512_div_ps(a_vec, b_vec);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, _mm256_div_ps(a_vec, b_vec));
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) / *((b_usize + i * 4) as *const f32);
+        i += 1;
     }
 }
 
@@ -266,8 +601,9 @@ fn div_parallel_scalar(
 }
 
 // Neg parallel AVX2 kernel
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-fn neg_parallel_avx2(
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn neg_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
     numel: usize,
@@ -277,18 +613,58 @@ fn neg_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
-    unsafe {
-        let mut i = start;
-        while i + 8 <= end {
-            let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-            let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-            i += 8;
-        }
-        while i < end {
-            *((out_usize + i * 4) as *mut f32) = -*((a_usize + i * 4) as *const f32);
-            i += 1;
-        }
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let a1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let r0 = _mm256_xor_ps(a0, _mm256_set1_ps(-0.0f32));
+        let r1 = _mm256_xor_ps(a1, _mm256_set1_ps(-0.0f32));
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, r0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
+        i += 16;
+    }
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = -*((a_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
+// Neg parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn neg_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a_vec = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm512_xor_ps(a_vec, _mm512_set1_ps(-0.0f32));
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = -*((a_usize + i * 4) as *const f32);
+        i += 1;
     }
 }
 
@@ -312,8 +688,9 @@ fn neg_parallel_scalar(
 }
 
 // Abs parallel AVX2 kernel
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-fn abs_parallel_avx2(
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn abs_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
     numel: usize,
@@ -323,19 +700,61 @@ fn abs_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
-    unsafe {
-        let sign_bit = _mm256_set1_ps(-0.0f32);
-        let mut i = start;
-        while i + 8 <= end {
-            let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-            let result = _mm256_andnot_ps(sign_bit, a_vec);
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-            i += 8;
-        }
-        while i < end {
-            *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).abs();
-            i += 1;
-        }
+    let sign_bit = _mm256_set1_ps(-0.0f32);
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let a1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let r0 = _mm256_andnot_ps(sign_bit, a0);
+        let r1 = _mm256_andnot_ps(sign_bit, a1);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, r0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
+        i += 16;
+    }
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm256_andnot_ps(sign_bit, a_vec);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).abs();
+        i += 1;
+    }
+}
+
+// Abs parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn abs_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let sign_bit = _mm512_set1_ps(-0.0f32);
+    let mut i = start;
+    while i + 16 <= end {
+        let a_vec = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm512_andnot_ps(sign_bit, a_vec);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let sign_bit_256 = _mm256_set1_ps(-0.0f32);
+        let result = _mm256_andnot_ps(sign_bit_256, a_vec);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).abs();
+        i += 1;
     }
 }
 
@@ -358,9 +777,10 @@ fn abs_parallel_scalar(
     }
 }
 
-// Fused add+relu parallel AVX2 kernel
-#[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-fn fused_add_relu_parallel_avx2(
+// Sub parallel AVX2 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn sub_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
     numel: usize,
@@ -371,22 +791,159 @@ fn fused_add_relu_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
-    unsafe {
-        let zero = _mm256_set1_ps(0.0f32);
-        let mut i = start;
-        while i + 8 <= end {
-            let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-            let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
-            let sum = _mm256_add_ps(a_vec, b_vec);
-            let relu = _mm256_max_ps(sum, zero);
-            _mm256_storeu_ps((out_usize + i * 4) as *mut f32, relu);
-            i += 8;
+    let mut i = start;
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm256_sub_ps(a_vec, b_vec);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) - *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
+// Sub parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn sub_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a_vec = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm512_sub_ps(a_vec, b_vec);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, _mm256_sub_ps(a_vec, b_vec));
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) - *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
+// Parallel scalar fallback for sub
+#[cfg(feature = "parallel")]
+fn sub_parallel_scalar(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    for i in start..end {
+        unsafe {
+            *((out_usize + i * 4) as *mut f32) =
+                *((a_usize + i * 4) as *const f32) - *((b_usize + i * 4) as *const f32);
         }
-        while i < end {
-            let val = *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
-            *((out_usize + i * 4) as *mut f32) = val.max(0.0);
-            i += 1;
-        }
+    }
+}
+
+// Fused add+relu parallel AVX2 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn fused_add_relu_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let zero = _mm256_set1_ps(0.0f32);
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let a1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let b0 = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let b1 = _mm256_loadu_ps((b_usize + (i + 8) * 4) as *const f32);
+        let sum0 = _mm256_add_ps(a0, b0);
+        let sum1 = _mm256_add_ps(a1, b1);
+        let relu0 = _mm256_max_ps(sum0, zero);
+        let relu1 = _mm256_max_ps(sum1, zero);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, relu0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, relu1);
+        i += 16;
+    }
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let sum = _mm256_add_ps(a_vec, b_vec);
+        let relu = _mm256_max_ps(sum, zero);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, relu);
+        i += 8;
+    }
+    while i < end {
+        let val = *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = val.max(0.0);
+        i += 1;
+    }
+}
+
+// Fused add+relu parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn fused_add_relu_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let zero = _mm512_set1_ps(0.0f32);
+    let mut i = start;
+    while i + 16 <= end {
+        let a_vec = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        let sum = _mm512_add_ps(a_vec, b_vec);
+        let relu = _mm512_max_ps(sum, zero);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, relu);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let sum = _mm256_add_ps(a_vec, b_vec);
+        let relu = _mm256_max_ps(sum, _mm256_set1_ps(0.0f32));
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, relu);
+        i += 8;
+    }
+    while i < end {
+        let val = *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = val.max(0.0);
+        i += 1;
     }
 }
 
@@ -407,6 +964,367 @@ fn fused_add_relu_parallel_scalar(
         unsafe {
             let val = *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
             *((out_usize + i * 4) as *mut f32) = val.max(0.0);
+        }
+    }
+}
+
+// Fused mul+add parallel AVX2 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn fused_mul_add_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    c_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let c_vec = _mm256_loadu_ps((c_usize + i * 4) as *const f32);
+        // a * b + c using FMA
+        let result = _mm256_fmadd_ps(a_vec, b_vec, c_vec);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        let a_val = *((a_usize + i * 4) as *const f32);
+        let b_val = *((b_usize + i * 4) as *const f32);
+        let c_val = *((c_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = a_val * b_val + c_val;
+        i += 1;
+    }
+}
+
+// Fused mul+add parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn fused_mul_add_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    c_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a_vec = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        let c_vec = _mm512_loadu_ps((c_usize + i * 4) as *const f32);
+        // a * b + c using FMA
+        let result = _mm512_fmadd_ps(a_vec, b_vec, c_vec);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let c_vec = _mm256_loadu_ps((c_usize + i * 4) as *const f32);
+        let result = _mm256_fmadd_ps(a_vec, b_vec, c_vec);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        let a_val = *((a_usize + i * 4) as *const f32);
+        let b_val = *((b_usize + i * 4) as *const f32);
+        let c_val = *((c_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = a_val * b_val + c_val;
+        i += 1;
+    }
+}
+
+// Parallel scalar fallback for fused_mul_add
+#[cfg(feature = "parallel")]
+fn fused_mul_add_parallel_scalar(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    c_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    for i in start..end {
+        unsafe {
+            let a_val = *((a_usize + i * 4) as *const f32);
+            let b_val = *((b_usize + i * 4) as *const f32);
+            let c_val = *((c_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = a_val * b_val + c_val;
+        }
+    }
+}
+
+// Parallel sigmoid AVX2 kernel using exp approximation
+#[cfg(all(feature = "parallel", feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn sigmoid_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        // Compute sigmoid using 1/(1+exp(-x))
+        // Process elements one by one for now - Section 3 will vectorize this
+        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x);
+        let mut results = [0.0f32; 8];
+        for j in 0..8 {
+            let val = x_f32[j];
+            if val > 9.0 {
+                results[j] = 1.0;
+            } else if val < -9.0 {
+                results[j] = 0.0;
+            } else {
+                results[j] = 1.0 / (1.0 + (-val).exp());
+            }
+        }
+        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        if x > 9.0 {
+            *((out_usize + i * 4) as *mut f32) = 1.0;
+        } else if x < -9.0 {
+            *((out_usize + i * 4) as *mut f32) = 0.0;
+        } else {
+            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+        }
+        i += 1;
+    }
+}
+
+// Sigmoid parallel AVX512 kernel
+#[cfg(all(feature = "parallel", feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn sigmoid_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        // Compute sigmoid using 1/(1+exp(-x))
+        // Process elements one by one for now - Section 3 will vectorize this
+        let x_f32 = std::mem::transmute::<__m512, [f32; 16]>(x);
+        let mut results = [0.0f32; 16];
+        for j in 0..16 {
+            let val = x_f32[j];
+            if val > 9.0 {
+                results[j] = 1.0;
+            } else if val < -9.0 {
+                results[j] = 0.0;
+            } else {
+                results[j] = 1.0 / (1.0 + (-val).exp());
+            }
+        }
+        let result = std::mem::transmute::<[f32; 16], __m512>(results);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x);
+        let mut results = [0.0f32; 8];
+        for j in 0..8 {
+            let val = x_f32[j];
+            if val > 9.0 {
+                results[j] = 1.0;
+            } else if val < -9.0 {
+                results[j] = 0.0;
+            } else {
+                results[j] = 1.0 / (1.0 + (-val).exp());
+            }
+        }
+        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        if x > 9.0 {
+            *((out_usize + i * 4) as *mut f32) = 1.0;
+        } else if x < -9.0 {
+            *((out_usize + i * 4) as *mut f32) = 0.0;
+        } else {
+            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+        }
+        i += 1;
+    }
+}
+
+// Parallel scalar fallback for sigmoid
+#[cfg(feature = "parallel")]
+fn sigmoid_parallel_scalar(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    for i in start..end {
+        unsafe {
+            let x = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+        }
+    }
+}
+
+// Parallel tanh AVX2 kernel using exact computation
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn tanh_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let clamp_lo = _mm256_set1_ps(-10.0f32);
+    let clamp_hi = _mm256_set1_ps(10.0f32);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+
+        // Clamp values to prevent overflow in exp
+        let x_clamped = _mm256_min_ps(_mm256_max_ps(x, clamp_lo), clamp_hi);
+
+        // Compute tanh using formula: tanh(x) = (e^2x - 1) / (e^2x + 1)
+        // Process elements one by one for now - Section 3 will vectorize this
+        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x_clamped);
+        let mut results = [0.0f32; 8];
+        for j in 0..8 {
+            let val = x_f32[j];
+            let exp_2x = (2.0 * val).exp();
+            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
+        }
+        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        let exp_2x = (2.0 * x).exp();
+        *((out_usize + i * 4) as *mut f32) = (exp_2x - 1.0) / (exp_2x + 1.0);
+        i += 1;
+    }
+}
+
+// Tanh parallel AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn tanh_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let clamp_lo = _mm512_set1_ps(-10.0f32);
+    let clamp_hi = _mm512_set1_ps(10.0f32);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+
+        // Clamp values to prevent overflow in exp
+        let x_clamped = _mm512_min_ps(_mm512_max_ps(x, clamp_lo), clamp_hi);
+
+        // Compute tanh using formula: tanh(x) = (e^2x - 1) / (e^2x + 1)
+        // Process elements one by one for now - Section 3 will vectorize this
+        let x_f32 = std::mem::transmute::<__m512, [f32; 16]>(x_clamped);
+        let mut results = [0.0f32; 16];
+        for j in 0..16 {
+            let val = x_f32[j];
+            let exp_2x = (2.0 * val).exp();
+            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
+        }
+        let result = std::mem::transmute::<[f32; 16], __m512>(results);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let clamp_lo_256 = _mm256_set1_ps(-10.0f32);
+        let clamp_hi_256 = _mm256_set1_ps(10.0f32);
+        let x_clamped = _mm256_min_ps(_mm256_max_ps(x, clamp_lo_256), clamp_hi_256);
+        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x_clamped);
+        let mut results = [0.0f32; 8];
+        for j in 0..8 {
+            let val = x_f32[j];
+            let exp_2x = (2.0 * val).exp();
+            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
+        }
+        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        let exp_2x = (2.0 * x).exp();
+        *((out_usize + i * 4) as *mut f32) = (exp_2x - 1.0) / (exp_2x + 1.0);
+        i += 1;
+    }
+}
+
+// Parallel scalar fallback for tanh
+#[cfg(feature = "parallel")]
+fn tanh_parallel_scalar(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    for i in start..end {
+        unsafe {
+            let x = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = x.tanh();
         }
     }
 }
@@ -499,8 +1417,9 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
         let x = f32x8::from(*in_chunk);
         let x3 = x * x * x;
         let y = sqrt_2_over_pi * (x + coeff * x3);
-        let exp_2y = (y + y).exp();
-        let t = (exp_2y - one) / (exp_2y + one);
+        // Using exp to compute tanh
+        let exp_y = y.exp();
+        let t = (exp_y - one) / (exp_y + one);
         let result = half * x * (one + t);
         *out_chunk = result.into();
     }
@@ -549,8 +1468,9 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
         let x = f32x4::from(*in_chunk);
         let x3 = x * x * x;
         let y = sqrt_2_over_pi * (x + coeff * x3);
-        let exp_2y = (y + y).exp();
-        let t = (exp_2y - one) / (exp_2y + one);
+        // Using exp to compute tanh
+        let exp_y = y.exp();
+        let t = (exp_y - one) / (exp_y + one);
         let result = half * x * (one + t);
         *out_chunk = result.into();
     }
@@ -564,7 +1484,6 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[allow(dead_code)]
 fn tanh_simd(input: &[f32], output: &mut [f32]) {
     let two = f32x4::new([2.0; 4]);
     let one = f32x4::new([1.0; 4]);
@@ -597,36 +1516,26 @@ fn tanh_simd(input: &[f32], output: &mut [f32]) {
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 #[allow(dead_code)]
 fn tanh_simd(input: &[f32], output: &mut [f32]) {
-    let two = f32x8::new([2.0; 8]);
-    let one = f32x8::new([1.0; 8]);
-
+    // tanh(x) = (e^2x - 1) / (e^2x + 1)
     let (chunks, remainder) = input.as_chunks::<8>();
     let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
 
     for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
         let v = f32x8::from(*in_chunk);
-        let abs_v = v.abs();
-        let exp_2x = (two * abs_v).exp();
-        let result = (exp_2x - one) / (exp_2x + one);
-        let sign = v.sign_bit();
-        let result = result.blend(-result, sign);
+        let v_clamped = v.max(f32x8::new([-10.0; 8])).min(f32x8::new([10.0; 8]));
+        let exp_2x = (f32x8::new([2.0; 8]) * v_clamped).exp();
+        let result = (exp_2x - f32x8::new([1.0; 8])) / (exp_2x + f32x8::new([1.0; 8]));
         *out_chunk = result.into();
     }
 
     for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
-        let x = *in_val;
-        let abs_x = x.abs();
-        let exp_2x = (2.0 * abs_x).exp();
-        let mut result = (exp_2x - 1.0) / (exp_2x + 1.0);
-        if x < 0.0 {
-            result = -result;
-        }
-        *out_val = result;
+        let x_clamped = in_val.clamp(-10.0, 10.0);
+        let exp_2x = (2.0 * x_clamped).exp();
+        *out_val = (exp_2x - 1.0) / (exp_2x + 1.0);
     }
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[allow(dead_code)]
 fn sigmoid_simd(input: &[f32], output: &mut [f32]) {
     let one = f32x4::new([1.0; 4]);
 
@@ -647,13 +1556,57 @@ fn sigmoid_simd(input: &[f32], output: &mut [f32]) {
     }
 }
 
+// Sigmoid SIMD for x86_64 using exp approximation
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[allow(dead_code)]
+fn sigmoid_simd_x86(input: &[f32], output: &mut [f32]) {
+    unsafe {
+        let (chunks, remainder) = input.as_chunks::<8>();
+        let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
+
+        for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+            let x = _mm256_loadu_ps(in_chunk.as_ptr());
+            // Compute sigmoid using 1/(1+exp(-x))
+            let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x);
+            let mut results = [0.0f32; 8];
+            for j in 0..8 {
+                let val = x_f32[j];
+                if val > 9.0 {
+                    results[j] = 1.0;
+                } else if val < -9.0 {
+                    results[j] = 0.0;
+                } else {
+                    results[j] = 1.0 / (1.0 + (-val).exp());
+                }
+            }
+            let result = std::mem::transmute::<[f32; 8], __m256>(results);
+            _mm256_storeu_ps(out_chunk.as_mut_ptr(), result);
+        }
+
+        for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+            let val = *in_val;
+            if val > 9.0 {
+                *out_val = 1.0;
+            } else if val < -9.0 {
+                *out_val = 0.0;
+            } else {
+                *out_val = 1.0 / (1.0 + (-val).exp());
+            }
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn create_output(tensor: &Tensor, shape: Vec<i64>) -> Tensor {
     let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
     let numel: i64 = sizes.iter().product();
     let nbytes = (numel * tensor.dtype().size() as i64) as usize;
     let storage = Arc::new(Storage::new_cpu(tensor.dtype(), nbytes));
-    Tensor::new(crate::tensor::TensorImpl::new(storage, sizes))
+    Tensor::new(crate::tensor::TensorImpl::new(
+        storage,
+        sizes,
+        tensor.dtype(),
+    ))
 }
 
 #[inline]
@@ -673,6 +1626,36 @@ fn broadcast_shapes_simple(a: &[i64], b: &[i64]) -> Vec<i64> {
     result
 }
 
+// Section 7: Optimized broadcast index decomposition
+// Precomputes multipliers to map output index to input index without loops
+#[inline]
+fn broadcast_index_decomposition(
+    idx: usize,
+    out_shape: &[usize],
+    input_shape: &[usize],
+    input_strides: &[usize],
+    storage_offset: usize,
+) -> usize {
+    let ndim = out_shape.len();
+    // Precompute multipliers: multipliers[i] = product(out_shape[i+1..])
+    let mut multipliers = vec![0usize; ndim];
+    let mut mult = 1usize;
+    for i in (0..ndim).rev() {
+        multipliers[i] = mult;
+        mult *= out_shape[i];
+    }
+
+    // Map output index to 1D input index
+    let mut input_idx = 0usize;
+    for i in 0..ndim {
+        let dim_idx = (idx / multipliers[i]) % out_shape[i];
+        if i < input_shape.len() && input_shape[i] != 1 {
+            input_idx += dim_idx * input_strides[i];
+        }
+    }
+    input_idx + storage_offset
+}
+
 fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
@@ -683,11 +1666,11 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 4096 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
-        let mut output = Tensor::zeros(output_shape, a.dtype(), a.device());
+        let mut output = Tensor::empty(output_shape, a.dtype(), a.device());
 
         let a_ptr = a.data_ptr_f32();
         let b_ptr = b.data_ptr_f32();
@@ -702,23 +1685,34 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        add_parallel_avx2(
-                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
-                        );
-                    });
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            add_parallel_avx512(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
                 }
-                _ => {
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            add_parallel_avx2(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Scalar => {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         add_parallel_scalar(
                             chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -726,13 +1720,26 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    add_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => unsafe {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => unsafe {
                     let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a_vec = _mm512_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm512_loadu_ps(b_ptr.add(i));
+                        let result = _mm512_add_ps(a_vec, b_vec);
+                        _mm512_storeu_ps(out_ptr.add(i), result);
+                        i += 16;
+                    }
                     while i + 8 <= numel {
                         let a_vec = _mm256_loadu_ps(a_ptr.add(i));
                         let b_vec = _mm256_loadu_ps(b_ptr.add(i));
@@ -745,11 +1752,44 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         i += 1;
                     }
                 },
-                _ => {
+                SimdLevel::Avx2 => unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = _mm256_loadu_ps(a_ptr.add(i));
+                        let a1 = _mm256_loadu_ps(a_ptr.add(i + 8));
+                        let b0 = _mm256_loadu_ps(b_ptr.add(i));
+                        let b1 = _mm256_loadu_ps(b_ptr.add(i + 8));
+                        let r0 = _mm256_add_ps(a0, b0);
+                        let r1 = _mm256_add_ps(a1, b1);
+                        _mm256_storeu_ps(out_ptr.add(i), r0);
+                        _mm256_storeu_ps(out_ptr.add(i + 8), r1);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                        let result = _mm256_add_ps(a_vec, b_vec);
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Scalar => {
                     for idx in 0..numel {
                         unsafe {
                             *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
                         }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
                     }
                 }
             }
@@ -759,7 +1799,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let iter = TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -781,28 +1821,28 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
+    // Convert to usize for the helper function
+    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+
     for idx in 0..numel {
-        let mut remaining = idx;
-        let mut a_idx = 0;
-        let mut b_idx = 0;
-
-        for i in (0..out_shape.len()).rev() {
-            let dim_idx = remaining % out_shape[i] as usize;
-            remaining /= out_shape[i] as usize;
-
-            if i >= a_shape.len() || a_shape[i] == 1 {
-            } else {
-                a_idx += dim_idx * a_strides[i] as usize;
-            }
-
-            if i >= b_shape.len() || b_shape[i] == 1 {
-            } else {
-                b_idx += dim_idx * b_strides[i] as usize;
-            }
-        }
-
-        a_idx += a_storage_offset;
-        b_idx += b_storage_offset;
+        let a_idx = broadcast_index_decomposition(
+            idx,
+            &out_shape_usize,
+            &a_shape_usize,
+            &a_strides_usize,
+            a_storage_offset,
+        );
+        let b_idx = broadcast_index_decomposition(
+            idx,
+            &out_shape_usize,
+            &b_shape_usize,
+            &b_strides_usize,
+            b_storage_offset,
+        );
 
         unsafe {
             let a_val = *a_ptr.add(a_idx);
@@ -818,10 +1858,146 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
+    let a_shape = a.inner.sizes.as_slice();
+    let b_shape = b.inner.sizes.as_slice();
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
+    let a_numel = a.inner.numel() as usize;
+
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+        let output_shape = a_shape.to_vec();
+        let numel = a_numel;
+
+        let mut output = Tensor::empty(output_shape, a.dtype(), a.device());
+
+        let a_ptr = a.data_ptr_f32();
+        let b_ptr = b.data_ptr_f32();
+
+        let output_inner = Arc::make_mut(&mut output.inner);
+        let output_storage = Arc::make_mut(&mut output_inner.storage);
+        let Storage::Cpu(cpu_storage) = output_storage else {
+            panic!("Expected CPU storage");
+        };
+        let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            let a_usize = a_ptr as usize;
+            let b_usize = b_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            sub_parallel_avx512(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            sub_parallel_avx2(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        sub_parallel_scalar(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                        );
+                    });
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    sub_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+                });
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a_vec = _mm512_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm512_loadu_ps(b_ptr.add(i));
+                        let result = _mm512_sub_ps(a_vec, b_vec);
+                        _mm512_storeu_ps(out_ptr.add(i), result);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                        let result = _mm256_sub_ps(a_vec, b_vec);
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Avx2 => unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = _mm256_loadu_ps(a_ptr.add(i));
+                        let a1 = _mm256_loadu_ps(a_ptr.add(i + 8));
+                        let b0 = _mm256_loadu_ps(b_ptr.add(i));
+                        let b1 = _mm256_loadu_ps(b_ptr.add(i + 8));
+                        let r0 = _mm256_sub_ps(a0, b0);
+                        let r1 = _mm256_sub_ps(a1, b1);
+                        _mm256_storeu_ps(out_ptr.add(i), r0);
+                        _mm256_storeu_ps(out_ptr.add(i + 8), r1);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                        let result = _mm256_sub_ps(a_vec, b_vec);
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Scalar => {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
+                    }
+                }
+            }
+        }
+        return vec![output];
+    }
+
     let iter = TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
-
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -843,137 +2019,34 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
-        #[cfg(feature = "parallel")]
-        {
-            const CHUNK_SIZE: usize = 8192;
-            let num_chunks = numel.div_ceil(CHUNK_SIZE);
+    // Convert to usize for the helper function
+    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
 
-            let a_usize = a_ptr as usize;
-            let b_usize = b_ptr as usize;
-            let out_usize = out_ptr as usize;
+    // Broadcast loop should always run when shapes differ or tensors are non-contiguous
+    for idx in 0..numel {
+        let a_idx = broadcast_index_decomposition(
+            idx,
+            &out_shape_usize,
+            &a_shape_usize,
+            &a_strides_usize,
+            a_storage_offset,
+        );
+        let b_idx = broadcast_index_decomposition(
+            idx,
+            &out_shape_usize,
+            &b_shape_usize,
+            &b_strides_usize,
+            b_storage_offset,
+        );
 
-            if num_chunks > 1 {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                    let start = chunk_idx * CHUNK_SIZE;
-                    let end = (start + CHUNK_SIZE).min(numel);
-
-                    let a_ptr = a_usize as *const f32;
-                    let b_ptr = b_usize as *const f32;
-                    let out_ptr = out_usize as *mut f32;
-
-                    for i in start..end {
-                        unsafe {
-                            *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
-                        }
-                    }
-                });
-            } else {
-                let a_ptr = a_usize as *const f32;
-                let b_ptr = b_usize as *const f32;
-                let out_ptr = out_usize as *mut f32;
-
-                for i in 0..numel {
-                    unsafe {
-                        *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
-                    }
-                }
-            }
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("avx2") {
-                    unsafe {
-                        let mut i = 0usize;
-                        while i + 8 <= numel {
-                            let a_vec = _mm256_loadu_ps(a_ptr.add(i));
-                            let b_vec = _mm256_loadu_ps(b_ptr.add(i));
-                            let result = _mm256_sub_ps(a_vec, b_vec);
-                            _mm256_storeu_ps(out_ptr.add(i), result);
-                            i += 8;
-                        }
-                        while i < numel {
-                            *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
-                            i += 1;
-                        }
-                    }
-                } else {
-                    for idx in 0..numel {
-                        unsafe {
-                            *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
-                        }
-                    }
-                }
-            }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-                let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-
-                let (a_chunks, a_rem) = a_slice.as_chunks::<4>();
-                let (b_chunks, b_rem) = b_slice.as_chunks::<4>();
-                let (out_chunks, out_rem) = out_slice.as_chunks_mut::<4>();
-
-                for ((a_chunk, b_chunk), out_chunk) in a_chunks
-                    .iter()
-                    .zip(b_chunks.iter())
-                    .zip(out_chunks.iter_mut())
-                {
-                    let a_vec = f32x4::from(*a_chunk);
-                    let b_vec = f32x4::from(*b_chunk);
-                    let result = a_vec - b_vec;
-                    *out_chunk = result.into();
-                }
-                for ((a_val, b_val), out_val) in
-                    a_rem.iter().zip(b_rem.iter()).zip(out_rem.iter_mut())
-                {
-                    *out_val = *a_val - *b_val;
-                }
-            }
-            #[cfg(not(all(
-                feature = "simd",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            )))]
-            {
-                for idx in 0..numel {
-                    unsafe {
-                        *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
-                    }
-                }
-            }
-        }
-    } else {
-        for idx in 0..numel {
-            let mut remaining = idx;
-            let mut a_idx = 0;
-            let mut b_idx = 0;
-
-            for i in (0..out_shape.len()).rev() {
-                let dim_idx = remaining % out_shape[i] as usize;
-                remaining /= out_shape[i] as usize;
-
-                if i >= a_shape.len() || a_shape[i] == 1 {
-                } else {
-                    a_idx += dim_idx * a_strides[i] as usize;
-                }
-
-                if i >= b_shape.len() || b_shape[i] == 1 {
-                } else {
-                    b_idx += dim_idx * b_strides[i] as usize;
-                }
-            }
-
-            a_idx += a_storage_offset;
-            b_idx += b_storage_offset;
-
-            unsafe {
-                let a_val = *a_ptr.add(a_idx);
-                let b_val = *b_ptr.add(b_idx);
-                *out_ptr.add(idx) = a_val - b_val;
-            }
+        unsafe {
+            let a_val = *a_ptr.add(a_idx);
+            let b_val = *b_ptr.add(b_idx);
+            *out_ptr.add(idx) = a_val - b_val;
         }
     }
 
@@ -990,11 +2063,11 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 4096 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
-        let mut output = Tensor::zeros(output_shape, a.dtype(), a.device());
+        let mut output = Tensor::empty(output_shape, a.dtype(), a.device());
 
         let a_ptr = a.data_ptr_f32();
         let b_ptr = b.data_ptr_f32();
@@ -1009,23 +2082,34 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        mul_parallel_avx2(
-                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
-                        );
-                    });
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            mul_parallel_avx512(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
                 }
-                _ => {
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            mul_parallel_avx2(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Scalar => {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         mul_parallel_scalar(
                             chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -1033,13 +2117,26 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    mul_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => unsafe {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => unsafe {
                     let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a_vec = _mm512_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm512_loadu_ps(b_ptr.add(i));
+                        let result = _mm512_mul_ps(a_vec, b_vec);
+                        _mm512_storeu_ps(out_ptr.add(i), result);
+                        i += 16;
+                    }
                     while i + 8 <= numel {
                         let a_vec = _mm256_loadu_ps(a_ptr.add(i));
                         let b_vec = _mm256_loadu_ps(b_ptr.add(i));
@@ -1052,11 +2149,44 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         i += 1;
                     }
                 },
-                _ => {
+                SimdLevel::Avx2 => unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = _mm256_loadu_ps(a_ptr.add(i));
+                        let a1 = _mm256_loadu_ps(a_ptr.add(i + 8));
+                        let b0 = _mm256_loadu_ps(b_ptr.add(i));
+                        let b1 = _mm256_loadu_ps(b_ptr.add(i + 8));
+                        let r0 = _mm256_mul_ps(a0, b0);
+                        let r1 = _mm256_mul_ps(a1, b1);
+                        _mm256_storeu_ps(out_ptr.add(i), r0);
+                        _mm256_storeu_ps(out_ptr.add(i + 8), r1);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                        let result = _mm256_mul_ps(a_vec, b_vec);
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Scalar => {
                     for idx in 0..numel {
                         unsafe {
                             *out_ptr.add(idx) = *a_ptr.add(idx) * *b_ptr.add(idx);
                         }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) * *b_ptr.add(idx);
                     }
                 }
             }
@@ -1066,7 +2196,8 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let iter = TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1088,28 +2219,28 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
+    // Convert to usize for the helper function
+    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+
     for idx in 0..numel {
-        let mut remaining = idx;
-        let mut a_idx = 0;
-        let mut b_idx = 0;
-
-        for i in (0..out_shape.len()).rev() {
-            let dim_idx = remaining % out_shape[i] as usize;
-            remaining /= out_shape[i] as usize;
-
-            if i >= a_shape.len() || a_shape[i] == 1 {
-            } else {
-                a_idx += dim_idx * a_strides[i] as usize;
-            }
-
-            if i >= b_shape.len() || b_shape[i] == 1 {
-            } else {
-                b_idx += dim_idx * b_strides[i] as usize;
-            }
-        }
-
-        a_idx += a_storage_offset;
-        b_idx += b_storage_offset;
+        let a_idx = broadcast_index_decomposition(
+            idx,
+            &out_shape_usize,
+            &a_shape_usize,
+            &a_strides_usize,
+            a_storage_offset,
+        );
+        let b_idx = broadcast_index_decomposition(
+            idx,
+            &out_shape_usize,
+            &b_shape_usize,
+            &b_strides_usize,
+            b_storage_offset,
+        );
 
         unsafe {
             let a_val = *a_ptr.add(a_idx);
@@ -1128,7 +2259,7 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1150,27 +2281,45 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
+    // Convert to usize for the helper function
+    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+
+    if a.is_contiguous() && b.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        div_parallel_avx2(
-                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
-                        );
-                    });
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            div_parallel_avx512(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
                 }
-                _ => {
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            div_parallel_avx2(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Scalar => {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         div_parallel_scalar(
                             chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -1178,13 +2327,26 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    div_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => unsafe {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => unsafe {
                     let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a_vec = _mm512_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm512_loadu_ps(b_ptr.add(i));
+                        let result = _mm512_div_ps(a_vec, b_vec);
+                        _mm512_storeu_ps(out_ptr.add(i), result);
+                        i += 16;
+                    }
                     while i + 8 <= numel {
                         let a_vec = _mm256_loadu_ps(a_ptr.add(i));
                         let b_vec = _mm256_loadu_ps(b_ptr.add(i));
@@ -1197,7 +2359,32 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         i += 1;
                     }
                 },
-                _ => {
+                SimdLevel::Avx2 => unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = _mm256_loadu_ps(a_ptr.add(i));
+                        let a1 = _mm256_loadu_ps(a_ptr.add(i + 8));
+                        let b0 = _mm256_loadu_ps(b_ptr.add(i));
+                        let b1 = _mm256_loadu_ps(b_ptr.add(i + 8));
+                        let r0 = _mm256_div_ps(a0, b0);
+                        let r1 = _mm256_div_ps(a1, b1);
+                        _mm256_storeu_ps(out_ptr.add(i), r0);
+                        _mm256_storeu_ps(out_ptr.add(i + 8), r1);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                        let result = _mm256_div_ps(a_vec, b_vec);
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) / *b_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Scalar => {
                     for idx in 0..numel {
                         unsafe {
                             *out_ptr.add(idx) = *a_ptr.add(idx) / *b_ptr.add(idx);
@@ -1205,30 +2392,31 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) / *b_ptr.add(idx);
+                    }
+                }
+            }
         }
     } else {
         for idx in 0..numel {
-            let mut remaining = idx;
-            let mut a_idx = 0;
-            let mut b_idx = 0;
-
-            for i in (0..out_shape.len()).rev() {
-                let dim_idx = remaining % out_shape[i] as usize;
-                remaining /= out_shape[i] as usize;
-
-                if i >= a_shape.len() || a_shape[i] == 1 {
-                } else {
-                    a_idx += dim_idx * a_strides[i] as usize;
-                }
-
-                if i >= b_shape.len() || b_shape[i] == 1 {
-                } else {
-                    b_idx += dim_idx * b_strides[i] as usize;
-                }
-            }
-
-            a_idx += a_storage_offset;
-            b_idx += b_storage_offset;
+            let a_idx = broadcast_index_decomposition(
+                idx,
+                &out_shape_usize,
+                &a_shape_usize,
+                &a_strides_usize,
+                a_storage_offset,
+            );
+            let b_idx = broadcast_index_decomposition(
+                idx,
+                &out_shape_usize,
+                &b_shape_usize,
+                &b_strides_usize,
+                b_storage_offset,
+            );
 
             unsafe {
                 let a_val = *a_ptr.add(a_idx);
@@ -1247,7 +2435,7 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1259,35 +2447,104 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        neg_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            neg_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
                 }
-                _ => {
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            neg_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         neg_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
                     });
                 }
             }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    neg_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
-                unsafe {
-                    *out_ptr.add(idx) = -*a_ptr.add(idx);
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a_vec = _mm512_loadu_ps(a_ptr.add(i));
+                        let result = _mm512_xor_ps(a_vec, _mm512_set1_ps(-0.0f32));
+                        _mm512_storeu_ps(out_ptr.add(i), result);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = -*a_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Avx2 => unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = _mm256_loadu_ps(a_ptr.add(i));
+                        let a1 = _mm256_loadu_ps(a_ptr.add(i + 8));
+                        let r0 = _mm256_xor_ps(a0, _mm256_set1_ps(-0.0f32));
+                        let r1 = _mm256_xor_ps(a1, _mm256_set1_ps(-0.0f32));
+                        _mm256_storeu_ps(out_ptr.add(i), r0);
+                        _mm256_storeu_ps(out_ptr.add(i + 8), r1);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = -*a_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Scalar => {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = -*a_ptr.add(idx);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = -*a_ptr.add(idx);
+                    }
                 }
             }
         }
@@ -1309,7 +2566,7 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1321,28 +2578,43 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        abs_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            abs_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
                 }
-                _ => {
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            abs_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         abs_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
                     });
                 }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    abs_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                });
             }
         }
         #[cfg(not(feature = "parallel"))]
@@ -1365,13 +2637,131 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+// Parallel exp AVX2 kernel using fast_exp_avx2
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn exp_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = fast_exp_avx2(x);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).exp();
+        i += 1;
+    }
+}
+
+// Parallel exp AVX512 kernel using fast_exp_avx512
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn exp_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = fast_exp_avx512(x);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = fast_exp_avx2(x);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).exp();
+        i += 1;
+    }
+}
+
+// Parallel log AVX2 kernel using fast_log_avx2
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn log_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = fast_log_avx2(x);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).ln();
+        i += 1;
+    }
+}
+
+// Parallel log AVX512 kernel using fast_log_avx512
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn log_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = fast_log_avx512(x);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = fast_log_avx2(x);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).ln();
+        i += 1;
+    }
+}
+
 fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
 
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1383,38 +2773,70 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            // exp is transcendental, use scalar for parallel path
-            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                let start = chunk_idx * chunk_size;
-                let end = std::cmp::min(start + chunk_size, numel);
-
-                for i in start..end {
-                    unsafe {
-                        *((out_usize + i * 4) as *mut f32) =
-                            (*((a_usize + i * 4) as *const f32)).exp();
-                    }
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            exp_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
                 }
-            });
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            exp_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        let start = chunk_idx * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, numel);
+
+                        for i in start..end {
+                            unsafe {
+                                *((out_usize + i * 4) as *mut f32) =
+                                    (*((a_usize + i * 4) as *const f32)).exp();
+                            }
+                        }
+                    });
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    let start = chunk_idx * chunk_size;
+                    let end = std::cmp::min(start + chunk_size, numel);
+
+                    for i in start..end {
+                        unsafe {
+                            *((out_usize + i * 4) as *mut f32) =
+                                (*((a_usize + i * 4) as *const f32)).exp();
+                        }
+                    }
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 exp_simd(a_slice, out_slice);
             }
-            #[cfg(not(feature = "simd"))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -1441,7 +2863,7 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1453,32 +2875,64 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            // log is transcendental, use scalar for parallel path
-            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                let start = chunk_idx * chunk_size;
-                let end = std::cmp::min(start + chunk_size, numel);
-
-                for i in start..end {
-                    unsafe {
-                        *((out_usize + i * 4) as *mut f32) =
-                            (*((a_usize + i * 4) as *const f32)).ln();
-                    }
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            log_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
                 }
-            });
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            log_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        let start = chunk_idx * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, numel);
+
+                        for i in start..end {
+                            unsafe {
+                                *((out_usize + i * 4) as *mut f32) =
+                                    (*((a_usize + i * 4) as *const f32)).ln();
+                            }
+                        }
+                    });
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    let start = chunk_idx * chunk_size;
+                    let end = std::cmp::min(start + chunk_size, numel);
+
+                    for i in start..end {
+                        unsafe {
+                            *((out_usize + i * 4) as *mut f32) =
+                                (*((a_usize + i * 4) as *const f32)).ln();
+                        }
+                    }
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
@@ -1505,13 +2959,72 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+// Parallel sqrt AVX2 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn sqrt_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm256_sqrt_ps(x);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).sqrt();
+        i += 1;
+    }
+}
+
+// Parallel sqrt AVX512 kernel
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn sqrt_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm512_sqrt_ps(x);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let result = _mm256_sqrt_ps(x);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).sqrt();
+        i += 1;
+    }
+}
+
 fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
 
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1523,32 +3036,64 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            // sqrt is transcendental, use scalar for parallel path
-            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                let start = chunk_idx * chunk_size;
-                let end = std::cmp::min(start + chunk_size, numel);
-
-                for i in start..end {
-                    unsafe {
-                        *((out_usize + i * 4) as *mut f32) =
-                            (*((a_usize + i * 4) as *const f32)).sqrt();
-                    }
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            sqrt_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
                 }
-            });
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            sqrt_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        let start = chunk_idx * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, numel);
+
+                        for i in start..end {
+                            unsafe {
+                                *((out_usize + i * 4) as *mut f32) =
+                                    (*((a_usize + i * 4) as *const f32)).sqrt();
+                            }
+                        }
+                    });
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    let start = chunk_idx * chunk_size;
+                    let end = std::cmp::min(start + chunk_size, numel);
+
+                    for i in start..end {
+                        unsafe {
+                            *((out_usize + i * 4) as *mut f32) =
+                                (*((a_usize + i * 4) as *const f32)).sqrt();
+                        }
+                    }
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
@@ -1581,7 +3126,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1593,45 +3138,69 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        relu_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            relu_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
                 }
-                _ => {
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            relu_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         relu_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
                     });
                 }
             }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    relu_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 | SimdLevel::Avx2 => {
                     let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                     let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                     relu_simd(a_slice, out_slice);
                 }
-                _ => {
+                SimdLevel::Scalar => {
                     for idx in 0..numel {
                         unsafe {
                             let val = *a_ptr.add(idx);
                             *out_ptr.add(idx) = val.max(0.0);
                         }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        let val = *a_ptr.add(idx);
+                        *out_ptr.add(idx) = val.max(0.0);
                     }
                 }
             }
@@ -1657,7 +3226,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let _b_shape = b.shape();
     let output_shape = a_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1670,33 +3239,52 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && b.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-                SimdLevel::Avx2 => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        fused_add_relu_parallel_avx2(
-                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
-                        );
-                    });
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            fused_add_relu_parallel_avx512(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
                 }
-                _ => {
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            fused_add_relu_parallel_avx2(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Scalar => {
                     (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                         fused_add_relu_parallel_scalar(
                             chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
                         );
                     });
                 }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    fused_add_relu_parallel_scalar(
+                        chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                    );
+                });
             }
         }
         #[cfg(not(feature = "parallel"))]
@@ -1732,11 +3320,49 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            match SIMD_LEVEL {
-                #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => unsafe {
+                    let zero = _mm512_set1_ps(0.0f32);
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a_vec = _mm512_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm512_loadu_ps(b_ptr.add(i));
+                        let sum = _mm512_add_ps(a_vec, b_vec);
+                        let relu = _mm512_max_ps(sum, zero);
+                        _mm512_storeu_ps(out_ptr.add(i), relu);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                        let sum = _mm256_add_ps(a_vec, b_vec);
+                        let relu = _mm256_max_ps(sum, _mm256_set1_ps(0.0f32));
+                        _mm256_storeu_ps(out_ptr.add(i), relu);
+                        i += 8;
+                    }
+                    while i < numel {
+                        let val = *a_ptr.add(i) + *b_ptr.add(i);
+                        *out_ptr.add(i) = val.max(0.0);
+                        i += 1;
+                    }
+                },
                 SimdLevel::Avx2 => unsafe {
                     let zero = _mm256_set1_ps(0.0f32);
                     let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = _mm256_loadu_ps(a_ptr.add(i));
+                        let a1 = _mm256_loadu_ps(a_ptr.add(i + 8));
+                        let b0 = _mm256_loadu_ps(b_ptr.add(i));
+                        let b1 = _mm256_loadu_ps(b_ptr.add(i + 8));
+                        let sum0 = _mm256_add_ps(a0, b0);
+                        let sum1 = _mm256_add_ps(a1, b1);
+                        let relu0 = _mm256_max_ps(sum0, zero);
+                        let relu1 = _mm256_max_ps(sum1, zero);
+                        _mm256_storeu_ps(out_ptr.add(i), relu0);
+                        _mm256_storeu_ps(out_ptr.add(i + 8), relu1);
+                        i += 16;
+                    }
                     while i + 8 <= numel {
                         let a_vec = _mm256_loadu_ps(a_ptr.add(i));
                         let b_vec = _mm256_loadu_ps(b_ptr.add(i));
@@ -1751,12 +3377,21 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         i += 1;
                     }
                 },
-                _ => {
+                SimdLevel::Scalar => {
                     for idx in 0..numel {
                         unsafe {
                             let val = *a_ptr.add(idx) + *b_ptr.add(idx);
                             *out_ptr.add(idx) = val.max(0.0);
                         }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        let val = *a_ptr.add(idx) + *b_ptr.add(idx);
+                        *out_ptr.add(idx) = val.max(0.0);
                     }
                 }
             }
@@ -1773,13 +3408,284 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+#[inline]
+fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let b = args[1];
+    let c = args[2];
+
+    let a_shape = a.shape();
+    let output_shape = a_shape.to_vec();
+
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+    let b_ptr = b.data_ptr() as *const f32;
+    let c_ptr = c.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    if a.is_contiguous() && b.is_contiguous() && c.is_contiguous() && numel > 2048 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            let a_usize = a_ptr as usize;
+            let b_usize = b_ptr as usize;
+            let c_usize = c_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            fused_mul_add_parallel_avx512(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            fused_mul_add_parallel_avx2(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        fused_mul_add_parallel_scalar(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
+                        );
+                    });
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    fused_mul_add_parallel_scalar(
+                        chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
+                    );
+                });
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a_vec = _mm512_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm512_loadu_ps(b_ptr.add(i));
+                        let c_vec = _mm512_loadu_ps(c_ptr.add(i));
+                        let result = _mm512_fmadd_ps(a_vec, b_vec, c_vec);
+                        _mm512_storeu_ps(out_ptr.add(i), result);
+                        i += 16;
+                    }
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                        let c_vec = _mm256_loadu_ps(c_ptr.add(i));
+                        let result = _mm256_fmadd_ps(a_vec, b_vec, c_vec);
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i) + *c_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Avx2 => unsafe {
+                    let mut i = 0usize;
+                    while i + 8 <= numel {
+                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
+                        let b_vec = _mm256_loadu_ps(b_ptr.add(i));
+                        let c_vec = _mm256_loadu_ps(c_ptr.add(i));
+                        let result = _mm256_fmadd_ps(a_vec, b_vec, c_vec);
+                        _mm256_storeu_ps(out_ptr.add(i), result);
+                        i += 8;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i) + *c_ptr.add(i);
+                        i += 1;
+                    }
+                },
+                SimdLevel::Scalar => {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = *a_ptr.add(idx) * *b_ptr.add(idx) + *c_ptr.add(idx);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = *a_ptr.add(idx) * *b_ptr.add(idx) + *c_ptr.add(idx);
+                    }
+                }
+            }
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let a_val = *a_ptr.add(idx);
+                let b_val = *b_ptr.add(idx);
+                let c_val = *c_ptr.add(idx);
+                *out_ptr.add(idx) = a_val * b_val + c_val;
+            }
+        }
+    }
+
+    vec![output]
+}
+
+// Parallel GELU AVX2 kernel using fast_exp_avx2 for tanh
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn gelu_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let sqrt_2_over_pi = _mm256_set1_ps(0.7978846f32);
+    let coeff = _mm256_set1_ps(0.044715f32);
+    let half = _mm256_set1_ps(0.5f32);
+    let one = _mm256_set1_ps(1.0f32);
+    let two = _mm256_set1_ps(2.0f32);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+
+        // Compute x^3
+        let x2 = _mm256_mul_ps(x, x);
+        let x3 = _mm256_mul_ps(x, x2);
+
+        // Compute inner = sqrt_2_over_pi * (x + coeff * x^3)
+        let inner = _mm256_fmadd_ps(coeff, x3, x);
+        let inner = _mm256_mul_ps(sqrt_2_over_pi, inner);
+
+        // Compute tanh(inner) using: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        let exp_2x = fast_exp_avx2(_mm256_mul_ps(two, inner));
+        let tanh = _mm256_div_ps(_mm256_sub_ps(exp_2x, one), _mm256_add_ps(exp_2x, one));
+
+        // Compute gelu = 0.5 * x * (1 + tanh)
+        let result = _mm256_mul_ps(half, x);
+        let result = _mm256_mul_ps(result, _mm256_add_ps(one, tanh));
+
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        let x3 = x * x * x;
+        let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
+        *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+        i += 1;
+    }
+}
+
+// Parallel GELU AVX512 kernel using fast_exp_avx512 for tanh
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn gelu_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let sqrt_2_over_pi = _mm512_set1_ps(0.7978846f32);
+    let coeff = _mm512_set1_ps(0.044715f32);
+    let half = _mm512_set1_ps(0.5f32);
+    let one = _mm512_set1_ps(1.0f32);
+    let two = _mm512_set1_ps(2.0f32);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+
+        // Compute x^3
+        let x2 = _mm512_mul_ps(x, x);
+        let x3 = _mm512_mul_ps(x, x2);
+
+        // Compute inner = sqrt_2_over_pi * (x + coeff * x^3)
+        let inner = _mm512_fmadd_ps(coeff, x3, x);
+        let inner = _mm512_mul_ps(sqrt_2_over_pi, inner);
+
+        // Compute tanh(inner) using: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        let exp_2x = fast_exp_avx512(_mm512_mul_ps(two, inner));
+        let tanh = _mm512_div_ps(_mm512_sub_ps(exp_2x, one), _mm512_add_ps(exp_2x, one));
+
+        // Compute gelu = 0.5 * x * (1 + tanh)
+        let result = _mm512_mul_ps(half, x);
+        let result = _mm512_mul_ps(result, _mm512_add_ps(one, tanh));
+
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let sqrt_2_over_pi_256 = _mm256_set1_ps(0.7978846f32);
+        let coeff_256 = _mm256_set1_ps(0.044715f32);
+        let half_256 = _mm256_set1_ps(0.5f32);
+        let one_256 = _mm256_set1_ps(1.0f32);
+        let two_256 = _mm256_set1_ps(2.0f32);
+
+        let x2 = _mm256_mul_ps(x, x);
+        let x3 = _mm256_mul_ps(x, x2);
+        let inner = _mm256_fmadd_ps(coeff_256, x3, x);
+        let inner = _mm256_mul_ps(sqrt_2_over_pi_256, inner);
+        let exp_2x = fast_exp_avx2(_mm256_mul_ps(two_256, inner));
+        let tanh = _mm256_div_ps(
+            _mm256_sub_ps(exp_2x, one_256),
+            _mm256_add_ps(exp_2x, one_256),
+        );
+        let result = _mm256_mul_ps(half_256, x);
+        let result = _mm256_mul_ps(result, _mm256_add_ps(one_256, tanh));
+
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 8;
+    }
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        let x3 = x * x * x;
+        let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
+        *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+        i += 1;
+    }
+}
+
 fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
 
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1791,40 +3697,74 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            // GELU is transcendental, use scalar for parallel path
-            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                let start = chunk_idx * chunk_size;
-                let end = std::cmp::min(start + chunk_size, numel);
-
-                for i in start..end {
-                    unsafe {
-                        let x = *((a_usize + i * 4) as *const f32);
-                        let x3 = x * x * x;
-                        let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
-                        *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
-                    }
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            gelu_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
                 }
-            });
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            gelu_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        let start = chunk_idx * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, numel);
+
+                        for i in start..end {
+                            unsafe {
+                                let x = *((a_usize + i * 4) as *const f32);
+                                let x3 = x * x * x;
+                                let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
+                                *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+                            }
+                        }
+                    });
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    let start = chunk_idx * chunk_size;
+                    let end = std::cmp::min(start + chunk_size, numel);
+
+                    for i in start..end {
+                        unsafe {
+                            let x = *((a_usize + i * 4) as *const f32);
+                            let x3 = x * x * x;
+                            let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
+                            *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+                        }
+                    }
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 gelu_simd(a_slice, out_slice);
             }
-            #[cfg(not(feature = "simd"))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -1856,7 +3796,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1868,17 +3808,47 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
-            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-            out_slice
-                .par_iter_mut()
-                .zip(a_slice.par_iter())
-                .for_each(|(out, &x)| {
-                    *out = 1.0 / (1.0 + (-x).exp());
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            // Use runtime feature detection for x86_64
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            sigmoid_parallel_avx512(
+                                chunk_idx, chunk_size, numel, a_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            sigmoid_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        sigmoid_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    sigmoid_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
                 });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
@@ -1888,7 +3858,27 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 sigmoid_simd(a_slice, out_slice);
             }
-            #[cfg(not(all(feature = "simd", target_arch = "aarch64")))]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+                // Use runtime detection to choose implementation
+                if is_x86_feature_detected!("avx2") {
+                    sigmoid_simd_x86(a_slice, out_slice);
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            let x = *a_ptr.add(idx);
+                            *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(
+                feature = "simd",
+                any(target_arch = "aarch64", target_arch = "x86_64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -1916,7 +3906,7 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1928,38 +3918,74 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            // tanh is transcendental, use scalar for parallel path
-            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                let start = chunk_idx * chunk_size;
-                let end = std::cmp::min(start + chunk_size, numel);
-
-                for i in start..end {
-                    unsafe {
-                        *((out_usize + i * 4) as *mut f32) =
-                            (*((a_usize + i * 4) as *const f32)).tanh();
-                    }
+            // Use runtime feature detection for x86_64
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            tanh_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
                 }
-            });
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            tanh_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                });
+            }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 tanh_simd(a_slice, out_slice);
             }
-            #[cfg(not(feature = "simd"))]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+                // Use runtime detection to choose implementation
+                if is_x86_feature_detected!("avx2") {
+                    tanh_simd(a_slice, out_slice);
+                } else {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = (*a_ptr.add(idx)).tanh();
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(
+                feature = "simd",
+                any(target_arch = "aarch64", target_arch = "x86_64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -1986,7 +4012,7 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
@@ -1998,12 +4024,12 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = 1024 * 16;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -2092,7 +4118,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     output_shape.push(m as i64);
     output_shape.push(n as i64);
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let a_ptr = a.data_ptr() as *const f32;
     let b_ptr = b.data_ptr() as *const f32;
@@ -2115,7 +4141,19 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         && a.is_contiguous()
         && b.is_contiguous();
 
+    let a_strides = a.strides();
+    let b_strides = b.strides();
+
+    let a_stride_0 = a_strides[a.ndim() - 2];
+    let a_stride_1 = a_strides[a.ndim() - 1];
+    let b_stride_0 = b_strides[b.ndim() - 2];
+    let b_stride_1 = b_strides[b.ndim() - 1];
+
+    let a_batch_stride = if a.ndim() > 2 { a_strides[0] } else { 0 };
+    let b_batch_stride = if b.ndim() > 2 { b_strides[0] } else { 0 };
+
     if use_blas {
+        // BLAS requires contiguous matrices. If we reach here, a and b are contiguous.
         let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
         let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
         let result = matmul_blas(a_slice, b_slice, m as usize, k as usize, n as usize);
@@ -2126,15 +4164,51 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             if batch > 1 || m as usize * n as usize > 10000 {
                 parallel_matmul(
-                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                    a_ptr,
+                    b_ptr,
+                    out_ptr,
+                    batch,
+                    m,
+                    n,
+                    k,
+                    a_batch_stride,
+                    a_stride_0,
+                    a_stride_1,
+                    b_batch_stride,
+                    b_stride_0,
+                    b_stride_1,
                 );
             } else if m as usize <= 64 && n as usize <= 64 && k as usize <= 64 {
                 small_matrix_matmul(
-                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                    a_ptr,
+                    b_ptr,
+                    out_ptr,
+                    batch,
+                    m,
+                    n,
+                    k,
+                    a_batch_stride,
+                    a_stride_0,
+                    a_stride_1,
+                    b_batch_stride,
+                    b_stride_0,
+                    b_stride_1,
                 );
             } else {
                 single_threaded_matmul(
-                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                    a_ptr,
+                    b_ptr,
+                    out_ptr,
+                    batch,
+                    m,
+                    n,
+                    k,
+                    a_batch_stride,
+                    a_stride_0,
+                    a_stride_1,
+                    b_batch_stride,
+                    b_stride_0,
+                    b_stride_1,
                 );
             }
         }
@@ -2142,11 +4216,35 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             if m as usize <= 64 && n as usize <= 64 && k as usize <= 64 {
                 small_matrix_matmul(
-                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                    a_ptr,
+                    b_ptr,
+                    out_ptr,
+                    batch,
+                    m,
+                    n,
+                    k,
+                    a_batch_stride,
+                    a_stride_0,
+                    a_stride_1,
+                    b_batch_stride,
+                    b_stride_0,
+                    b_stride_1,
                 );
             } else {
                 single_threaded_matmul(
-                    a_ptr, b_ptr, out_ptr, batch, m, n, k, a_rows, a_cols, b_cols,
+                    a_ptr,
+                    b_ptr,
+                    out_ptr,
+                    batch,
+                    m,
+                    n,
+                    k,
+                    a_batch_stride,
+                    a_stride_0,
+                    a_stride_1,
+                    b_batch_stride,
+                    b_stride_0,
+                    b_stride_1,
                 );
             }
         }
@@ -2165,98 +4263,148 @@ fn parallel_matmul(
     m: i32,
     n: i32,
     k: i32,
-    a_rows: usize,
-    a_cols: usize,
-    b_cols: usize,
+    a_batch_stride: i64,
+    a_stride_0: i64,
+    a_stride_1: i64,
+    b_batch_stride: i64,
+    b_stride_0: i64,
+    b_stride_1: i64,
 ) {
-    let total_outputs = batch * m as usize * n as usize;
-
     let a_usize = a_ptr as usize;
     let b_usize = b_ptr as usize;
     let out_usize = out_ptr as usize;
     let m_usize = m as usize;
     let n_usize = n as usize;
     let k_usize = k as usize;
-    let _batch_usize = batch;
 
-    (0..total_outputs).into_par_iter().for_each(|idx| {
-        let bat = idx / (m_usize * n_usize);
-        let rem = idx % (m_usize * n_usize);
-        let i = rem / n_usize;
-        let j = rem % n_usize;
+    // Parallelize at the row level (batch * m rows)
+    let total_rows = batch * m_usize;
 
-        let mut sum = 0.0f32;
-        let mut kk = 0;
+    (0..total_rows).into_par_iter().for_each(|row_idx| {
+        let bat = row_idx / m_usize;
+        let i = row_idx % m_usize;
 
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        {
-            if is_x86_feature_detected!("fma") {
-                unsafe {
-                    while kk + 8 <= k_usize {
-                        let a0 = _mm256_loadu_ps(
-                            (a_usize + (bat * a_rows * a_cols + i * a_cols + kk) * 4) as *const f32,
-                        );
-                        let a1 = _mm256_loadu_ps(
-                            (a_usize + (bat * a_rows * a_cols + i * a_cols + kk + 8) * 4)
-                                as *const f32,
-                        );
+        let bat_a_offset = bat * a_batch_stride as usize;
+        let bat_b_offset = bat * b_batch_stride as usize;
 
-                        let b0 = _mm256_loadu_ps(
-                            (b_usize + (bat * k_usize * b_cols + kk * b_cols + j) * 4)
-                                as *const f32,
-                        );
-                        let b1 = _mm256_loadu_ps(
-                            (b_usize + (bat * k_usize * b_cols + (kk + 8) * b_cols + j) * 4)
-                                as *const f32,
-                        );
+        for j in 0..n_usize {
+            let mut sum = 0.0f32;
+            let mut kk = 0;
 
-                        let acc0 = _mm256_mul_ps(a0, b0);
-                        let acc1 = _mm256_mul_ps(a1, b1);
-                        let acc = _mm256_add_ps(acc0, acc1);
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("fma") {
+                    unsafe {
+                        while kk + 8 <= k_usize {
+                            let a0 = _mm256_loadu_ps(
+                                (a_usize
+                                    + (bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + (kk) * a_stride_1 as usize)
+                                        * 4) as *const f32,
+                            );
+                            let a1 = _mm256_loadu_ps(
+                                (a_usize
+                                    + (bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + (kk + 8) * a_stride_1 as usize)
+                                        * 4) as *const f32,
+                            );
 
-                        let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                        _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
-                        sum += acc_arr.assume_init().iter().sum::<f32>();
+                            let b0 = _mm256_loadu_ps(
+                                (b_usize
+                                    + (bat_b_offset
+                                        + (kk) * b_stride_0 as usize
+                                        + j * b_stride_1 as usize)
+                                        * 4) as *const f32,
+                            );
+                            let b1 = _mm256_loadu_ps(
+                                (b_usize
+                                    + (bat_b_offset
+                                        + (kk + 8) * b_stride_0 as usize
+                                        + j * b_stride_1 as usize)
+                                        * 4) as *const f32,
+                            );
 
-                        kk += 16;
+                            let acc0 = _mm256_mul_ps(a0, b0);
+                            let acc1 = _mm256_mul_ps(a1, b1);
+                            let acc = _mm256_add_ps(acc0, acc1);
+
+                            let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                            _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
+                            sum += acc_arr.assume_init().iter().sum::<f32>();
+
+                            #[cfg(feature = "prefetch")]
+                            {
+                                _mm_prefetch(
+                                    (b_usize
+                                        + (bat_b_offset
+                                            + (kk + 16) * b_stride_0 as usize
+                                            + j * b_stride_1 as usize)
+                                            * 4) as *const i8,
+                                    _MM_HINT_T0,
+                                );
+                                _mm_prefetch(
+                                    (a_usize
+                                        + (bat_a_offset
+                                            + i * a_stride_0 as usize
+                                            + (kk + 16) * a_stride_1 as usize)
+                                            * 4) as *const i8,
+                                    _MM_HINT_T0,
+                                );
+                            }
+
+                            kk += 16;
+                        }
                     }
                 }
             }
-        }
 
-        while kk + 4 <= k_usize {
-            unsafe {
-                let bat_offset = bat * a_rows * a_cols + i * a_cols;
-                let a_val = *((a_usize + (bat_offset + kk) * 4) as *const f32);
-                let a_val1 = *((a_usize + (bat_offset + kk + 1) * 4) as *const f32);
-                let a_val2 = *((a_usize + (bat_offset + kk + 2) * 4) as *const f32);
-                let a_val3 = *((a_usize + (bat_offset + kk + 3) * 4) as *const f32);
+            while kk + 4 <= k_usize {
+                unsafe {
+                    let a_base = bat_a_offset + i * a_stride_0 as usize;
+                    let a_val =
+                        *((a_usize + (a_base + kk * a_stride_1 as usize) * 4) as *const f32);
+                    let a_val1 =
+                        *((a_usize + (a_base + (kk + 1) * a_stride_1 as usize) * 4) as *const f32);
+                    let a_val2 =
+                        *((a_usize + (a_base + (kk + 2) * a_stride_1 as usize) * 4) as *const f32);
+                    let a_val3 =
+                        *((a_usize + (a_base + (kk + 3) * a_stride_1 as usize) * 4) as *const f32);
 
-                let b_base = bat * k_usize * b_cols + kk * b_cols + j;
-                let b_val = *((b_usize + b_base * 4) as *const f32);
-                let b_val1 = *((b_usize + (b_base + b_cols) * 4) as *const f32);
-                let b_val2 = *((b_usize + (b_base + 2 * b_cols) * 4) as *const f32);
-                let b_val3 = *((b_usize + (b_base + 3 * b_cols) * 4) as *const f32);
+                    let b_base = bat_b_offset + j * b_stride_1 as usize;
+                    let b_val =
+                        *((b_usize + (b_base + kk * b_stride_0 as usize) * 4) as *const f32);
+                    let b_val1 =
+                        *((b_usize + (b_base + (kk + 1) * b_stride_0 as usize) * 4) as *const f32);
+                    let b_val2 =
+                        *((b_usize + (b_base + (kk + 2) * b_stride_0 as usize) * 4) as *const f32);
+                    let b_val3 =
+                        *((b_usize + (b_base + (kk + 3) * b_stride_0 as usize) * 4) as *const f32);
 
-                sum += a_val * b_val + a_val1 * b_val1 + a_val2 * b_val2 + a_val3 * b_val3;
+                    sum += a_val * b_val + a_val1 * b_val1 + a_val2 * b_val2 + a_val3 * b_val3;
+                }
+                kk += 4;
             }
-            kk += 4;
-        }
 
-        while kk < k_usize {
-            unsafe {
-                let a_val =
-                    *((a_usize + (bat * a_rows * a_cols + i * a_cols + kk) * 4) as *const f32);
-                let b_val =
-                    *((b_usize + (bat * k_usize * b_cols + kk * b_cols + j) * 4) as *const f32);
-                sum += a_val * b_val;
+            while kk < k_usize {
+                unsafe {
+                    let a_val = *((a_usize
+                        + (bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize) * 4)
+                        as *const f32);
+                    let b_val = *((b_usize
+                        + (bat_b_offset + kk * b_stride_0 as usize + j * b_stride_1 as usize) * 4)
+                        as *const f32);
+                    sum += a_val * b_val;
+                }
+                kk += 1;
             }
-            kk += 1;
-        }
 
-        unsafe {
-            *((out_usize + idx * 4) as *mut f32) = sum;
-        };
+            unsafe {
+                let out_idx = bat * m_usize * n_usize + i * n_usize + j;
+                *((out_usize + out_idx * 4) as *mut f32) = sum;
+            };
+        }
     });
 }
 
@@ -2269,11 +4417,17 @@ fn small_matrix_matmul(
     m: i32,
     n: i32,
     k: i32,
-    a_rows: usize,
-    a_cols: usize,
-    b_cols: usize,
+    a_batch_stride: i64,
+    a_stride_0: i64,
+    a_stride_1: i64,
+    b_batch_stride: i64,
+    b_stride_0: i64,
+    b_stride_1: i64,
 ) {
     for bat in 0..batch {
+        let bat_a_offset = bat * a_batch_stride as usize;
+        let bat_b_offset = bat * b_batch_stride as usize;
+
         for i in 0..m as usize {
             for j in 0..n as usize {
                 let mut sum = 0.0f32;
@@ -2287,19 +4441,27 @@ fn small_matrix_matmul(
                             let mut kk = 0usize;
 
                             while kk + 8 <= k as usize {
-                                let a0 = _mm256_loadu_ps(
-                                    a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk),
-                                );
-                                let a1 = _mm256_loadu_ps(
-                                    a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 8),
-                                );
+                                let a0 = _mm256_loadu_ps(a_ptr.add(
+                                    bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + kk * a_stride_1 as usize,
+                                ));
+                                let a1 = _mm256_loadu_ps(a_ptr.add(
+                                    bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + (kk + 8) * a_stride_1 as usize,
+                                ));
 
-                                let b0 = _mm256_loadu_ps(
-                                    b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j),
-                                );
-                                let b1 = _mm256_loadu_ps(
-                                    b_ptr.add(bat * k as usize * b_cols + (kk + 8) * b_cols + j),
-                                );
+                                let b0 = _mm256_loadu_ps(b_ptr.add(
+                                    bat_b_offset
+                                        + kk * b_stride_0 as usize
+                                        + j * b_stride_1 as usize,
+                                ));
+                                let b1 = _mm256_loadu_ps(b_ptr.add(
+                                    bat_b_offset
+                                        + (kk + 8) * b_stride_0 as usize
+                                        + j * b_stride_1 as usize,
+                                ));
 
                                 acc0 = _mm256_fmadd_ps(a0, b0, acc0);
                                 acc1 = _mm256_fmadd_ps(a1, b1, acc1);
@@ -2313,8 +4475,16 @@ fn small_matrix_matmul(
                             sum += acc_arr.assume_init().iter().sum::<f32>();
 
                             while kk < k as usize {
-                                let a_val = *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk);
-                                let b_val = *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j);
+                                let a_val = *a_ptr.add(
+                                    bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + kk * a_stride_1 as usize,
+                                );
+                                let b_val = *b_ptr.add(
+                                    bat_b_offset
+                                        + kk * b_stride_0 as usize
+                                        + j * b_stride_1 as usize,
+                                );
                                 sum += a_val * b_val;
                                 kk += 1;
                             }
@@ -2329,19 +4499,40 @@ fn small_matrix_matmul(
                         let k_limit = k as usize;
 
                         while kk + 4 <= k_limit {
-                            let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                            let a1 =
-                                unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
-                            let a2 =
-                                unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
-                            let a3 =
-                                unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+                            let a0 = unsafe {
+                                *a_ptr.add(
+                                    bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + kk * a_stride_1 as usize,
+                                )
+                            };
+                            let a1 = unsafe {
+                                *a_ptr.add(
+                                    bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + (kk + 1) * a_stride_1 as usize,
+                                )
+                            };
+                            let a2 = unsafe {
+                                *a_ptr.add(
+                                    bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + (kk + 2) * a_stride_1 as usize,
+                                )
+                            };
+                            let a3 = unsafe {
+                                *a_ptr.add(
+                                    bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + (kk + 3) * a_stride_1 as usize,
+                                )
+                            };
 
-                            let b_base = bat * k as usize * b_cols + kk * b_cols + j;
-                            let b0 = unsafe { *b_ptr.add(b_base) };
-                            let b1 = unsafe { *b_ptr.add(b_base + b_cols) };
-                            let b2 = unsafe { *b_ptr.add(b_base + 2 * b_cols) };
-                            let b3 = unsafe { *b_ptr.add(b_base + 3 * b_cols) };
+                            let b_base = bat_b_offset + j * b_stride_1 as usize;
+                            let b0 = unsafe { *b_ptr.add(b_base + kk * b_stride_0 as usize) };
+                            let b1 = unsafe { *b_ptr.add(b_base + (kk + 1) * b_stride_0 as usize) };
+                            let b2 = unsafe { *b_ptr.add(b_base + (kk + 2) * b_stride_0 as usize) };
+                            let b3 = unsafe { *b_ptr.add(b_base + (kk + 3) * b_stride_0 as usize) };
 
                             sum0 += a0 * b0;
                             sum1 += a1 * b1;
@@ -2353,10 +4544,20 @@ fn small_matrix_matmul(
                         sum = sum0 + sum1 + sum2 + sum3;
 
                         while kk < k_limit {
-                            let a_val =
-                                unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                            let b_val =
-                                unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                            let a_val = unsafe {
+                                *a_ptr.add(
+                                    bat_a_offset
+                                        + i * a_stride_0 as usize
+                                        + kk * a_stride_1 as usize,
+                                )
+                            };
+                            let b_val = unsafe {
+                                *b_ptr.add(
+                                    bat_b_offset
+                                        + kk * b_stride_0 as usize
+                                        + j * b_stride_1 as usize,
+                                )
+                            };
                             sum += a_val * b_val;
                             kk += 1;
                         }
@@ -2374,16 +4575,38 @@ fn small_matrix_matmul(
                     let k_limit = k as usize;
 
                     while kk + 4 <= k_limit {
-                        let a0 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                        let a1 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1) };
-                        let a2 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2) };
-                        let a3 = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3) };
+                        let a0 = unsafe {
+                            *a_ptr.add(
+                                bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize,
+                            )
+                        };
+                        let a1 = unsafe {
+                            *a_ptr.add(
+                                bat_a_offset
+                                    + i * a_stride_0 as usize
+                                    + (kk + 1) * a_stride_1 as usize,
+                            )
+                        };
+                        let a2 = unsafe {
+                            *a_ptr.add(
+                                bat_a_offset
+                                    + i * a_stride_0 as usize
+                                    + (kk + 2) * a_stride_1 as usize,
+                            )
+                        };
+                        let a3 = unsafe {
+                            *a_ptr.add(
+                                bat_a_offset
+                                    + i * a_stride_0 as usize
+                                    + (kk + 3) * a_stride_1 as usize,
+                            )
+                        };
 
-                        let b_base = bat * k as usize * b_cols + kk * b_cols + j;
-                        let b0 = unsafe { *b_ptr.add(b_base) };
-                        let b1 = unsafe { *b_ptr.add(b_base + b_cols) };
-                        let b2 = unsafe { *b_ptr.add(b_base + 2 * b_cols) };
-                        let b3 = unsafe { *b_ptr.add(b_base + 3 * b_cols) };
+                        let b_base = bat_b_offset + j * b_stride_1 as usize;
+                        let b0 = unsafe { *b_ptr.add(b_base + kk * b_stride_0 as usize) };
+                        let b1 = unsafe { *b_ptr.add(b_base + (kk + 1) * b_stride_0 as usize) };
+                        let b2 = unsafe { *b_ptr.add(b_base + (kk + 2) * b_stride_0 as usize) };
+                        let b3 = unsafe { *b_ptr.add(b_base + (kk + 3) * b_stride_0 as usize) };
 
                         sum0 += a0 * b0;
                         sum1 += a1 * b1;
@@ -2395,9 +4618,16 @@ fn small_matrix_matmul(
                     sum = sum0 + sum1 + sum2 + sum3;
 
                     while kk < k_limit {
-                        let a_val = unsafe { *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk) };
-                        let b_val =
-                            unsafe { *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j) };
+                        let a_val = unsafe {
+                            *a_ptr.add(
+                                bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize,
+                            )
+                        };
+                        let b_val = unsafe {
+                            *b_ptr.add(
+                                bat_b_offset + kk * b_stride_0 as usize + j * b_stride_1 as usize,
+                            )
+                        };
                         sum += a_val * b_val;
                         kk += 1;
                     }
@@ -2419,13 +4649,19 @@ fn single_threaded_matmul(
     m: i32,
     n: i32,
     k: i32,
-    a_rows: usize,
-    a_cols: usize,
-    b_cols: usize,
+    a_batch_stride: i64,
+    a_stride_0: i64,
+    a_stride_1: i64,
+    b_batch_stride: i64,
+    b_stride_0: i64,
+    b_stride_1: i64,
 ) {
     const TILE_SIZE: usize = 64;
 
     for bat in 0..batch {
+        let bat_a_offset = bat * a_batch_stride as usize;
+        let bat_b_offset = bat * b_batch_stride as usize;
+
         for i_tile in (0..m as usize).step_by(TILE_SIZE) {
             for j_tile in (0..n as usize).step_by(TILE_SIZE) {
                 for k_tile in (0..k as usize).step_by(TILE_SIZE) {
@@ -2446,20 +4682,26 @@ fn single_threaded_matmul(
                                         let mut kk = k_tile;
 
                                         while kk + 8 <= k_max {
-                                            let a0 = _mm256_loadu_ps(
-                                                a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk),
-                                            );
-                                            let a1 =
-                                                _mm256_loadu_ps(a_ptr.add(
-                                                    bat * a_rows * a_cols + i * a_cols + kk + 8,
-                                                ));
+                                            let a0 = _mm256_loadu_ps(a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + kk * a_stride_1 as usize,
+                                            ));
+                                            let a1 = _mm256_loadu_ps(a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + (kk + 8) * a_stride_1 as usize,
+                                            ));
 
-                                            let b0 =
-                                                _mm256_loadu_ps(b_ptr.add(
-                                                    bat * k as usize * b_cols + kk * b_cols + j,
-                                                ));
+                                            let b0 = _mm256_loadu_ps(b_ptr.add(
+                                                bat_b_offset
+                                                    + kk * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
+                                            ));
                                             let b1 = _mm256_loadu_ps(b_ptr.add(
-                                                bat * k as usize * b_cols + (kk + 8) * b_cols + j,
+                                                bat_b_offset
+                                                    + (kk + 8) * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
                                             ));
 
                                             acc0 = _mm256_fmadd_ps(a0, b0, acc0);
@@ -2469,19 +4711,22 @@ fn single_threaded_matmul(
                                             {
                                                 _mm_prefetch(
                                                     b_ptr.add(
-                                                        bat * k as usize * b_cols
-                                                            + (kk + TILE_SIZE) * b_cols
-                                                            + j,
-                                                    ),
+                                                        bat_b_offset
+                                                            + (kk + TILE_SIZE)
+                                                                * b_stride_0 as usize
+                                                            + j * b_stride_1 as usize,
+                                                    )
+                                                        as *const i8,
                                                     _MM_HINT_T0,
                                                 );
                                                 _mm_prefetch(
                                                     a_ptr.add(
-                                                        bat * a_rows * a_cols
-                                                            + i * a_cols
-                                                            + kk
-                                                            + TILE_SIZE,
-                                                    ),
+                                                        bat_a_offset
+                                                            + i * a_stride_0 as usize
+                                                            + (kk + TILE_SIZE)
+                                                                * a_stride_1 as usize,
+                                                    )
+                                                        as *const i8,
                                                     _MM_HINT_T0,
                                                 );
                                             }
@@ -2495,46 +4740,87 @@ fn single_threaded_matmul(
                                         sum += acc_arr.assume_init().iter().sum::<f32>();
 
                                         while kk < k_max {
-                                            let a_val =
-                                                *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk);
-                                            let b_val = *b_ptr
-                                                .add(bat * k as usize * b_cols + kk * b_cols + j);
+                                            let a_val = *a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + kk * a_stride_1 as usize,
+                                            );
+                                            let b_val = *b_ptr.add(
+                                                bat_b_offset
+                                                    + kk * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
+                                            );
                                             sum += a_val * b_val;
                                             kk += 1;
+                                        }
+                                        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                        {
+                                            for idx in 0..numel {
+                                                unsafe {
+                                                    *out_ptr.add(idx) =
+                                                        *a_ptr.add(idx) / *b_ptr.add(idx);
+                                                }
+                                            }
                                         }
                                     }
                                 } else {
                                     let mut kk = k_tile;
                                     while kk + 4 <= k_max {
                                         let a0 = unsafe {
-                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk)
+                                            *a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + kk * a_stride_1 as usize,
+                                            )
                                         };
                                         let a1 = unsafe {
-                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1)
+                                            *a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + (kk + 1) * a_stride_1 as usize,
+                                            )
                                         };
                                         let a2 = unsafe {
-                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2)
+                                            *a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + (kk + 2) * a_stride_1 as usize,
+                                            )
                                         };
                                         let a3 = unsafe {
-                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3)
+                                            *a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + (kk + 3) * a_stride_1 as usize,
+                                            )
                                         };
 
                                         let b0 = unsafe {
-                                            *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
+                                            *b_ptr.add(
+                                                bat_b_offset
+                                                    + kk * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
+                                            )
                                         };
                                         let b1 = unsafe {
                                             *b_ptr.add(
-                                                bat * k as usize * b_cols + (kk + 1) * b_cols + j,
+                                                bat_b_offset
+                                                    + (kk + 1) * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
                                             )
                                         };
                                         let b2 = unsafe {
                                             *b_ptr.add(
-                                                bat * k as usize * b_cols + (kk + 2) * b_cols + j,
+                                                bat_b_offset
+                                                    + (kk + 2) * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
                                             )
                                         };
                                         let b3 = unsafe {
                                             *b_ptr.add(
-                                                bat * k as usize * b_cols + (kk + 3) * b_cols + j,
+                                                bat_b_offset
+                                                    + (kk + 3) * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
                                             )
                                         };
 
@@ -2544,10 +4830,18 @@ fn single_threaded_matmul(
 
                                     while kk < k_max {
                                         let a_val = unsafe {
-                                            *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk)
+                                            *a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + kk * a_stride_1 as usize,
+                                            )
                                         };
                                         let b_val = unsafe {
-                                            *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
+                                            *b_ptr.add(
+                                                bat_b_offset
+                                                    + kk * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
+                                            )
                                         };
                                         sum += a_val * b_val;
                                         kk += 1;
@@ -2560,32 +4854,61 @@ fn single_threaded_matmul(
                                 let mut kk = k_tile;
                                 while kk + 4 <= k_max {
                                     let a0 = unsafe {
-                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk)
+                                        *a_ptr.add(
+                                            bat_a_offset
+                                                + i * a_stride_0 as usize
+                                                + kk * a_stride_1 as usize,
+                                        )
                                     };
                                     let a1 = unsafe {
-                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 1)
+                                        *a_ptr.add(
+                                            bat_a_offset
+                                                + i * a_stride_0 as usize
+                                                + (kk + 1) * a_stride_1 as usize,
+                                        )
                                     };
                                     let a2 = unsafe {
-                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 2)
+                                        *a_ptr.add(
+                                            bat_a_offset
+                                                + i * a_stride_0 as usize
+                                                + (kk + 2) * a_stride_1 as usize,
+                                        )
                                     };
                                     let a3 = unsafe {
-                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk + 3)
+                                        *a_ptr.add(
+                                            bat_a_offset
+                                                + i * a_stride_0 as usize
+                                                + (kk + 3) * a_stride_1 as usize,
+                                        )
                                     };
 
                                     let b0 = unsafe {
-                                        *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
+                                        *b_ptr.add(
+                                            bat_b_offset
+                                                + kk * b_stride_0 as usize
+                                                + j * b_stride_1 as usize,
+                                        )
                                     };
                                     let b1 = unsafe {
-                                        *b_ptr
-                                            .add(bat * k as usize * b_cols + (kk + 1) * b_cols + j)
+                                        *b_ptr.add(
+                                            bat_b_offset
+                                                + (kk + 1) * b_stride_0 as usize
+                                                + j * b_stride_1 as usize,
+                                        )
                                     };
                                     let b2 = unsafe {
-                                        *b_ptr
-                                            .add(bat * k as usize * b_cols + (kk + 2) * b_cols + j)
+                                        *b_ptr.add(
+                                            bat_b_offset
+                                                + (kk + 2) * b_stride_0 as usize
+                                                + j * b_stride_1 as usize,
+                                        )
                                     };
                                     let b3 = unsafe {
-                                        *b_ptr
-                                            .add(bat * k as usize * b_cols + (kk + 3) * b_cols + j)
+                                        *b_ptr.add(
+                                            bat_b_offset
+                                                + (kk + 3) * b_stride_0 as usize
+                                                + j * b_stride_1 as usize,
+                                        )
                                     };
 
                                     sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
@@ -2594,10 +4917,18 @@ fn single_threaded_matmul(
 
                                 while kk < k_max {
                                     let a_val = unsafe {
-                                        *a_ptr.add(bat * a_rows * a_cols + i * a_cols + kk)
+                                        *a_ptr.add(
+                                            bat_a_offset
+                                                + i * a_stride_0 as usize
+                                                + kk * a_stride_1 as usize,
+                                        )
                                     };
                                     let b_val = unsafe {
-                                        *b_ptr.add(bat * k as usize * b_cols + kk * b_cols + j)
+                                        *b_ptr.add(
+                                            bat_b_offset
+                                                + kk * b_stride_0 as usize
+                                                + j * b_stride_1 as usize,
+                                        )
                                     };
                                     sum += a_val * b_val;
                                     kk += 1;
@@ -2679,7 +5010,7 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         vec![out_features]
     };
 
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
@@ -2751,6 +5082,113 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let w = args[1];
+    let bias = if args.len() > 2 { Some(args[2]) } else { None };
+
+    let x_shape = x.shape();
+    let w_shape = w.shape();
+
+    let batch_size: i64 = if x_shape.len() > 1 {
+        x_shape[..x_shape.len() - 1].iter().product()
+    } else {
+        1
+    };
+    let in_features = x_shape[x_shape.len() - 1];
+    let out_features = w_shape[0];
+
+    let x_ptr = x.data_ptr_f32();
+    let w_ptr = w.data_ptr_f32();
+    debug_assert!(
+        w.is_contiguous(),
+        "fused_linear_silu: weight tensor must be contiguous"
+    );
+
+    let output_shape: Vec<i64> = if x_shape.len() > 1 {
+        let mut s = x_shape[..x_shape.len() - 1].to_vec();
+        s.push(out_features);
+        s
+    } else {
+        vec![out_features]
+    };
+
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    let batch_size = batch_size as usize;
+    let in_features = in_features as usize;
+    let out_features = out_features as usize;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let total = batch_size * out_features;
+
+        let x_usize = x_ptr as usize;
+        let w_usize = w_ptr as usize;
+        let out_usize = out_ptr as usize;
+
+        (0..total).into_par_iter().for_each(|idx| {
+            let batch_idx = idx / out_features;
+            let out_idx = idx % out_features;
+
+            let mut sum = 0.0f32;
+            for k in 0..in_features {
+                let x_offset = batch_idx * in_features + k;
+                let w_offset = out_idx * in_features + k;
+                let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
+                let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
+                sum += x_val * w_val;
+            }
+
+            if let Some(b) = bias {
+                let b_ptr = b.data_ptr_f32();
+                sum += unsafe { *b_ptr.add(out_idx) };
+            }
+
+            // SiLU: x / (1.0 + (-x).exp())
+            let silu_val = sum / (1.0 + (-sum).exp());
+            unsafe {
+                *((out_usize + idx * 4) as *mut f32) = silu_val;
+            };
+        });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for batch_idx in 0..batch_size {
+            for out_idx in 0..out_features {
+                let mut sum = 0.0f32;
+                for k in 0..in_features {
+                    let x_offset = batch_idx * in_features + k;
+                    let w_offset = out_idx * in_features + k;
+                    let x_val = unsafe { *x_ptr.add(x_offset) };
+                    let w_val = unsafe { *w_ptr.add(w_offset) };
+                    sum += x_val * w_val;
+                }
+
+                if let Some(b) = bias {
+                    let b_ptr = b.data_ptr_f32();
+                    sum += unsafe { *b_ptr.add(out_idx) };
+                }
+
+                // SiLU: x / (1.0 + (-x).exp())
+                let silu_val = sum / (1.0 + (-sum).exp());
+                unsafe {
+                    *out_ptr.add(batch_idx * out_features + out_idx) = silu_val;
+                };
+            }
+        }
+    }
+
+    vec![output]
+}
+
 fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let w = args[1];
@@ -2782,7 +5220,7 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         vec![out_features]
     };
 
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
@@ -2893,147 +5331,7 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         output_shape = vec![1];
     }
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
-
-    let a_ptr = a.data_ptr() as *const f32;
-    let _a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
-    let a_storage_offset = a.inner.storage_offset as usize;
-
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
-    };
-    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
-
-    let dim_size = a_shape[dim] as usize;
-    let mut strides_before = 1i64;
-    let mut strides_after = 1i64;
-
-    for i in 0..dim {
-        strides_before *= a_shape[i];
-    }
-    for i in (dim + 1)..ndim {
-        strides_after *= a_shape[i];
-    }
-
-    let total_blocks = (strides_before * strides_after) as usize;
-    let a_numel = a.numel() as usize;
-
-    #[cfg(feature = "parallel")]
-    {
-        if total_blocks > 256 && dim_size > 32 {
-            let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
-            let results: Vec<f32> = (0..total_blocks)
-                .into_par_iter()
-                .map(|block| {
-                    let block_before = block / (strides_after as usize);
-                    let block_after = block % (strides_after as usize);
-
-                    let mut sum = 0.0f32;
-                    for d in 0..dim_size {
-                        let linear_idx =
-                            (block_before * dim_size + d) * strides_after as usize + block_after;
-                        let idx = a_storage_offset + linear_idx;
-                        if idx < a_numel {
-                            sum += a_slice[idx];
-                        }
-                    }
-                    sum
-                })
-                .collect();
-
-            for (i, &sum) in results.iter().enumerate() {
-                unsafe {
-                    *out_ptr.add(i) = sum;
-                }
-            }
-            return vec![output];
-        }
-    }
-
-    for block in 0..total_blocks {
-        let block_before = block / (strides_after as usize);
-        let block_after = block % (strides_after as usize);
-
-        let mut sum = 0.0f32;
-        for d in 0..dim_size {
-            let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
-            let idx = a_storage_offset + linear_idx;
-            if idx < a_numel {
-                unsafe {
-                    sum += *a_ptr.add(idx);
-                }
-            }
-        }
-
-        unsafe {
-            *out_ptr.add(block) = sum;
-        }
-    }
-
-    vec![output]
-}
-
-fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let a = args[0];
-    let dim = if args.len() > 1 {
-        args[1].item() as usize
-    } else {
-        0
-    };
-    let keepdim = if args.len() > 2 {
-        args[2].item() != 0.0
-    } else {
-        false
-    };
-
-    let a_shape = a.shape();
-    let ndim = a_shape.len();
-    let dim = if dim >= ndim { ndim - 1 } else { dim };
-
-    let dim_size = a_shape[dim] as f32;
-
-    let sum_result = sum_kernel(args);
-    let mut sum_tensor = sum_result[0].clone();
-
-    if keepdim {
-        sum_tensor = sum_tensor.unsqueeze(dim);
-    }
-
-    let scale = Tensor::full(vec![], 1.0 / dim_size, DType::F32, Device::Cpu);
-    vec![sum_tensor * scale]
-}
-
-fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let a = args[0];
-    let dim = if args.len() > 1 {
-        args[1].item() as usize
-    } else {
-        0
-    };
-    let keepdim = if args.len() > 2 {
-        args[2].item() != 0.0
-    } else {
-        false
-    };
-
-    let a_shape = a.shape();
-    let ndim = a_shape.len();
-    let dim = if dim >= ndim { ndim - 1 } else { dim };
-
-    let mut output_shape: Vec<i64> = a_shape.clone();
-    if keepdim {
-        output_shape[dim] = 1;
-    } else {
-        output_shape.remove(dim);
-    }
-
-    if output_shape.is_empty() {
-        output_shape = vec![1];
-    }
-
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let a_ptr = a.data_ptr() as *const f32;
     let a_storage_offset = a.inner.storage_offset as usize;
@@ -3069,22 +5367,22 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let block_before = block / (strides_after as usize);
                     let block_after = block % (strides_after as usize);
 
-                    let mut max_val = f32::MIN;
+                    let mut sum_val = 0.0f32;
                     for d in 0..dim_size {
                         let linear_idx =
                             (block_before * dim_size + d) * strides_after as usize + block_after;
                         let idx = a_storage_offset + linear_idx;
                         if idx < a_numel {
-                            max_val = max_val.max(a_slice[idx]);
+                            sum_val += a_slice[idx];
                         }
                     }
-                    max_val
+                    sum_val
                 })
                 .collect();
 
-            for (i, &max_val) in results.iter().enumerate() {
+            for (i, &sum_val) in results.iter().enumerate() {
                 unsafe {
-                    *out_ptr.add(i) = max_val;
+                    *out_ptr.add(i) = sum_val;
                 }
             }
             return vec![output];
@@ -3095,19 +5393,19 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let block_before = block / (strides_after as usize);
         let block_after = block % (strides_after as usize);
 
-        let mut max_val = f32::MIN;
+        let mut sum_val = 0.0f32;
         for d in 0..dim_size {
             let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
             let idx = a_storage_offset + linear_idx;
             if idx < a_numel {
                 unsafe {
-                    max_val = max_val.max(*a_ptr.add(idx));
+                    sum_val += *a_ptr.add(idx);
                 }
             }
         }
 
         unsafe {
-            *out_ptr.add(block) = max_val;
+            *out_ptr.add(block) = sum_val;
         }
     }
 
@@ -3217,6 +5515,108 @@ fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         unsafe {
             *out_ptr.add(block) = min_val;
+        }
+    }
+
+    vec![output]
+}
+
+fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim = if args.len() > 1 {
+        args[1].item() as usize
+    } else {
+        0
+    };
+    let keepdim = if args.len() > 2 {
+        args[2].item() != 0.0
+    } else {
+        false
+    };
+
+    let a_shape = a.shape();
+    let ndim = a_shape.len();
+    let dim = if dim >= ndim { ndim - 1 } else { dim };
+
+    let dim_size = a_shape[dim] as f32;
+
+    let sum_result = sum_kernel(args);
+    let mut sum_tensor = sum_result[0].clone();
+
+    if keepdim {
+        sum_tensor = sum_tensor.unsqueeze(dim);
+    }
+
+    let scale = Tensor::full(vec![], 1.0 / dim_size, DType::F32, Device::Cpu);
+    vec![sum_tensor * scale]
+}
+
+fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim = if args.len() > 1 {
+        args[1].item() as usize
+    } else {
+        0
+    };
+    let keepdim = if args.len() > 2 {
+        args[2].item() != 0.0
+    } else {
+        false
+    };
+
+    let a_shape = a.shape();
+    let ndim = a_shape.len();
+    let dim = if dim >= ndim { ndim - 1 } else { dim };
+
+    let mut output_shape: Vec<i64> = a_shape.clone();
+    if keepdim {
+        output_shape[dim] = 1;
+    } else {
+        output_shape.remove(dim);
+    }
+
+    if output_shape.is_empty() {
+        output_shape = vec![1];
+    }
+
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let a_ptr = a.data_ptr() as *const f32;
+    let a_storage_offset = a.inner.storage_offset as usize;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    let dim_size = a_shape[dim] as usize;
+    let mut strides_before = 1i64;
+    let mut strides_after = 1i64;
+
+    for i in 0..dim {
+        strides_before *= a_shape[i];
+    }
+    for i in (dim + 1)..ndim {
+        strides_after *= a_shape[i];
+    }
+
+    for block in 0..(strides_before as usize * strides_after as usize) {
+        let mut max_val = f32::NEG_INFINITY;
+        for i in 0..dim_size {
+            let a_idx = (block / (strides_after as usize)) * dim_size * (strides_after as usize)
+                + i * (strides_after as usize)
+                + block % (strides_after as usize);
+            unsafe {
+                let val = *a_ptr.add(a_idx + a_storage_offset);
+                if val > max_val {
+                    max_val = val;
+                }
+            }
+        }
+        unsafe {
+            *out_ptr.add(block) = max_val;
         }
     }
 
@@ -4561,7 +6961,7 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -4613,7 +7013,7 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 4096 {
+    if a.is_contiguous() && numel > 2048 {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -4640,6 +7040,69 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let val = *a_ptr.add(idx);
                 *out_ptr.add(idx) = val.powf(exponent);
             }
+        }
+    }
+
+    vec![output]
+}
+
+fn gt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let threshold = args[1].item();
+
+    let iter = TensorIterator::build_for_unary(a);
+    let output_shape = iter.output_shape.to_vec();
+
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    for idx in 0..numel {
+        unsafe {
+            let val = *a_ptr.add(idx);
+            *out_ptr.add(idx) = if val > threshold { 1.0 } else { 0.0 };
+        }
+    }
+
+    vec![output]
+}
+
+fn sign_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+
+    let iter = TensorIterator::build_for_unary(a);
+    let output_shape = iter.output_shape.to_vec();
+
+    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    for idx in 0..numel {
+        unsafe {
+            let val = *a_ptr.add(idx);
+            *out_ptr.add(idx) = if val > 0.0 {
+                1.0
+            } else if val < 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
         }
     }
 
@@ -4681,6 +7144,16 @@ fn register_kernels() {
         DispatchKey::Cpu,
         fused_linear_gelu_kernel as KernelFn,
     );
+    register(
+        "fused_mul_add",
+        DispatchKey::Cpu,
+        fused_mul_add_kernel as KernelFn,
+    );
+    register(
+        "fused_linear_silu",
+        DispatchKey::Cpu,
+        fused_linear_silu_kernel as KernelFn,
+    );
     register("sum", DispatchKey::Cpu, sum_kernel as KernelFn);
     register("mean", DispatchKey::Cpu, mean_kernel as KernelFn);
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);
@@ -4717,4 +7190,6 @@ fn register_kernels() {
     register("eye", DispatchKey::Cpu, eye_kernel as KernelFn);
     register("randn", DispatchKey::Cpu, randn_kernel as KernelFn);
     register("rand", DispatchKey::Cpu, rand_kernel as KernelFn);
+    register("gt_scalar", DispatchKey::Cpu, gt_scalar_kernel as KernelFn);
+    register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
 }

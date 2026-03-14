@@ -80,7 +80,7 @@ def stack(tensors, dim=0):
                 for j in range(numel):
                     result_data[i * numel + j] = t_data[j]
 
-        result_shape = [total_tensors] + list(first.shape())
+        result_shape = [total_tensors] + list(first.shape)
         result = fnn.tensor(result_data, result_shape)
 
         if dim != 0:

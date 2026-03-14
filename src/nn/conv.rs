@@ -1,4 +1,4 @@
-use crate::autograd::{AutogradMeta, Conv2dBackward};
+use crate::autograd::{self, AutogradMeta, Conv2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
@@ -91,6 +91,11 @@ impl Module for Conv2d {
         let output = result[0].clone();
 
         if x.requires_grad() || self.weight.requires_grad() {
+            let edges = {
+                let mut edges = autograd::make_edge(x);
+                edges.extend(autograd::make_edge(&self.weight));
+                edges
+            };
             let backward = Conv2dBackward::new(
                 x.clone(),
                 self.weight.clone(),
@@ -98,6 +103,7 @@ impl Module for Conv2d {
                 self.padding,
                 self.dilation,
                 self.groups,
+                edges,
             );
             let mut meta = AutogradMeta::new(false);
             meta.grad_fn = Some(Arc::new(backward));

@@ -346,6 +346,7 @@ fn create_output_tensor(data: Vec<f32>, shape: Vec<i64>, device: TensorDevice) -
     Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         shape.iter().copied().collect(),
+        DType::F32,
     ))
 }
 
@@ -639,6 +640,7 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
     Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         shape.iter().copied().collect(),
+        DType::F32,
     ))
 }
 
@@ -716,6 +718,7 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
     Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         shape.iter().copied().collect(),
+        DType::F32,
     ))
 }
 
@@ -881,5 +884,6 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
     vec![Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ))]
 }
