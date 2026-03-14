@@ -280,22 +280,22 @@ unsafe fn add_parallel_neon(
         let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
         let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
         let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
-        
+
         let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
         let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
         let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
         let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
-        
+
         let r0 = vaddq_f32(a0, b0);
         let r1 = vaddq_f32(a1, b1);
         let r2 = vaddq_f32(a2, b2);
         let r3 = vaddq_f32(a3, b3);
-        
+
         vst1q_f32((out_usize + i * 4) as *mut f32, r0);
         vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
         vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
         vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
-        
+
         i += 16;
     }
     while i + 4 <= end {
@@ -429,22 +429,22 @@ unsafe fn mul_parallel_neon(
         let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
         let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
         let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
-        
+
         let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
         let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
         let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
         let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
-        
+
         let r0 = vmulq_f32(a0, b0);
         let r1 = vmulq_f32(a1, b1);
         let r2 = vmulq_f32(a2, b2);
         let r3 = vmulq_f32(a3, b3);
-        
+
         vst1q_f32((out_usize + i * 4) as *mut f32, r0);
         vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
         vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
         vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
-        
+
         i += 16;
     }
     while i + 4 <= end {
@@ -575,17 +575,17 @@ unsafe fn relu_parallel_neon(
         let v1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
         let v2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
         let v3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
-        
+
         let r0 = vmaxq_f32(v0, zero);
         let r1 = vmaxq_f32(v1, zero);
         let r2 = vmaxq_f32(v2, zero);
         let r3 = vmaxq_f32(v3, zero);
-        
+
         vst1q_f32((out_usize + i * 4) as *mut f32, r0);
         vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
         vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
         vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
-        
+
         i += 16;
     }
     while i + 4 <= end {
@@ -716,22 +716,22 @@ unsafe fn div_parallel_neon(
         let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
         let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
         let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
-        
+
         let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
         let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
         let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
         let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
-        
+
         let r0 = vdivq_f32(a0, b0);
         let r1 = vdivq_f32(a1, b1);
         let r2 = vdivq_f32(a2, b2);
         let r3 = vdivq_f32(a3, b3);
-        
+
         vst1q_f32((out_usize + i * 4) as *mut f32, r0);
         vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
         vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
         vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
-        
+
         i += 16;
     }
     while i + 4 <= end {
@@ -859,18 +859,18 @@ unsafe fn neg_parallel_neon(
         let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
         let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
         let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
-        
+
         // vnegq_f32 flips the sign bit directly
         let r0 = vnegq_f32(a0);
         let r1 = vnegq_f32(a1);
         let r2 = vnegq_f32(a2);
         let r3 = vnegq_f32(a3);
-        
+
         vst1q_f32((out_usize + i * 4) as *mut f32, r0);
         vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
         vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
         vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
-        
+
         i += 16;
     }
     while i + 4 <= end {
@@ -992,17 +992,17 @@ unsafe fn abs_parallel_neon(
         let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
         let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
         let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
-        
+
         let r0 = vabsq_f32(a0);
         let r1 = vabsq_f32(a1);
         let r2 = vabsq_f32(a2);
         let r3 = vabsq_f32(a3);
-        
+
         vst1q_f32((out_usize + i * 4) as *mut f32, r0);
         vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
         vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
         vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
-        
+
         i += 16;
     }
     while i + 4 <= end {
@@ -1120,22 +1120,22 @@ unsafe fn sub_parallel_neon(
         let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
         let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
         let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
-        
+
         let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
         let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
         let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
         let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
-        
+
         let r0 = vsubq_f32(a0, b0);
         let r1 = vsubq_f32(a1, b1);
         let r2 = vsubq_f32(a2, b2);
         let r3 = vsubq_f32(a3, b3);
-        
+
         vst1q_f32((out_usize + i * 4) as *mut f32, r0);
         vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
         vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
         vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
-        
+
         i += 16;
     }
     while i + 4 <= end {
@@ -1412,28 +1412,28 @@ unsafe fn fused_mul_add_parallel_neon(
         let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
         let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
         let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
-        
+
         let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
         let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
         let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
         let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
-        
+
         let c0 = vld1q_f32((c_usize + i * 4) as *const f32);
         let c1 = vld1q_f32((c_usize + (i + 4) * 4) as *const f32);
         let c2 = vld1q_f32((c_usize + (i + 8) * 4) as *const f32);
         let c3 = vld1q_f32((c_usize + (i + 12) * 4) as *const f32);
-        
+
         // vfmaq_f32 computes: c + a * b
         let r0 = vfmaq_f32(c0, a0, b0);
         let r1 = vfmaq_f32(c1, a1, b1);
         let r2 = vfmaq_f32(c2, a2, b2);
         let r3 = vfmaq_f32(c3, a3, b3);
-        
+
         vst1q_f32((out_usize + i * 4) as *mut f32, r0);
         vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
         vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
         vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
-        
+
         i += 16;
     }
     while i + 4 <= end {
@@ -2130,11 +2130,13 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
-                    add_parallel_neon(
-                        chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
-                    );
-                });
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        add_parallel_neon(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                        );
+                    });
             }
             #[cfg(not(any(
                 all(feature = "simd", target_arch = "x86_64"),
@@ -2213,22 +2215,22 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         let a1 = vld1q_f32(a_ptr.add(i + 4));
                         let a2 = vld1q_f32(a_ptr.add(i + 8));
                         let a3 = vld1q_f32(a_ptr.add(i + 12));
-                        
+
                         let b0 = vld1q_f32(b_ptr.add(i));
                         let b1 = vld1q_f32(b_ptr.add(i + 4));
                         let b2 = vld1q_f32(b_ptr.add(i + 8));
                         let b3 = vld1q_f32(b_ptr.add(i + 12));
-                        
+
                         let r0 = vaddq_f32(a0, b0);
                         let r1 = vaddq_f32(a1, b1);
                         let r2 = vaddq_f32(a2, b2);
                         let r3 = vaddq_f32(a3, b3);
-                        
+
                         vst1q_f32(out_ptr.add(i), r0);
                         vst1q_f32(out_ptr.add(i + 4), r1);
                         vst1q_f32(out_ptr.add(i + 8), r2);
                         vst1q_f32(out_ptr.add(i + 12), r3);
-                        
+
                         i += 16;
                     }
                     while i + 4 <= numel {
@@ -2445,7 +2447,50 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = vld1q_f32(a_ptr.add(i));
+                        let a1 = vld1q_f32(a_ptr.add(i + 4));
+                        let a2 = vld1q_f32(a_ptr.add(i + 8));
+                        let a3 = vld1q_f32(a_ptr.add(i + 12));
+
+                        let b0 = vld1q_f32(b_ptr.add(i));
+                        let b1 = vld1q_f32(b_ptr.add(i + 4));
+                        let b2 = vld1q_f32(b_ptr.add(i + 8));
+                        let b3 = vld1q_f32(b_ptr.add(i + 12));
+
+                        let r0 = vsubq_f32(a0, b0);
+                        let r1 = vsubq_f32(a1, b1);
+                        let r2 = vsubq_f32(a2, b2);
+                        let r3 = vsubq_f32(a3, b3);
+
+                        vst1q_f32(out_ptr.add(i), r0);
+                        vst1q_f32(out_ptr.add(i + 4), r1);
+                        vst1q_f32(out_ptr.add(i + 8), r2);
+                        vst1q_f32(out_ptr.add(i + 12), r3);
+
+                        i += 16;
+                    }
+                    while i + 4 <= numel {
+                        let a_vec = vld1q_f32(a_ptr.add(i));
+                        let b_vec = vld1q_f32(b_ptr.add(i));
+                        let result = vsubq_f32(a_vec, b_vec);
+                        vst1q_f32(out_ptr.add(i), result);
+                        i += 4;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) - *b_ptr.add(i);
+                        i += 1;
+                    }
+                }
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -2644,7 +2689,50 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = vld1q_f32(a_ptr.add(i));
+                        let a1 = vld1q_f32(a_ptr.add(i + 4));
+                        let a2 = vld1q_f32(a_ptr.add(i + 8));
+                        let a3 = vld1q_f32(a_ptr.add(i + 12));
+
+                        let b0 = vld1q_f32(b_ptr.add(i));
+                        let b1 = vld1q_f32(b_ptr.add(i + 4));
+                        let b2 = vld1q_f32(b_ptr.add(i + 8));
+                        let b3 = vld1q_f32(b_ptr.add(i + 12));
+
+                        let r0 = vmulq_f32(a0, b0);
+                        let r1 = vmulq_f32(a1, b1);
+                        let r2 = vmulq_f32(a2, b2);
+                        let r3 = vmulq_f32(a3, b3);
+
+                        vst1q_f32(out_ptr.add(i), r0);
+                        vst1q_f32(out_ptr.add(i + 4), r1);
+                        vst1q_f32(out_ptr.add(i + 8), r2);
+                        vst1q_f32(out_ptr.add(i + 12), r3);
+
+                        i += 16;
+                    }
+                    while i + 4 <= numel {
+                        let a_vec = vld1q_f32(a_ptr.add(i));
+                        let b_vec = vld1q_f32(b_ptr.add(i));
+                        let result = vmulq_f32(a_vec, b_vec);
+                        vst1q_f32(out_ptr.add(i), result);
+                        i += 4;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                        i += 1;
+                    }
+                }
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -2854,7 +2942,50 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = vld1q_f32(a_ptr.add(i));
+                        let a1 = vld1q_f32(a_ptr.add(i + 4));
+                        let a2 = vld1q_f32(a_ptr.add(i + 8));
+                        let a3 = vld1q_f32(a_ptr.add(i + 12));
+
+                        let b0 = vld1q_f32(b_ptr.add(i));
+                        let b1 = vld1q_f32(b_ptr.add(i + 4));
+                        let b2 = vld1q_f32(b_ptr.add(i + 8));
+                        let b3 = vld1q_f32(b_ptr.add(i + 12));
+
+                        let r0 = vdivq_f32(a0, b0);
+                        let r1 = vdivq_f32(a1, b1);
+                        let r2 = vdivq_f32(a2, b2);
+                        let r3 = vdivq_f32(a3, b3);
+
+                        vst1q_f32(out_ptr.add(i), r0);
+                        vst1q_f32(out_ptr.add(i + 4), r1);
+                        vst1q_f32(out_ptr.add(i + 8), r2);
+                        vst1q_f32(out_ptr.add(i + 12), r3);
+
+                        i += 16;
+                    }
+                    while i + 4 <= numel {
+                        let a_vec = vld1q_f32(a_ptr.add(i));
+                        let b_vec = vld1q_f32(b_ptr.add(i));
+                        let result = vdivq_f32(a_vec, b_vec);
+                        vst1q_f32(out_ptr.add(i), result);
+                        i += 4;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) / *b_ptr.add(i);
+                        i += 1;
+                    }
+                }
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -3001,7 +3132,44 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = vld1q_f32(a_ptr.add(i));
+                        let a1 = vld1q_f32(a_ptr.add(i + 4));
+                        let a2 = vld1q_f32(a_ptr.add(i + 8));
+                        let a3 = vld1q_f32(a_ptr.add(i + 12));
+
+                        let r0 = vnegq_f32(a0);
+                        let r1 = vnegq_f32(a1);
+                        let r2 = vnegq_f32(a2);
+                        let r3 = vnegq_f32(a3);
+
+                        vst1q_f32(out_ptr.add(i), r0);
+                        vst1q_f32(out_ptr.add(i + 4), r1);
+                        vst1q_f32(out_ptr.add(i + 8), r2);
+                        vst1q_f32(out_ptr.add(i + 12), r3);
+
+                        i += 16;
+                    }
+                    while i + 4 <= numel {
+                        let a_vec = vld1q_f32(a_ptr.add(i));
+                        let result = vnegq_f32(a_vec);
+                        vst1q_f32(out_ptr.add(i), result);
+                        i += 4;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = -*a_ptr.add(i);
+                        i += 1;
+                    }
+                }
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -3072,7 +3240,18 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        abs_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     abs_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
@@ -3081,9 +3260,46 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            for idx in 0..numel {
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
                 unsafe {
-                    *out_ptr.add(idx) = (*a_ptr.add(idx)).abs();
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = vld1q_f32(a_ptr.add(i));
+                        let a1 = vld1q_f32(a_ptr.add(i + 4));
+                        let a2 = vld1q_f32(a_ptr.add(i + 8));
+                        let a3 = vld1q_f32(a_ptr.add(i + 12));
+
+                        let r0 = vabsq_f32(a0);
+                        let r1 = vabsq_f32(a1);
+                        let r2 = vabsq_f32(a2);
+                        let r3 = vabsq_f32(a3);
+
+                        vst1q_f32(out_ptr.add(i), r0);
+                        vst1q_f32(out_ptr.add(i + 4), r1);
+                        vst1q_f32(out_ptr.add(i + 8), r2);
+                        vst1q_f32(out_ptr.add(i + 12), r3);
+
+                        i += 16;
+                    }
+                    while i + 4 <= numel {
+                        let a_vec = vld1q_f32(a_ptr.add(i));
+                        let result = vabsq_f32(a_vec);
+                        vst1q_f32(out_ptr.add(i), result);
+                        i += 4;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = (*a_ptr.add(i)).abs();
+                        i += 1;
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "aarch64")))]
+            {
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = (*a_ptr.add(idx)).abs();
+                    }
                 }
             }
         }
@@ -3657,7 +3873,29 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                
+                let zero = f32x4::ZERO;
+                let (chunks, remainder) = a_slice.as_chunks::<4>();
+                let (out_chunks, out_remainder) = out_slice.as_chunks_mut::<4>();
+            
+                for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+                    let v = f32x4::from(*in_chunk);
+                    let result = v.max(zero);
+                    *out_chunk = result.into();
+                }
+            
+                for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+                    *out_val = in_val.max(0.0);
+                }
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -3848,7 +4086,39 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                
+                let (a_chunks, a_rem) = a_slice.as_chunks::<4>();
+                let (b_chunks, b_rem) = b_slice.as_chunks::<4>();
+                let (out_chunks, out_rem) = out_slice.as_chunks_mut::<4>();
+
+                let zero = f32x4::ZERO;
+                for ((a_chunk, b_chunk), out_chunk) in a_chunks
+                    .iter()
+                    .zip(b_chunks.iter())
+                    .zip(out_chunks.iter_mut())
+                {
+                    let a_vec = f32x4::from(*a_chunk);
+                    let b_vec = f32x4::from(*b_chunk);
+                    let sum = a_vec + b_vec;
+                    let result = sum.max(zero);
+                    *out_chunk = result.into();
+                }
+
+                for ((a_val, b_val), out_val) in
+                    a_rem.iter().zip(b_rem.iter()).zip(out_rem.iter_mut())
+                {
+                    *out_val = (*a_val + *b_val).max(0.0);
+                }
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -3992,7 +4262,56 @@ fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = vld1q_f32(a_ptr.add(i));
+                        let a1 = vld1q_f32(a_ptr.add(i + 4));
+                        let a2 = vld1q_f32(a_ptr.add(i + 8));
+                        let a3 = vld1q_f32(a_ptr.add(i + 12));
+                        
+                        let b0 = vld1q_f32(b_ptr.add(i));
+                        let b1 = vld1q_f32(b_ptr.add(i + 4));
+                        let b2 = vld1q_f32(b_ptr.add(i + 8));
+                        let b3 = vld1q_f32(b_ptr.add(i + 12));
+                        
+                        let c0 = vld1q_f32(c_ptr.add(i));
+                        let c1 = vld1q_f32(c_ptr.add(i + 4));
+                        let c2 = vld1q_f32(c_ptr.add(i + 8));
+                        let c3 = vld1q_f32(c_ptr.add(i + 12));
+                        
+                        let r0 = vfmaq_f32(c0, a0, b0);
+                        let r1 = vfmaq_f32(c1, a1, b1);
+                        let r2 = vfmaq_f32(c2, a2, b2);
+                        let r3 = vfmaq_f32(c3, a3, b3);
+                        
+                        vst1q_f32(out_ptr.add(i), r0);
+                        vst1q_f32(out_ptr.add(i + 4), r1);
+                        vst1q_f32(out_ptr.add(i + 8), r2);
+                        vst1q_f32(out_ptr.add(i + 12), r3);
+                        
+                        i += 16;
+                    }
+                    while i + 4 <= numel {
+                        let a_vec = vld1q_f32(a_ptr.add(i));
+                        let b_vec = vld1q_f32(b_ptr.add(i));
+                        let c_vec = vld1q_f32(c_ptr.add(i));
+                        let result = vfmaq_f32(c_vec, a_vec, b_vec);
+                        vst1q_f32(out_ptr.add(i), result);
+                        i += 4;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i) + *c_ptr.add(i);
+                        i += 1;
+                    }
+                }
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
