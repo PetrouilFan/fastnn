@@ -671,6 +671,22 @@ impl Tensor {
         }
     }
 
+    pub fn empty(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
+        let sizes: SmallVec<[i64; 8]> = shape.into();
+        let numel: i64 = sizes.iter().product();
+        let nbytes = (numel * dtype.size() as i64) as usize;
+        // Create uninitialized storage
+        let mut storage = Storage::new_cpu(dtype, nbytes);
+        let storage = Arc::new(storage);
+        // Use new_with_device for GPU tensors to track the target device
+        match device {
+            Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
+            Device::Wgpu(_) => {
+                Tensor::new(TensorImpl::new_with_device(storage, sizes, device, dtype))
+            }
+        }
+    }
+
     pub fn ones(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         let mut t = Self::zeros(shape, dtype, device);
         let numel = t.inner.numel() as usize;
