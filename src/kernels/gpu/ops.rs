@@ -30,6 +30,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -58,6 +59,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -86,6 +88,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -114,6 +117,7 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -140,6 +144,7 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -166,6 +171,7 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -192,6 +198,7 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -218,6 +225,7 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -244,6 +252,7 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -271,6 +280,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -300,6 +310,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -329,6 +340,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -356,6 +368,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -383,6 +396,7 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -410,6 +424,7 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
@@ -479,6 +494,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output = Tensor::new(crate::tensor::TensorImpl::new(
         storage,
         output_shape.iter().copied().collect(),
+        DType::F32,
     ));
     vec![output]
 }
