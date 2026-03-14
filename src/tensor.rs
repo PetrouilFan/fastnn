@@ -358,7 +358,7 @@ impl TensorImpl {
         let start = start.max(0) as usize;
         let end = (end.min(size) - 1) as usize;
 
-        if start >= end {
+        if start > end {
             panic!("slice: invalid range");
         }
 

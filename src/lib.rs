@@ -209,6 +209,14 @@ impl PyTensor {
             self.inner.device().as_str()
         )
     }
+
+    fn __getitem__(&self, idx: usize) -> PyTensor {
+        // For 2D tensor [N, D], t[idx] returns [D] (the row)
+        // For 1D tensor [N], t[idx] returns scalar (0-dim)
+        // Implementation: slice(0, idx, idx+1, 1).squeeze(0)
+        let sliced = self.inner.slice(0, idx as i64, (idx + 1) as i64, 1);
+        PyTensor::from_tensor(sliced.squeeze(Some(0)))
+    }
 }
 
 #[pyfunction]
