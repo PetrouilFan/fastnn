@@ -15,6 +15,7 @@ use nn::Module;
 use optim::Optimizer;
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
+use pyo3::PyAny;
 use rand::Rng;
 use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
@@ -97,6 +98,10 @@ impl PyTensor {
         self.inner.to_numpy()
     }
 
+    fn debug_strides(&self) -> Vec<i64> {
+        self.inner.strides()
+    }
+
     #[pyo3(signature = (requires_grad))]
     fn requires_grad_(&mut self, requires_grad: bool) {
         let inner_clone: &mut TensorImpl = Arc::make_mut(&mut self.inner.inner);
@@ -176,6 +181,10 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.mul(&other.inner))
     }
 
+    fn __rmul__(&self, other: f32) -> PyTensor {
+        PyTensor::from_tensor(self.inner.mul(&Tensor::from_scalar(other)))
+    }
+
     fn mul_scalar(&self, other: f32) -> PyTensor {
         PyTensor::from_tensor(self.inner.mul(&Tensor::from_scalar(other)))
     }
@@ -199,6 +208,14 @@ impl PyTensor {
             self.inner.dtype().as_str(),
             self.inner.device().as_str()
         )
+    }
+
+    fn __getitem__(&self, idx: usize) -> PyTensor {
+        // For 2D tensor [N, D], t[idx] returns [D] (the row)
+        // For 1D tensor [N], t[idx] returns scalar (0-dim)
+        // Implementation: slice(0, idx, idx+1, 1).squeeze(0)
+        let sliced = self.inner.slice(0, idx as i64, (idx + 1) as i64, 1);
+        PyTensor::from_tensor(sliced.squeeze(Some(0)))
     }
 }
 
@@ -473,10 +490,7 @@ fn neg(a: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn abs(a: &PyTensor) -> PyTensor {
-    use dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
-    let result = dispatch("abs", dispatch_key, &[&a.inner]);
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(a.inner.abs())
 }
 
 #[pyfunction]
@@ -572,6 +586,14 @@ fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
         dispatch_key,
         &[&a.inner, &Tensor::from_scalar(dim as f32)],
     );
+    PyTensor::from_tensor(result[0].clone())
+}
+
+#[pyfunction]
+fn embedding(weight: &PyTensor, indices: &PyTensor) -> PyTensor {
+    use dispatcher::dispatch;
+    let dispatch_key = dispatcher::device_to_dispatch_key(weight.inner.device());
+    let result = dispatch("embedding", dispatch_key, &[&weight.inner, &indices.inner]);
     PyTensor::from_tensor(result[0].clone())
 }
 
@@ -701,12 +723,14 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
     let output = result[0].clone();
 
     if pred.inner.requires_grad() {
+        let edges = autograd::make_edge(&pred.inner);
         let backward = autograd::CrossEntropyBackward::new(
             pred.inner.clone(),
             target.inner.clone(),
             reduction.clone(),
+            edges,
         );
-        let mut meta = AutogradMeta::new(false);
+        let mut meta = AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(std::sync::Arc::new(backward));
         let mut output = output.clone();
         Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
@@ -913,9 +937,10 @@ struct LayerNorm {
 #[pymethods]
 impl LayerNorm {
     #[new]
-    fn new(normalized_shape: i64, eps: Option<f64>) -> Self {
+    #[pyo3(signature = (normalized_shape, eps = 1e-5))]
+    fn new(normalized_shape: i64, eps: f64) -> Self {
         LayerNorm {
-            inner: nn::norm::LayerNorm::new(normalized_shape, eps.unwrap_or(1e-5)),
+            inner: nn::norm::LayerNorm::new(normalized_shape, eps),
         }
     }
 
@@ -1306,6 +1331,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(silu, py)?)?;
     m.add_function(wrap_pyfunction!(softmax, py)?)?;
     m.add_function(wrap_pyfunction!(log_softmax, py)?)?;
+    m.add_function(wrap_pyfunction!(embedding, py)?)?;
     m.add_function(wrap_pyfunction!(sum, py)?)?;
     m.add_function(wrap_pyfunction!(mean, py)?)?;
     m.add_function(wrap_pyfunction!(max, py)?)?;
