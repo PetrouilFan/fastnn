@@ -92,7 +92,7 @@ impl Module for Conv2d {
 
         if x.requires_grad() || self.weight.requires_grad() {
             let edges = {
-                let mut edges = autograd::make_edge(&x);
+                let mut edges = autograd::make_edge(x);
                 edges.extend(autograd::make_edge(&self.weight));
                 edges
             };

@@ -56,7 +56,7 @@ pub fn make_edge(tensor: &Tensor) -> Vec<Edge> {
         .grad_fn()
         .map(|node| Edge(node, 0))
         .map(|e| vec![e])
-        .unwrap_or_else(Vec::new)
+        .unwrap_or_default()
 }
 
 pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
@@ -980,11 +980,10 @@ impl Node for LayerNormBackward {
             .sub(&self.normalized.mul(&mean_grad_x_hat_x_hat))
             .div(&std);
 
-        let grad_gamma = if let Some(ref g) = self.gamma {
-            Some(grad.mul(&self.normalized).sum(0, false))
-        } else {
-            None
-        };
+        let grad_gamma = self
+            .gamma
+            .as_ref()
+            .map(|_| grad.mul(&self.normalized).sum(0, false));
         let grad_beta = Some(grad.sum(0, false));
 
         vec![
