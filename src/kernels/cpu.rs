@@ -1321,6 +1321,65 @@ fn fused_add_relu_parallel_scalar(
     }
 }
 
+// Fused add+relu parallel NEON kernel
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+unsafe fn fused_add_relu_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    let zero = vdupq_n_f32(0.0);
+    while i + 16 <= end {
+        let a0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+
+        let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
+        let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
+        let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
+        let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
+
+        let sum0 = vaddq_f32(a0, b0);
+        let sum1 = vaddq_f32(a1, b1);
+        let sum2 = vaddq_f32(a2, b2);
+        let sum3 = vaddq_f32(a3, b3);
+
+        let relu0 = vmaxq_f32(sum0, zero);
+        let relu1 = vmaxq_f32(sum1, zero);
+        let relu2 = vmaxq_f32(sum2, zero);
+        let relu3 = vmaxq_f32(sum3, zero);
+
+        vst1q_f32((out_usize + i * 4) as *mut f32, relu0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, relu1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, relu2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, relu3);
+
+        i += 16;
+    }
+    while i + 4 <= end {
+        let a_vec = vld1q_f32((a_usize + i * 4) as *const f32);
+        let b_vec = vld1q_f32((b_usize + i * 4) as *const f32);
+        let sum = vaddq_f32(a_vec, b_vec);
+        let result = vmaxq_f32(sum, zero);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
+    }
+    while i < end {
+        let val = *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = val.max(0.0);
+        i += 1;
+    }
+}
+
 // Fused mul+add parallel AVX2 kernel
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
