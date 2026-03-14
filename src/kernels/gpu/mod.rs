@@ -37,8 +37,14 @@ pub struct GpuContext {
     shader_modules: RwLock<HashMap<String, ShaderModule>>,
     pipelines: RwLock<HashMap<String, ComputePipeline>>,
     buffer_id_counter: AtomicUsize,
-    #[allow(dead_code)]
-    buffer_pool: RwLock<HashMap<usize, Vec<wgpu::Buffer>>>,
+    // Size-bucketed buffer pool using power-of-2 bucketing
+    // Key: bucket index (log2 of aligned size), Value: list of buffers
+    buffer_pool: RwLock<HashMap<u32, Vec<wgpu::Buffer>>>,
+    // Persistent staging buffers for CPU↔GPU transfers
+    staging_buffer_cpu_to_gpu: RwLock<Option<wgpu::Buffer>>,
+    staging_buffer_gpu_to_cpu: RwLock<Option<wgpu::Buffer>>,
+    staging_buffer_size: AtomicUsize,
+    // Command buffer batching support (placeholder for future implementation)
 }
 
 impl Clone for GpuContext {
@@ -51,6 +57,9 @@ impl Clone for GpuContext {
             pipelines: RwLock::new(HashMap::new()),
             buffer_id_counter: AtomicUsize::new(0),
             buffer_pool: RwLock::new(HashMap::new()),
+            staging_buffer_cpu_to_gpu: RwLock::new(None),
+            staging_buffer_gpu_to_cpu: RwLock::new(None),
+            staging_buffer_size: AtomicUsize::new(0),
         }
     }
 }
@@ -85,14 +94,29 @@ impl GpuContext {
             pipelines: RwLock::new(HashMap::new()),
             buffer_id_counter: AtomicUsize::new(0),
             buffer_pool: RwLock::new(HashMap::new()),
+            staging_buffer_cpu_to_gpu: RwLock::new(None),
+            staging_buffer_gpu_to_cpu: RwLock::new(None),
+            staging_buffer_size: AtomicUsize::new(0),
         }
     }
 
-    /// Acquire a buffer - create a new one (simplified for now)
+    /// Calculate bucket index for size-bucketed pooling
+    /// Uses power-of-2 bucketing with 256-byte alignment
+    fn get_bucket_index(size: usize) -> u32 {
+        const MIN_ALIGNMENT: usize = 256;
+        let aligned_size = size.max(MIN_ALIGNMENT).next_power_of_two();
+        aligned_size.trailing_zeros()
+    }
+
+    /// Acquire a buffer - allocate new one
+    /// Pooling is disabled for now to avoid zeroing issues
     pub fn acquire_buffer(&self, size: usize) -> wgpu::Buffer {
+        // Round up to power of 2 for better alignment
+        let aligned_size = size.next_power_of_two();
+
         self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pooled_buffer"),
-            size: size as u64,
+            size: aligned_size as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
@@ -101,8 +125,75 @@ impl GpuContext {
     }
 
     /// Return a buffer to the pool for reuse
-    pub fn release_buffer(&self, _buffer: wgpu::Buffer, _size: usize) {
-        // Simplified: don't pool for now
+    pub fn release_buffer(&self, buffer: wgpu::Buffer, size: usize) {
+        let bucket = Self::get_bucket_index(size);
+
+        // Verify buffer size matches bucket
+        let aligned_size = 1 << bucket;
+        if buffer.size() != aligned_size as u64 {
+            // Size mismatch - don't pool, let it be dropped
+            return;
+        }
+
+        let mut pool = self.buffer_pool.write();
+        let buffers = pool.entry(bucket).or_insert_with(Vec::new);
+
+        // Limit pool size to prevent unbounded growth
+        const MAX_BUFFERS_PER_BUCKET: usize = 16;
+        if buffers.len() < MAX_BUFFERS_PER_BUCKET {
+            buffers.push(buffer);
+        }
+        // Otherwise, buffer is dropped (reclaimed by GPU allocator)
+    }
+
+    /// Ensure persistent staging buffer is large enough for given size
+    fn ensure_staging_buffer_cpu_to_gpu(&self, size: usize) -> wgpu::Buffer {
+        let mut staging_guard = self.staging_buffer_cpu_to_gpu.write();
+
+        if let Some(buffer) = &*staging_guard {
+            if buffer.size() >= size as u64 {
+                return buffer.clone();
+            }
+        }
+
+        // Allocate new, larger staging buffer
+        let new_size = size.next_power_of_two();
+        let new_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging_cpu_to_gpu"),
+            size: new_size as u64,
+            usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        *staging_guard = Some(new_buffer.clone());
+        self.staging_buffer_size
+            .store(new_size, std::sync::atomic::Ordering::Relaxed);
+        new_buffer
+    }
+
+    /// Get staging buffer for GPU to CPU transfers
+    fn ensure_staging_buffer_gpu_to_cpu(&self, size: usize) -> wgpu::Buffer {
+        let mut staging_guard = self.staging_buffer_gpu_to_cpu.write();
+
+        if let Some(buffer) = &*staging_guard {
+            if buffer.size() >= size as u64 {
+                return buffer.clone();
+            }
+        }
+
+        // Allocate new, larger staging buffer
+        let new_size = size.next_power_of_two();
+        let new_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging_gpu_to_cpu"),
+            size: new_size as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        *staging_guard = Some(new_buffer.clone());
+        self.staging_buffer_size
+            .store(new_size, std::sync::atomic::Ordering::Relaxed);
+        new_buffer
     }
 
     /// Get or create a buffer from CPU data
@@ -110,7 +201,7 @@ impl GpuContext {
         let size = std::mem::size_of_val(cpu_data);
         let buffer = self.acquire_buffer(size);
 
-        // Write data to buffer
+        // Use temporary staging buffer (not persistent for now)
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!("{}_staging", label)),
             size: size as u64,
@@ -151,15 +242,8 @@ impl GpuContext {
         }
     }
 
-    pub fn create_buffer(&self, size: usize, label: &str) -> GpuBuffer {
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: size as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    pub fn create_buffer(&self, size: usize, _label: &str) -> GpuBuffer {
+        let buffer = self.acquire_buffer(size);
 
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
         GpuBuffer {
@@ -253,12 +337,8 @@ impl GpuContext {
     }
 
     pub fn read_buffer_from_arc(&self, buffer: &Arc<Buffer>, size: usize) -> Vec<f32> {
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: size as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // Use persistent staging buffer
+        let staging = self.ensure_staging_buffer_gpu_to_cpu(size);
 
         let mut encoder = self
             .device
@@ -268,13 +348,21 @@ impl GpuContext {
         encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size as u64);
         self.queue.submit([encoder.finish()]);
 
-        let slice = staging.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::Maintain::Wait);
+        let slice = staging.slice(..size as u64);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
 
-        let data = slice.get_mapped_range().to_vec();
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .unwrap()
+            .expect("Failed to map staging buffer");
+
+        let data = slice.get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-        let _ = slice;
+        drop(data);
         staging.unmap();
         result
     }
@@ -350,6 +438,7 @@ fn create_output_tensor(data: Vec<f32>, shape: Vec<i64>, device: TensorDevice) -
     ))
 }
 
+// Simple ADD shader (non-vectorized for debugging)
 const ADD_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> a: array<f32>;
 @group(0) @binding(1) var<storage, read> b: array<f32>;
@@ -368,11 +457,22 @@ const SUB_SHADER: &str = r#"
 @group(0) @binding(1) var<storage, read> b: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = a[idx] - b[idx];
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var a_vec = vec4<f32>(a[vec_idx], a[vec_idx + 1u], a[vec_idx + 2u], a[vec_idx + 3u]);
+        var b_vec = vec4<f32>(b[vec_idx], b[vec_idx + 1u], b[vec_idx + 2u], b[vec_idx + 3u]);
+        var out_vec = a_vec - b_vec;
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = a[idx] - b[idx];
+    }
 }
 "#;
 
@@ -381,11 +481,22 @@ const MUL_SHADER: &str = r#"
 @group(0) @binding(1) var<storage, read> b: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = a[idx] * b[idx];
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var a_vec = vec4<f32>(a[vec_idx], a[vec_idx + 1u], a[vec_idx + 2u], a[vec_idx + 3u]);
+        var b_vec = vec4<f32>(b[vec_idx], b[vec_idx + 1u], b[vec_idx + 2u], b[vec_idx + 3u]);
+        var out_vec = a_vec * b_vec;
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = a[idx] * b[idx];
+    }
 }
 "#;
 
@@ -394,11 +505,22 @@ const DIV_SHADER: &str = r#"
 @group(0) @binding(1) var<storage, read> b: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = a[idx] / b[idx];
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var a_vec = vec4<f32>(a[vec_idx], a[vec_idx + 1u], a[vec_idx + 2u], a[vec_idx + 3u]);
+        var b_vec = vec4<f32>(b[vec_idx], b[vec_idx + 1u], b[vec_idx + 2u], b[vec_idx + 3u]);
+        var out_vec = a_vec / b_vec;
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = a[idx] / b[idx];
+    }
 }
 "#;
 
@@ -406,11 +528,21 @@ const NEG_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = -input[idx];
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = -in_vec;
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = -input[idx];
+    }
 }
 "#;
 
@@ -418,11 +550,21 @@ const ABS_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = abs(input[idx]);
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = abs(in_vec);
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = abs(input[idx]);
+    }
 }
 "#;
 
@@ -430,11 +572,21 @@ const EXP_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = exp(input[idx]);
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = vec4<f32>(exp(in_vec.x), exp(in_vec.y), exp(in_vec.z), exp(in_vec.w));
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = exp(input[idx]);
+    }
 }
 "#;
 
@@ -442,11 +594,21 @@ const LOG_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = log(input[idx]);
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = vec4<f32>(log(in_vec.x), log(in_vec.y), log(in_vec.z), log(in_vec.w));
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = log(input[idx]);
+    }
 }
 "#;
 
@@ -454,11 +616,21 @@ const SQRT_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = sqrt(input[idx]);
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = sqrt(in_vec);
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = sqrt(input[idx]);
+    }
 }
 "#;
 
@@ -466,11 +638,21 @@ const RELU_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = max(input[idx], 0.0);
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = max(in_vec, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = max(input[idx], 0.0);
+    }
 }
 "#;
 
@@ -478,7 +660,7 @@ const GELU_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
     if (idx >= arrayLength(&output)) { return; }
@@ -494,12 +676,22 @@ const SIGMOID_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    let x = input[idx];
-    output[idx] = 1.0 / (1.0 + exp(-x));
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = 1.0 / (1.0 + exp(-in_vec));
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        let x = input[idx];
+        output[idx] = 1.0 / (1.0 + exp(-x));
+    }
 }
 "#;
 
@@ -507,11 +699,21 @@ const TANH_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = tanh(input[idx]);
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = tanh(in_vec);
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = tanh(input[idx]);
+    }
 }
 "#;
 
@@ -519,12 +721,22 @@ const SILU_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    let x = input[idx];
-    output[idx] = x / (1.0 + exp(-x));
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var in_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var out_vec = in_vec / (1.0 + exp(-in_vec));
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        let x = input[idx];
+        output[idx] = x / (1.0 + exp(-x));
+    }
 }
 "#;
 
@@ -533,12 +745,24 @@ const FUSED_ADD_RELU_SHADER: &str = r#"
 @group(0) @binding(1) var<storage, read> b: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    let sum = a[idx] + b[idx];
-    output[idx] = max(sum, 0.0);
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var a_vec = vec4<f32>(a[vec_idx], a[vec_idx + 1u], a[vec_idx + 2u], a[vec_idx + 3u]);
+        var b_vec = vec4<f32>(b[vec_idx], b[vec_idx + 1u], b[vec_idx + 2u], b[vec_idx + 3u]);
+        var sum_vec = a_vec + b_vec;
+        var out_vec = max(sum_vec, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        let sum = a[idx] + b[idx];
+        output[idx] = max(sum, 0.0);
+    }
 }
 "#;
 
@@ -555,21 +779,51 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+var<workgroup> tileA: array<array<f32, 16>, 16>;
+var<workgroup> tileB: array<array<f32, 16>, 16>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>) {
     let col = global_id.x;
     let row = global_id.y;
     let m = params.m;
     let n = params.n;
     let k = params.k;
+    
+    let tile_size = 16u;
 
     if (row >= m || col >= n) { return; }
 
     var sum = 0.0;
-    for (var i = 0u; i < k; i = i + 1u) {
-        let a_idx = row * k + i;
-        let b_idx = i * n + col;
-        sum = sum + a[a_idx] * b[b_idx];
+    
+    // Loop over tiles
+    for (var tile = 0u; tile < k; tile = tile + tile_size) {
+        // Load tile from A into shared memory
+        let a_row = row;
+        let a_col = tile + local_id.x;
+        if (a_row < m && a_col < k) {
+            tileA[local_id.y][local_id.x] = a[a_row * k + a_col];
+        } else {
+            tileA[local_id.y][local_id.x] = 0.0;
+        }
+        
+        // Load tile from B into shared memory
+        let b_row = tile + local_id.y;
+        let b_col = col;
+        if (b_row < k && b_col < n) {
+            tileB[local_id.y][local_id.x] = b[b_row * n + b_col];
+        } else {
+            tileB[local_id.y][local_id.x] = 0.0;
+        }
+        
+        workgroupBarrier();
+        
+        // Compute dot product from shared memory
+        for (var i = 0u; i < tile_size; i = i + 1u) {
+            sum += tileA[local_id.y][i] * tileB[i][local_id.x];
+        }
+        
+        workgroupBarrier();
     }
 
     let out_idx = row * n + col;
