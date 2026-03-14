@@ -412,7 +412,7 @@ unsafe fn mul_parallel_avx2(
 
 // Mul parallel NEON kernel
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[target_feature(enable = "neon")]
+#[allow(dead_code)]
 unsafe fn mul_parallel_neon(
     chunk_idx: usize,
     chunk_size: usize,
@@ -559,7 +559,7 @@ unsafe fn relu_parallel_avx2(
 
 // Relu parallel NEON kernel
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[target_feature(enable = "neon")]
+#[allow(dead_code)]
 unsafe fn relu_parallel_neon(
     chunk_idx: usize,
     chunk_size: usize,
@@ -701,7 +701,7 @@ unsafe fn div_parallel_avx2(
 
 // Div parallel NEON kernel
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[target_feature(enable = "neon")]
+#[allow(dead_code)]
 unsafe fn div_parallel_neon(
     chunk_idx: usize,
     chunk_size: usize,
@@ -846,7 +846,7 @@ unsafe fn neg_parallel_avx2(
 
 // Neg parallel NEON kernel
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[target_feature(enable = "neon")]
+#[allow(dead_code)]
 unsafe fn neg_parallel_neon(
     chunk_idx: usize,
     chunk_size: usize,
@@ -1108,7 +1108,7 @@ unsafe fn sub_parallel_avx2(
 
 // Sub parallel NEON kernel
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[target_feature(enable = "neon")]
+#[allow(dead_code)]
 unsafe fn sub_parallel_neon(
     chunk_idx: usize,
     chunk_size: usize,
@@ -1400,7 +1400,7 @@ unsafe fn fused_mul_add_parallel_avx512(
 
 // Fused mul+add parallel NEON kernel
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[target_feature(enable = "neon")]
+#[allow(dead_code)]
 unsafe fn fused_mul_add_parallel_neon(
     chunk_idx: usize,
     chunk_size: usize,
