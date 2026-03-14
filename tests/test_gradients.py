@@ -5,7 +5,6 @@ import fastnn as fnn
 def numerical_grad(f, x, eps=1e-3):
     """Compute numerical gradient via central differences."""
     grad = np.zeros_like(x.numpy())
-    x_flat = x.numpy().flat
     grad_flat = grad.flat
 
     for i in range(x.numel()):
