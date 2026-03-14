@@ -350,6 +350,7 @@ unsafe fn add_parallel_avx512(
 
 // Parallel scalar fallback
 #[cfg(feature = "parallel")]
+#[allow(dead_code)]
 fn add_parallel_scalar(
     chunk_idx: usize,
     chunk_size: usize,
@@ -499,6 +500,7 @@ unsafe fn mul_parallel_avx512(
 
 // Parallel scalar fallback for mul
 #[cfg(feature = "parallel")]
+#[allow(dead_code)]
 fn mul_parallel_scalar(
     chunk_idx: usize,
     chunk_size: usize,
@@ -638,6 +640,7 @@ unsafe fn relu_parallel_avx512(
 
 // Parallel scalar fallback for relu
 #[cfg(feature = "parallel")]
+#[allow(dead_code)]
 fn relu_parallel_scalar(
     chunk_idx: usize,
     chunk_size: usize,
@@ -786,6 +789,7 @@ unsafe fn div_parallel_avx512(
 
 // Parallel scalar fallback for div
 #[cfg(feature = "parallel")]
+#[allow(dead_code)]
 fn div_parallel_scalar(
     chunk_idx: usize,
     chunk_size: usize,
@@ -920,6 +924,7 @@ unsafe fn neg_parallel_avx512(
 
 // Parallel scalar fallback for neg
 #[cfg(feature = "parallel")]
+#[allow(dead_code)]
 fn neg_parallel_scalar(
     chunk_idx: usize,
     chunk_size: usize,
@@ -1054,6 +1059,7 @@ unsafe fn abs_parallel_avx512(
 
 // Parallel scalar fallback for abs
 #[cfg(feature = "parallel")]
+#[allow(dead_code)]
 fn abs_parallel_scalar(
     chunk_idx: usize,
     chunk_size: usize,
@@ -1190,6 +1196,7 @@ unsafe fn sub_parallel_avx512(
 
 // Parallel scalar fallback for sub
 #[cfg(feature = "parallel")]
+#[allow(dead_code)]
 fn sub_parallel_scalar(
     chunk_idx: usize,
     chunk_size: usize,
@@ -1455,6 +1462,7 @@ unsafe fn fused_mul_add_parallel_neon(
 
 // Parallel scalar fallback for fused_mul_add
 #[cfg(feature = "parallel")]
+#[allow(dead_code)]
 fn fused_mul_add_parallel_scalar(
     chunk_idx: usize,
     chunk_size: usize,
@@ -1892,6 +1900,7 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
 fn tanh_simd(input: &[f32], output: &mut [f32]) {
     let two = f32x4::new([2.0; 4]);
     let one = f32x4::new([1.0; 4]);
@@ -1944,6 +1953,7 @@ fn tanh_simd(input: &[f32], output: &mut [f32]) {
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
 fn sigmoid_simd(input: &[f32], output: &mut [f32]) {
     let one = f32x4::new([1.0; 4]);
 
