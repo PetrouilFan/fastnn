@@ -59,10 +59,11 @@ def _patch_numpy(tensor_cls):
 
     tensor_cls.numpy = _new_numpy
 
-    def _new_getitem(self, idx):
-        return self.numpy()[idx]
-
-    tensor_cls.__getitem__ = _new_getitem
+    # NOTE: Removed __getitem__ patch as it returns numpy arrays and breaks autograd.
+    # Users should use .numpy()[idx] explicitly if they want numpy indexing.
+    # def _new_getitem(self, idx):
+    #     return self.numpy()[idx]
+    # tensor_cls.__getitem__ = _new_getitem
 
 
 _patch_numpy(_core.PyTensor)
@@ -110,6 +111,7 @@ tanh = _core.tanh
 silu = _core.silu
 softmax = _core.softmax
 log_softmax = _core.log_softmax
+embedding = _core.embedding
 argmax = _core.argmax
 argmin = _core.argmin
 sum = _core.sum
