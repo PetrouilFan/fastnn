@@ -5367,22 +5367,22 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let block_before = block / (strides_after as usize);
                     let block_after = block % (strides_after as usize);
 
-                    let mut max_val = f32::MIN;
+                    let mut sum_val = 0.0f32;
                     for d in 0..dim_size {
                         let linear_idx =
                             (block_before * dim_size + d) * strides_after as usize + block_after;
                         let idx = a_storage_offset + linear_idx;
                         if idx < a_numel {
-                            max_val = max_val.max(a_slice[idx]);
+                            sum_val += a_slice[idx];
                         }
                     }
-                    max_val
+                    sum_val
                 })
                 .collect();
 
-            for (i, &max_val) in results.iter().enumerate() {
+            for (i, &sum_val) in results.iter().enumerate() {
                 unsafe {
-                    *out_ptr.add(i) = max_val;
+                    *out_ptr.add(i) = sum_val;
                 }
             }
             return vec![output];
@@ -5393,19 +5393,19 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let block_before = block / (strides_after as usize);
         let block_after = block % (strides_after as usize);
 
-        let mut max_val = f32::MIN;
+        let mut sum_val = 0.0f32;
         for d in 0..dim_size {
             let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
             let idx = a_storage_offset + linear_idx;
             if idx < a_numel {
                 unsafe {
-                    max_val = max_val.max(*a_ptr.add(idx));
+                    sum_val += *a_ptr.add(idx);
                 }
             }
         }
 
         unsafe {
-            *out_ptr.add(block) = max_val;
+            *out_ptr.add(block) = sum_val;
         }
     }
 
