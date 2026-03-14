@@ -20,6 +20,9 @@ use std::arch::x86_64::*;
 use rayon::prelude::*;
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+use std::arch::aarch64::*;
+
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
 use wide::f32x4;
 
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
@@ -257,6 +260,58 @@ unsafe fn add_parallel_avx2(
     }
 }
 
+// Parallel SIMD kernels - NEON version
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[target_feature(enable = "neon")]
+unsafe fn add_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+        
+        let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
+        let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
+        let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
+        let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
+        
+        let r0 = vaddq_f32(a0, b0);
+        let r1 = vaddq_f32(a1, b1);
+        let r2 = vaddq_f32(a2, b2);
+        let r3 = vaddq_f32(a3, b3);
+        
+        vst1q_f32((out_usize + i * 4) as *mut f32, r0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
+        
+        i += 16;
+    }
+    while i + 4 <= end {
+        let a_vec = vld1q_f32((a_usize + i * 4) as *const f32);
+        let b_vec = vld1q_f32((b_usize + i * 4) as *const f32);
+        let result = vaddq_f32(a_vec, b_vec);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
 // Parallel SIMD kernels - AVX512 version
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
@@ -354,6 +409,58 @@ unsafe fn mul_parallel_avx2(
     }
 }
 
+// Mul parallel NEON kernel
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[target_feature(enable = "neon")]
+unsafe fn mul_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+        
+        let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
+        let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
+        let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
+        let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
+        
+        let r0 = vmulq_f32(a0, b0);
+        let r1 = vmulq_f32(a1, b1);
+        let r2 = vmulq_f32(a2, b2);
+        let r3 = vmulq_f32(a3, b3);
+        
+        vst1q_f32((out_usize + i * 4) as *mut f32, r0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
+        
+        i += 16;
+    }
+    while i + 4 <= end {
+        let a_vec = vld1q_f32((a_usize + i * 4) as *const f32);
+        let b_vec = vld1q_f32((b_usize + i * 4) as *const f32);
+        let result = vmulq_f32(a_vec, b_vec);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) * *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
 // Mul parallel AVX512 kernel
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
@@ -440,6 +547,52 @@ unsafe fn relu_parallel_avx2(
         let result = _mm256_max_ps(v, zero);
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
+    }
+    while i < end {
+        let val = *((a_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = val.max(0.0);
+        i += 1;
+    }
+}
+
+// Relu parallel NEON kernel
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[target_feature(enable = "neon")]
+unsafe fn relu_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let zero = vdupq_n_f32(0.0);
+    let mut i = start;
+    while i + 16 <= end {
+        let v0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let v1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let v2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let v3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+        
+        let r0 = vmaxq_f32(v0, zero);
+        let r1 = vmaxq_f32(v1, zero);
+        let r2 = vmaxq_f32(v2, zero);
+        let r3 = vmaxq_f32(v3, zero);
+        
+        vst1q_f32((out_usize + i * 4) as *mut f32, r0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
+        
+        i += 16;
+    }
+    while i + 4 <= end {
+        let v = vld1q_f32((a_usize + i * 4) as *const f32);
+        let result = vmaxq_f32(v, zero);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
     }
     while i < end {
         let val = *((a_usize + i * 4) as *const f32);
@@ -543,6 +696,58 @@ unsafe fn div_parallel_avx2(
     }
 }
 
+// Div parallel NEON kernel
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[target_feature(enable = "neon")]
+unsafe fn div_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+        
+        let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
+        let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
+        let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
+        let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
+        
+        let r0 = vdivq_f32(a0, b0);
+        let r1 = vdivq_f32(a1, b1);
+        let r2 = vdivq_f32(a2, b2);
+        let r3 = vdivq_f32(a3, b3);
+        
+        vst1q_f32((out_usize + i * 4) as *mut f32, r0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
+        
+        i += 16;
+    }
+    while i + 4 <= end {
+        let a_vec = vld1q_f32((a_usize + i * 4) as *const f32);
+        let b_vec = vld1q_f32((b_usize + i * 4) as *const f32);
+        let result = vdivq_f32(a_vec, b_vec);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) / *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
 // Div parallel AVX512 kernel
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
@@ -628,6 +833,51 @@ unsafe fn neg_parallel_avx2(
         let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = -*((a_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
+// Neg parallel NEON kernel
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[target_feature(enable = "neon")]
+unsafe fn neg_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+        
+        // vnegq_f32 flips the sign bit directly
+        let r0 = vnegq_f32(a0);
+        let r1 = vnegq_f32(a1);
+        let r2 = vnegq_f32(a2);
+        let r3 = vnegq_f32(a3);
+        
+        vst1q_f32((out_usize + i * 4) as *mut f32, r0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
+        
+        i += 16;
+    }
+    while i + 4 <= end {
+        let a_vec = vld1q_f32((a_usize + i * 4) as *const f32);
+        let result = vnegq_f32(a_vec);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
     }
     while i < end {
         *((out_usize + i * 4) as *mut f32) = -*((a_usize + i * 4) as *const f32);
@@ -723,6 +973,50 @@ unsafe fn abs_parallel_avx2(
     }
 }
 
+// Abs parallel NEON kernel
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[target_feature(enable = "neon")]
+unsafe fn abs_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+        
+        let r0 = vabsq_f32(a0);
+        let r1 = vabsq_f32(a1);
+        let r2 = vabsq_f32(a2);
+        let r3 = vabsq_f32(a3);
+        
+        vst1q_f32((out_usize + i * 4) as *mut f32, r0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
+        
+        i += 16;
+    }
+    while i + 4 <= end {
+        let a_vec = vld1q_f32((a_usize + i * 4) as *const f32);
+        let result = vabsq_f32(a_vec);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).abs();
+        i += 1;
+    }
+}
+
 // Abs parallel AVX512 kernel
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
@@ -798,6 +1092,58 @@ unsafe fn sub_parallel_avx2(
         let result = _mm256_sub_ps(a_vec, b_vec);
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) =
+            *((a_usize + i * 4) as *const f32) - *((b_usize + i * 4) as *const f32);
+        i += 1;
+    }
+}
+
+// Sub parallel NEON kernel
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[target_feature(enable = "neon")]
+unsafe fn sub_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+        
+        let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
+        let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
+        let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
+        let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
+        
+        let r0 = vsubq_f32(a0, b0);
+        let r1 = vsubq_f32(a1, b1);
+        let r2 = vsubq_f32(a2, b2);
+        let r3 = vsubq_f32(a3, b3);
+        
+        vst1q_f32((out_usize + i * 4) as *mut f32, r0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
+        
+        i += 16;
+    }
+    while i + 4 <= end {
+        let a_vec = vld1q_f32((a_usize + i * 4) as *const f32);
+        let b_vec = vld1q_f32((b_usize + i * 4) as *const f32);
+        let result = vsubq_f32(a_vec, b_vec);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
     }
     while i < end {
         *((out_usize + i * 4) as *mut f32) =
@@ -1035,6 +1381,68 @@ unsafe fn fused_mul_add_parallel_avx512(
         let result = _mm256_fmadd_ps(a_vec, b_vec, c_vec);
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
+    }
+    while i < end {
+        let a_val = *((a_usize + i * 4) as *const f32);
+        let b_val = *((b_usize + i * 4) as *const f32);
+        let c_val = *((c_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = a_val * b_val + c_val;
+        i += 1;
+    }
+}
+
+// Fused mul+add parallel NEON kernel
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[target_feature(enable = "neon")]
+unsafe fn fused_mul_add_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    b_usize: usize,
+    c_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        let a0 = vld1q_f32((a_usize + i * 4) as *const f32);
+        let a1 = vld1q_f32((a_usize + (i + 4) * 4) as *const f32);
+        let a2 = vld1q_f32((a_usize + (i + 8) * 4) as *const f32);
+        let a3 = vld1q_f32((a_usize + (i + 12) * 4) as *const f32);
+        
+        let b0 = vld1q_f32((b_usize + i * 4) as *const f32);
+        let b1 = vld1q_f32((b_usize + (i + 4) * 4) as *const f32);
+        let b2 = vld1q_f32((b_usize + (i + 8) * 4) as *const f32);
+        let b3 = vld1q_f32((b_usize + (i + 12) * 4) as *const f32);
+        
+        let c0 = vld1q_f32((c_usize + i * 4) as *const f32);
+        let c1 = vld1q_f32((c_usize + (i + 4) * 4) as *const f32);
+        let c2 = vld1q_f32((c_usize + (i + 8) * 4) as *const f32);
+        let c3 = vld1q_f32((c_usize + (i + 12) * 4) as *const f32);
+        
+        // vfmaq_f32 computes: c + a * b
+        let r0 = vfmaq_f32(c0, a0, b0);
+        let r1 = vfmaq_f32(c1, a1, b1);
+        let r2 = vfmaq_f32(c2, a2, b2);
+        let r3 = vfmaq_f32(c3, a3, b3);
+        
+        vst1q_f32((out_usize + i * 4) as *mut f32, r0);
+        vst1q_f32((out_usize + (i + 4) * 4) as *mut f32, r1);
+        vst1q_f32((out_usize + (i + 8) * 4) as *mut f32, r2);
+        vst1q_f32((out_usize + (i + 12) * 4) as *mut f32, r3);
+        
+        i += 16;
+    }
+    while i + 4 <= end {
+        let a_vec = vld1q_f32((a_usize + i * 4) as *const f32);
+        let b_vec = vld1q_f32((b_usize + i * 4) as *const f32);
+        let c_vec = vld1q_f32((c_usize + i * 4) as *const f32);
+        let result = vfmaq_f32(c_vec, a_vec, b_vec);
+        vst1q_f32((out_usize + i * 4) as *mut f32, result);
+        i += 4;
     }
     while i < end {
         let a_val = *((a_usize + i * 4) as *const f32);
@@ -1720,7 +2128,18 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
+                    add_parallel_neon(
+                        chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                    );
+                });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     add_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
@@ -1785,7 +2204,50 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     }
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                unsafe {
+                    let mut i = 0usize;
+                    while i + 16 <= numel {
+                        let a0 = vld1q_f32(a_ptr.add(i));
+                        let a1 = vld1q_f32(a_ptr.add(i + 4));
+                        let a2 = vld1q_f32(a_ptr.add(i + 8));
+                        let a3 = vld1q_f32(a_ptr.add(i + 12));
+                        
+                        let b0 = vld1q_f32(b_ptr.add(i));
+                        let b1 = vld1q_f32(b_ptr.add(i + 4));
+                        let b2 = vld1q_f32(b_ptr.add(i + 8));
+                        let b3 = vld1q_f32(b_ptr.add(i + 12));
+                        
+                        let r0 = vaddq_f32(a0, b0);
+                        let r1 = vaddq_f32(a1, b1);
+                        let r2 = vaddq_f32(a2, b2);
+                        let r3 = vaddq_f32(a3, b3);
+                        
+                        vst1q_f32(out_ptr.add(i), r0);
+                        vst1q_f32(out_ptr.add(i + 4), r1);
+                        vst1q_f32(out_ptr.add(i + 8), r2);
+                        vst1q_f32(out_ptr.add(i + 12), r3);
+                        
+                        i += 16;
+                    }
+                    while i + 4 <= numel {
+                        let a_vec = vld1q_f32(a_ptr.add(i));
+                        let b_vec = vld1q_f32(b_ptr.add(i));
+                        let result = vaddq_f32(a_vec, b_vec);
+                        vst1q_f32(out_ptr.add(i), result);
+                        i += 4;
+                    }
+                    while i < numel {
+                        *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                        i += 1;
+                    }
+                }
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
