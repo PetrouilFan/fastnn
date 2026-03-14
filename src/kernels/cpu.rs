@@ -90,7 +90,7 @@ unsafe fn fast_exp_avx2(x: __m256) -> __m256 {
     // Algorithm: exp(x) = 2^(x/ln2) = 2^floor(x/ln2) * 2^frac(x/ln2)
     // Then approximate 2^frac using a degree-5 polynomial.
     let ln2_rcp = _mm256_set1_ps(std::f32::consts::LOG2_E); // 1/ln(2)
-    let ln2_hi = _mm256_set1_ps(0.693_359_375_f32);
+    let ln2_hi = _mm256_set1_ps(0.693_359_4_f32);
     let ln2_lo = _mm256_set1_ps(-2.121_944_4e-4_f32);
     let half = _mm256_set1_ps(0.5_f32);
     let one = _mm256_set1_ps(1.0_f32);
@@ -99,10 +99,10 @@ unsafe fn fast_exp_avx2(x: __m256) -> __m256 {
 
     // Polynomial coefficients for 2^x on [0,1]: from Cephes
     let p0 = _mm256_set1_ps(1.987_569_3e-4_f32);
-    let p1 = _mm256_set1_ps(1.398_199_0e-3_f32);
+    let p1 = _mm256_set1_ps(1.398_199e-3_f32);
     let p2 = _mm256_set1_ps(8.333_452e-3_f32);
     let p3 = _mm256_set1_ps(4.166_579_5e-2_f32);
-    let p4 = _mm256_set1_ps(1.666_666_77e-1_f32);
+    let p4 = _mm256_set1_ps(1.666_666_7e-1_f32);
     let p5 = _mm256_set1_ps(5.0e-1_f32);
 
     let x = _mm256_min_ps(_mm256_max_ps(x, clamp_lo), clamp_hi);
