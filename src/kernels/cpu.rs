@@ -2634,7 +2634,16 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
+                    mul_parallel_neon(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+                });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     mul_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
@@ -2887,7 +2896,16 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
+                    div_parallel_neon(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+                });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     div_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
@@ -3858,7 +3876,16 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
+                    relu_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     relu_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
@@ -3988,7 +4015,18 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
+                    fused_add_relu_parallel_neon(
+                        chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                    );
+                });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     fused_add_relu_parallel_scalar(
@@ -4213,7 +4251,18 @@ fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
+                    fused_mul_add_parallel_neon(
+                        chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
+                    );
+                });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     fused_mul_add_parallel_scalar(
