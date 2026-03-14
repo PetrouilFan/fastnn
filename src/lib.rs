@@ -217,6 +217,10 @@ impl PyTensor {
         let sliced = self.inner.slice(0, idx as i64, (idx + 1) as i64, 1);
         PyTensor::from_tensor(sliced.squeeze(Some(0)))
     }
+
+    fn cpu(&self) -> PyTensor {
+        PyTensor::from_tensor(self.inner.to_cpu())
+    }
 }
 
 #[pyfunction]
