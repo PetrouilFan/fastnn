@@ -676,7 +676,7 @@ impl Tensor {
         let numel: i64 = sizes.iter().product();
         let nbytes = (numel * dtype.size() as i64) as usize;
         // Create uninitialized storage
-        let mut storage = Storage::new_cpu(dtype, nbytes);
+        let storage = Storage::new_cpu(dtype, nbytes);
         let storage = Arc::new(storage);
         // Use new_with_device for GPU tensors to track the target device
         match device {

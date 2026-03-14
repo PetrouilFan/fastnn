@@ -89,7 +89,7 @@ unsafe fn fast_exp_avx2(x: __m256) -> __m256 {
     // Cephes-style fast exp approximation accurate to ~1 ULP for f32
     // Algorithm: exp(x) = 2^(x/ln2) = 2^floor(x/ln2) * 2^frac(x/ln2)
     // Then approximate 2^frac using a degree-5 polynomial.
-    let ln2_rcp = _mm256_set1_ps(1.442_695_04_f32); // 1/ln(2)
+    let ln2_rcp = _mm256_set1_ps(std::f32::consts::LOG2_E); // 1/ln(2)
     let ln2_hi = _mm256_set1_ps(0.693_359_375_f32);
     let ln2_lo = _mm256_set1_ps(-2.121_944_4e-4_f32);
     let half = _mm256_set1_ps(0.5_f32);
@@ -157,7 +157,7 @@ unsafe fn fast_log_avx2(x: __m256) -> __m256 {
     // log2(x) = (exponent - 127) + log2(mantissa)
     // log2(mantissa) approximated with polynomial on [1,2]
     let one = _mm256_set1_ps(1.0f32);
-    let ln2 = _mm256_set1_ps(0.6931471805599453f32);
+    let ln2 = _mm256_set1_ps(std::f32::consts::LN_2);
     let clamp_hi = _mm256_set1_ps(1e30f32);
     let clamp_lo = _mm256_set1_ps(1e-30f32);
 
@@ -183,7 +183,7 @@ unsafe fn fast_log_avx2(x: __m256) -> __m256 {
     let z = _mm256_div_ps(y_minus_1, y_plus_1);
     let z2 = _mm256_mul_ps(z, z);
 
-    let a0 = _mm256_set1_ps(1.442695f32);
+    let a0 = _mm256_set1_ps(std::f32::consts::LOG2_E);
     let a1 = _mm256_set1_ps(0.721205f32);
     let a2 = _mm256_set1_ps(0.480898f32);
     let a3 = _mm256_set1_ps(0.252011f32);
@@ -1419,8 +1419,8 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
         let y = sqrt_2_over_pi * (x + coeff * x3);
         // Using exp to compute tanh
         let exp_y = y.exp();
-        let t = (exp_y - one.clone()) / (exp_y + one.clone());
-        let result = half * x * (one.clone() + t);
+        let t = (exp_y - one) / (exp_y + one);
+        let result = half * x * (one + t);
         *out_chunk = result.into();
     }
 
@@ -1470,8 +1470,8 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
         let y = sqrt_2_over_pi * (x + coeff * x3);
         // Using exp to compute tanh
         let exp_y = y.exp();
-        let t = (exp_y - one.clone()) / (exp_y + one.clone());
-        let result = half * x * (one.clone() + t);
+        let t = (exp_y - one) / (exp_y + one);
+        let result = half * x * (one + t);
         *out_chunk = result.into();
     }
 
@@ -1686,7 +1686,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -1884,7 +1884,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -2083,7 +2083,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -2293,7 +2293,7 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -2452,7 +2452,7 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -2583,7 +2583,7 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -2778,7 +2778,7 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_TRANSCENDENTAL;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -2880,7 +2880,7 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_TRANSCENDENTAL;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -3041,7 +3041,7 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_TRANSCENDENTAL;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -3143,7 +3143,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -3244,7 +3244,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -3436,7 +3436,7 @@ fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let b_usize = b_ptr as usize;
@@ -3702,7 +3702,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_TRANSCENDENTAL;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -3813,7 +3813,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_TRANSCENDENTAL;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -3923,7 +3923,7 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_TRANSCENDENTAL;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
@@ -4029,7 +4029,7 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             use rayon::prelude::*;
             let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = (numel + chunk_size - 1) / chunk_size;
+            let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
