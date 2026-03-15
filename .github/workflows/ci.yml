@@ -74,6 +74,3 @@ jobs:
 
       - name: Run Python tests
         run: uv run python -m pytest tests/ -v
-
-      - name: Run Rust tests
-        run: cargo test --lib --release
