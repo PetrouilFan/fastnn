@@ -42,11 +42,11 @@ impl AdamW {
 
         let step: Vec<u64> = vec![0; params.len()];
 
-        for (i, p) in params.iter().enumerate() {
-            if p.shape() == vec![32, 64, 64] {
-                panic!("AdamW::new: param {} has shape [32, 64, 64]", i);
-            }
-        }
+        // for (i, p) in params.iter().enumerate() {
+        //     if p.shape() == vec![32, 64, 64] {
+        //         panic!("AdamW::new: param {} has shape [32, 64, 64]", i);
+        //     }
+        // }
         AdamW {
             params,
             lr,
