@@ -1971,6 +1971,7 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
     let coeff = f32x8::new([0.044715; 8]);
     let half = f32x8::new([0.5; 8]);
     let one = f32x8::new([1.0; 8]);
+    let two = f32x8::new([2.0; 8]);
 
     let (chunks, remainder) = input.as_chunks::<8>();
     let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
@@ -1979,9 +1980,14 @@ fn gelu_simd(input: &[f32], output: &mut [f32]) {
         let x = f32x8::from(*in_chunk);
         let x3 = x * x * x;
         let y = sqrt_2_over_pi * (x + coeff * x3);
-        // Using exp to compute tanh
-        let exp_y = y.exp();
-        let t = (exp_y - one) / (exp_y + one);
+        // Compute tanh(y) stably to avoid inf/inf -> NaN
+        // tanh(z) = sign(z) * (1 - 2 / (exp(2|z|) + 1))
+        let abs_y = y.abs();
+        let exp_2abs_y = (abs_y + abs_y).exp(); // 2.0 * abs_y
+        let tanh_val = one - (two / (exp_2abs_y + one));
+        // Safe sign calculation avoiding div by zero (y / abs_y with epsilon)
+        let sign = y / (abs_y + 1e-9);
+        let t = tanh_val * sign;
         let result = half * x * (one + t);
         *out_chunk = result.into();
     }
