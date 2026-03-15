@@ -19,12 +19,12 @@ impl Linear {
             .map(|_| (rand::random::<f32>() - 0.5) * 2.0 * scale)
             .collect();
         let weight = Tensor::from_vec(weight_data, vec![in_features, out_features]);
-        weight.requires_grad_(true);
+        let weight = weight.requires_grad_(true);
 
         let bias = if bias {
             let bias_data: Vec<f32> = (0..out_features).map(|_| 0.0).collect();
             let b = Tensor::from_vec(bias_data, vec![out_features]);
-            b.requires_grad_(true);
+            let b = b.requires_grad_(true);
             Some(b)
         } else {
             None

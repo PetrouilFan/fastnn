@@ -66,7 +66,17 @@ def _patch_numpy(tensor_cls):
     # tensor_cls.__getitem__ = _new_getitem
 
 
+def _patch_backward(tensor_cls):
+    _original_backward = tensor_cls.backward
+
+    def _new_backward(self, grad=None):
+        return _original_backward(self)
+
+    tensor_cls.backward = _new_backward
+
+
 _patch_numpy(_core.PyTensor)
+_patch_backward(_core.PyTensor)
 
 zeros = _core.zeros
 ones = _core.ones

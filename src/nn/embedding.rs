@@ -27,6 +27,14 @@ impl Embedding {
             training: std::sync::atomic::AtomicBool::new(true),
         }
     }
+
+    pub fn parameters(&self) -> Vec<Tensor> {
+        vec![self.weight.clone()]
+    }
+
+    pub fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![("weight".to_string(), self.weight.clone())]
+    }
 }
 
 impl Module for Embedding {
