@@ -17,7 +17,7 @@ FF_DIM = 128
 NUM_CLASSES = 2
 DROPOUT_P = 0.1
 BATCH_SIZE = 32
-EPOCHS = 1  # Single epoch for quick test
+EPOCHS = 3  # 3 epochs to match test_transformer_training
 LR = 1e-3
 SEED = 42
 
@@ -74,33 +74,38 @@ def compute_accuracy(loader, model):
 
 
 print("=" * 60)
-print("Quick Transformer Test (1 epoch)")
+print(f"Quick Transformer Test ({EPOCHS} epochs)")
 print(f"  d_model={D_MODEL}, heads={NUM_HEADS}, layers={NUM_LAYERS}")
 print("=" * 60)
 
 model.train()
-epoch_loss = 0.0
 epoch_start = time.time()
+epoch_losses = []
 
-for x_batch, y_batch in train_loader:
-    logits = model(x_batch)
-    y_int = fnn.tensor(
-        [int(v) for v in y_batch.numpy().flatten()],
-        [len(y_batch.numpy().flatten())],
+for epoch in range(EPOCHS):
+    epoch_loss = 0.0
+    for x_batch, y_batch in train_loader:
+        logits = model(x_batch)
+        y_int = fnn.tensor(
+            [int(v) for v in y_batch.numpy().flatten()],
+            [len(y_batch.numpy().flatten())],
+        )
+        loss = fnn.cross_entropy_loss(logits, y_int)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+
+    avg_loss = epoch_loss / len(train_loader)
+    epoch_losses.append(avg_loss)
+    train_acc = compute_accuracy(train_loader, model)
+    print(
+        f"Epoch {epoch + 1}/{EPOCHS} | loss={avg_loss:.4f} | train_acc={train_acc:.4f}"
     )
-    loss = fnn.cross_entropy_loss(logits, y_int)
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    epoch_loss += loss.item()
 
-avg_loss = epoch_loss / len(train_loader)
 epoch_time = time.time() - epoch_start
-
+avg_loss = epoch_losses[-1]  # Use loss from last epoch
 train_acc = compute_accuracy(train_loader, model)
-print(
-    f"Epoch 1/{EPOCHS} | loss={avg_loss:.4f} | train_acc={train_acc:.4f} | time={epoch_time:.2f}s"
-)
 
 print("=" * 60)
 print("QUICK TEST COMPLETE")
