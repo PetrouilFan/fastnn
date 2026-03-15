@@ -131,8 +131,10 @@ impl PyTensor {
         self.inner.is_leaf()
     }
 
-    fn backward(&self) {
-        crate::autograd::backward(&self.inner, None);
+    #[pyo3(signature = (grad=None))]
+    fn backward(&self, grad: Option<PyTensor>) {
+        let grad_tensor = grad.map(|g| g.inner);
+        crate::autograd::backward(&self.inner, grad_tensor);
     }
 
     fn detach(&self) -> PyTensor {
