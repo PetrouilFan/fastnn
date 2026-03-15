@@ -818,7 +818,15 @@ fn _no_grad_exit() {
 }
 
 #[pyfunction]
-fn _set_seed(_seed: u64) {}
+fn _set_seed(seed: u64) {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    // Set the seed for the random number generator
+    // Note: This is a simple implementation that sets the seed for the current thread
+    // In a real implementation, you might want to use a thread-local RNG
+    let _rng = StdRng::seed_from_u64(seed);
+    // Note: We're not actually using the RNG anywhere yet, so this is a placeholder
+}
 
 #[cfg(feature = "parallel")]
 use rayon::ThreadPoolBuilder;
