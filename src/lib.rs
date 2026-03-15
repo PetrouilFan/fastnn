@@ -17,8 +17,7 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 use pyo3::PyAny;
 use rand::Rng;
-use std::sync::OnceLock;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
 use tensor::{Tensor, TensorImpl};
 
@@ -708,7 +707,25 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
             &Tensor::from_scalar(reduction_code),
         ],
     );
-    PyTensor::from_tensor(result[0].clone())
+    let output = result[0].clone();
+
+    // Set up autograd tracking
+    if autograd::is_grad_enabled() && pred.inner.requires_grad() {
+        let edges = autograd::make_edge(&pred.inner);
+        let backward = autograd::MSELossBackward::new(
+            pred.inner.clone(),
+            target.inner.clone(),
+            reduction,
+            edges,
+        );
+        let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+        meta.grad_fn = Some(std::sync::Arc::new(backward));
+        let mut output = output.clone();
+        Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+        PyTensor::from_tensor(output)
+    } else {
+        PyTensor::from_tensor(output)
+    }
 }
 
 #[pyfunction]
