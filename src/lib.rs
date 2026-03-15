@@ -581,14 +581,7 @@ fn silu(a: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    use dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
-    let result = dispatch(
-        "softmax",
-        dispatch_key,
-        &[&a.inner, &Tensor::from_scalar(dim as f32)],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(a.inner.softmax(dim))
 }
 
 #[pyfunction]
