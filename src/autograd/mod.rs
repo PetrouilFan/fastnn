@@ -1168,6 +1168,62 @@ impl Node for CrossEntropyBackward {
 }
 
 #[allow(dead_code)]
+pub struct MSELossBackward {
+    pub pred: Tensor,
+    pub target: Tensor,
+    pub reduction: String,
+    pub edges: Vec<Edge>,
+}
+
+impl MSELossBackward {
+    pub fn new(pred: Tensor, target: Tensor, reduction: String, edges: Vec<Edge>) -> Self {
+        MSELossBackward {
+            pred,
+            target,
+            reduction,
+            edges,
+        }
+    }
+}
+
+impl Node for MSELossBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs[0].clone().unwrap(); // This is d(loss)/d(mse_loss_output)
+        let diff = self.pred.sub(&self.target);
+
+        // The gradient of MSE loss with respect to predictions is 2 * (pred - target) / N
+        let grad_loss = match self.reduction.as_str() {
+            "mean" => {
+                let n = diff.numel() as f32;
+                diff.mul(&Tensor::from_scalar(2.0))
+                    .div(&Tensor::from_scalar(n))
+            }
+            "sum" => diff.mul(&Tensor::from_scalar(2.0)),
+            _ => diff.mul(&Tensor::from_scalar(2.0)),
+        };
+
+        // Multiply by the incoming gradient
+        vec![Some(grad.mul(&grad_loss))]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "MSELossBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.pred)
+    }
+}
+
+#[allow(dead_code)]
 pub struct ViewBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
