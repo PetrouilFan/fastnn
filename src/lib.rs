@@ -243,6 +243,10 @@ impl PyTensor {
     fn cpu(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.to_cpu())
     }
+
+    fn to_gpu(&self, device_id: usize) -> PyTensor {
+        PyTensor::from_tensor(self.inner.to_gpu(device_id))
+    }
 }
 
 #[pyfunction]
@@ -1408,7 +1412,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<PyTensor>()?;
 
-    m.add_function(wrap_pyfunction!(bucket_allreduce, m)?)?;
+    m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
 
     Ok(())
 }
