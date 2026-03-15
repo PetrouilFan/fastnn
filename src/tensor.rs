@@ -490,15 +490,22 @@ impl TensorImpl {
         self.version_counter.load(Ordering::SeqCst)
     }
 
+    #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ptr(),
             Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+                let location = std::panic::Location::caller();
+                panic!(
+                    "Cannot get CPU pointer from GPU storage. Use .to_cpu() first.\nCalled from: {}:{}",
+                    location.file(),
+                    location.line()
+                );
             }
         }
     }
 
+    #[track_caller]
     pub fn data_ptr_f32(&self) -> *const f32 {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
@@ -506,10 +513,13 @@ impl TensorImpl {
                 unsafe { ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
+                let location = std::panic::Location::caller();
                 panic!(
-                    "Cannot get CPU pointer from GPU storage. Device: {:?}, Storage: {:?}",
+                    "Cannot get CPU pointer from GPU storage. Device: {:?}, Storage: {:?}\nLocation: {}:{}",
                     self.device,
-                    self.storage.as_ref()
+                    self.storage.as_ref(),
+                    location.file(),
+                    location.line()
                 );
             }
         }
@@ -1130,10 +1140,12 @@ impl Tensor {
         }
     }
 
+    #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
         self.inner.data_ptr()
     }
 
+    #[track_caller]
     pub fn data_ptr_f32(&self) -> *const f32 {
         self.inner.data_ptr_f32()
     }
@@ -1264,7 +1276,12 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
+        // Determine dispatch key based on both tensors' devices
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
         let result = dispatch("add", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1341,7 +1358,11 @@ impl Tensor {
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
         let result = dispatch("sub", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1363,7 +1384,11 @@ impl Tensor {
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
         let result = dispatch("mul", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1385,7 +1410,11 @@ impl Tensor {
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
         let result = dispatch("div", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1407,7 +1436,11 @@ impl Tensor {
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
         let result = dispatch("matmul", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1613,7 +1646,18 @@ impl Tensor {
     }
 
     pub fn fused_linear_gelu(&self, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
+        let device = match (self.device(), weight.device()) {
+            (Device::Wgpu(id), _) => Device::Wgpu(id),
+            (_, Device::Wgpu(id)) => Device::Wgpu(id),
+            _ => {
+                if let Some(b) = bias {
+                    b.device()
+                } else {
+                    Device::Cpu
+                }
+            }
+        };
+        let dispatch_key = device_to_dispatch_key(device);
         let args: Vec<&Tensor> = match bias {
             Some(b) => vec![self, weight, b],
             None => vec![self, weight],

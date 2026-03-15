@@ -208,22 +208,31 @@ impl GpuContext {
         let size = std::mem::size_of_val(cpu_data);
         let buffer = self.acquire_buffer(size);
 
-        // Use temporary staging buffer (not persistent for now)
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("{}_staging", label)),
-            size: size as u64,
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
-            mapped_at_creation: true,
+        // Use persistent staging buffer for CPU-to-GPU transfers
+        let staging = self.ensure_staging_buffer_cpu_to_gpu(size);
+
+        // Map staging buffer for writing
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let staging_slice = staging.slice(..size as u64);
+        staging_slice.map_async(wgpu::MapMode::Write, move |result| {
+            let _ = sender.send(result);
         });
 
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .unwrap()
+            .expect("Failed to map staging buffer for write");
+
+        // Copy data to staging buffer
         {
-            let mut range = staging.slice(..).get_mapped_range_mut();
+            let mut range = staging_slice.get_mapped_range_mut();
             range.copy_from_slice(bytemuck::cast_slice(cpu_data));
         }
 
         staging.unmap();
 
-        // Copy to actual buffer
+        // Copy from staging buffer to actual GPU buffer
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -480,7 +489,6 @@ fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
         tensor.clone()
     };
 
-    // Check if the conversion worked
     let cpu_is_gpu = cpu_tensor.inner.is_gpu();
     let cpu_storage_type = match cpu_tensor.inner.storage.as_ref() {
         Storage::Cpu(_) => "Cpu",
@@ -1349,14 +1357,11 @@ fn run_reduction_kernel(
     // Create output buffer
     let output_buffer = ctx.create_buffer(output_numel * 4, "output");
 
-    // For now, implement a simple reduction that works for 2D tensors reducing along dim 1
-    // This matches the benchmark usage: sum(x, 1) for shape (1000, 1000) -> (1000,)
-    if ndim == 2 && dim == 1 {
-        // 2D tensor, reduce along dimension 1 (columns)
+    // For 2D tensors, optimize common reduction cases
+    if ndim == 2 {
         let m = input_shape[0] as usize;
         let n = input_shape[1] as usize;
 
-        // Create a simple shader for this specific case
         let reduce_shader = match op {
             "sum" => format!(
                 r#"

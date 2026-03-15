@@ -4287,11 +4287,9 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-
                 let zero = f32x4::ZERO;
                 let (chunks, remainder) = a_slice.as_chunks::<4>();
                 let (out_chunks, out_remainder) = out_slice.as_chunks_mut::<4>();
-
                 for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
                     let v = f32x4::from(*in_chunk);
                     let result = v.max(zero);
@@ -4707,27 +4705,22 @@ fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         let a1 = vld1q_f32(a_ptr.add(i + 4));
                         let a2 = vld1q_f32(a_ptr.add(i + 8));
                         let a3 = vld1q_f32(a_ptr.add(i + 12));
-
                         let b0 = vld1q_f32(b_ptr.add(i));
                         let b1 = vld1q_f32(b_ptr.add(i + 4));
                         let b2 = vld1q_f32(b_ptr.add(i + 8));
                         let b3 = vld1q_f32(b_ptr.add(i + 12));
-
                         let c0 = vld1q_f32(c_ptr.add(i));
                         let c1 = vld1q_f32(c_ptr.add(i + 4));
                         let c2 = vld1q_f32(c_ptr.add(i + 8));
                         let c3 = vld1q_f32(c_ptr.add(i + 12));
-
                         let r0 = vfmaq_f32(c0, a0, b0);
                         let r1 = vfmaq_f32(c1, a1, b1);
                         let r2 = vfmaq_f32(c2, a2, b2);
                         let r3 = vfmaq_f32(c3, a3, b3);
-
                         vst1q_f32(out_ptr.add(i), r0);
                         vst1q_f32(out_ptr.add(i + 4), r1);
                         vst1q_f32(out_ptr.add(i + 8), r2);
                         vst1q_f32(out_ptr.add(i + 12), r3);
-
                         i += 16;
                     }
                     while i + 4 <= numel {
