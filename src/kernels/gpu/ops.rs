@@ -10,10 +10,29 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_add(a, b, device_id);
+    // Check if either tensor is on GPU
+    let device_id = match (a.device(), b.device()) {
+        (Device::Wgpu(id), _) => Some(id),
+        (_, Device::Wgpu(id)) => Some(id),
+        _ => None,
+    };
+
+    if let Some(device_id) = device_id {
+        // Move tensors to the target GPU device if needed
+        let a_gpu = match a.device() {
+            Device::Cpu => a.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
+            _ => a.clone(),
+        };
+        let b_gpu = match b.device() {
+            Device::Cpu => b.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
+            _ => b.clone(),
+        };
+        return gpu::gpu_add(&a_gpu, &b_gpu, device_id);
     }
 
+    // Both are CPU
     let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
@@ -39,10 +58,29 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_sub(a, b, device_id);
+    // Check if either tensor is on GPU
+    let device_id = match (a.device(), b.device()) {
+        (Device::Wgpu(id), _) => Some(id),
+        (_, Device::Wgpu(id)) => Some(id),
+        _ => None,
+    };
+
+    if let Some(device_id) = device_id {
+        // Move tensors to the target GPU device if needed
+        let a_gpu = match a.device() {
+            Device::Cpu => a.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
+            _ => a.clone(),
+        };
+        let b_gpu = match b.device() {
+            Device::Cpu => b.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
+            _ => b.clone(),
+        };
+        return gpu::gpu_sub(&a_gpu, &b_gpu, device_id);
     }
 
+    // Both are CPU
     let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
@@ -68,10 +106,29 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_mul(a, b, device_id);
+    // Check if either tensor is on GPU
+    let device_id = match (a.device(), b.device()) {
+        (Device::Wgpu(id), _) => Some(id),
+        (_, Device::Wgpu(id)) => Some(id),
+        _ => None,
+    };
+
+    if let Some(device_id) = device_id {
+        // Move tensors to the target GPU device if needed
+        let a_gpu = match a.device() {
+            Device::Cpu => a.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
+            _ => a.clone(),
+        };
+        let b_gpu = match b.device() {
+            Device::Cpu => b.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
+            _ => b.clone(),
+        };
+        return gpu::gpu_mul(&a_gpu, &b_gpu, device_id);
     }
 
+    // Both are CPU
     let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
@@ -97,10 +154,29 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_div(a, b, device_id);
+    // Check if either tensor is on GPU
+    let device_id = match (a.device(), b.device()) {
+        (Device::Wgpu(id), _) => Some(id),
+        (_, Device::Wgpu(id)) => Some(id),
+        _ => None,
+    };
+
+    if let Some(device_id) = device_id {
+        // Move tensors to the target GPU device if needed
+        let a_gpu = match a.device() {
+            Device::Cpu => a.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
+            _ => a.clone(),
+        };
+        let b_gpu = match b.device() {
+            Device::Cpu => b.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
+            _ => b.clone(),
+        };
+        return gpu::gpu_div(&a_gpu, &b_gpu, device_id);
     }
 
+    // Both are CPU
     let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
@@ -433,8 +509,26 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_matmul(a, b, device_id);
+    // Check if either tensor is on GPU
+    let device_id = match (a.device(), b.device()) {
+        (Device::Wgpu(id), _) => Some(id),
+        (_, Device::Wgpu(id)) => Some(id),
+        _ => None,
+    };
+
+    if let Some(device_id) = device_id {
+        // Move tensors to the target GPU device if needed
+        let a_gpu = match a.device() {
+            Device::Cpu => a.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
+            _ => a.clone(),
+        };
+        let b_gpu = match b.device() {
+            Device::Cpu => b.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
+            _ => b.clone(),
+        };
+        return gpu::gpu_matmul(&a_gpu, &b_gpu, device_id);
     }
 
     let a_shape = a.shape();
