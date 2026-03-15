@@ -122,6 +122,9 @@ def benchmark():
             opt.step()
             opt.zero_grad()
 
+        # Adjust weights based on performance after each epoch
+        dp_model.adjust_weights_based_on_performance()
+
         print(f"  Epoch {e}: {time.time() - epoch_start:.3f}s - Loss: {avg_loss:.4f}")
 
     time_2gpu = time.time() - start_time
