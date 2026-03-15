@@ -8,7 +8,10 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         return;
     }
 
-    let grad_output = grad_output.unwrap_or_else(|| Tensor::from_scalar(1.0));
+    let grad_output = grad_output.unwrap_or_else(|| {
+        // Create scalar gradient on the same device as root
+        Tensor::full(vec![], 1.0, root.dtype(), root.device())
+    });
 
     // Map from tensor_id to accumulated gradient
     let mut grads: HashMap<usize, Tensor> = HashMap::new();
