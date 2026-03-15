@@ -1522,16 +1522,16 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pyfunction]
 #[allow(clippy::needless_range_loop)]
 fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
-    // Simple implementation: average gradients across replicas
+    // Optimized implementation: average gradients across replicas
     // param_groups is a list of parameter lists, one per replica
-
+    
     if param_groups.is_empty() {
         return Ok(());
     }
-
+    
     let num_replicas = param_groups.len();
     let num_params = param_groups[0].len();
-
+    
     // Check all replicas have the same number of parameters
     for group in &param_groups {
         if group.len() != num_params {
@@ -1540,38 +1540,56 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
             ));
         }
     }
-
+    
+    // Pre-allocate gradients vector to avoid repeated allocations
+    let mut gradients = Vec::with_capacity(num_replicas);
+    let num_replicas_tensor = crate::tensor::Tensor::from_scalar(num_replicas as f32);
+    
     // For each parameter index, average gradients across replicas
     for param_idx in 0..num_params {
+        // Clear gradients vector for reuse (keeps capacity)
+        gradients.clear();
+        
         // Collect gradients from all replicas
-        let mut gradients = Vec::new();
+        let mut all_have_grad = true;
         for replica_idx in 0..num_replicas {
             let param = &param_groups[replica_idx][param_idx];
             if let Some(grad) = param.grad() {
                 gradients.push(grad.inner.clone());
             } else {
                 // If any replica has no gradient, skip this parameter
+                all_have_grad = false;
                 break;
             }
         }
-
+        
+        if !all_have_grad {
+            continue;
+        }
+        
         // If we collected gradients from all replicas, average them
         if gradients.len() == num_replicas {
             // Compute average gradient: sum all gradients and divide by num_replicas
+            // Start with first gradient as base
             let mut avg_grad = gradients[0].clone();
+            
+            // Add remaining gradients (skip first since it's already in avg_grad)
             for i in 1..gradients.len() {
                 avg_grad = avg_grad.add(&gradients[i]);
             }
-            let num_replicas_tensor = crate::tensor::Tensor::from_scalar(num_replicas as f32);
+            
+            // Divide by number of replicas
             avg_grad = avg_grad.div(&num_replicas_tensor);
-
+            
             // Set the averaged gradient back to all parameters
+            // Create the PyTensor once and reuse for all replicas
+            let avg_grad_py = PyTensor::from_tensor(avg_grad.clone());
             for replica_idx in 0..num_replicas {
                 let param = &mut param_groups[replica_idx][param_idx];
-                param.set_grad(Some(PyTensor::from_tensor(avg_grad.clone())));
+                param.set_grad(Some(avg_grad_py.clone()));
             }
         }
     }
-
+    
     Ok(())
 }
