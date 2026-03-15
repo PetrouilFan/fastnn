@@ -133,6 +133,12 @@ impl PyTensor {
         crate::autograd::backward(&self.inner, None);
     }
 
+    #[pyo3(signature = (grad))]
+    fn set_grad(&mut self, grad: Option<PyTensor>) {
+        let grad_tensor = grad.map(|g| g.inner);
+        crate::tensor::TensorImpl::set_grad_for_tensor(&self.inner, grad_tensor);
+    }
+
     fn detach(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.detach())
     }
@@ -210,12 +216,28 @@ impl PyTensor {
         )
     }
 
-    fn __getitem__(&self, idx: usize) -> PyTensor {
-        // For 2D tensor [N, D], t[idx] returns [D] (the row)
-        // For 1D tensor [N], t[idx] returns scalar (0-dim)
-        // Implementation: slice(0, idx, idx+1, 1).squeeze(0)
-        let sliced = self.inner.slice(0, idx as i64, (idx + 1) as i64, 1);
-        PyTensor::from_tensor(sliced.squeeze(Some(0)))
+    fn __getitem__(&self, idx: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        use pyo3::types::PySlice;
+
+        // Check if idx is a slice
+        if let Ok(slice) = idx.downcast::<PySlice>() {
+            let length: isize = self.inner.shape()[0] as i64 as isize;
+            let indices = slice.indices(length)?;
+            // For now, only support slicing along dimension 0
+            let start = indices.start as i64;
+            let stop = indices.stop as i64;
+            let step = indices.step as i64;
+            let sliced = self.inner.slice(0, start, stop, step);
+            Ok(PyTensor::from_tensor(sliced))
+        } else {
+            // Assume it's an integer index
+            let idx_val: usize = idx.extract()?;
+            // For 2D tensor [N, D], t[idx] returns [D] (the row)
+            // For 1D tensor [N], t[idx] returns scalar (0-dim)
+            // Implementation: slice(0, idx, idx+1, 1).squeeze(0)
+            let sliced = self.inner.slice(0, idx_val as i64, (idx_val + 1) as i64, 1);
+            Ok(PyTensor::from_tensor(sliced.squeeze(Some(0))))
+        }
     }
 
     fn cpu(&self) -> PyTensor {
@@ -864,6 +886,12 @@ impl Linear {
     fn is_training(&self) -> bool {
         self.inner.is_training()
     }
+
+    #[pyo3(signature = (device_id))]
+    fn to_gpu(&mut self, device_id: usize) {
+        self.inner.weight = self.inner.weight.to_gpu(device_id);
+        self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
+    }
 }
 
 #[pyclass]
@@ -930,6 +958,12 @@ impl Conv2d {
 
     fn eval(&self) {
         self.inner.eval_mode();
+    }
+
+    #[pyo3(signature = (device_id))]
+    fn to_gpu(&mut self, device_id: usize) {
+        self.inner.weight = self.inner.weight.to_gpu(device_id);
+        self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
     }
 }
 
@@ -1373,6 +1407,64 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAdamW>()?;
 
     m.add_class::<PyTensor>()?;
+
+    m.add_function(wrap_pyfunction!(bucket_allreduce, m)?)?;
+
+    Ok(())
+}
+
+#[pyfunction]
+fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
+    // Simple implementation: average gradients across replicas
+    // param_groups is a list of parameter lists, one per replica
+
+    if param_groups.is_empty() {
+        return Ok(());
+    }
+
+    let num_replicas = param_groups.len();
+    let num_params = param_groups[0].len();
+
+    // Check all replicas have the same number of parameters
+    for group in &param_groups {
+        if group.len() != num_params {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "All replicas must have the same number of parameters",
+            ));
+        }
+    }
+
+    // For each parameter index, average gradients across replicas
+    for param_idx in 0..num_params {
+        // Collect gradients from all replicas
+        let mut gradients = Vec::new();
+        for replica_idx in 0..num_replicas {
+            let param = &param_groups[replica_idx][param_idx];
+            if let Some(grad) = param.grad() {
+                gradients.push(grad.inner.clone());
+            } else {
+                // If any replica has no gradient, skip this parameter
+                break;
+            }
+        }
+
+        // If we collected gradients from all replicas, average them
+        if gradients.len() == num_replicas {
+            // Compute average gradient: sum all gradients and divide by num_replicas
+            let mut avg_grad = gradients[0].clone();
+            for i in 1..gradients.len() {
+                avg_grad = avg_grad.add(&gradients[i]);
+            }
+            let num_replicas_tensor = crate::tensor::Tensor::from_scalar(num_replicas as f32);
+            avg_grad = avg_grad.div(&num_replicas_tensor);
+
+            // Set the averaged gradient back to all parameters
+            for replica_idx in 0..num_replicas {
+                let param = &mut param_groups[replica_idx][param_idx];
+                param.set_grad(Some(PyTensor::from_tensor(avg_grad.clone())));
+            }
+        }
+    }
 
     Ok(())
 }
