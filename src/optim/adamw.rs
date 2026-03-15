@@ -68,7 +68,7 @@ impl Optimizer for AdamW {
         let beta2 = self.betas.1;
 
         // Debug: print all param shapes
-        if self.step.len() > 0 && self.step[0] >= 60 {
+        if !self.step.is_empty() && self.step[0] >= 60 {
             panic!(
                 "Debug: step >= 60. Param shapes: {:?}",
                 self.params.iter().map(|p| p.shape()).collect::<Vec<_>>()

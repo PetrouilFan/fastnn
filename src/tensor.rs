@@ -1161,7 +1161,20 @@ impl Tensor {
     /// Move tensor to CPU memory
     pub fn to_cpu(&self) -> Tensor {
         match self.inner.storage.as_ref() {
-            Storage::Cpu(_) => self.clone(),
+            Storage::Cpu(_) => {
+                // Storage is already CPU, but device might be GPU (lazy GPU tensor)
+                // Return a clone with CPU device
+                Tensor::new(TensorImpl {
+                    storage: self.inner.storage.clone(),
+                    sizes: self.inner.sizes.clone(),
+                    strides: self.inner.strides.clone(),
+                    storage_offset: self.inner.storage_offset,
+                    dtype: self.inner.dtype,
+                    device: Device::Cpu,
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: self.inner.autograd_meta.clone(),
+                })
+            }
             Storage::Wgpu(gpu) => {
                 // Read GPU buffer to CPU
                 use crate::kernels::gpu::get_context;
@@ -1278,8 +1291,8 @@ impl Tensor {
         // For GPU tensors, we need to use dispatch-based addition
         if self.inner.is_gpu() || other.inner.is_gpu() {
             // Perform addition using the dispatch system
-            // Explicitly use &*self to get &Tensor, which resolves to the inherent method
-            let result = (&*self).add(other);
+            // Use &*self to get &Tensor from &mut Tensor
+            let result = (self as &Tensor).add(other);
             // Update self with the result
             *self = result;
             return self;
