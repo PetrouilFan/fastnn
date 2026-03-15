@@ -45,19 +45,19 @@ impl TransformerBlock {
     }
 
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        let residual = x.clone();
-        let x_norm = self.norm1.forward(x);
-        let attn_output = self.self_attn.forward(&x_norm);
-        let x = attn_output.add(&residual);
+        // Layer 1: Self-attention with residual connection
+        let x_norm1 = self.norm1.forward(x);
+        let attn_output = self.self_attn.forward(&x_norm1);
+        let x = attn_output.add(x); // No clone needed, just use original x
 
-        let residual = x.clone();
+        // Layer 2: Feed-forward with residual connection (fused linear+gelu)
         let x_norm2 = self.norm2.forward(&x);
-        let mut ff_out = self.ff1.forward(&x_norm2);
 
-        ff_out = ff_out.gelu();
+        // Use fused linear+gelu for better performance
+        let ff_hidden = x_norm2.fused_linear_gelu(&self.ff1.weight, self.ff1.bias.as_ref());
+        let ff_out = self.ff2.forward(&ff_hidden);
 
-        ff_out = self.ff2.forward(&ff_out);
-        ff_out.add(&residual)
+        ff_out.add(&x)
     }
 }
 

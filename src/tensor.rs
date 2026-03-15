@@ -1466,6 +1466,16 @@ impl Tensor {
         }
     }
 
+    pub fn fused_linear_gelu(&self, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let args: Vec<&Tensor> = match bias {
+            Some(b) => vec![self, weight, b],
+            None => vec![self, weight],
+        };
+        let result = dispatch("fused_linear_gelu", dispatch_key, &args);
+        result[0].clone()
+    }
+
     pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch(
