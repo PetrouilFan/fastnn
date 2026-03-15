@@ -6,7 +6,6 @@ Vocab: 100 tokens (0=PAD, 1=CLS, 2-50=positive-leaning, 51-99=negative-leaning)
 """
 
 import numpy as np
-import json
 
 np.random.seed(42)
 
@@ -65,7 +64,7 @@ np.save("tests/y_train.npy", y_train)
 np.save("tests/X_test.npy", X_test)
 np.save("tests/y_test.npy", y_test)
 
-print(f"Dataset generated:")
+print("Dataset generated:")
 print(
     f"  Train: {X_train.shape}, labels: {y_train.shape}, "
     f"pos={y_train.sum()}, neg={(1 - y_train).sum()}"
