@@ -52,9 +52,6 @@ def benchmark():
 
     # Large model to ensure compute bound (not PCIe bound)
     print("Building model...")
-    model = fnn.models.MLP(
-        input_dim=features, hidden_dims=[2048, 2048, 1024], output_dim=classes
-    )
 
     epochs = 5
 
