@@ -5,6 +5,7 @@
 )]
 #![allow(unused_imports)]
 
+use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{matmul_blas, MIN_BLAS_SIZE};
@@ -3045,7 +3046,11 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
     let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 2048 {
+    // Check if broadcasting is needed - only use parallel path when shapes are equal
+    let needs_broadcast = a_shape != b_shape;
+    let use_parallel = a.is_contiguous() && b.is_contiguous() && numel > 2048 && !needs_broadcast;
+
+    if use_parallel {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -5379,7 +5384,13 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut output_shape: Vec<i64> = vec![];
     if a_shape.len() > 2 {
         for i in 0..a_shape.len() - 2 {
-            output_shape.push(a_shape[i].max(b_shape[i]));
+            // If b has matching dimensions, use max (broadcasting)
+            // If b is 2D (no batch dims), just use a's batch dims
+            if b_shape.len() > 2 && i < b_shape.len() - 2 {
+                output_shape.push(a_shape[i].max(b_shape[i]));
+            } else {
+                output_shape.push(a_shape[i]);
+            }
         }
     }
     output_shape.push(m as i64);
@@ -6810,12 +6821,26 @@ fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let sum_result = sum_kernel(args);
     let mut sum_tensor = sum_result[0].clone();
 
-    if keepdim {
+    // sum_kernel already handles keepdim correctly
+    // If keepdim is true, sum_tensor has shape [..., 1, ...]
+    // If keepdim is false, sum_tensor has shape with the dimension removed
+    // We need to unsqueeze for broadcasting with the input, then squeeze back if needed
+    let needs_unsqueeze = !keepdim;
+    if needs_unsqueeze {
         sum_tensor = sum_tensor.unsqueeze(dim);
     }
 
     let scale = Tensor::full(vec![], 1.0 / dim_size, DType::F32, Device::Cpu);
-    vec![sum_tensor * scale]
+    let result = sum_tensor * scale;
+
+    // If we unsqueezed for broadcasting, remove it now
+    let result = if needs_unsqueeze {
+        result.squeeze(Some(dim))
+    } else {
+        result
+    };
+
+    vec![result]
 }
 
 fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -6914,7 +6939,8 @@ fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         &Tensor::from_scalar(1.0),
     ])[0]
         .clone();
-    let max_exp = x.sub(&max_vals.clone().unsqueeze(dim)).exp();
+    // max_kernel with keepdim=true already keeps the dimension, so no need to unsqueeze
+    let max_exp = x.sub(&max_vals).exp();
     let sum_exp = max_exp.sum(dim as i32, true);
 
     vec![max_exp.div(&sum_exp)]
@@ -6927,7 +6953,7 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
     let x_ptr = x.data_ptr() as *const f32;
     let numel = x.numel() as usize;
-    let _num_rows = numel / dim_size;
+    let num_rows = numel / dim_size;
 
     let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
@@ -6964,6 +6990,7 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                             for j in 0..8 {
                                 max_val = max_val.max(max_arr[j]);
                             }
+                            // Handle remaining elements
                             for j in i..dim_size {
                                 max_val = max_val.max(x_row[j]);
                             }
@@ -7164,7 +7191,8 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let target_class = targets_data[b] as usize;
             let class_logit = logits_data[base_idx + target_class];
 
-            losses[b] = log_sum_exp - class_logit;
+            // Add max_logit back (subtracted before exp for numerical stability)
+            losses[b] = log_sum_exp + max_logit - class_logit;
             total_loss += losses[b];
         }
 
@@ -7187,7 +7215,8 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let target_class = targets_data[b] as usize;
             let class_logit = logits_data[base_idx + target_class];
 
-            losses[b] = log_sum_exp - class_logit;
+            // Add max_logit back (subtracted before exp for numerical stability)
+            losses[b] = log_sum_exp + max_logit - class_logit;
             total_loss += losses[b];
         }
     }
@@ -7947,6 +7976,7 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
 
     let mut normalized = x.sub(&mean).div(&std);
+    let x_hat = normalized.clone(); // Store x_hat before scaling/shifting
 
     if let Some(w) = weight {
         normalized = normalized.mul(w);
@@ -7955,7 +7985,8 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         normalized = normalized.add(b);
     }
 
-    vec![normalized]
+    // Return: output, mean, variance, x_hat (normalized before scaling/shifting)
+    vec![normalized, mean, var, x_hat]
 }
 
 fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -8045,7 +8076,85 @@ fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
 
+    // Set up gradient tracking for embedding
+    if weight.requires_grad() {
+        let backward = EmbeddingBackward::new(weight.clone(), indices.clone());
+        let mut meta = AutogradMeta::new_non_leaf(true);
+        meta.grad_fn = Some(Arc::new(backward));
+        Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+    }
+
     vec![output]
+}
+
+pub struct EmbeddingBackward {
+    pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
+}
+
+impl EmbeddingBackward {
+    pub fn new(weight: Tensor, indices: Tensor) -> Self {
+        EmbeddingBackward {
+            inputs: vec![weight, indices],
+            edges: vec![],
+        }
+    }
+}
+
+impl Node for EmbeddingBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs[0].clone().unwrap();
+        let weight = &self.inputs[0];
+        let indices = &self.inputs[1];
+
+        let weight_shape = weight.shape().clone();
+        let embedding_dim = weight_shape[1];
+        let batch_size = grad_output.shape()[0];
+
+        // Create gradient for weight (same shape as weight)
+        let mut weight_grad = Tensor::zeros(weight_shape.clone(), weight.dtype(), weight.device());
+
+        // Accumulate gradients from output
+        let grad_output_ptr = grad_output.data_ptr() as *const f32;
+        let indices_ptr = indices.data_ptr() as *const f32;
+        let weight_grad_inner = Arc::make_mut(&mut weight_grad.inner);
+        let weight_grad_storage = Arc::make_mut(&mut weight_grad_inner.storage);
+        let Storage::Cpu(cpu_storage) = weight_grad_storage else {
+            panic!("Expected CPU storage");
+        };
+        let weight_grad_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+        for i in 0..batch_size as usize {
+            let idx = unsafe { *indices_ptr.add(i) } as usize;
+            if idx < weight_shape[0] as usize {
+                for j in 0..embedding_dim as usize {
+                    let w_idx = idx * embedding_dim as usize + j;
+                    let o_idx = i * embedding_dim as usize + j;
+                    unsafe {
+                        *weight_grad_ptr.add(w_idx) += *grad_output_ptr.add(o_idx);
+                    }
+                }
+            }
+        }
+
+        vec![Some(weight_grad)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "EmbeddingBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        &self.inputs
+    }
 }
 
 fn zeros_kernel(args: &[&Tensor]) -> Vec<Tensor> {
