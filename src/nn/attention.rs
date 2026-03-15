@@ -44,6 +44,12 @@ impl MultiHeadAttention {
     }
 
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        if x.ndim() < 3 {
+            panic!(
+                "MultiHeadAttention expected input with at least 3 dimensions (batch, seq_len, d_model), got shape {:?}",
+                x.shape()
+            );
+        }
         let batch = x.shape()[0];
         let seq_len = x.shape()[1];
 

@@ -50,13 +50,9 @@ impl TransformerBlock {
         let attn_output = self.self_attn.forward(&x_norm1);
         let x = attn_output.add(x); // No clone needed, just use original x
 
-        // Layer 2: Feed-forward with residual connection (fused linear+gelu)
+        // Layer 2: Feed-forward with residual connection
         let x_norm2 = self.norm2.forward(&x);
-
-        // Use fused linear+gelu for better performance
-        let ff_hidden = x_norm2.fused_linear_gelu(&self.ff1.weight, self.ff1.bias.as_ref());
-        let ff_out = self.ff2.forward(&ff_hidden);
-
+        let ff_out = self.ff2.forward(&self.ff1.forward(&x_norm2).gelu());
         ff_out.add(&x)
     }
 }
@@ -180,8 +176,24 @@ impl TransformerEncoder {
 
     pub fn forward(&self, token_ids: &Tensor) -> Tensor {
         let shape = token_ids.shape();
+        if shape.len() < 2 {
+            panic!(
+                "TransformerEncoder expected input with at least 2 dimensions (batch, seq_len), got shape {:?}",
+                shape
+            );
+        }
         let batch = shape[0];
         let seq_len = shape[1];
+
+        if seq_len > self.max_seq_len {
+            panic!(
+                "Sequence length {} exceeds maximum sequence length {}",
+                seq_len, self.max_seq_len
+            );
+        }
+        if seq_len == 0 {
+            panic!("Sequence length cannot be 0");
+        }
 
         let x = self.embedding.forward(token_ids);
 
