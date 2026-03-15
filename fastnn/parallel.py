@@ -1,8 +1,8 @@
 """Distributed Data Parallel (DDP) implementation for fastnn."""
 
-import fastnn as fnn
+import fastnn._core as _core
 import threading
-from typing import List, Optional, Union
+from typing import List, Optional
 
 
 class DataParallel:
@@ -51,14 +51,9 @@ class DataParallel:
         self.replicas = models
         self.epoch_times = [0.0] * len(device_ids)  # Track performance per GPU
 
-        # Default weights: proportional to GPU memory capacity
-        # 1080 Ti ~ 11GB, 1650 ~ 4GB → [0.7, 0.3]
+        # Default weights: equal split for unknown configurations
         if weights is None:
-            if len(device_ids) == 2:
-                self.weights = [0.7, 0.3]  # Weighted by memory/ability
-            else:
-                # Even split for other configurations
-                self.weights = [1.0 / len(device_ids)] * len(device_ids)
+            self.weights = [1.0 / len(device_ids)] * len(device_ids)
         else:
             if len(weights) != len(device_ids):
                 raise ValueError("weights must have same length as device_ids")
@@ -155,7 +150,7 @@ class DataParallel:
         2. Averages them
         3. Pushes back to all devices
         """
-        fnn._core.bucket_allreduce(self.param_groups)
+        _core.bucket_allreduce(self.param_groups)
 
     def adjust_weights_based_on_performance(self):
         """Adjust workload weights based on measured GPU performance.
