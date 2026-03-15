@@ -1484,7 +1484,7 @@ impl Node for SliceBackward {
                 let input_strides = &self.input.inner.strides;
 
                 // Compute the sliced shape
-                let sliced_size = ((self.end - self.start) / self.step) + 1;
+                let sliced_size = (self.end - self.start + self.step - 1) / self.step;
                 let mut grad_shape = input_shape.clone();
                 grad_shape[self.dim] = sliced_size;
 
