@@ -1,5 +1,5 @@
 use crate::autograd::{Edge, Node};
-use crate::tensor::{Tensor, TensorImpl};
+use crate::tensor::Tensor;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
