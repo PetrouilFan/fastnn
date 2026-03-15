@@ -1694,18 +1694,21 @@ unsafe fn sigmoid_parallel_neon(
 
     let one = f32x4::new([1.0; 4]);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
         let neg_x = -x;
         let exp_neg_x = neg_x.exp();
         let result = one / (one + exp_neg_x);
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
         i += 4;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
-        *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+        let x = *a_ptr.add(i);
+        *out_ptr.add(i) = 1.0 / (1.0 + (-x).exp());
         i += 1;
     }
 }
@@ -1854,9 +1857,12 @@ unsafe fn tanh_parallel_neon(
     let clamp_lo = f32x4::new([-10.0; 4]);
     let clamp_hi = f32x4::new([10.0; 4]);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
 
         // Clamp values to prevent overflow in exp
         let x_clamped = x.max(clamp_lo).min(clamp_hi);
@@ -1865,13 +1871,13 @@ unsafe fn tanh_parallel_neon(
         let exp_2x = (two * x_clamped).exp();
         let result = (exp_2x - one) / (exp_2x + one);
 
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
         i += 4;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
+        let x = *a_ptr.add(i);
         let exp_2x = (2.0 * x).exp();
-        *((out_usize + i * 4) as *mut f32) = (exp_2x - 1.0) / (exp_2x + 1.0);
+        *out_ptr.add(i) = (exp_2x - 1.0) / (exp_2x + 1.0);
         i += 1;
     }
 }
@@ -3612,15 +3618,18 @@ unsafe fn exp_parallel_neon(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
         let result = x.exp();
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
         i += 4;
     }
     while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).exp();
+        *out_ptr.add(i) = (*a_ptr.add(i)).ln();
         i += 1;
     }
 }
@@ -3697,11 +3706,14 @@ unsafe fn log_parallel_neon(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
         let result = x.ln();
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
         i += 4;
     }
     while i < end {
@@ -4026,15 +4038,18 @@ unsafe fn sqrt_parallel_neon(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
         let result = x.sqrt();
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
         i += 4;
     }
     while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).sqrt();
+        *out_ptr.add(i) = (*a_ptr.add(i)).sqrt();
         i += 1;
     }
 }
@@ -4879,9 +4894,12 @@ unsafe fn gelu_parallel_neon(
     let one = f32x4::new([1.0; 4]);
     let two = f32x4::new([2.0; 4]);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
 
         // Compute x^3
         let x2 = x * x;
@@ -4897,14 +4915,14 @@ unsafe fn gelu_parallel_neon(
         // Compute gelu = 0.5 * x * (1 + tanh)
         let result = half * x * (one + tanh);
 
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
         i += 4;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
+        let x = *a_ptr.add(i);
         let x3 = x * x * x;
         let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
-        *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+        *out_ptr.add(i) = 0.5 * x * (1.0 + t);
         i += 1;
     }
 }
