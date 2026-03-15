@@ -1,5 +1,4 @@
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
-use crate::storage::Storage;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
@@ -115,31 +114,19 @@ impl Optimizer for Adam {
             let lr = Tensor::from_scalar(self.lr as f32);
             let step_size = lr.mul(&update);
 
-            // Apply the update to parameters in-place using raw pointer
-            let ptr = Arc::as_ptr(&param.inner) as *mut crate::tensor::TensorImpl;
-            let numel = param.numel() as usize;
-            unsafe {
-                let inner = &mut *ptr;
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    panic!("Optimizer only supports CPU tensors");
-                };
-                let data_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
-                let update_slice = step_size.as_f32_slice();
-                for (j, update_val) in update_slice.iter().take(numel).enumerate() {
-                    let param_val = *data_ptr.add(j);
-                    *data_ptr.add(j) = param_val - update_val;
-                }
-            }
+            // Apply the update to parameters in-place
+            // param = param - step_size
+            let negative_step = step_size.neg();
+            param.add_(&negative_step);
         }
     }
 
     fn zero_grad(&mut self) {
-        for param in &self.params {
-            let ptr = Arc::as_ptr(&param.inner) as *mut crate::tensor::TensorImpl;
-            unsafe {
-                if let Some(meta) = (*ptr).autograd_meta.as_mut() {
-                    meta.grad = None;
+        for param in &mut self.params {
+            let inner = Arc::make_mut(&mut param.inner);
+            if let Some(meta) = &mut inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
                 }
             }
         }
