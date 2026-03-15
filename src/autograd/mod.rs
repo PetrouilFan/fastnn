@@ -456,7 +456,7 @@ impl Node for MatmulBackward {
         // sum over the batch dimensions
         if b.ndim() < grad_b.ndim() {
             let diff = grad_b.ndim() as i32 - b.ndim() as i32;
-            for i in 0..diff as usize {
+            for _ in 0..diff as usize {
                 grad_b = grad_b.sum(0, false);
             }
         }
