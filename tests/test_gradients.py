@@ -418,13 +418,21 @@ def test_softmax_grad():
     x = fnn.tensor([[1.0, 2.0, 3.0]], [1, 3])
     x.requires_grad_(True)
     y = fnn.softmax(x, -1)
-    y.sum().backward()
+    # Use a different loss that will have non-zero gradient
+    # sum(x * softmax(x)) has non-zero gradient
+    loss = (x * y).sum()
+    loss.backward()
 
-    # Simple check: gradient should not be all zeros
-    # When we do sum(softmax(x)), the gradient should flow through
+    # Check that gradient exists and is not all zeros
     assert x.grad is not None
     grad_val = x.grad.numpy()
     assert not np.allclose(grad_val, 0), "Softmax gradient is all zeros"
+
+    # Verify the gradient is correct
+    # For sum(x * softmax(x)), the gradient should be:
+    # d(sum(x_i * softmax_i))/dx_j = softmax_j + x_j * softmax_j * (1 - softmax_j) - sum_i x_i * softmax_i * softmax_j
+    # This is more complex, so we just check it's not all zeros
+    print(f"Softmax gradient: {grad_val}")
 
 
 def test_layer_norm_grad():
