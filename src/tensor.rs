@@ -106,7 +106,20 @@ impl TensorImpl {
         // If not contiguous, we need to copy the data to a new contiguous layout
         let data = self.as_f32_slice().to_vec();
         let sizes = self.sizes.clone();
-        Tensor::from_vec(data, sizes.to_vec())
+        let mut new_tensor = Tensor::from_vec(data, sizes.to_vec());
+
+        // Preserve autograd metadata but without grad_fn (contiguous creates a copy)
+        if let Some(meta) = &self.autograd_meta {
+            let meta_lock = meta.lock().unwrap();
+            if meta_lock.requires_grad {
+                let new_meta = AutogradMeta::new_non_leaf(true);
+                // Don't clone grad_fn - contiguous creates a copy, so it's a leaf
+                Arc::make_mut(&mut new_tensor.inner).autograd_meta =
+                    Some(Arc::new(std::sync::Mutex::new(new_meta)));
+            }
+        }
+
+        new_tensor
     }
 
     pub fn view(&self, sizes: SmallVec<[i64; 8]>) -> TensorImpl {
@@ -277,7 +290,7 @@ impl TensorImpl {
                     dtype: self.dtype,
                     device: self.device,
                     version_counter: Arc::clone(&self.version_counter),
-                    autograd_meta: self.autograd_meta.clone(),
+                    autograd_meta: None,
                 }
                 .into()
             }
@@ -304,7 +317,7 @@ impl TensorImpl {
                     dtype: self.dtype,
                     device: self.device,
                     version_counter: Arc::clone(&self.version_counter),
-                    autograd_meta: self.autograd_meta.clone(),
+                    autograd_meta: None,
                 }
                 .into()
             }
@@ -384,7 +397,7 @@ impl TensorImpl {
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: self.autograd_meta.clone(),
+            autograd_meta: None,
         }
         .into()
     }
@@ -493,7 +506,11 @@ impl TensorImpl {
                 unsafe { ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+                panic!(
+                    "Cannot get CPU pointer from GPU storage. Device: {:?}, Storage: {:?}",
+                    self.device,
+                    self.storage.as_ref()
+                );
             }
         }
     }
@@ -538,12 +555,12 @@ impl TensorImpl {
 
     /// Check if storage is on GPU
     pub fn is_gpu(&self) -> bool {
-        matches!(self.storage.as_ref(), Storage::Wgpu(_))
+        matches!(self.device, Device::Wgpu(_))
     }
 
     /// Check if storage is on CPU
     pub fn is_cpu(&self) -> bool {
-        matches!(self.storage.as_ref(), Storage::Cpu(_))
+        matches!(self.device, Device::Cpu)
     }
 
     /// Get GPU buffer reference if on GPU
@@ -670,13 +687,37 @@ impl Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let numel: i64 = sizes.iter().product();
         let nbytes = (numel * dtype.size() as i64) as usize;
-        // Create CPU storage first (GPU buffers are created on-demand)
-        let storage = Arc::new(Storage::new_cpu(dtype, nbytes));
-        // Use new_with_device for GPU tensors to track the target device
+
         match device {
-            Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
-            Device::Wgpu(_) => {
-                Tensor::new(TensorImpl::new_with_device(storage, sizes, device, dtype))
+            Device::Cpu => {
+                let storage = Arc::new(Storage::new_cpu(dtype, nbytes));
+                Tensor::new(TensorImpl::new(storage, sizes, dtype))
+            }
+            Device::Wgpu(device_id) => {
+                // Create actual GPU storage for GPU tensors
+                use crate::kernels::gpu::get_context;
+                let ctx = get_context(device_id);
+                let buffer = ctx.create_buffer(nbytes, "zeros");
+
+                let storage = Arc::new(Storage::Wgpu(GpuStorage {
+                    buffer: buffer.buffer,
+                    nbytes,
+                    device_id,
+                    staging: RwLock::new(None),
+                }));
+
+                let strides = compute_strides(&sizes);
+
+                Tensor::new(TensorImpl {
+                    storage,
+                    sizes,
+                    strides,
+                    storage_offset: 0,
+                    dtype,
+                    device: Device::Wgpu(device_id),
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: None,
+                })
             }
         }
     }
@@ -738,40 +779,66 @@ impl Tensor {
 
     pub fn full(shape: Vec<i64>, value: f32, dtype: DType, device: Device) -> Self {
         let mut t = Self::zeros(shape, dtype, device);
-        let numel = t.inner.numel() as usize;
-        let inner = Arc::make_mut(&mut t.inner);
-        let storage = Arc::make_mut(&mut inner.storage);
-        let Storage::Cpu(cpu_storage) = storage else {
-            panic!("Expected CPU storage for full()");
-        };
-        let ptr = cpu_storage.data.as_mut_ptr();
 
-        match dtype {
-            DType::F32 => {
-                let f32_ptr = ptr as *mut f32;
-                for i in 0..numel {
-                    unsafe {
-                        *f32_ptr.add(i) = value;
+        match device {
+            Device::Cpu => {
+                let numel = t.inner.numel() as usize;
+                let inner = Arc::make_mut(&mut t.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!("Expected CPU storage for full()");
+                };
+                let ptr = cpu_storage.data.as_mut_ptr();
+
+                match dtype {
+                    DType::F32 => {
+                        let f32_ptr = ptr as *mut f32;
+                        for i in 0..numel {
+                            unsafe {
+                                *f32_ptr.add(i) = value;
+                            }
+                        }
                     }
+                    DType::F64 => {
+                        let f64_ptr = ptr as *mut f64;
+                        for i in 0..numel {
+                            unsafe {
+                                *f64_ptr.add(i) = value as f64;
+                            }
+                        }
+                    }
+                    DType::I32 => {
+                        let i32_ptr = ptr as *mut i32;
+                        for i in 0..numel {
+                            unsafe {
+                                *i32_ptr.add(i) = value as i32;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            DType::F64 => {
-                let f64_ptr = ptr as *mut f64;
-                for i in 0..numel {
-                    unsafe {
-                        *f64_ptr.add(i) = value as f64;
-                    }
-                }
+            Device::Wgpu(device_id) => {
+                // For GPU tensors, use a kernel to fill with value
+                // Create a scalar tensor with the value and broadcast it
+                use crate::kernels::gpu::get_context;
+                let ctx = get_context(device_id);
+
+                // Create a buffer with the value
+                let numel = t.inner.numel() as usize;
+                let data = vec![value; numel];
+                let buffer = ctx.create_gpu_buffer_from_data(&data, "full");
+
+                // Update the tensor's storage
+                let inner = Arc::make_mut(&mut t.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                *storage = Storage::Wgpu(GpuStorage {
+                    buffer: buffer.buffer,
+                    nbytes: numel * 4,
+                    device_id,
+                    staging: RwLock::new(None),
+                });
             }
-            DType::I32 => {
-                let i32_ptr = ptr as *mut i32;
-                for i in 0..numel {
-                    unsafe {
-                        *i32_ptr.add(i) = value as i32;
-                    }
-                }
-            }
-            _ => {}
         }
         t
     }
@@ -884,8 +951,8 @@ impl Tensor {
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = autograd::ViewBackward::new(self.clone(), edges);
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            let backward = autograd::SliceBackward::new(self.clone(), dim, start, end, step, edges);
+            let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta =
@@ -1123,8 +1190,37 @@ impl Tensor {
     pub fn to_gpu(&self, device_id: usize) -> Tensor {
         match self.inner.storage.as_ref() {
             Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),
+            Storage::Wgpu(gpu) => {
+                // Tensor is on a different GPU device, need to move it
+                // First read from the source GPU, then write to target GPU
+                use crate::kernels::gpu::get_context;
+                let src_ctx = get_context(gpu.device_id);
+                let f32_data = src_ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
+                let byte_data = bytemuck::cast_slice(&f32_data);
+
+                let dst_ctx = get_context(device_id);
+                let buffer = dst_ctx.create_gpu_buffer_from_bytes(byte_data, "to_gpu");
+
+                let storage = Arc::new(Storage::Wgpu(GpuStorage {
+                    buffer: buffer.buffer,
+                    nbytes: gpu.nbytes,
+                    device_id,
+                    staging: RwLock::new(None),
+                }));
+
+                Tensor::new(TensorImpl {
+                    storage,
+                    sizes: self.inner.sizes.clone(),
+                    strides: self.inner.strides.clone(),
+                    storage_offset: self.inner.storage_offset,
+                    dtype: self.inner.dtype,
+                    device: Device::Wgpu(device_id),
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: self.inner.autograd_meta.clone(),
+                })
+            }
             _ => {
-                // Get CPU data
+                // CPU storage or "lazy GPU" tensor - get CPU data
                 let cpu_data = self.as_f32_slice().to_vec();
                 let dtype = self.inner.dtype;
 
@@ -1179,6 +1275,17 @@ impl Tensor {
     /// In-place addition for gradient accumulation
     /// This is used internally by the autograd engine to accumulate gradients
     pub fn add_(&mut self, other: &Tensor) -> &mut Self {
+        // For GPU tensors, we need to use dispatch-based addition
+        if self.inner.is_gpu() || other.inner.is_gpu() {
+            // Perform addition using the dispatch system
+            // Explicitly use &*self to get &Tensor, which resolves to the inherent method
+            let result = (&*self).add(other);
+            // Update self with the result
+            *self = result;
+            return self;
+        }
+
+        // CPU path: direct memory manipulation
         let self_inner = Arc::make_mut(&mut self.inner);
         let dtype = self_inner.dtype;
         let numel = self_inner.numel() as usize;

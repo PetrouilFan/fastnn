@@ -100,6 +100,9 @@ impl Node for AddBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
+        if a.shape() == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
+            panic!("AddBackward: a=[64, 64], grad=[32, 64, 64]");
+        }
 
         // Handle broadcasting: if input shape doesn't match output shape,
         // sum over the extra dimensions
@@ -107,9 +110,16 @@ impl Node for AddBackward {
             grad.clone()
         } else {
             // Sum over dimensions that exist in grad but not in a
+            // Broadcasting aligns dimensions on the right
             let mut grad_a = grad.clone();
+            let diff = grad.shape().len() as i32 - a.shape().len() as i32;
             for i in (0..grad.shape().len()).rev() {
-                if i >= a.shape().len() || a.shape()[i] != grad.shape()[i] {
+                let a_dim = if i as i32 >= diff {
+                    a.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1 // Dimension doesn't exist in a, treat as 1 (broadcasted)
+                };
+                if a_dim != grad.shape()[i] {
                     grad_a = grad_a.sum(i as i32, false);
                 }
             }
@@ -121,8 +131,14 @@ impl Node for AddBackward {
         } else {
             // Sum over dimensions that exist in grad but not in b
             let mut grad_b = grad.clone();
+            let diff = grad.shape().len() as i32 - b.shape().len() as i32;
             for i in (0..grad.shape().len()).rev() {
-                if i >= b.shape().len() || b.shape()[i] != grad.shape()[i] {
+                let b_dim = if i as i32 >= diff {
+                    b.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if b_dim != grad.shape()[i] {
                     grad_b = grad_b.sum(i as i32, false);
                 }
             }
@@ -202,9 +218,50 @@ impl Node for MulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
+        if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
+            && grad.shape() == vec![32, 64, 64]
+        {
+            panic!(
+                "MulBackward: a=[{}], b=[{}], grad=[{}]",
+                a.shape().len(),
+                b.shape().len(),
+                grad.shape().len()
+            );
+        }
 
-        let grad_a = grad.clone().mul(b);
-        let grad_b = grad.mul(a);
+        // Compute gradient for a: grad * b
+        let mut grad_a = grad.clone().mul(b);
+        // Sum over dimensions that were broadcasted in a
+        if a.shape() != grad_a.shape() {
+            let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
+            for i in (0..grad_a.shape().len()).rev() {
+                let a_dim = if i as i32 >= diff {
+                    a.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if a_dim != grad_a.shape()[i] {
+                    grad_a = grad_a.sum(i as i32, false);
+                }
+            }
+        }
+
+        // Compute gradient for b: grad * a
+        let mut grad_b = grad.mul(a);
+        // Sum over dimensions that were broadcasted in b
+        if b.shape() != grad_b.shape() {
+            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
+            for i in (0..grad_b.shape().len()).rev() {
+                let b_dim = if i as i32 >= diff {
+                    b.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if b_dim != grad_b.shape()[i] {
+                    grad_b = grad_b.sum(i as i32, false);
+                }
+            }
+        }
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -243,6 +300,16 @@ impl Node for DivBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
+        if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
+            && grad.shape() == vec![32, 64, 64]
+        {
+            panic!(
+                "DivBackward: a=[{}], b=[{}], grad=[{}]",
+                a.shape().len(),
+                b.shape().len(),
+                grad.shape().len()
+            );
+        }
 
         let b_sq = b.mul(b);
         let grad_a = grad.clone().div(&b.clone());
@@ -359,11 +426,40 @@ impl Node for MatmulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
+        if (a.shape() == vec![32, 64, 64] && b.shape() == vec![64, 64])
+            && grad.shape() == vec![32, 64, 64]
+        {
+            panic!(
+                "MatmulBackward: a={:?}, b={:?}, grad={:?}",
+                a.shape(),
+                b.shape(),
+                grad.shape()
+            );
+        }
+
+        // If grad is a scalar (e.g., from sum()), we need to expand it to the output shape
+        let grad_shape = grad.shape();
+        let grad = if grad_shape.is_empty() {
+            // Expand scalar gradient to match the output shape [a.shape[0], b.shape[1]]
+            let output_shape = vec![a.shape()[0], b.shape()[1]];
+            grad.expand(output_shape)
+        } else {
+            grad
+        };
 
         let ndim_b = b.ndim();
         let ndim_a = a.ndim();
         let grad_a = grad.matmul(&b.transpose(ndim_b - 2, ndim_b - 1));
-        let grad_b = a.transpose(ndim_a - 2, ndim_a - 1).matmul(&grad);
+        let mut grad_b = a.transpose(ndim_a - 2, ndim_a - 1).matmul(&grad);
+
+        // Handle broadcasting: if b has fewer dimensions than grad_b,
+        // sum over the batch dimensions
+        if b.ndim() < grad_b.ndim() {
+            let diff = grad_b.ndim() as i32 - b.ndim() as i32;
+            for i in 0..diff as usize {
+                grad_b = grad_b.sum(0, false);
+            }
+        }
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -415,10 +511,8 @@ impl Node for SumBackward {
         let grad_shape = grad.shape();
 
         if grad_shape.is_empty() {
-            let ones = Tensor::from_vec(
-                vec![1.0; shape.iter().product::<i64>() as usize],
-                shape.clone(),
-            );
+            // Create ones tensor on the same device as grad
+            let ones = Tensor::full(shape.clone(), 1.0, grad.dtype(), grad.device());
             vec![Some(grad.mul(&ones))]
         } else if self.keepdim {
             vec![Some(grad.expand(shape))]
@@ -478,7 +572,8 @@ impl Node for MeanBackward {
             .unwrap_or_default();
 
         let result = if grad_shape.is_empty() {
-            let ones = Tensor::from_vec(vec![1.0; self.numel as usize], shape.clone());
+            // Create ones tensor on the same device as grad
+            let ones = Tensor::full(shape.clone(), 1.0, grad.dtype(), grad.device());
             grad.mul(&ones).mul(&Tensor::from_scalar(scale))
         } else if self.keepdim {
             let scaled_grad = grad.mul(&Tensor::from_scalar(scale));
@@ -1097,8 +1192,12 @@ impl Node for CrossEntropyBackward {
         let batch_size = logits.shape()[0] as usize;
         let num_classes = logits.shape()[1] as usize;
 
-        let logits_data = logits.as_f32_slice();
-        let targets_data = targets.as_f32_slice();
+        // Move GPU tensors to CPU for computation
+        let logits_cpu = logits.to_cpu();
+        let targets_cpu = targets.to_cpu();
+
+        let logits_data = logits_cpu.as_f32_slice();
+        let targets_data = targets_cpu.as_f32_slice();
 
         let mut grad_logits_data = vec![0.0f32; batch_size * num_classes];
 
@@ -1145,6 +1244,12 @@ impl Node for CrossEntropyBackward {
             grad_logits_data,
             vec![batch_size as i64, num_classes as i64],
         );
+
+        // Move gradient back to original device if logits was on GPU
+        let grad_logits = match logits.device() {
+            crate::storage::Device::Wgpu(device_id) => grad_logits.to_gpu(device_id),
+            _ => grad_logits,
+        };
 
         vec![Some(grad_logits)]
     }
@@ -1294,6 +1399,13 @@ impl Node for SliceBackward {
 
         // Create a zero tensor for the gradient of the input
         let input_shape = self.input.shape();
+        if input_shape == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
+            panic!(
+                "SliceBackward: input_shape {:?} != grad.shape() {:?}",
+                input_shape,
+                grad.shape()
+            );
+        }
         let mut grad_input = Tensor::zeros(
             input_shape.clone(),
             crate::storage::DType::F32,
