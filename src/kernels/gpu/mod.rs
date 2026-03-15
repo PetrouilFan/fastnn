@@ -480,7 +480,6 @@ fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
         tensor.clone()
     };
 
-    // Check if the conversion worked
     let cpu_is_gpu = cpu_tensor.inner.is_gpu();
     let cpu_storage_type = match cpu_tensor.inner.storage.as_ref() {
         Storage::Cpu(_) => "Cpu",
