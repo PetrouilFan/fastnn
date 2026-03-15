@@ -1357,14 +1357,11 @@ fn run_reduction_kernel(
     // Create output buffer
     let output_buffer = ctx.create_buffer(output_numel * 4, "output");
 
-    // For now, implement a simple reduction that works for 2D tensors reducing along dim 1
-    // This matches the benchmark usage: sum(x, 1) for shape (1000, 1000) -> (1000,)
-    if ndim == 2 && dim == 1 {
-        // 2D tensor, reduce along dimension 1 (columns)
+    // For 2D tensors, optimize common reduction cases
+    if ndim == 2 {
         let m = input_shape[0] as usize;
         let n = input_shape[1] as usize;
 
-        // Create a simple shader for this specific case
         let reduce_shader = match op {
             "sum" => format!(
                 r#"
