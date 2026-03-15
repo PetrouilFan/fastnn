@@ -74,7 +74,7 @@ class DataParallel:
         batch_size = x.shape[0]
 
         losses = [0.0] * len(self.device_ids)
-        epoch_start = time.time()
+        gpu_times = [0.0] * len(self.device_ids)  # Track time per GPU
 
         def worker(i):
             # Weighted data split based on GPU capability
@@ -86,6 +86,9 @@ class DataParallel:
                 end = batch_size
             else:
                 end = start + chunk_size
+
+            # Measure time for this GPU's work
+            gpu_start = time.time()
 
             # Move data chunk to device
             x_chunk = x[start:end].to_gpu(self.device_ids[i])
@@ -99,6 +102,8 @@ class DataParallel:
             loss.backward()
             losses[i] = loss.item()
 
+            gpu_times[i] = time.time() - gpu_start
+
         # Execute concurrently using Python threads
         threads = [
             threading.Thread(target=worker, args=(i,))
@@ -109,11 +114,8 @@ class DataParallel:
         for t in threads:
             t.join()
 
-        # Track epoch time per GPU for performance-based weight adjustment
-        epoch_time = time.time() - epoch_start
-        self.epoch_times = [epoch_time] * len(
-            self.device_ids
-        )  # Simplified: assume all GPUs take same time
+        # Update epoch times with measured GPU times
+        self.epoch_times = gpu_times
 
         return sum(losses) / len(losses)
 
@@ -136,18 +138,27 @@ class DataParallel:
         if len(self.epoch_times) < 2:
             return  # Not enough data to adjust
 
-        # Simple heuristic: adjust weights inversely proportional to epoch time
-        # Faster GPU should get more data
-        total_time = sum(self.epoch_times)
-        if total_time == 0:
+        # Ensure we have valid times
+        if any(t <= 0 for t in self.epoch_times):
             return
 
+        # Simple heuristic: adjust weights inversely proportional to epoch time
+        # Faster GPU should get more data
+        # Use smoothing to avoid oscillations
+        alpha = 0.3  # Smoothing factor: how much to trust new measurements
+
         # Inverse proportional: weight = (1/time) / sum(1/time)
-        inv_times = [1.0 / t if t > 0 else 1.0 for t in self.epoch_times]
+        inv_times = [1.0 / t for t in self.epoch_times]
         total_inv = sum(inv_times)
 
         if total_inv > 0:
-            new_weights = [inv / total_inv for inv in inv_times]
+            target_weights = [inv / total_inv for inv in inv_times]
+
+            # Smooth with previous weights
+            new_weights = [
+                alpha * target + (1 - alpha) * current
+                for target, current in zip(target_weights, self.weights)
+            ]
 
             # Ensure minimum weight for each GPU (avoid starvation)
             min_weight = 0.1  # At least 10% for each GPU
@@ -157,8 +168,14 @@ class DataParallel:
             total_new = sum(new_weights)
             self.weights = [w / total_new for w in new_weights]
 
-            # Log adjustment for debugging
-            print(f"Adjusted weights: {self.weights}")
+            # Log adjustment for debugging (only if significant change)
+            if any(
+                abs(new - old) > 0.05
+                for new, old in zip(self.weights, self.epoch_times)
+            ):
+                print(
+                    f"Adjusted weights: {self.weights} (GPU times: {self.epoch_times})"
+                )
 
     def get_current_weights(self):
         """Return current workload weights."""
