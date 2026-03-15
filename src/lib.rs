@@ -240,8 +240,8 @@ impl PyTensor {
         use pyo3::types::PySlice;
 
         // Check if idx is a slice
-        if let Ok(slice) = idx.downcast::<PySlice>() {
-            let length: isize = self.inner.shape()[0] as i64 as isize;
+        if let Ok(slice) = idx.cast::<PySlice>() {
+            let length: isize = self.inner.shape()[0] as isize;
             let indices = slice.indices(length)?;
             // For now, only support slicing along dimension 0
             let start = indices.start as i64;
@@ -929,6 +929,7 @@ impl Linear {
     }
 
     #[pyo3(signature = (device_id))]
+    #[allow(clippy::wrong_self_convention)]
     fn to_gpu(&mut self, device_id: usize) {
         self.inner.weight = self.inner.weight.to_gpu(device_id);
         self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
@@ -1002,6 +1003,7 @@ impl Conv2d {
     }
 
     #[pyo3(signature = (device_id))]
+    #[allow(clippy::wrong_self_convention)]
     fn to_gpu(&mut self, device_id: usize) {
         self.inner.weight = self.inner.weight.to_gpu(device_id);
         self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
@@ -1518,6 +1520,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[pyfunction]
+#[allow(clippy::needless_range_loop)]
 fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
     // Simple implementation: average gradients across replicas
     // param_groups is a list of parameter lists, one per replica
