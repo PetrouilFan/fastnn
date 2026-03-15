@@ -208,22 +208,31 @@ impl GpuContext {
         let size = std::mem::size_of_val(cpu_data);
         let buffer = self.acquire_buffer(size);
 
-        // Use temporary staging buffer (not persistent for now)
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("{}_staging", label)),
-            size: size as u64,
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
-            mapped_at_creation: true,
+        // Use persistent staging buffer for CPU-to-GPU transfers
+        let staging = self.ensure_staging_buffer_cpu_to_gpu(size);
+
+        // Map staging buffer for writing
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let staging_slice = staging.slice(..size as u64);
+        staging_slice.map_async(wgpu::MapMode::Write, move |result| {
+            let _ = sender.send(result);
         });
 
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .unwrap()
+            .expect("Failed to map staging buffer for write");
+
+        // Copy data to staging buffer
         {
-            let mut range = staging.slice(..).get_mapped_range_mut();
+            let mut range = staging_slice.get_mapped_range_mut();
             range.copy_from_slice(bytemuck::cast_slice(cpu_data));
         }
 
         staging.unmap();
 
-        // Copy to actual buffer
+        // Copy from staging buffer to actual GPU buffer
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
