@@ -8154,7 +8154,8 @@ fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let backward = EmbeddingBackward::new(weight.clone(), indices.clone());
         let mut meta = AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(Arc::new(backward));
-        Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+        Arc::make_mut(&mut output.inner).autograd_meta =
+            Some(Arc::new(std::sync::Mutex::new(meta)));
     }
 
     vec![output]

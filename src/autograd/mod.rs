@@ -20,7 +20,6 @@ pub fn no_grad_exit() {
     NO_GRAD_GLOBAL.store(false, Ordering::SeqCst);
 }
 
-#[derive(Clone)]
 pub struct AutogradMeta {
     pub requires_grad: bool,
     pub grad: Option<Tensor>,
