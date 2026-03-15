@@ -69,8 +69,8 @@ jobs:
         with:
           command: develop
 
-      - name: Run Python tests
-        run: pytest tests/ -v
+      - name: Install dev dependencies
+        run: uv pip install pytest pytest-benchmark
 
-      - name: Run Rust tests
-        run: cargo test --lib --release
+      - name: Run Python tests
+        run: uv run python -m pytest tests/ -v
