@@ -1,9 +1,9 @@
-# 🚀 fastnn
+# fastnn
 
 **fastnn** is a high-performance, lightweight neural network framework built from scratch in Rust with seamless Python bindings. It is designed to be a fast, hardware-efficient alternative to mainstream deep learning libraries, providing hardware-accelerated CPU and GPU compute via a familiar PyTorch-like Python API.
 
 
-## ✨ Features
+## Features
 
 
 - **Blazing Fast CPU Kernels:** Hand-written SIMD instructions (AVX2, AVX512 for x86_64, and NEON for ARM) with optimized approximations for transcendental functions (e.g., Cephes-style fast `exp` and `log`).
@@ -14,7 +14,7 @@
 - **Optimized Convolutions:** Supports `im2col` transforms and specialized kernels (e.g., 1x1, depthwise, 3x3) optimized for specific stride/dilation configurations.
 
 
-## 📦 Core Components
+## Core Components
 
 
 The framework ships with the essential building blocks for modern deep learning:
@@ -27,7 +27,7 @@ The framework ships with the essential building blocks for modern deep learning:
 - **Optimizers:** `SGD`, `Adam`, `AdamW`.
 
 
-## 🛠️ Project Structure
+## Project Structure
 
 
 ```text
@@ -48,7 +48,7 @@ fastnn/
         └── gpu/          # WebGPU contexts, compute pipelines, and buffers
 ```
 
-## ⚙️ Installation
+## Installation
 
 ### Prerequisites
 
@@ -68,7 +68,7 @@ uv pip install -e .[dev]
 
 **Note**: The `[dev]` flag installs testing dependencies like pytest, pytest-benchmark, and numpy.
 
-## 🚀 Quick Start (Python)
+## Quick Start (Python)
 
 Because fastnn exposes a PyTorch-like API, you can easily define models and execute operations directly from Python:
 
@@ -106,7 +106,7 @@ optimizer.step()
 print(f"Loss: {loss.item()}")
 ```
 
-## 🧠 Advanced Configuration
+## Advanced Configuration
 
 ### Device Management
 
@@ -124,7 +124,7 @@ fastnn leverages rayon for heavy parallel lifting. You can adjust the number of 
 fn._set_num_threads(8)
 ```
 
-## 🧪 Testing and Benchmarking
+## Testing and Benchmarking
 
 Tests are built using pytest. You can run the testing and benchmarking suites using:
 
