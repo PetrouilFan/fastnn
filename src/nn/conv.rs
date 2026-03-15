@@ -108,7 +108,8 @@ impl Module for Conv2d {
             let mut meta = AutogradMeta::new(false);
             meta.grad_fn = Some(Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -132,15 +133,17 @@ impl Module for Conv2d {
     }
 
     fn zero_grad(&self) {
-        let mut meta = self.weight.inner.autograd_meta.clone();
-        if let Some(m) = &mut meta {
-            m.grad = None;
+        if let Some(meta) = &self.weight.inner.autograd_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.grad = None;
+            }
         }
 
         if let Some(b) = &self.bias {
-            let mut meta = b.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &b.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }

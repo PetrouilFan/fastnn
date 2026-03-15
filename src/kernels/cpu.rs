@@ -5,6 +5,7 @@
 )]
 #![allow(unused_imports)]
 
+use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{matmul_blas, MIN_BLAS_SIZE};
@@ -1693,18 +1694,26 @@ unsafe fn sigmoid_parallel_neon(
 
     let one = f32x4::new([1.0; 4]);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
         let neg_x = -x;
         let exp_neg_x = neg_x.exp();
         let result = one / (one + exp_neg_x);
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
-        *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+        let x = *a_ptr.add(i);
+        *out_ptr.add(i) = 1.0 / (1.0 + (-x).exp());
         i += 1;
     }
 }
@@ -1853,9 +1862,14 @@ unsafe fn tanh_parallel_neon(
     let clamp_lo = f32x4::new([-10.0; 4]);
     let clamp_hi = f32x4::new([10.0; 4]);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
 
         // Clamp values to prevent overflow in exp
         let x_clamped = x.max(clamp_lo).min(clamp_hi);
@@ -1864,13 +1878,15 @@ unsafe fn tanh_parallel_neon(
         let exp_2x = (two * x_clamped).exp();
         let result = (exp_2x - one) / (exp_2x + one);
 
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
+        let x = *a_ptr.add(i);
         let exp_2x = (2.0 * x).exp();
-        *((out_usize + i * 4) as *mut f32) = (exp_2x - 1.0) / (exp_2x + 1.0);
+        *out_ptr.add(i) = (exp_2x - 1.0) / (exp_2x + 1.0);
         i += 1;
     }
 }
@@ -3045,7 +3061,11 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
     let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 2048 {
+    // Check if broadcasting is needed - only use parallel path when shapes are equal
+    let needs_broadcast = a_shape != b_shape;
+    let use_parallel = a.is_contiguous() && b.is_contiguous() && numel > 2048 && !needs_broadcast;
+
+    if use_parallel {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -3607,15 +3627,22 @@ unsafe fn exp_parallel_neon(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
         let result = x.exp();
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).exp();
+        *out_ptr.add(i) = (*a_ptr.add(i)).ln();
         i += 1;
     }
 }
@@ -3692,11 +3719,18 @@ unsafe fn log_parallel_neon(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
         let result = x.ln();
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
@@ -4021,15 +4055,22 @@ unsafe fn sqrt_parallel_neon(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
         let result = x.sqrt();
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).sqrt();
+        *out_ptr.add(i) = (*a_ptr.add(i)).sqrt();
         i += 1;
     }
 }
@@ -4867,9 +4908,14 @@ unsafe fn gelu_parallel_neon(
     let one = f32x4::new([1.0; 4]);
     let two = f32x4::new([2.0; 4]);
 
+    let a_ptr = a_usize as *const f32;
+    let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
 
         // Compute x^3
         let x2 = x * x;
@@ -4885,14 +4931,16 @@ unsafe fn gelu_parallel_neon(
         // Compute gelu = 0.5 * x * (1 + tanh)
         let result = half * x * (one + tanh);
 
-        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
+        let x = *a_ptr.add(i);
         let x3 = x * x * x;
         let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
-        *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+        *out_ptr.add(i) = 0.5 * x * (1.0 + t);
         i += 1;
     }
 }
@@ -5372,7 +5420,13 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut output_shape: Vec<i64> = vec![];
     if a_shape.len() > 2 {
         for i in 0..a_shape.len() - 2 {
-            output_shape.push(a_shape[i].max(b_shape[i]));
+            // If b has matching dimensions, use max (broadcasting)
+            // If b is 2D (no batch dims), just use a's batch dims
+            if b_shape.len() > 2 && i < b_shape.len() - 2 {
+                output_shape.push(a_shape[i].max(b_shape[i]));
+            } else {
+                output_shape.push(a_shape[i]);
+            }
         }
     }
     output_shape.push(m as i64);
@@ -6565,7 +6619,12 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6675,7 +6734,12 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6784,7 +6848,12 @@ fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6803,18 +6872,37 @@ fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let sum_result = sum_kernel(args);
     let mut sum_tensor = sum_result[0].clone();
 
-    if keepdim {
+    // sum_kernel already handles keepdim correctly
+    // If keepdim is true, sum_tensor has shape [..., 1, ...]
+    // If keepdim is false, sum_tensor has shape with the dimension removed
+    // We need to unsqueeze for broadcasting with the input, then squeeze back if needed
+    let needs_unsqueeze = !keepdim;
+    if needs_unsqueeze {
         sum_tensor = sum_tensor.unsqueeze(dim);
     }
 
     let scale = Tensor::full(vec![], 1.0 / dim_size, DType::F32, Device::Cpu);
-    vec![sum_tensor * scale]
+    let result = sum_tensor * scale;
+
+    // If we unsqueezed for broadcasting, remove it now
+    let result = if needs_unsqueeze {
+        result.squeeze(Some(dim))
+    } else {
+        result
+    };
+
+    vec![result]
 }
 
 fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6886,7 +6974,12 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let x_shape = x.shape();
+        let ndim = x_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6907,7 +7000,8 @@ fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         &Tensor::from_scalar(1.0),
     ])[0]
         .clone();
-    let max_exp = x.sub(&max_vals.clone().unsqueeze(dim)).exp();
+    // max_kernel with keepdim=true already keeps the dimension, so no need to unsqueeze
+    let max_exp = x.sub(&max_vals).exp();
     let sum_exp = max_exp.sum(dim as i32, true);
 
     vec![max_exp.div(&sum_exp)]
@@ -6920,7 +7014,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
     let x_ptr = x.data_ptr() as *const f32;
     let numel = x.numel() as usize;
-    let _num_rows = numel / dim_size;
 
     let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
@@ -6957,6 +7050,7 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                             for j in 0..8 {
                                 max_val = max_val.max(max_arr[j]);
                             }
+                            // Handle remaining elements
                             for j in i..dim_size {
                                 max_val = max_val.max(x_row[j]);
                             }
@@ -6990,6 +7084,7 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
     #[cfg(not(feature = "parallel"))]
     {
+        let num_rows = numel / dim_size;
         let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
 
@@ -7021,7 +7116,12 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let x_shape = x.shape();
+        let ndim = x_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -7157,7 +7257,8 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let target_class = targets_data[b] as usize;
             let class_logit = logits_data[base_idx + target_class];
 
-            losses[b] = log_sum_exp - class_logit;
+            // Add max_logit back (subtracted before exp for numerical stability)
+            losses[b] = log_sum_exp + max_logit - class_logit;
             total_loss += losses[b];
         }
 
@@ -7180,7 +7281,8 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let target_class = targets_data[b] as usize;
             let class_logit = logits_data[base_idx + target_class];
 
-            losses[b] = log_sum_exp - class_logit;
+            // Add max_logit back (subtracted before exp for numerical stability)
+            losses[b] = log_sum_exp + max_logit - class_logit;
             total_loss += losses[b];
         }
     }
@@ -7940,6 +8042,7 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
 
     let mut normalized = x.sub(&mean).div(&std);
+    let x_hat = normalized.clone(); // Store x_hat before scaling/shifting
 
     if let Some(w) = weight {
         normalized = normalized.mul(w);
@@ -7948,7 +8051,8 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         normalized = normalized.add(b);
     }
 
-    vec![normalized]
+    // Return: output, mean, variance, x_hat (normalized before scaling/shifting)
+    vec![normalized, mean, var, x_hat]
 }
 
 fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -8038,7 +8142,86 @@ fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
 
+    // Set up gradient tracking for embedding
+    if weight.requires_grad() {
+        let backward = EmbeddingBackward::new(weight.clone(), indices.clone());
+        let mut meta = AutogradMeta::new_non_leaf(true);
+        meta.grad_fn = Some(Arc::new(backward));
+        Arc::make_mut(&mut output.inner).autograd_meta =
+            Some(Arc::new(std::sync::Mutex::new(meta)));
+    }
+
     vec![output]
+}
+
+pub struct EmbeddingBackward {
+    pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
+}
+
+impl EmbeddingBackward {
+    pub fn new(weight: Tensor, indices: Tensor) -> Self {
+        EmbeddingBackward {
+            inputs: vec![weight, indices],
+            edges: vec![],
+        }
+    }
+}
+
+impl Node for EmbeddingBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs[0].clone().unwrap();
+        let weight = &self.inputs[0];
+        let indices = &self.inputs[1];
+
+        let weight_shape = weight.shape().clone();
+        let embedding_dim = weight_shape[1];
+        let batch_size = grad_output.shape()[0];
+
+        // Create gradient for weight (same shape as weight)
+        let mut weight_grad = Tensor::zeros(weight_shape.clone(), weight.dtype(), weight.device());
+
+        // Accumulate gradients from output
+        let grad_output_ptr = grad_output.data_ptr() as *const f32;
+        let indices_ptr = indices.data_ptr() as *const f32;
+        let weight_grad_inner = Arc::make_mut(&mut weight_grad.inner);
+        let weight_grad_storage = Arc::make_mut(&mut weight_grad_inner.storage);
+        let Storage::Cpu(cpu_storage) = weight_grad_storage else {
+            panic!("Expected CPU storage");
+        };
+        let weight_grad_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+        for i in 0..batch_size as usize {
+            let idx = unsafe { *indices_ptr.add(i) } as usize;
+            if idx < weight_shape[0] as usize {
+                for j in 0..embedding_dim as usize {
+                    let w_idx = idx * embedding_dim as usize + j;
+                    let o_idx = i * embedding_dim as usize + j;
+                    unsafe {
+                        *weight_grad_ptr.add(w_idx) += *grad_output_ptr.add(o_idx);
+                    }
+                }
+            }
+        }
+
+        vec![Some(weight_grad)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "EmbeddingBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        &self.inputs
+    }
 }
 
 fn zeros_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -8430,6 +8613,32 @@ fn register_kernels() {
         DispatchKey::Cpu,
         cross_entropy_loss_kernel as KernelFn,
     );
+
+    // GPU fallback for cross_entropy_loss (moves to CPU for computation)
+    fn cross_entropy_loss_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
+        // Move inputs to CPU, compute, then move result back to GPU
+        let pred_cpu = args[0].to_cpu();
+        let target_cpu = args[1].to_cpu();
+        let reduction_code = args[2].item();
+
+        // Create CPU tensors for dispatch
+        let cpu_args = [&pred_cpu, &target_cpu, &Tensor::from_scalar(reduction_code)];
+        let result = cross_entropy_loss_kernel(&cpu_args);
+
+        // Move result back to original GPU
+        let device_id = match args[0].inner.storage.as_ref() {
+            Storage::Wgpu(gpu) => gpu.device_id,
+            _ => 0,
+        };
+        vec![result[0].to_gpu(device_id)]
+    }
+
+    register(
+        "cross_entropy_loss",
+        DispatchKey::Wgpu,
+        cross_entropy_loss_gpu_fallback as KernelFn,
+    );
+
     register("conv2d", DispatchKey::Cpu, conv2d_kernel as KernelFn);
     register(
         "layer_norm",
@@ -8451,5 +8660,24 @@ fn register_kernels() {
     register("randn", DispatchKey::Cpu, randn_kernel as KernelFn);
     register("rand", DispatchKey::Cpu, rand_kernel as KernelFn);
     register("gt_scalar", DispatchKey::Cpu, gt_scalar_kernel as KernelFn);
+
+    // GPU fallback for gt_scalar (moves to CPU for computation)
+    fn gt_scalar_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
+        let input_cpu = args[0].to_cpu();
+        let threshold = args[1].item();
+        let result_cpu = gt_scalar_kernel(&[&input_cpu, &Tensor::from_scalar(threshold)]);
+
+        let device_id = match args[0].inner.storage.as_ref() {
+            Storage::Wgpu(gpu) => gpu.device_id,
+            _ => 0,
+        };
+        vec![result_cpu[0].to_gpu(device_id)]
+    }
+
+    register(
+        "gt_scalar",
+        DispatchKey::Wgpu,
+        gt_scalar_gpu_fallback as KernelFn,
+    );
     register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
 }
