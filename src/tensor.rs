@@ -103,7 +103,10 @@ impl TensorImpl {
         if self.is_contiguous() {
             return Tensor::new(self.clone());
         }
-        self.view(self.sizes.clone()).into()
+        // If not contiguous, we need to copy the data to a new contiguous layout
+        let data = self.as_f32_slice().to_vec();
+        let sizes = self.sizes.clone();
+        Tensor::from_vec(data, sizes.to_vec())
     }
 
     pub fn view(&self, sizes: SmallVec<[i64; 8]>) -> TensorImpl {
@@ -272,7 +275,7 @@ impl TensorImpl {
                     dtype: self.dtype,
                     device: self.device,
                     version_counter: Arc::clone(&self.version_counter),
-                    autograd_meta: None,
+                    autograd_meta: self.autograd_meta.clone(),
                 }
                 .into()
             }
@@ -299,7 +302,7 @@ impl TensorImpl {
                     dtype: self.dtype,
                     device: self.device,
                     version_counter: Arc::clone(&self.version_counter),
-                    autograd_meta: None,
+                    autograd_meta: self.autograd_meta.clone(),
                 }
                 .into()
             }
@@ -336,13 +339,13 @@ impl TensorImpl {
 
         TensorImpl {
             storage: Arc::clone(&self.storage),
-            sizes: new_sizes,
+            sizes,
             strides: new_strides,
             storage_offset: self.storage_offset,
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: None,
+            autograd_meta: self.autograd_meta.clone(),
         }
         .into()
     }
@@ -379,7 +382,7 @@ impl TensorImpl {
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: None,
+            autograd_meta: self.autograd_meta.clone(),
         }
         .into()
     }
@@ -800,12 +803,36 @@ impl Tensor {
 
     pub fn view(&self, shape: Vec<i64>) -> Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        self.inner.view(sizes).into()
+        let output: Tensor = self.inner.view(sizes).into();
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::ViewBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn reshape(&self, shape: Vec<i64>) -> Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        self.inner.reshape(sizes)
+        let output = self.inner.reshape(sizes);
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::ViewBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
@@ -818,7 +845,19 @@ impl Tensor {
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
-        self.inner.squeeze(dim)
+        let output = self.inner.squeeze(dim);
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::ViewBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Tensor {
@@ -831,7 +870,19 @@ impl Tensor {
     }
 
     pub fn slice(&self, dim: usize, start: i64, end: i64, step: i64) -> Tensor {
-        self.inner.slice(dim, start, end, step)
+        let output = self.inner.slice(dim, start, end, step);
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::SliceBackward::new(self.clone(), dim, start, end, step, edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
     }
 
     pub fn to_dtype(&self, dtype: DType) -> Tensor {
@@ -847,7 +898,9 @@ impl Tensor {
     }
 
     pub fn requires_grad_(&self, requires_grad: bool) -> Tensor {
-        self.inner.requires_grad_(requires_grad)
+        let mut inner = self.inner.clone();
+        Arc::make_mut(&mut inner).set_requires_grad(requires_grad);
+        Tensor::new(inner.as_ref().clone())
     }
 
     pub fn grad(&self) -> Option<Tensor> {
@@ -1049,7 +1102,7 @@ impl Tensor {
                     dtype: self.inner.dtype,
                     device: Device::Cpu,
                     version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: None,
+                    autograd_meta: self.inner.autograd_meta.clone(),
                 })
             }
         }
@@ -1080,13 +1133,13 @@ impl Tensor {
                 let sizes: SmallVec<[i64; 8]> = shape.iter().copied().collect();
                 Tensor::new(TensorImpl {
                     storage,
-                    sizes,
+                    sizes: self.inner.sizes.clone(),
                     strides: self.inner.strides.clone(),
                     storage_offset: self.inner.storage_offset,
                     dtype,
                     device: Device::Wgpu(device_id),
                     version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: None,
+                    autograd_meta: self.inner.autograd_meta.clone(),
                 })
             }
         }

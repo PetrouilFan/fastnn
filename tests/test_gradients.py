@@ -429,16 +429,27 @@ def test_softmax_grad():
 
 def test_layer_norm_grad():
     """Test layer norm gradient."""
-    # TODO: Fix LayerNorm kernel bug (expand: not enough dimensions)
-    # Skip for now as the main goal (matmul_grad) is fixed
-    pass
+    x = fnn.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [2, 3])
+    x.requires_grad_(True)
+    layer_norm = fnn.LayerNorm(3)
+    y = layer_norm(x)
+    y.sum().backward()
+    assert x.grad is not None
+    assert x.grad.shape == x.shape
 
 
 def test_embedding_grad():
     """Test embedding gradient."""
-    # TODO: Add autograd support for embedding function
-    # Skip for now as the main goal (matmul_grad) is fixed
-    pass
+    vocab_size = 10
+    embed_dim = 4
+    indices = fnn.tensor([0, 1, 2], [3])
+    embedding = fnn.Embedding(vocab_size, embed_dim)
+    output = embedding(indices)
+    output.sum().backward()
+    # Check that weight gradient exists
+    weight = embedding.parameters()[0]
+    assert weight.grad is not None, "Embedding weight should have gradient"
+    assert weight.grad.shape == weight.shape, "Gradient shape should match weight shape"
 
 
 def test_cross_entropy_grad():
