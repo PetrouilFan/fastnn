@@ -99,16 +99,17 @@ class DataParallel:
         losses = [0.0] * len(self.device_ids)
         gpu_times = [0.0] * len(self.device_ids)  # Track time per GPU
 
-        def worker(i):
-            # Weighted data split based on GPU capability
-            chunk_size = int(batch_size * self.weights[i])
-            start = int(sum(self.weights[:i]) * batch_size)
+        # Precompute split indices to avoid floating point errors and skipped elements
+        split_indices = [0]
+        for i in range(len(self.device_ids)):
+            split_indices.append(split_indices[-1] + int(batch_size * self.weights[i]))
+        # Ensure the last index is exactly batch_size
+        split_indices[-1] = batch_size
 
-            # Handle last chunk to include any remainder
-            if i == len(self.device_ids) - 1:
-                end = batch_size
-            else:
-                end = start + chunk_size
+        def worker(i):
+            # Get split indices from precomputed list
+            start = split_indices[i]
+            end = split_indices[i + 1]
 
             # Measure time for this GPU's work
             gpu_start = time.time()
