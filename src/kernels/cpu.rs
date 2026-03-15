@@ -6626,7 +6626,12 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6736,7 +6741,12 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6845,7 +6855,12 @@ fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6889,7 +6904,12 @@ fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -6961,7 +6981,12 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let x_shape = x.shape();
+        let ndim = x_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };
@@ -7098,7 +7123,12 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let dim = if args.len() > 1 {
-        args[1].item() as usize
+        let dim_i32 = args[1].item() as i32;
+        let x_shape = x.shape();
+        let ndim = x_shape.len() as i32;
+        // Handle negative dimensions
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
     } else {
         0
     };

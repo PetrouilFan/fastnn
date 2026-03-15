@@ -1428,6 +1428,27 @@ impl Tensor {
         }
     }
 
+    pub fn softmax(&self, dim: i32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch(
+            "softmax",
+            dispatch_key,
+            &[self, &Tensor::from_scalar(dim as f32)],
+        );
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::SoftmaxBackward::new(output.clone(), dim as usize, edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            output
+        } else {
+            output
+        }
+    }
+
     pub fn sqrt(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("sqrt", dispatch_key, &[self]);

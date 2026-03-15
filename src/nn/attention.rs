@@ -82,12 +82,7 @@ impl MultiHeadAttention {
         attn_scores = attn_scores.mul(&Tensor::from_scalar(scale));
 
         // 6. Apply softmax
-        let attn_weights = dispatch(
-            "softmax",
-            DispatchKey::Cpu,
-            &[&attn_scores, &Tensor::from_scalar(2.0)], // axis=2
-        )[0]
-        .clone();
+        let attn_weights = attn_scores.softmax(2); // axis=2
 
         // 7. Apply attention to values
         let context = attn_weights.matmul(&v);
