@@ -70,7 +70,7 @@ jobs:
           command: develop
 
       - name: Install dev dependencies
-        run: uv pip install -e ".[dev]"
+        run: uv pip install pytest pytest-benchmark
 
       - name: Run Python tests
         run: uv run python -m pytest tests/ -v
