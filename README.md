@@ -67,8 +67,6 @@ fastnn includes highly optimized GPU kernels with vectorized shader operations:
 - Shader consistency: All binary operations now use vectorized shaders
 - Optimized MatMul: Tiled matrix multiplication with shared memory
 
-For detailed benchmarks, see [BENCHMARKS.md](BENCHMARKS.md).
-
 ## Installation
 
 ### Prerequisites

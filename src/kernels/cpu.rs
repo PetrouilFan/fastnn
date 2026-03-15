@@ -3642,7 +3642,7 @@ unsafe fn exp_parallel_neon(
         i += 4;
     }
     while i < end {
-        *out_ptr.add(i) = (*a_ptr.add(i)).ln();
+        *out_ptr.add(i) = (*a_ptr.add(i)).exp();
         i += 1;
     }
 }
