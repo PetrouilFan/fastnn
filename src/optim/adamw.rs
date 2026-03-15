@@ -42,6 +42,11 @@ impl AdamW {
 
         let step: Vec<u64> = vec![0; params.len()];
 
+        for (i, p) in params.iter().enumerate() {
+            if p.shape() == vec![32, 64, 64] {
+                panic!("AdamW::new: param {} has shape [32, 64, 64]", i);
+            }
+        }
         AdamW {
             params,
             lr,
@@ -62,12 +67,31 @@ impl Optimizer for AdamW {
         let beta1 = self.betas.0;
         let beta2 = self.betas.1;
 
+        // Debug: print all param shapes
+        if self.step.len() > 0 && self.step[0] >= 60 {
+            panic!(
+                "Debug: step >= 60. Param shapes: {:?}",
+                self.params.iter().map(|p| p.shape()).collect::<Vec<_>>()
+            );
+        }
+
         for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
                 g
             } else {
                 continue;
             };
+            if grad.shape().len() == 3 {
+                panic!("grad.shape() = {:?}", grad.shape());
+            }
+            if param.shape() != grad.shape() {
+                // panic!(
+                //     "Shape mismatch in AdamW::step: param.shape() = {:?}, grad.shape() = {:?}, param.id() = {}",
+                //     param.shape(),
+                //     grad.shape(),
+                //     param.id()
+                // );
+            }
 
             self.step[i] += 1;
             let t = self.step[i] as f64;
