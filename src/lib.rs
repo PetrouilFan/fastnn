@@ -90,7 +90,16 @@ impl PyTensor {
     }
 
     fn item(&self) -> f32 {
-        self.inner.item()
+        // Move to CPU if on GPU
+        let tensor = if matches!(
+            self.inner.inner.storage.as_ref(),
+            crate::storage::Storage::Wgpu(_)
+        ) {
+            self.inner.to_cpu()
+        } else {
+            self.inner.clone()
+        };
+        tensor.item()
     }
 
     fn numpy(&self) -> Vec<f32> {
@@ -102,11 +111,14 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (requires_grad))]
-    fn requires_grad_(&mut self, requires_grad: bool) {
+    fn requires_grad_(&mut self, requires_grad: bool) -> PyTensor {
         // Get a raw pointer to the TensorImpl
         let ptr = Arc::as_ptr(&self.inner.inner) as *mut TensorImpl;
         unsafe {
             (*ptr).set_requires_grad(requires_grad);
+        }
+        PyTensor {
+            inner: self.inner.clone(),
         }
     }
 
@@ -228,6 +240,10 @@ impl PyTensor {
 
     fn cpu(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.to_cpu())
+    }
+
+    fn to_gpu(&self, device_id: usize) -> PyTensor {
+        PyTensor::from_tensor(self.inner.to_gpu(device_id))
     }
 
     fn contiguous(&self) -> PyTensor {
