@@ -70,7 +70,7 @@ def _patch_backward(tensor_cls):
     _original_backward = tensor_cls.backward
 
     def _new_backward(self, grad=None):
-        return _original_backward(self)
+        return _original_backward(self, grad)
 
     tensor_cls.backward = _new_backward
 
