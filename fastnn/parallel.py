@@ -2,10 +2,14 @@
 
 import fastnn as fnn
 import threading
+from typing import List, Optional, Union
 
 
 class DataParallel:
     """Distributed Data Parallel wrapper for fastnn models.
+
+    This class enables multi-GPU training by distributing data across
+    multiple GPU devices and synchronizing gradients using bucketed AllReduce.
 
     Note: Due to fastnn's Rust-based architecture, this implementation
     requires creating model replicas manually rather than using deepcopy.
@@ -15,9 +19,31 @@ class DataParallel:
         device_ids: List of GPU device IDs (e.g., [0, 1])
         weights: Optional list of data weights per GPU. If None, uses
                  memory-based weighting (e.g., [0.7, 0.3] for 11GB + 4GB GPUs)
+
+    Example:
+        >>> # Create model replicas for each GPU
+        >>> model_gpu0 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
+        >>> model_gpu1 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
+        >>>
+        >>> # Initialize DataParallel
+        >>> dp_model = DataParallel(
+        ...     [model_gpu0, model_gpu1],
+        ...     device_ids=[0, 1],
+        ...     weights=[0.6, 0.4]
+        ... )
+        >>>
+        >>> # Training loop
+        >>> for x_batch, y_batch in dataloader:
+        ...     loss = dp_model.forward_backward(x_batch, y_batch, fnn.cross_entropy_loss)
+        ...     dp_model.sync_gradients()
+        ...     for opt in optimizers:
+        ...         opt.step()
+        ...         opt.zero_grad()
     """
 
-    def __init__(self, models, device_ids, weights=None):
+    def __init__(
+        self, models: List, device_ids: List[int], weights: Optional[List[float]] = None
+    ):
         if not isinstance(models, list) or len(models) != len(device_ids):
             raise ValueError("models must be a list with same length as device_ids")
 
@@ -34,6 +60,8 @@ class DataParallel:
                 # Even split for other configurations
                 self.weights = [1.0 / len(device_ids)] * len(device_ids)
         else:
+            if len(weights) != len(device_ids):
+                raise ValueError("weights must have same length as device_ids")
             self.weights = weights
 
         # Normalize weights to sum to 1.0
