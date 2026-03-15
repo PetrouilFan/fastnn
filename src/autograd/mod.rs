@@ -98,8 +98,39 @@ impl AddBackward {
 
 impl Node for AddBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone();
-        vec![grad.clone(), grad]
+        let grad = grad_outputs[0].clone().unwrap();
+        let a = &self.inputs[0];
+        let b = &self.inputs[1];
+
+        // Handle broadcasting: if input shape doesn't match output shape,
+        // sum over the extra dimensions
+        let grad_a = if a.shape() == grad.shape() {
+            grad.clone()
+        } else {
+            // Sum over dimensions that exist in grad but not in a
+            let mut grad_a = grad.clone();
+            for i in (0..grad.shape().len()).rev() {
+                if i >= a.shape().len() || a.shape()[i] != grad.shape()[i] {
+                    grad_a = grad_a.sum(i as i32, false);
+                }
+            }
+            grad_a
+        };
+
+        let grad_b = if b.shape() == grad.shape() {
+            grad.clone()
+        } else {
+            // Sum over dimensions that exist in grad but not in b
+            let mut grad_b = grad.clone();
+            for i in (0..grad.shape().len()).rev() {
+                if i >= b.shape().len() || b.shape()[i] != grad.shape()[i] {
+                    grad_b = grad_b.sum(i as i32, false);
+                }
+            }
+            grad_b
+        };
+
+        vec![Some(grad_a), Some(grad_b)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -926,9 +957,8 @@ impl Node for Conv2dBackward {
 
 #[allow(dead_code)]
 pub struct LayerNormBackward {
-    pub input: Tensor,
+    pub inputs: Vec<Tensor>,
     pub normalized: Tensor,
-    pub gamma: Option<Tensor>,
     pub mean: Tensor,
     pub variance: Tensor,
     pub eps: f32,
@@ -938,17 +968,17 @@ pub struct LayerNormBackward {
 impl LayerNormBackward {
     pub fn new(
         input: Tensor,
+        weight: Tensor,
+        bias: Tensor,
         normalized: Tensor,
-        gamma: Option<Tensor>,
         mean: Tensor,
         variance: Tensor,
         eps: f32,
         edges: Vec<Edge>,
     ) -> Self {
         LayerNormBackward {
-            input,
+            inputs: vec![input, weight, bias],
             normalized,
-            gamma,
             mean,
             variance,
             eps,
@@ -960,13 +990,11 @@ impl LayerNormBackward {
 impl Node for LayerNormBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
+        let weight = &self.inputs[1];
+        let bias = &self.inputs[2];
 
         let std = self.variance.add(&Tensor::from_scalar(self.eps)).sqrt();
-        let grad_x_hat = if let Some(ref g) = self.gamma {
-            grad.mul(g)
-        } else {
-            grad.clone()
-        };
+        let grad_x_hat = grad.mul(weight);
 
         let mean_grad_x_hat = grad_x_hat
             .sum(1, true)
@@ -980,29 +1008,10 @@ impl Node for LayerNormBackward {
             .sub(&self.normalized.mul(&mean_grad_x_hat_x_hat))
             .div(&std);
 
-        let grad_gamma = self
-            .gamma
-            .as_ref()
-            .map(|_| grad.mul(&self.normalized).sum(0, false));
-        let grad_beta = Some(grad.sum(0, false));
+        let grad_weight = grad.mul(&self.normalized).sum(0, false);
+        let grad_bias = grad.sum(0, false);
 
-        vec![
-            Some(grad_input),
-            grad_gamma.or_else(|| {
-                Some(Tensor::zeros(
-                    vec![1],
-                    crate::storage::DType::F32,
-                    crate::storage::Device::Cpu,
-                ))
-            }),
-            grad_beta.or_else(|| {
-                Some(Tensor::zeros(
-                    vec![1],
-                    crate::storage::DType::F32,
-                    crate::storage::Device::Cpu,
-                ))
-            }),
-        ]
+        vec![Some(grad_input), Some(grad_weight), Some(grad_bias)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -1010,7 +1019,7 @@ impl Node for LayerNormBackward {
     }
 
     fn num_inputs(&self) -> usize {
-        1
+        3
     }
 
     fn name(&self) -> &str {
@@ -1018,7 +1027,7 @@ impl Node for LayerNormBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        std::slice::from_ref(&self.input)
+        &self.inputs
     }
 }
 
@@ -1154,5 +1163,148 @@ impl Node for CrossEntropyBackward {
 
     fn inputs(&self) -> &[Tensor] {
         std::slice::from_ref(&self.logits)
+    }
+}
+
+#[allow(dead_code)]
+pub struct ViewBackward {
+    pub input: Tensor,
+    pub edges: Vec<Edge>,
+}
+
+impl ViewBackward {
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        ViewBackward { input, edges }
+    }
+}
+
+impl Node for ViewBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs[0].clone().unwrap();
+        let shape = self.input.shape();
+        vec![Some(grad.reshape(shape))]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "ViewBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
+}
+
+#[allow(dead_code)]
+pub struct SliceBackward {
+    pub input: Tensor,
+    pub dim: usize,
+    pub start: i64,
+    pub end: i64,
+    pub step: i64,
+    pub edges: Vec<Edge>,
+}
+
+impl SliceBackward {
+    pub fn new(
+        input: Tensor,
+        dim: usize,
+        start: i64,
+        end: i64,
+        step: i64,
+        edges: Vec<Edge>,
+    ) -> Self {
+        SliceBackward {
+            input,
+            dim,
+            start,
+            end,
+            step,
+            edges,
+        }
+    }
+}
+
+impl Node for SliceBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs[0].clone().unwrap();
+
+        // Create a zero tensor for the gradient of the input
+        let input_shape = self.input.shape();
+        let mut grad_input = Tensor::zeros(
+            input_shape.clone(),
+            crate::storage::DType::F32,
+            self.input.device(),
+        );
+
+        // For simplicity, assume CPU and contiguous tensors
+        use crate::storage::Storage;
+
+        if let Storage::Cpu(cpu_grad) = grad.inner.storage.as_ref() {
+            let grad_input_storage = &mut Arc::make_mut(&mut grad_input.inner).storage;
+            if let Storage::Cpu(cpu_grad_input) = Arc::make_mut(grad_input_storage) {
+                let grad_ptr = cpu_grad.data.as_ptr() as *const f32;
+                let grad_input_ptr = cpu_grad_input.data.as_mut_ptr() as *mut f32;
+
+                let grad_numel = grad.numel() as usize;
+                let input_strides = &self.input.inner.strides;
+
+                // Compute the sliced shape
+                let sliced_size = ((self.end - self.start) / self.step) + 1;
+                let mut grad_shape = input_shape.clone();
+                grad_shape[self.dim] = sliced_size;
+
+                // Iterate over grad and scatter to grad_input
+                for i in 0..grad_numel {
+                    // Compute multi-dimensional index for grad
+                    let mut temp = i;
+                    let mut grad_coords = vec![0; grad_shape.len()];
+                    for d in (0..grad_shape.len()).rev() {
+                        grad_coords[d] = temp % grad_shape[d] as usize;
+                        temp /= grad_shape[d] as usize;
+                    }
+
+                    // Map to input coordinates
+                    let mut input_coords = grad_coords.clone();
+                    input_coords[self.dim] =
+                        (self.start as usize) + (grad_coords[self.dim] * self.step as usize);
+
+                    // Compute linear index in input
+                    let mut input_idx = 0;
+                    for d in 0..input_coords.len() {
+                        input_idx += input_coords[d] * input_strides[d] as usize;
+                    }
+
+                    unsafe {
+                        *grad_input_ptr.add(input_idx) += *grad_ptr.add(i);
+                    }
+                }
+            }
+        }
+
+        vec![Some(grad_input)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "SliceBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
     }
 }

@@ -104,8 +104,11 @@ impl PyTensor {
 
     #[pyo3(signature = (requires_grad))]
     fn requires_grad_(&mut self, requires_grad: bool) {
-        let inner_clone: &mut TensorImpl = Arc::make_mut(&mut self.inner.inner);
-        inner_clone.set_requires_grad(requires_grad);
+        // Get a raw pointer to the TensorImpl
+        let ptr = Arc::as_ptr(&self.inner.inner) as *mut TensorImpl;
+        unsafe {
+            (*ptr).set_requires_grad(requires_grad);
+        }
     }
 
     #[getter]
@@ -159,6 +162,10 @@ impl PyTensor {
 
     fn transpose(&self, dim0: i64, dim1: i64) -> PyTensor {
         PyTensor::from_tensor(self.inner.transpose(dim0 as usize, dim1 as usize))
+    }
+
+    fn permute(&self, dims: Vec<i64>) -> PyTensor {
+        PyTensor::from_tensor(self.inner.permute(dims))
     }
 
     fn unsqueeze(&self, dim: i64) -> PyTensor {
@@ -220,6 +227,10 @@ impl PyTensor {
 
     fn cpu(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.to_cpu())
+    }
+
+    fn contiguous(&self) -> PyTensor {
+        PyTensor::from_tensor(self.inner.contiguous())
     }
 }
 
@@ -1284,6 +1295,68 @@ impl PyAdamW {
     fn load_state_dict(&mut self, _state: String) {}
 }
 
+#[pyclass]
+struct PyTransformerEncoder {
+    inner: nn::transformer::TransformerEncoder,
+}
+
+#[pymethods]
+impl PyTransformerEncoder {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        vocab_size: i64,
+        max_seq_len: i64,
+        d_model: i64,
+        num_heads: i64,
+        num_layers: i64,
+        ff_dim: i64,
+        num_classes: i64,
+        dropout_p: f32,
+    ) -> Self {
+        PyTransformerEncoder {
+            inner: nn::transformer::TransformerEncoder::new(
+                vocab_size,
+                max_seq_len,
+                d_model,
+                num_heads,
+                num_layers,
+                ff_dim,
+                num_classes,
+                dropout_p,
+            ),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn forward(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner
+            .parameters()
+            .into_iter()
+            .map(PyTensor::from_tensor)
+            .collect()
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&mut self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&mut self) {
+        self.inner.eval_mode();
+    }
+}
+
 #[pyfunction]
 fn save_model(_model: Py<PyAny>, path: String) {
     println!("Saved model to {}", path);
@@ -1371,6 +1444,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySGD>()?;
     m.add_class::<PyAdam>()?;
     m.add_class::<PyAdamW>()?;
+    m.add_class::<PyTransformerEncoder>()?;
 
     m.add_class::<PyTensor>()?;
 
