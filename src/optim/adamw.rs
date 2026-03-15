@@ -81,9 +81,9 @@ impl Optimizer for AdamW {
             } else {
                 continue;
             };
-            if grad.shape().len() == 3 {
-                panic!("grad.shape() = {:?}", grad.shape());
-            }
+            // if grad.shape().len() == 3 {
+            //     panic!("grad.shape() = {:?}", grad.shape());
+            // }
             if param.shape() != grad.shape() {
                 // panic!(
                 //     "Shape mismatch in AdamW::step: param.shape() = {:?}, grad.shape() = {:?}, param.id() = {}",
