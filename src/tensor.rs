@@ -1115,7 +1115,6 @@ impl Tensor {
             _ => {
                 // Get CPU data
                 let cpu_data = self.as_f32_slice().to_vec();
-                let shape = self.shape();
                 let dtype = self.inner.dtype;
 
                 // Create GPU tensor
@@ -1130,7 +1129,6 @@ impl Tensor {
                     staging: RwLock::new(None),
                 }));
 
-                let sizes: SmallVec<[i64; 8]> = shape.iter().copied().collect();
                 Tensor::new(TensorImpl {
                     storage,
                     sizes: self.inner.sizes.clone(),

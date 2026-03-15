@@ -12,6 +12,7 @@ pub struct MultiHeadAttention {
     pub num_heads: i64,
     pub head_dim: i64,
     pub d_model: i64,
+    #[allow(dead_code)]
     pub dropout_p: f32,
     training: AtomicBool,
 }
@@ -102,9 +103,7 @@ impl MultiHeadAttention {
         let context = context.reshape(vec![batch, seq_len, self.d_model]);
 
         // 11. Output projection
-        let output = self.out_proj.forward(&context);
-
-        output
+        self.out_proj.forward(&context)
     }
 }
 
