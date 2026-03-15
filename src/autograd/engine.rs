@@ -88,15 +88,13 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             if let Some(grad_input) = grad_input_opt {
                 if input_tensor.is_leaf() {
                     // Accumulate gradient for leaf tensor
-                    let tensor_impl_ptr = Arc::as_ptr(&input_tensor.inner);
-                    unsafe {
-                        let tensor_impl = &mut *(tensor_impl_ptr as *mut TensorImpl);
-                        if let Some(meta) = &mut tensor_impl.autograd_meta {
-                            if let Some(existing_grad) = &mut meta.grad {
+                    if let Some(meta) = &input_tensor.inner.autograd_meta {
+                        if let Ok(mut lock) = meta.lock() {
+                            if let Some(existing_grad) = &mut lock.grad {
                                 // In-place addition for gradient accumulation
                                 existing_grad.add_(grad_input);
                             } else {
-                                meta.grad = Some(grad_input.clone());
+                                lock.grad = Some(grad_input.clone());
                             }
                         }
                     }
