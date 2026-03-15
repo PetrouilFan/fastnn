@@ -121,7 +121,7 @@ The following benchmarks show the performance after vectorizing ADD and GELU sha
 | FusedAddReLU 1000×1000 | 540μs | ~50μs | ~1.2ms | GPU faster (1.6x) |
 | GELU 1000×1000 | 6.2ms | ~300μs | ~0.4ms | GPU wins (14x speedup) |
 
-## Recent Optimizations (v0.2.0)
+## Recent Optimizations (v0.3.0)
 
 ### CPU Optimizations
 - Added SIMD support to parallel add/mul kernels
@@ -134,7 +134,7 @@ The following benchmarks show the performance after vectorizing ADD and GELU sha
   - Lowered GEMM threshold to 16 for better utilization
   - Removed unnecessary data copies in convolution paths
 
-### GPU Optimizations (v0.3.0)
+### GPU Optimizations
 - **Vectorized ADD shader**: Changed from scalar to vec4 operations (2.42x → 4.04x speedup for 1000×1000)
 - **Vectorized GELU shader**: Implemented vectorized tanh and GELU computations (5.00x → 14.07x speedup for 1000×1000)
 - **Shader consistency**: All binary operations now use vectorized shaders (SUB, MUL, DIV, ADD)
