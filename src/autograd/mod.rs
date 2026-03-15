@@ -966,6 +966,7 @@ pub struct LayerNormBackward {
 }
 
 impl LayerNormBackward {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: Tensor,
         weight: Tensor,
@@ -991,7 +992,7 @@ impl Node for LayerNormBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let weight = &self.inputs[1];
-        let bias = &self.inputs[2];
+        let _bias = &self.inputs[2];
 
         let std = self.variance.add(&Tensor::from_scalar(self.eps)).sqrt();
         let grad_x_hat = grad.mul(weight);

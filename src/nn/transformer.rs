@@ -1,4 +1,3 @@
-use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::attention::MultiHeadAttention;
 use crate::nn::dropout::Dropout;
 use crate::nn::embedding::Embedding;
@@ -14,8 +13,11 @@ pub struct TransformerBlock {
     pub norm2: LayerNorm,
     pub ff1: Linear,
     pub ff2: Linear,
+    #[allow(dead_code)]
     pub dropout: Dropout,
+    #[allow(dead_code)]
     pub d_model: i64,
+    #[allow(dead_code)]
     pub ff_dim: i64,
     training: AtomicBool,
 }
@@ -131,13 +133,17 @@ pub struct TransformerEncoder {
     pub layers: Vec<TransformerBlock>,
     pub norm: LayerNorm,
     pub classifier: Linear,
+    #[allow(dead_code)]
     pub d_model: i64,
+    #[allow(dead_code)]
     pub max_seq_len: i64,
+    #[allow(dead_code)]
     pub num_classes: i64,
     training: AtomicBool,
 }
 
 impl TransformerEncoder {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vocab_size: i64,
         max_seq_len: i64,
@@ -179,7 +185,7 @@ impl TransformerEncoder {
 
         let x = self.embedding.forward(token_ids);
 
-        let positions: Vec<f32> = (0..seq_len as i64).map(|i| i as f32).collect();
+        let positions: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
 
         let mut repeated_positions = Vec::new();
         for _ in 0..batch {
