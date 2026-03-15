@@ -1,5 +1,4 @@
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
-use crate::storage::Storage;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 

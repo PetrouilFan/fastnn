@@ -8628,13 +8628,6 @@ fn register_kernels() {
         let target_cpu = args[1].to_cpu();
         let reduction_code = args[2].item();
 
-        let reduction = match reduction_code as i32 {
-            0 => "none",
-            1 => "mean",
-            2 => "sum",
-            _ => "mean",
-        };
-
         // Create CPU tensors for dispatch
         let cpu_args = [&pred_cpu, &target_cpu, &Tensor::from_scalar(reduction_code)];
         let result = cross_entropy_loss_kernel(&cpu_args);
