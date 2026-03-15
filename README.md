@@ -2,7 +2,7 @@
 
 **fastnn** is a high-performance, lightweight neural network framework built from scratch in Rust with seamless Python bindings. It is designed to be a fast, hardware-efficient alternative to mainstream deep learning libraries, providing hardware-accelerated CPU and GPU compute via a familiar PyTorch-like Python API.
 
-**Version:** v0.3.0 - GPU Performance Update with Vectorized Shaders
+**Version:** v0.4.0 - Multi-GPU Support with Distributed Data Parallel
 
 
 ## Features
@@ -170,3 +170,45 @@ python tests/bench_gpu.py         # Comprehensive GPU benchmark suite
 ```
 
 **Performance Note:** GPU acceleration shows best results for medium-to-large tensors (>100×100). Small tensor operations may have overhead from kernel launches and data transfers.
+
+### Multi-GPU Training
+
+fastnn now supports multi-GPU training via Distributed Data Parallel (DDP) with bucketed AllReduce gradient synchronization.
+
+```python
+import fastnn as fnn
+
+# Create model replicas for each GPU
+model_gpu0 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
+model_gpu1 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
+
+# Initialize DataParallel
+dp_model = fnn.DataParallel(
+    [model_gpu0, model_gpu1],
+    device_ids=[0, 1],
+    weights=[0.6, 0.4]  # Optional: weighted data split
+)
+
+# Training loop
+optimizers = [
+    fnn.Adam(dp_model.replicas[0].parameters(), lr=1e-3),
+    fnn.Adam(dp_model.replicas[1].parameters(), lr=1e-3)
+]
+
+for x_batch, y_batch in dataloader:
+    loss = dp_model.forward_backward(x_batch, y_batch, fnn.cross_entropy_loss)
+    dp_model.sync_gradients()
+    
+    for opt in optimizers:
+        opt.step()
+        opt.zero_grad()
+    
+    # Optional: Adjust weights based on GPU performance
+    dp_model.adjust_weights_based_on_performance()
+```
+
+**Key Features:**
+- **Weighted Data Splitting**: Automatically distributes data based on GPU capabilities
+- **Bucketed AllReduce**: Efficient gradient synchronization using optimized Rust implementation
+- **Dynamic Load Balancing**: Adjusts workload distribution based on measured GPU performance
+- **Thread-safe Execution**: Concurrent forward/backward passes across multiple GPUs

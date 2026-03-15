@@ -1,6 +1,8 @@
 import numpy as np
 import fastnn._core as _core
 
+__version__ = "0.4.0"
+
 from fastnn.core import no_grad, set_seed, set_num_threads, set_default_device
 from fastnn.data import DataLoader, Dataset, TensorDataset
 from fastnn.callbacks import (
@@ -9,6 +11,7 @@ from fastnn.callbacks import (
     LearningRateScheduler,
     CSVLogger,
 )
+from fastnn.parallel import DataParallel
 
 __all__ = [
     "no_grad",
@@ -22,6 +25,7 @@ __all__ = [
     "ModelCheckpoint",
     "LearningRateScheduler",
     "CSVLogger",
+    "DataParallel",
     "models",
 ]
 
