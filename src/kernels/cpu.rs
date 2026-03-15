@@ -1678,6 +1678,37 @@ fn sigmoid_parallel_scalar(
     }
 }
 
+// Parallel sigmoid NEON kernel using wide::f32x4
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+unsafe fn sigmoid_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let one = f32x4::new([1.0; 4]);
+
+    let mut i = start;
+    while i + 4 <= end {
+        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let neg_x = -x;
+        let exp_neg_x = neg_x.exp();
+        let result = one / (one + exp_neg_x);
+        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        i += 4;
+    }
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
+        i += 1;
+    }
+}
+
 // Parallel tanh AVX2 kernel using exact computation
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -1804,6 +1835,46 @@ fn tanh_parallel_scalar(
     }
 }
 
+// Parallel tanh NEON kernel using wide::f32x4
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+unsafe fn tanh_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let two = f32x4::new([2.0; 4]);
+    let one = f32x4::new([1.0; 4]);
+    let clamp_lo = f32x4::new([-10.0; 4]);
+    let clamp_hi = f32x4::new([10.0; 4]);
+
+    let mut i = start;
+    while i + 4 <= end {
+        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+
+        // Clamp values to prevent overflow in exp
+        let x_clamped = x.max(clamp_lo).min(clamp_hi);
+
+        // Compute tanh using formula: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        let exp_2x = (two * x_clamped).exp();
+        let result = (exp_2x - one) / (exp_2x + one);
+
+        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        i += 4;
+    }
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        let exp_2x = (2.0 * x).exp();
+        *((out_usize + i * 4) as *mut f32) = (exp_2x - 1.0) / (exp_2x + 1.0);
+        i += 1;
+    }
+}
+
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 #[allow(dead_code)]
 fn relu_simd(input: &[f32], output: &mut [f32]) {
@@ -1925,6 +1996,60 @@ fn silu_simd(input: &[f32], output: &mut [f32]) {
     for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
         let x = *in_val;
         *out_val = x / (1.0 + (-x).exp());
+    }
+}
+
+// Exp kernel using wide library for SIMD on ARM
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+fn exp_simd(input: &[f32], output: &mut [f32]) {
+    let (chunks, remainder) = input.as_chunks::<4>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<4>();
+
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let v = f32x4::from(*in_chunk);
+        let result = v.exp();
+        *out_chunk = result.into();
+    }
+
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        *out_val = in_val.exp();
+    }
+}
+
+// Log kernel using wide library for SIMD on ARM
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+fn log_simd(input: &[f32], output: &mut [f32]) {
+    let (chunks, remainder) = input.as_chunks::<4>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<4>();
+
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let v = f32x4::from(*in_chunk);
+        let result = v.ln();
+        *out_chunk = result.into();
+    }
+
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        *out_val = in_val.ln();
+    }
+}
+
+// Sqrt kernel using wide library for SIMD on ARM
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+fn sqrt_simd(input: &[f32], output: &mut [f32]) {
+    let (chunks, remainder) = input.as_chunks::<4>();
+    let (out_chunks, out_remainder) = output.as_chunks_mut::<4>();
+
+    for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
+        let v = f32x4::from(*in_chunk);
+        let result = v.sqrt();
+        *out_chunk = result.into();
+    }
+
+    for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
+        *out_val = in_val.sqrt();
     }
 }
 
@@ -2695,9 +2820,13 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
-                    mul_parallel_neon(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
-                });
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        mul_parallel_neon(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                        );
+                    });
             }
             #[cfg(not(any(
                 all(feature = "simd", target_arch = "x86_64"),
@@ -2957,9 +3086,13 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
-                    div_parallel_neon(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
-                });
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        div_parallel_neon(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                        );
+                    });
             }
             #[cfg(not(any(
                 all(feature = "simd", target_arch = "x86_64"),
@@ -3461,6 +3594,32 @@ unsafe fn exp_parallel_avx512(
     }
 }
 
+// Parallel exp NEON kernel using wide::f32x4
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+unsafe fn exp_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 4 <= end {
+        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let result = x.exp();
+        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        i += 4;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).exp();
+        i += 1;
+    }
+}
+
 // Parallel log AVX2 kernel using fast_log_avx2
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -3513,6 +3672,32 @@ unsafe fn log_parallel_avx512(
         let result = fast_log_avx2(x);
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).ln();
+        i += 1;
+    }
+}
+
+// Parallel log NEON kernel using wide::f32x4
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+unsafe fn log_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 4 <= end {
+        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let result = x.ln();
+        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        i += 4;
     }
     while i < end {
         *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).ln();
@@ -3578,7 +3763,18 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        exp_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * chunk_size;
@@ -3601,7 +3797,16 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 exp_simd(a_slice, out_slice);
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                exp_simd(a_slice, out_slice);
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -3680,7 +3885,18 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        log_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * chunk_size;
@@ -3703,7 +3919,16 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 log_simd(a_slice, out_slice);
             }
-            #[cfg(not(feature = "simd"))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                log_simd(a_slice, out_slice);
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -3783,6 +4008,32 @@ unsafe fn sqrt_parallel_avx512(
     }
 }
 
+// Parallel sqrt NEON kernel using wide::f32x4
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+unsafe fn sqrt_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 4 <= end {
+        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+        let result = x.sqrt();
+        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        i += 4;
+    }
+    while i < end {
+        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).sqrt();
+        i += 1;
+    }
+}
+
 fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
 
@@ -3841,7 +4092,18 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        sqrt_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * chunk_size;
@@ -3864,7 +4126,16 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 sqrt_simd(a_slice, out_slice);
             }
-            #[cfg(not(feature = "simd"))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                sqrt_simd(a_slice, out_slice);
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -3937,9 +4208,11 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
-                    relu_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                });
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        relu_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
             }
             #[cfg(not(any(
                 all(feature = "simd", target_arch = "x86_64"),
@@ -3973,17 +4246,15 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-                
                 let zero = f32x4::ZERO;
                 let (chunks, remainder) = a_slice.as_chunks::<4>();
                 let (out_chunks, out_remainder) = out_slice.as_chunks_mut::<4>();
-            
                 for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
                     let v = f32x4::from(*in_chunk);
                     let result = v.max(zero);
                     *out_chunk = result.into();
                 }
-            
+
                 for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
                     *out_val = in_val.max(0.0);
                 }
@@ -4076,11 +4347,13 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
-                    fused_add_relu_parallel_neon(
-                        chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
-                    );
-                });
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        fused_add_relu_parallel_neon(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                        );
+                    });
             }
             #[cfg(not(any(
                 all(feature = "simd", target_arch = "x86_64"),
@@ -4198,7 +4471,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
                 let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, numel) };
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-                
+
                 let (a_chunks, a_rem) = a_slice.as_chunks::<4>();
                 let (b_chunks, b_rem) = b_slice.as_chunks::<4>();
                 let (out_chunks, out_rem) = out_slice.as_chunks_mut::<4>();
@@ -4312,11 +4585,13 @@ fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| unsafe {
-                    fused_mul_add_parallel_neon(
-                        chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
-                    );
-                });
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        fused_mul_add_parallel_neon(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
+                        );
+                    });
             }
             #[cfg(not(any(
                 all(feature = "simd", target_arch = "x86_64"),
@@ -4389,27 +4664,22 @@ fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         let a1 = vld1q_f32(a_ptr.add(i + 4));
                         let a2 = vld1q_f32(a_ptr.add(i + 8));
                         let a3 = vld1q_f32(a_ptr.add(i + 12));
-                        
                         let b0 = vld1q_f32(b_ptr.add(i));
                         let b1 = vld1q_f32(b_ptr.add(i + 4));
                         let b2 = vld1q_f32(b_ptr.add(i + 8));
                         let b3 = vld1q_f32(b_ptr.add(i + 12));
-                        
                         let c0 = vld1q_f32(c_ptr.add(i));
                         let c1 = vld1q_f32(c_ptr.add(i + 4));
                         let c2 = vld1q_f32(c_ptr.add(i + 8));
                         let c3 = vld1q_f32(c_ptr.add(i + 12));
-                        
                         let r0 = vfmaq_f32(c0, a0, b0);
                         let r1 = vfmaq_f32(c1, a1, b1);
                         let r2 = vfmaq_f32(c2, a2, b2);
                         let r3 = vfmaq_f32(c3, a3, b3);
-                        
                         vst1q_f32(out_ptr.add(i), r0);
                         vst1q_f32(out_ptr.add(i + 4), r1);
                         vst1q_f32(out_ptr.add(i + 8), r2);
                         vst1q_f32(out_ptr.add(i + 12), r3);
-                        
                         i += 16;
                     }
                     while i + 4 <= numel {
@@ -4578,6 +4848,55 @@ unsafe fn gelu_parallel_avx512(
     }
 }
 
+// Parallel GELU NEON kernel using wide::f32x4
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+unsafe fn gelu_parallel_neon(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let sqrt_2_over_pi = f32x4::new([0.7978846; 4]);
+    let coeff = f32x4::new([0.044715; 4]);
+    let half = f32x4::new([0.5; 4]);
+    let one = f32x4::new([1.0; 4]);
+    let two = f32x4::new([2.0; 4]);
+
+    let mut i = start;
+    while i + 4 <= end {
+        let x = f32x4::from(*(a_usize + i * 4) as *const [f32; 4]);
+
+        // Compute x^3
+        let x2 = x * x;
+        let x3 = x * x2;
+
+        // Compute inner = sqrt_2_over_pi * (x + coeff * x^3)
+        let inner = sqrt_2_over_pi * (x + coeff * x3);
+
+        // Compute tanh(inner) using: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        let exp_2x = (two * inner).exp();
+        let tanh = (exp_2x - one) / (exp_2x + one);
+
+        // Compute gelu = 0.5 * x * (1 + tanh)
+        let result = half * x * (one + tanh);
+
+        *(out_usize + i * 4) as *mut [f32; 4] = result.into();
+        i += 4;
+    }
+    while i < end {
+        let x = *((a_usize + i * 4) as *const f32);
+        let x3 = x * x * x;
+        let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
+        *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+        i += 1;
+    }
+}
+
 fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
 
@@ -4638,7 +4957,18 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        gelu_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * chunk_size;
@@ -4663,7 +4993,16 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
                 gelu_simd(a_slice, out_slice);
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                gelu_simd(a_slice, out_slice);
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -4742,7 +5081,18 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        sigmoid_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     sigmoid_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
@@ -4850,7 +5200,18 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        tanh_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
