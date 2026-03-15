@@ -146,6 +146,12 @@ impl GpuContext {
         // Otherwise, buffer is dropped (reclaimed by GPU allocator)
     }
 
+    /// Release all buffers in pool (useful for cleanup)
+    pub fn clear_buffer_pool(&self) {
+        let mut pool = self.buffer_pool.write();
+        pool.clear();
+    }
+
     /// Ensure persistent staging buffer is large enough for given size
     fn ensure_staging_buffer_cpu_to_gpu(&self, size: usize) -> wgpu::Buffer {
         let mut staging_guard = self.staging_buffer_cpu_to_gpu.write();
@@ -438,17 +444,28 @@ fn create_output_tensor(data: Vec<f32>, shape: Vec<i64>, device: TensorDevice) -
     ))
 }
 
-// Simple ADD shader (non-vectorized for debugging)
+// ADD shader with vectorized operations for better GPU utilization
 const ADD_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> a: array<f32>;
 @group(0) @binding(1) var<storage, read> b: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(256)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    output[idx] = a[idx] + b[idx];
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var a_vec = vec4<f32>(a[vec_idx], a[vec_idx + 1u], a[vec_idx + 2u], a[vec_idx + 3u]);
+        var b_vec = vec4<f32>(b[vec_idx], b[vec_idx + 1u], b[vec_idx + 2u], b[vec_idx + 3u]);
+        var out_vec = a_vec + b_vec;
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        output[idx] = a[idx] + b[idx];
+    }
 }
 "#;
 
@@ -663,12 +680,25 @@ const GELU_SHADER: &str = r#"
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= arrayLength(&output)) { return; }
-    let x = input[idx];
-    let x3 = x * x * x;
-    let in_arg = 0.7978846 * (x + 0.044715 * x3);
-    let t = tanh(in_arg);
-    output[idx] = 0.5 * x * (1.0 + t);
+    let vec_idx = idx * 4u;
+    
+    if (vec_idx + 3u < arrayLength(&output)) {
+        var x_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
+        var x3_vec = x_vec * x_vec * x_vec;
+        var in_arg_vec = vec4<f32>(0.7978846, 0.7978846, 0.7978846, 0.7978846) * (x_vec + vec4<f32>(0.044715, 0.044715, 0.044715, 0.044715) * x3_vec);
+        var t_vec = tanh(in_arg_vec);
+        var out_vec = vec4<f32>(0.5, 0.5, 0.5, 0.5) * x_vec * (vec4<f32>(1.0, 1.0, 1.0, 1.0) + t_vec);
+        output[vec_idx] = out_vec.x;
+        output[vec_idx + 1u] = out_vec.y;
+        output[vec_idx + 2u] = out_vec.z;
+        output[vec_idx + 3u] = out_vec.w;
+    } else if (idx < arrayLength(&output)) {
+        let x = input[idx];
+        let x3 = x * x * x;
+        let in_arg = 0.7978846 * (x + 0.044715 * x3);
+        let t = tanh(in_arg);
+        output[idx] = 0.5 * x * (1.0 + t);
+    }
 }
 "#;
 
