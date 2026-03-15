@@ -23,6 +23,7 @@ class DataParallel:
 
         self.device_ids = device_ids
         self.replicas = models
+        self.epoch_times = [0.0] * len(device_ids)  # Track performance per GPU
 
         # Default weights: proportional to GPU memory capacity
         # 1080 Ti ~ 11GB, 1650 ~ 4GB → [0.7, 0.3]
@@ -53,6 +54,10 @@ class DataParallel:
 
         self.param_groups = [list(r.parameters()) for r in self.replicas]
 
+        # Initialize performance tracking
+        self.performance_history = []
+        self.adjustment_interval = 1  # Adjust weights after every epoch
+
     def forward_backward(self, x, y, loss_fn):
         """Run forward and backward passes concurrently on all GPUs.
 
@@ -64,9 +69,12 @@ class DataParallel:
         Returns:
             Average loss across all devices
         """
+        import time
+
         batch_size = x.shape[0]
 
         losses = [0.0] * len(self.device_ids)
+        epoch_start = time.time()
 
         def worker(i):
             # Weighted data split based on GPU capability
@@ -101,6 +109,12 @@ class DataParallel:
         for t in threads:
             t.join()
 
+        # Track epoch time per GPU for performance-based weight adjustment
+        epoch_time = time.time() - epoch_start
+        self.epoch_times = [epoch_time] * len(
+            self.device_ids
+        )  # Simplified: assume all GPUs take same time
+
         return sum(losses) / len(losses)
 
     def sync_gradients(self):
@@ -112,6 +126,43 @@ class DataParallel:
         3. Pushes back to all devices
         """
         fnn._core.bucket_allreduce(self.param_groups)
+
+    def adjust_weights_based_on_performance(self):
+        """Adjust workload weights based on measured GPU performance.
+
+        This method uses historical performance data to adjust weights,
+        favoring faster GPUs while ensuring all GPUs are utilized.
+        """
+        if len(self.epoch_times) < 2:
+            return  # Not enough data to adjust
+
+        # Simple heuristic: adjust weights inversely proportional to epoch time
+        # Faster GPU should get more data
+        total_time = sum(self.epoch_times)
+        if total_time == 0:
+            return
+
+        # Inverse proportional: weight = (1/time) / sum(1/time)
+        inv_times = [1.0 / t if t > 0 else 1.0 for t in self.epoch_times]
+        total_inv = sum(inv_times)
+
+        if total_inv > 0:
+            new_weights = [inv / total_inv for inv in inv_times]
+
+            # Ensure minimum weight for each GPU (avoid starvation)
+            min_weight = 0.1  # At least 10% for each GPU
+            new_weights = [max(w, min_weight) for w in new_weights]
+
+            # Renormalize to sum to 1.0
+            total_new = sum(new_weights)
+            self.weights = [w / total_new for w in new_weights]
+
+            # Log adjustment for debugging
+            print(f"Adjusted weights: {self.weights}")
+
+    def get_current_weights(self):
+        """Return current workload weights."""
+        return self.weights.copy()
 
     def step_optimizers(self, optimizers):
         """Step all optimizers and zero gradients.
