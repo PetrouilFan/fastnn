@@ -8620,6 +8620,39 @@ fn register_kernels() {
         DispatchKey::Cpu,
         cross_entropy_loss_kernel as KernelFn,
     );
+
+    // GPU fallback for cross_entropy_loss (moves to CPU for computation)
+    fn cross_entropy_loss_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
+        // Move inputs to CPU, compute, then move result back to GPU
+        let pred_cpu = args[0].to_cpu();
+        let target_cpu = args[1].to_cpu();
+        let reduction_code = args[2].item();
+
+        let reduction = match reduction_code as i32 {
+            0 => "none",
+            1 => "mean",
+            2 => "sum",
+            _ => "mean",
+        };
+
+        // Create CPU tensors for dispatch
+        let cpu_args = [&pred_cpu, &target_cpu, &Tensor::from_scalar(reduction_code)];
+        let result = cross_entropy_loss_kernel(&cpu_args);
+
+        // Move result back to original GPU
+        let device_id = match args[0].inner.storage.as_ref() {
+            Storage::Wgpu(gpu) => gpu.device_id,
+            _ => 0,
+        };
+        vec![result[0].to_gpu(device_id)]
+    }
+
+    register(
+        "cross_entropy_loss",
+        DispatchKey::Wgpu,
+        cross_entropy_loss_gpu_fallback as KernelFn,
+    );
+
     register("conv2d", DispatchKey::Cpu, conv2d_kernel as KernelFn);
     register(
         "layer_norm",
@@ -8641,5 +8674,24 @@ fn register_kernels() {
     register("randn", DispatchKey::Cpu, randn_kernel as KernelFn);
     register("rand", DispatchKey::Cpu, rand_kernel as KernelFn);
     register("gt_scalar", DispatchKey::Cpu, gt_scalar_kernel as KernelFn);
+
+    // GPU fallback for gt_scalar (moves to CPU for computation)
+    fn gt_scalar_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
+        let input_cpu = args[0].to_cpu();
+        let threshold = args[1].item();
+        let result_cpu = gt_scalar_kernel(&[&input_cpu, &Tensor::from_scalar(threshold)]);
+
+        let device_id = match args[0].inner.storage.as_ref() {
+            Storage::Wgpu(gpu) => gpu.device_id,
+            _ => 0,
+        };
+        vec![result_cpu[0].to_gpu(device_id)]
+    }
+
+    register(
+        "gt_scalar",
+        DispatchKey::Wgpu,
+        gt_scalar_gpu_fallback as KernelFn,
+    );
     register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
 }

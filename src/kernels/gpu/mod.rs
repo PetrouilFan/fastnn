@@ -68,16 +68,17 @@ impl Clone for GpuContext {
 impl GpuContext {
     fn new(device_id: usize) -> Self {
         let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        }))
-        .expect("No GPU adapter found");
+        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
+
+        let adapter = if device_id < adapters.len() {
+            adapters.swap_remove(device_id)
+        } else {
+            panic!("No GPU adapter found for device_id: {}", device_id);
+        };
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("fastnn-gpu-device"),
+                label: Some(&format!("fastnn-gpu-device-{}", device_id)),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::downlevel_defaults(),
                 memory_hints: wgpu::MemoryHints::Performance,
@@ -238,6 +239,43 @@ impl GpuContext {
     pub fn create_gpu_buffer_from_data(&self, data: &[f32], label: &str) -> GpuBuffer {
         let size = std::mem::size_of_val(data);
         let buffer = self.get_or_create_gpu_buffer(data, label);
+
+        let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
+        GpuBuffer {
+            id,
+            buffer: Arc::new(buffer),
+            size,
+            device_id: self.device_id,
+        }
+    }
+
+    pub fn create_gpu_buffer_from_bytes(&self, data: &[u8], label: &str) -> GpuBuffer {
+        let size = data.len();
+        let buffer = self.acquire_buffer(size);
+
+        // Use temporary staging buffer
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{}_staging", label)),
+            size: size as u64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
+        });
+
+        {
+            let mut range = staging.slice(..).get_mapped_range_mut();
+            range.copy_from_slice(data);
+        }
+
+        staging.unmap();
+
+        // Copy to actual buffer
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some(&format!("{}_copy", label)),
+            });
+        encoder.copy_buffer_to_buffer(&staging, 0, &buffer, 0, size as u64);
+        self.queue.submit(Some(encoder.finish()));
 
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
         GpuBuffer {
@@ -429,8 +467,23 @@ pub struct GpuBuffer {
 }
 
 fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
-    let numel = tensor.inner.numel() as usize;
-    let ptr = tensor.data_ptr_f32();
+    // Convert GPU tensors to CPU first
+    let is_gpu = tensor.inner.is_gpu();
+    let cpu_tensor = if is_gpu {
+        tensor.to_cpu()
+    } else {
+        tensor.clone()
+    };
+
+    // Check if the conversion worked
+    let cpu_is_gpu = cpu_tensor.inner.is_gpu();
+    if cpu_is_gpu {
+        panic!("to_cpu() returned a GPU tensor! Original is_gpu: {}, cpu is_gpu: {}, original device: {:?}, storage: {:?}", 
+            is_gpu, cpu_is_gpu, tensor.device(), tensor.inner.storage.as_ref());
+    }
+
+    let numel = cpu_tensor.inner.numel() as usize;
+    let ptr = cpu_tensor.data_ptr_f32();
     unsafe { std::slice::from_raw_parts(ptr, numel).to_vec() }
 }
 
@@ -909,7 +962,10 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups((numel as u64).div_ceil(256) as u32, 1, 1);
+        // Cap workgroup count at 65535 (wgpu limit)
+        let num_workgroups = (numel as u64).div_ceil(256) as u32;
+        let x_groups = num_workgroups.min(65535);
+        compute_pass.dispatch_workgroups(x_groups, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
@@ -937,7 +993,12 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
     let a_buffer = if let Some(buffer) = a.inner.get_or_create_gpu_buffer(device_id) {
         buffer
     } else {
-        let a_data = get_tensor_data(a);
+        // If tensor is on a different GPU device, move it to the target device
+        let a_on_target = match a.device() {
+            TensorDevice::Wgpu(id) if id != device_id => a.to_gpu(device_id),
+            _ => a.clone(),
+        };
+        let a_data = get_tensor_data(&a_on_target);
         let gpu_buffer = ctx.create_gpu_buffer_from_data(&a_data, "a");
         a.inner
             .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
@@ -947,7 +1008,12 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
     let b_buffer = if let Some(buffer) = b.inner.get_or_create_gpu_buffer(device_id) {
         buffer
     } else {
-        let b_data = get_tensor_data(b);
+        // If tensor is on a different GPU device, move it to the target device
+        let b_on_target = match b.device() {
+            TensorDevice::Wgpu(id) if id != device_id => b.to_gpu(device_id),
+            _ => b.clone(),
+        };
+        let b_data = get_tensor_data(&b_on_target);
         let gpu_buffer = ctx.create_gpu_buffer_from_data(&b_data, "b");
         b.inner
             .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
@@ -987,7 +1053,10 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups((numel as u64).div_ceil(256) as u32, 1, 1);
+        // Cap workgroup count at 65535 (wgpu limit)
+        let num_workgroups = (numel as u64).div_ceil(256) as u32;
+        let x_groups = num_workgroups.min(65535);
+        compute_pass.dispatch_workgroups(x_groups, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
@@ -1151,8 +1220,9 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        let x_groups = n.div_ceil(8);
-        let y_groups = m.div_ceil(8);
+        // Cap workgroup dimensions at 65535 (wgpu limit)
+        let x_groups = n.div_ceil(8).min(65535);
+        let y_groups = m.div_ceil(8).min(65535);
         compute_pass.dispatch_workgroups(x_groups as u32, y_groups as u32, 1);
     }
     ctx.queue.submit([encoder.finish()]);
@@ -1394,15 +1464,25 @@ fn run_reduction_kernel(
             });
             compute_pass.set_pipeline(&pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            // Dispatch one workgroup per row
-            compute_pass.dispatch_workgroups((m as u64).div_ceil(256) as u32, 1, 1);
+            // Dispatch one workgroup per row, but cap at 65535 (wgpu limit)
+            let num_workgroups = (m as u64).div_ceil(256) as u32;
+            let x_groups = num_workgroups.min(65535);
+            let y_groups = ((num_workgroups as u64 + 65535) / 65536) as u32;
+            compute_pass.dispatch_workgroups(x_groups, y_groups.max(1), 1);
         }
         ctx.queue.submit([encoder.finish()]);
         ctx.device.poll(wgpu::Maintain::Wait);
     } else {
         // For other cases, fall back to CPU implementation
-        // (This is a temporary limitation for simplicity)
-        panic!("GPU reduction only implemented for 2D tensors reducing along dimension 1");
+        // Move input to CPU, compute, then move result back to GPU
+        let input_cpu = input.to_cpu();
+        let result_cpu = match op {
+            "sum" => input_cpu.sum(dim as i32, keepdim),
+            "mean" => input_cpu.mean(dim as i32, keepdim),
+            "max" => input_cpu.max(dim as i32, keepdim),
+            _ => input_cpu.sum(dim as i32, keepdim),
+        };
+        return result_cpu.to_gpu(device_id);
     }
 
     // Create tensor with GPU storage
