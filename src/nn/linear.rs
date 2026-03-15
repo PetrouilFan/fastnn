@@ -44,27 +44,11 @@ impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Tensor {
         let output = x.matmul(&self.weight);
 
-        let output = if let Some(b) = &self.bias {
+        if let Some(b) = &self.bias {
             output.add(b)
         } else {
             output
-        };
-
-        // Create fused backward operation if gradient tracking is enabled
-        if crate::autograd::is_grad_enabled()
-            && (x.requires_grad()
-                || self.weight.requires_grad()
-                || self.bias.as_ref().is_some_and(|b| b.requires_grad()))
-        {
-            use crate::autograd::{make_edge, AutogradMeta, LinearBackward};
-            use std::sync::Arc;
-
-            let edges = {
-                let mut edges = make_edge(x);
-                edges.extend(make_edge(&self.weight));
-                if let Some(b) = &self.bias {
-                    edges.extend(make_edge(b));
-                }
+        }
                 edges
             };
 
@@ -79,6 +63,8 @@ impl Module for Linear {
             output
         } else {
             output
+=======
+>>>>>>> parent of bfcaebe (Fix AdamW optimizer and improve Linear backward)
         }
     }
 
