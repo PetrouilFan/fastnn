@@ -469,6 +469,11 @@ pub struct GpuBuffer {
 fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
     // Convert GPU tensors to CPU first
     let is_gpu = tensor.inner.is_gpu();
+    let storage_type = match tensor.inner.storage.as_ref() {
+        Storage::Cpu(_) => "Cpu",
+        Storage::Wgpu(_) => "Wgpu",
+    };
+
     let cpu_tensor = if is_gpu {
         tensor.to_cpu()
     } else {
@@ -477,9 +482,14 @@ fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
 
     // Check if the conversion worked
     let cpu_is_gpu = cpu_tensor.inner.is_gpu();
+    let cpu_storage_type = match cpu_tensor.inner.storage.as_ref() {
+        Storage::Cpu(_) => "Cpu",
+        Storage::Wgpu(_) => "Wgpu",
+    };
+
     if cpu_is_gpu {
-        panic!("to_cpu() returned a GPU tensor! Original is_gpu: {}, cpu is_gpu: {}, original device: {:?}, storage: {:?}", 
-            is_gpu, cpu_is_gpu, tensor.device(), tensor.inner.storage.as_ref());
+        panic!("to_cpu() returned a GPU tensor! Original is_gpu: {}, cpu is_gpu: {}, original storage: {}, cpu storage: {}, original device: {:?}", 
+            is_gpu, cpu_is_gpu, storage_type, cpu_storage_type, tensor.device());
     }
 
     let numel = cpu_tensor.inner.numel() as usize;
@@ -1467,7 +1477,7 @@ fn run_reduction_kernel(
             // Dispatch one workgroup per row, but cap at 65535 (wgpu limit)
             let num_workgroups = (m as u64).div_ceil(256) as u32;
             let x_groups = num_workgroups.min(65535);
-            let y_groups = ((num_workgroups as u64 + 65535) / 65536) as u32;
+            let y_groups = (num_workgroups as u64).div_ceil(65536) as u32;
             compute_pass.dispatch_workgroups(x_groups, y_groups.max(1), 1);
         }
         ctx.queue.submit([encoder.finish()]);
