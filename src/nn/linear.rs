@@ -49,23 +49,6 @@ impl Module for Linear {
         } else {
             output
         }
-                edges
-            };
-
-            let backward =
-                LinearBackward::new(x.clone(), self.weight.clone(), self.bias.clone(), edges);
-
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(std::sync::Arc::new(backward));
-            let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            output
-=======
->>>>>>> parent of bfcaebe (Fix AdamW optimizer and improve Linear backward)
-        }
     }
 
     fn parameters(&self) -> Vec<Tensor> {
