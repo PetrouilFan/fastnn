@@ -1697,13 +1697,18 @@ unsafe fn sigmoid_parallel_neon(
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
 
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
+
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
         let neg_x = -x;
         let exp_neg_x = neg_x.exp();
         let result = one / (one + exp_neg_x);
-        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
@@ -1859,10 +1864,12 @@ unsafe fn tanh_parallel_neon(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
 
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
 
         // Clamp values to prevent overflow in exp
         let x_clamped = x.max(clamp_lo).min(clamp_hi);
@@ -1871,7 +1878,9 @@ unsafe fn tanh_parallel_neon(
         let exp_2x = (two * x_clamped).exp();
         let result = (exp_2x - one) / (exp_2x + one);
 
-        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
@@ -3620,12 +3629,16 @@ unsafe fn exp_parallel_neon(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
 
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
         let result = x.exp();
-        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
@@ -3708,12 +3721,16 @@ unsafe fn log_parallel_neon(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
 
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
         let result = x.ln();
-        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
@@ -4040,12 +4057,16 @@ unsafe fn sqrt_parallel_neon(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
 
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
         let result = x.sqrt();
-        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
@@ -4896,10 +4917,12 @@ unsafe fn gelu_parallel_neon(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
+    let a_ptr_arr = a_ptr as *const [f32; 4];
+    let out_ptr_arr = out_ptr as *mut [f32; 4];
 
     let mut i = start;
     while i + 4 <= end {
-        let x = f32x4::from(*(a_ptr.add(i * 4)) as *const [f32; 4]);
+        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
 
         // Compute x^3
         let x2 = x * x;
@@ -4915,7 +4938,9 @@ unsafe fn gelu_parallel_neon(
         // Compute gelu = 0.5 * x * (1 + tanh)
         let result = half * x * (one + tanh);
 
-        *(out_ptr.add(i * 4) as *mut [f32; 4]) = result.into();
+        unsafe {
+            *out_ptr_arr.add(i / 4) = result.into();
+        }
         i += 4;
     }
     while i < end {
