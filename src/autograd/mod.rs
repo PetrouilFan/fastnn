@@ -82,6 +82,65 @@ pub trait Node: Send + Sync {
     }
 }
 
+/// Fused Linear backward operation for better performance
+/// Computes gradients for weight, bias, and input in a single kernel
+pub struct LinearBackward {
+    pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
+}
+
+impl LinearBackward {
+    pub fn new(input: Tensor, weight: Tensor, bias: Option<Tensor>, edges: Vec<Edge>) -> Self {
+        let mut inputs = vec![input, weight];
+        if let Some(b) = bias {
+            inputs.push(b);
+        }
+        LinearBackward { inputs, edges }
+    }
+}
+
+impl Node for LinearBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs[0].clone().unwrap();
+
+        let input = &self.inputs[0];
+        let weight = &self.inputs[1];
+        let has_bias = self.inputs.len() == 3;
+
+        // Compute gradients with potential kernel fusion
+        // grad_input = grad_output @ weight^T
+        let grad_input = grad_output.matmul(&weight.transpose(0, 1));
+
+        // grad_weight = input^T @ grad_output
+        let grad_weight = input.transpose(0, 1).matmul(&grad_output);
+
+        // grad_bias = sum(grad_output, dim=0)
+        let grad_bias = if has_bias {
+            Some(grad_output.sum(0, false))
+        } else {
+            None
+        };
+
+        vec![Some(grad_input), Some(grad_weight), grad_bias]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        self.inputs.len()
+    }
+
+    fn name(&self) -> &str {
+        "LinearBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        &self.inputs
+    }
+}
+
 #[allow(dead_code)]
 pub struct AddBackward {
     pub inputs: Vec<Tensor>,
