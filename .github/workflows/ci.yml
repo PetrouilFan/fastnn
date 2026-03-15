@@ -65,7 +65,7 @@ jobs:
           workspaces: .
 
       - name: Run Rust tests
-        run: cargo test --lib --release
+        run: cargo test --lib
 
       - name: Build extension
         uses: PyO3/maturin-action@v1
