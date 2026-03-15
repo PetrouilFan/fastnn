@@ -100,9 +100,9 @@ impl Node for AddBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        if a.shape() == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
-            panic!("AddBackward: a=[64, 64], grad=[32, 64, 64]");
-        }
+        // if a.shape() == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
+        //     panic!("AddBackward: a=[64, 64], grad=[32, 64, 64]");
+        // }
 
         // Handle broadcasting: if input shape doesn't match output shape,
         // sum over the extra dimensions
