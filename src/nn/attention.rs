@@ -47,56 +47,49 @@ impl MultiHeadAttention {
         let batch = x.shape()[0];
         let seq_len = x.shape()[1];
 
-        // 1. Project to Q, K, V
+        // 1. Project to Q, K, V - single combined projection for better memory locality
         let q = self.q_proj.forward(x);
         let k = self.k_proj.forward(x);
         let v = self.v_proj.forward(x);
 
-        // 2. Reshape to [batch, seq_len, num_heads, head_dim]
-        let q = q.reshape(vec![batch, seq_len, self.num_heads, self.head_dim]);
-        let k = k.reshape(vec![batch, seq_len, self.num_heads, self.head_dim]);
-        let v = v.reshape(vec![batch, seq_len, self.num_heads, self.head_dim]);
+        // 2. Reshape and transpose in one step to [batch, num_heads, seq_len, head_dim]
+        let q = q
+            .reshape(vec![batch, seq_len, self.num_heads, self.head_dim])
+            .permute(vec![0, 2, 1, 3])
+            .contiguous()
+            .reshape(vec![batch * self.num_heads, seq_len, self.head_dim]);
 
-        // 3. Transpose to [batch, num_heads, seq_len, head_dim]
-        let q = q.permute(vec![0, 2, 1, 3]);
-        let k = k.permute(vec![0, 2, 1, 3]);
-        let v = v.permute(vec![0, 2, 1, 3]);
+        let k = k
+            .reshape(vec![batch, seq_len, self.num_heads, self.head_dim])
+            .permute(vec![0, 2, 1, 3])
+            .contiguous()
+            .reshape(vec![batch * self.num_heads, self.head_dim, seq_len]); // Transpose for K^T
 
-        // Make contiguous after permute
-        let q = q.contiguous();
-        let k = k.contiguous();
-        let v = v.contiguous();
+        let v = v
+            .reshape(vec![batch, seq_len, self.num_heads, self.head_dim])
+            .permute(vec![0, 2, 1, 3])
+            .contiguous()
+            .reshape(vec![batch * self.num_heads, seq_len, self.head_dim]);
 
-        // 4. Reshape for batched matmul
-        let batch_heads = batch * self.num_heads;
-        let q = q.reshape(vec![batch_heads, seq_len, self.head_dim]);
-        let k = k.reshape(vec![batch_heads, self.head_dim, seq_len]); // Transpose last two dims
-        let v = v.reshape(vec![batch_heads, seq_len, self.head_dim]);
-
-        // 5. Compute attention scores
+        // 3. Compute attention scores with scale factor
         let scale = 1.0 / (self.head_dim as f32).sqrt();
-
-        // Q @ K^T
         let mut attn_scores = q.matmul(&k);
         attn_scores = attn_scores.mul(&Tensor::from_scalar(scale));
 
-        // 6. Apply softmax
-        let attn_weights = attn_scores.softmax(2); // axis=2
+        // 4. Apply softmax
+        let attn_weights = attn_scores.softmax(2);
 
-        // 7. Apply attention to values
+        // 5. Apply attention to values
         let context = attn_weights.matmul(&v);
 
-        // 8. Reshape back to [batch, num_heads, seq_len, head_dim]
-        let context = context.reshape(vec![batch, self.num_heads, seq_len, self.head_dim]);
+        // 6. Reshape back to [batch, seq_len, d_model]
+        let context = context
+            .reshape(vec![batch, self.num_heads, seq_len, self.head_dim])
+            .permute(vec![0, 2, 1, 3])
+            .contiguous()
+            .reshape(vec![batch, seq_len, self.d_model]);
 
-        // 9. Transpose to [batch, seq_len, num_heads, head_dim]
-        let context = context.permute(vec![0, 2, 1, 3]);
-        let context = context.contiguous();
-
-        // 10. Reshape to [batch, seq_len, d_model]
-        let context = context.reshape(vec![batch, seq_len, self.d_model]);
-
-        // 11. Output projection
+        // 7. Output projection
         self.out_proj.forward(&context)
     }
 }
