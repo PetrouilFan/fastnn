@@ -69,16 +69,18 @@ impl Module for Linear {
 
     fn zero_grad(&self) {
         // Clear gradient on weight
-        let mut meta = self.weight.inner.autograd_meta.clone();
-        if let Some(m) = &mut meta {
-            m.grad = None;
+        if let Some(meta) = &self.weight.inner.autograd_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.grad = None;
+            }
         }
 
         // Clear gradient on bias
         if let Some(b) = &self.bias {
-            let mut meta = b.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &b.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }

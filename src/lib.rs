@@ -716,7 +716,8 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(std::sync::Arc::new(backward));
         let mut output = output.clone();
-        Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+        Arc::make_mut(&mut output.inner).autograd_meta =
+            Some(Arc::new(std::sync::Mutex::new(meta)));
         PyTensor::from_tensor(output)
     } else {
         PyTensor::from_tensor(output)
@@ -760,7 +761,8 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
         let mut meta = AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(std::sync::Arc::new(backward));
         let mut output = output.clone();
-        Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+        Arc::make_mut(&mut output.inner).autograd_meta =
+            Some(Arc::new(std::sync::Mutex::new(meta)));
         PyTensor::from_tensor(output)
     } else {
         PyTensor::from_tensor(output)

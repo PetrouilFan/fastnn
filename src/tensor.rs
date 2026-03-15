@@ -17,7 +17,7 @@ pub struct TensorImpl {
     pub dtype: DType,
     pub device: Device,
     pub version_counter: Arc<AtomicU64>,
-    pub autograd_meta: Option<AutogradMeta>,
+    pub autograd_meta: Option<Arc<std::sync::Mutex<AutogradMeta>>>,
 }
 
 impl TensorImpl {
@@ -132,8 +132,10 @@ impl TensorImpl {
 
         if autograd::is_grad_enabled() {
             if let Some(meta) = &self.autograd_meta {
-                if meta.requires_grad {
-                    new.set_requires_grad(true);
+                if let Ok(lock) = meta.lock() {
+                    if lock.requires_grad {
+                        new.set_requires_grad(true);
+                    }
                 }
             }
         }
@@ -390,15 +392,19 @@ impl TensorImpl {
     pub fn requires_grad(&self) -> bool {
         self.autograd_meta
             .as_ref()
-            .map(|m| m.requires_grad)
+            .map(|m| m.lock().unwrap().requires_grad)
             .unwrap_or(false)
     }
 
     pub fn set_requires_grad(&mut self, requires_grad: bool) {
         if self.autograd_meta.is_none() {
-            self.autograd_meta = Some(AutogradMeta::new(requires_grad));
+            self.autograd_meta = Some(Arc::new(std::sync::Mutex::new(AutogradMeta::new(
+                requires_grad,
+            ))));
         } else if let Some(meta) = &mut self.autograd_meta {
-            meta.requires_grad = requires_grad;
+            if let Ok(mut lock) = meta.lock() {
+                lock.requires_grad = requires_grad;
+            }
         }
     }
 
@@ -411,20 +417,21 @@ impl TensorImpl {
     }
 
     pub fn grad(&self) -> Option<Tensor> {
-        self.autograd_meta.as_ref()?.grad.clone()
+        self.autograd_meta.as_ref()?.lock().unwrap().grad.clone()
     }
 
     pub fn set_grad(&mut self, grad: Option<Tensor>) {
         if let Some(meta) = &mut self.autograd_meta {
-            meta.grad = grad;
+            if let Ok(mut lock) = meta.lock() {
+                lock.grad = grad;
+            }
         }
     }
 
     pub fn set_grad_for_tensor(tensor: &Tensor, grad: Option<Tensor>) {
-        let ptr = Arc::as_ptr(&tensor.inner) as *mut TensorImpl;
-        unsafe {
-            if let Some(meta) = (*ptr).autograd_meta.as_mut() {
-                meta.grad = grad;
+        if let Some(meta) = &tensor.inner.autograd_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.grad = grad;
             }
         }
     }
@@ -432,12 +439,12 @@ impl TensorImpl {
     pub fn is_leaf(&self) -> bool {
         self.autograd_meta
             .as_ref()
-            .map(|m| m.is_leaf)
+            .map(|m| m.lock().unwrap().is_leaf)
             .unwrap_or(true)
     }
 
     pub fn grad_fn(&self) -> Option<Arc<dyn autograd::Node>> {
-        self.autograd_meta.as_ref()?.grad_fn.clone()
+        self.autograd_meta.as_ref()?.lock().unwrap().grad_fn.clone()
     }
 
     pub fn detach(&self) -> Tensor {
@@ -811,7 +818,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -828,7 +836,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -853,7 +862,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -874,11 +884,12 @@ impl Tensor {
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = autograd::SliceBackward::new(self.clone(), dim, start, end, step, edges);
+            let backward = autograd::ViewBackward::new(self.clone(), edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1157,7 +1168,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1222,7 +1234,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1243,7 +1256,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1264,7 +1278,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1285,7 +1300,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1302,7 +1318,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1319,7 +1336,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1336,7 +1354,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1353,7 +1372,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1370,7 +1390,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1387,7 +1408,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1404,7 +1426,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1421,7 +1444,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1442,7 +1466,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1459,7 +1484,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1506,7 +1532,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1531,7 +1558,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -1572,7 +1600,8 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
