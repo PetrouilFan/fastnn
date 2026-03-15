@@ -54,7 +54,7 @@ impl Module for Linear {
         if crate::autograd::is_grad_enabled()
             && (x.requires_grad()
                 || self.weight.requires_grad()
-                || self.bias.as_ref().map_or(false, |b| b.requires_grad()))
+                || self.bias.as_ref().is_some_and(|b| b.requires_grad()))
         {
             use crate::autograd::{make_edge, AutogradMeta, LinearBackward};
             use std::sync::Arc;
