@@ -218,16 +218,16 @@ impl Node for MulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
-            && grad.shape() == vec![32, 64, 64]
-        {
-            panic!(
-                "MulBackward: a=[{}], b=[{}], grad=[{}]",
-                a.shape().len(),
-                b.shape().len(),
-                grad.shape().len()
-            );
-        }
+        // if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
+        //     && grad.shape() == vec![32, 64, 64]
+        // {
+        //     panic!(
+        //         "MulBackward: a=[{}], b=[{}], grad=[{}]",
+        //         a.shape().len(),
+        //         b.shape().len(),
+        //         grad.shape().len()
+        //     );
+        // }
 
         // Compute gradient for a: grad * b
         let mut grad_a = grad.clone().mul(b);
@@ -300,16 +300,16 @@ impl Node for DivBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
-            && grad.shape() == vec![32, 64, 64]
-        {
-            panic!(
-                "DivBackward: a=[{}], b=[{}], grad=[{}]",
-                a.shape().len(),
-                b.shape().len(),
-                grad.shape().len()
-            );
-        }
+        // if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
+        //     && grad.shape() == vec![32, 64, 64]
+        // {
+        //     panic!(
+        //         "DivBackward: a=[{}], b=[{}], grad=[{}]",
+        //         a.shape().len(),
+        //         b.shape().len(),
+        //         grad.shape().len()
+        //     );
+        // }
 
         let b_sq = b.mul(b);
         let grad_a = grad.clone().div(&b.clone());
@@ -426,16 +426,16 @@ impl Node for MatmulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        if (a.shape() == vec![32, 64, 64] && b.shape() == vec![64, 64])
-            && grad.shape() == vec![32, 64, 64]
-        {
-            panic!(
-                "MatmulBackward: a={:?}, b={:?}, grad={:?}",
-                a.shape(),
-                b.shape(),
-                grad.shape()
-            );
-        }
+        // if (a.shape() == vec![32, 64, 64] && b.shape() == vec![64, 64])
+        //     && grad.shape() == vec![32, 64, 64]
+        // {
+        //     panic!(
+        //         "MatmulBackward: a={:?}, b={:?}, grad={:?}",
+        //         a.shape(),
+        //         b.shape(),
+        //         grad.shape()
+        //     );
+        // }
 
         // If grad is a scalar (e.g., from sum()), we need to expand it to the output shape
         let grad_shape = grad.shape();
@@ -1399,13 +1399,13 @@ impl Node for SliceBackward {
 
         // Create a zero tensor for the gradient of the input
         let input_shape = self.input.shape();
-        if input_shape == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
-            panic!(
-                "SliceBackward: input_shape {:?} != grad.shape() {:?}",
-                input_shape,
-                grad.shape()
-            );
-        }
+        // if input_shape == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
+        //     panic!(
+        //         "SliceBackward: input_shape {:?} != grad.shape() {:?}",
+        //         input_shape,
+        //         grad.shape()
+        //     );
+        // }
         let mut grad_input = Tensor::zeros(
             input_shape.clone(),
             crate::storage::DType::F32,
