@@ -6971,7 +6971,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
     let x_ptr = x.data_ptr() as *const f32;
     let numel = x.numel() as usize;
-    let num_rows = numel / dim_size;
 
     let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
@@ -7042,6 +7041,7 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
     #[cfg(not(feature = "parallel"))]
     {
+        let num_rows = numel / dim_size;
         let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
 
