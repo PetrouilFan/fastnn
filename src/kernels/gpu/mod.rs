@@ -136,7 +136,7 @@ impl GpuContext {
         }
 
         let mut pool = self.buffer_pool.write();
-        let buffers = pool.entry(bucket).or_insert_with(Vec::new);
+        let buffers = pool.entry(bucket).or_default();
 
         // Limit pool size to prevent unbounded growth
         const MAX_BUFFERS_PER_BUCKET: usize = 16;
@@ -1173,7 +1173,7 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
 }
 
 // Reduction operation shaders
-
+#[allow(dead_code)]
 // SUM reduction shader - reduces along a dimension
 const SUM_REDUCE_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
@@ -1189,6 +1189,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 "#;
 
 // MEAN reduction shader
+#[allow(dead_code)]
 const MEAN_REDUCE_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
@@ -1200,6 +1201,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 "#;
 
 // MAX reduction shader
+#[allow(dead_code)]
 const MAX_REDUCE_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
@@ -1211,6 +1213,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 "#;
 
 // MIN reduction shader
+#[allow(dead_code)]
 const MIN_REDUCE_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
@@ -1226,7 +1229,7 @@ fn run_reduction_kernel(
     input: &Tensor,
     dim: usize,
     keepdim: bool,
-    shader: &str,
+    _shader: &str,
     name: &str,
     device_id: usize,
     op: &str,
