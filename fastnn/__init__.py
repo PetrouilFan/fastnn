@@ -166,6 +166,11 @@ class PySequential:
                 params.extend(layer.parameters())
         return params
 
+    def to_gpu(self, device_id):
+        for layer in self.layers:
+            if hasattr(layer, "to_gpu"):
+                layer.to_gpu(device_id)
+
     def train(self):
         for layer in self.layers:
             if hasattr(layer, "train"):

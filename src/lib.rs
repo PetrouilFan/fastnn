@@ -149,6 +149,12 @@ impl PyTensor {
         crate::autograd::backward(&self.inner, grad_tensor);
     }
 
+    #[pyo3(signature = (grad))]
+    fn set_grad(&mut self, grad: Option<PyTensor>) {
+        let grad_tensor = grad.map(|g| g.inner);
+        crate::tensor::TensorImpl::set_grad_for_tensor(&self.inner, grad_tensor);
+    }
+
     fn detach(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.detach())
     }
@@ -230,12 +236,28 @@ impl PyTensor {
         )
     }
 
-    fn __getitem__(&self, idx: usize) -> PyTensor {
-        // For 2D tensor [N, D], t[idx] returns [D] (the row)
-        // For 1D tensor [N], t[idx] returns scalar (0-dim)
-        // Implementation: slice(0, idx, idx+1, 1).squeeze(0)
-        let sliced = self.inner.slice(0, idx as i64, (idx + 1) as i64, 1);
-        PyTensor::from_tensor(sliced.squeeze(Some(0)))
+    fn __getitem__(&self, idx: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        use pyo3::types::PySlice;
+
+        // Check if idx is a slice
+        if let Ok(slice) = idx.cast::<PySlice>() {
+            let length: isize = self.inner.shape()[0] as isize;
+            let indices = slice.indices(length)?;
+            // For now, only support slicing along dimension 0
+            let start = indices.start as i64;
+            let stop = indices.stop as i64;
+            let step = indices.step as i64;
+            let sliced = self.inner.slice(0, start, stop, step);
+            Ok(PyTensor::from_tensor(sliced))
+        } else {
+            // Assume it's an integer index
+            let idx_val: usize = idx.extract()?;
+            // For 2D tensor [N, D], t[idx] returns [D] (the row)
+            // For 1D tensor [N], t[idx] returns scalar (0-dim)
+            // Implementation: slice(0, idx, idx+1, 1).squeeze(0)
+            let sliced = self.inner.slice(0, idx_val as i64, (idx_val + 1) as i64, 1);
+            Ok(PyTensor::from_tensor(sliced.squeeze(Some(0))))
+        }
     }
 
     fn cpu(&self) -> PyTensor {
@@ -796,7 +818,15 @@ fn _no_grad_exit() {
 }
 
 #[pyfunction]
-fn _set_seed(_seed: u64) {}
+fn _set_seed(seed: u64) {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    // Set the seed for the random number generator
+    // Note: This is a simple implementation that sets the seed for the current thread
+    // In a real implementation, you might want to use a thread-local RNG
+    let _rng = StdRng::seed_from_u64(seed);
+    // Note: We're not actually using the RNG anywhere yet, so this is a placeholder
+}
 
 #[cfg(feature = "parallel")]
 use rayon::ThreadPoolBuilder;
@@ -905,6 +935,13 @@ impl Linear {
     fn is_training(&self) -> bool {
         self.inner.is_training()
     }
+
+    #[pyo3(signature = (device_id))]
+    #[allow(clippy::wrong_self_convention)]
+    fn to_gpu(&mut self, device_id: usize) {
+        self.inner.weight = self.inner.weight.to_gpu(device_id);
+        self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
+    }
 }
 
 #[pyclass]
@@ -971,6 +1008,13 @@ impl Conv2d {
 
     fn eval(&self) {
         self.inner.eval_mode();
+    }
+
+    #[pyo3(signature = (device_id))]
+    #[allow(clippy::wrong_self_convention)]
+    fn to_gpu(&mut self, device_id: usize) {
+        self.inner.weight = self.inner.weight.to_gpu(device_id);
+        self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
     }
 }
 
@@ -1477,6 +1521,83 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTransformerEncoder>()?;
 
     m.add_class::<PyTensor>()?;
+
+    m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
+
+    Ok(())
+}
+
+#[pyfunction]
+#[allow(clippy::needless_range_loop)]
+fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
+    // Optimized implementation: average gradients across replicas
+    // param_groups is a list of parameter lists, one per replica
+
+    if param_groups.is_empty() {
+        return Ok(());
+    }
+
+    let num_replicas = param_groups.len();
+    let num_params = param_groups[0].len();
+
+    // Check all replicas have the same number of parameters
+    for group in &param_groups {
+        if group.len() != num_params {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "All replicas must have the same number of parameters",
+            ));
+        }
+    }
+
+    // Pre-allocate gradients vector to avoid repeated allocations
+    let mut gradients = Vec::with_capacity(num_replicas);
+    let num_replicas_tensor = crate::tensor::Tensor::from_scalar(num_replicas as f32);
+
+    // For each parameter index, average gradients across replicas
+    for param_idx in 0..num_params {
+        // Clear gradients vector for reuse (keeps capacity)
+        gradients.clear();
+
+        // Collect gradients from all replicas
+        let mut all_have_grad = true;
+        for replica_idx in 0..num_replicas {
+            let param = &param_groups[replica_idx][param_idx];
+            if let Some(grad) = param.grad() {
+                gradients.push(grad.inner.clone());
+            } else {
+                // If any replica has no gradient, skip this parameter
+                all_have_grad = false;
+                break;
+            }
+        }
+
+        if !all_have_grad {
+            continue;
+        }
+
+        // If we collected gradients from all replicas, average them
+        if gradients.len() == num_replicas {
+            // Compute average gradient: sum all gradients and divide by num_replicas
+            // Start with first gradient as base
+            let mut avg_grad = gradients[0].clone();
+
+            // Add remaining gradients (skip first since it's already in avg_grad)
+            for i in 1..gradients.len() {
+                avg_grad = avg_grad.add(&gradients[i]);
+            }
+
+            // Divide by number of replicas
+            avg_grad = avg_grad.div(&num_replicas_tensor);
+
+            // Set the averaged gradient back to all parameters
+            // Create the PyTensor once and reuse for all replicas
+            let avg_grad_py = PyTensor::from_tensor(avg_grad.clone());
+            for replica_idx in 0..num_replicas {
+                let param = &mut param_groups[replica_idx][param_idx];
+                param.set_grad(Some(avg_grad_py.clone()));
+            }
+        }
+    }
 
     Ok(())
 }
