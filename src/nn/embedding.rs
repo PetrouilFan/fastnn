@@ -53,9 +53,10 @@ impl Module for Embedding {
     }
 
     fn zero_grad(&self) {
-        let mut meta = self.weight.inner.autograd_meta.clone();
-        if let Some(m) = &mut meta {
-            m.grad = None;
+        if let Some(meta) = &self.weight.inner.autograd_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.grad = None;
+            }
         }
     }
 

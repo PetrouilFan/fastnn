@@ -135,11 +135,11 @@ impl Optimizer for Adam {
     }
 
     fn zero_grad(&mut self) {
-        for param in &self.params {
-            let ptr = Arc::as_ptr(&param.inner) as *mut crate::tensor::TensorImpl;
-            unsafe {
-                if let Some(meta) = (*ptr).autograd_meta.as_mut() {
-                    meta.grad = None;
+        for param in &mut self.params {
+            let inner = Arc::make_mut(&mut param.inner);
+            if let Some(meta) = &mut inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
                 }
             }
         }

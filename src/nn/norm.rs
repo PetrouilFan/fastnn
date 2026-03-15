@@ -85,7 +85,8 @@ impl Module for LayerNorm {
             let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
             output
         } else {
             output
@@ -116,15 +117,17 @@ impl Module for LayerNorm {
 
     fn zero_grad(&self) {
         if let Some(w) = &self.weight {
-            let mut meta = w.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &w.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
         if let Some(b) = &self.bias {
-            let mut meta = b.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &b.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }
@@ -243,15 +246,17 @@ impl Module for BatchNorm1d {
 
     fn zero_grad(&self) {
         if let Some(w) = &self.weight {
-            let mut meta = w.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &w.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
         if let Some(b) = &self.bias {
-            let mut meta = b.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &b.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }

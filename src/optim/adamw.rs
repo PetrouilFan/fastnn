@@ -141,7 +141,9 @@ impl Optimizer for AdamW {
         for param in &mut self.params.iter_mut() {
             let inner = Arc::make_mut(&mut param.inner);
             if let Some(meta) = &mut inner.autograd_meta {
-                meta.grad = None;
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }
