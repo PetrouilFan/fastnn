@@ -59,7 +59,38 @@ impl Module for LayerNorm {
             &[x, x, &weight, &bias, &Tensor::from_scalar(self.eps as f32)],
         );
 
-        result[0].clone()
+        let output = result[0].clone();
+        let mean = result[1].clone();
+        let variance = result[2].clone();
+        let x_hat = result[3].clone();
+
+        // Set up gradient tracking for layer norm
+        if x.requires_grad() || weight.requires_grad() || bias.requires_grad() {
+            let edges = {
+                let mut edges = crate::autograd::make_edge(x);
+                edges.extend(crate::autograd::make_edge(&weight));
+                edges.extend(crate::autograd::make_edge(&bias));
+                edges
+            };
+            let backward = crate::autograd::LayerNormBackward::new(
+                x.clone(),
+                weight.clone(),
+                bias.clone(),
+                x_hat,
+                mean,
+                variance,
+                self.eps as f32,
+                edges,
+            );
+            let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+            output
+        } else {
+            output
+        }
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -86,15 +117,17 @@ impl Module for LayerNorm {
 
     fn zero_grad(&self) {
         if let Some(w) = &self.weight {
-            let mut meta = w.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &w.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
         if let Some(b) = &self.bias {
-            let mut meta = b.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &b.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }
@@ -213,15 +246,17 @@ impl Module for BatchNorm1d {
 
     fn zero_grad(&self) {
         if let Some(w) = &self.weight {
-            let mut meta = w.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &w.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
         if let Some(b) = &self.bias {
-            let mut meta = b.inner.autograd_meta.clone();
-            if let Some(m) = &mut meta {
-                m.grad = None;
+            if let Some(meta) = &b.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }

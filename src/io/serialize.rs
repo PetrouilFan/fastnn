@@ -23,7 +23,7 @@ pub fn save_model(model: &dyn Module, path: &str) {
     // Save safetensors (simplified - would use actual safetensors crate)
     let _json_meta = serde_json::json!({
         "format": "fastnn",
-        "version": "0.1.0",
+        "version": "0.3.0",
         "metadata": metadata,
     });
 
