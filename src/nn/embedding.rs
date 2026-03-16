@@ -27,6 +27,14 @@ impl Embedding {
             training: std::sync::atomic::AtomicBool::new(true),
         }
     }
+
+    pub fn parameters(&self) -> Vec<Tensor> {
+        vec![self.weight.clone()]
+    }
+
+    pub fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![("weight".to_string(), self.weight.clone())]
+    }
 }
 
 impl Module for Embedding {
@@ -45,9 +53,10 @@ impl Module for Embedding {
     }
 
     fn zero_grad(&self) {
-        let mut meta = self.weight.inner.autograd_meta.clone();
-        if let Some(m) = &mut meta {
-            m.grad = None;
+        if let Some(meta) = &self.weight.inner.autograd_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.grad = None;
+            }
         }
     }
 
