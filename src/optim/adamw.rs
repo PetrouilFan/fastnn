@@ -1,6 +1,6 @@
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
 use crate::storage::Storage;
-use crate::tensor::Tensor;
+use crate::tensor::{Tensor, TensorImpl};
 use std::sync::Arc;
 
 pub struct AdamW {
@@ -42,6 +42,11 @@ impl AdamW {
 
         let step: Vec<u64> = vec![0; params.len()];
 
+        // for (i, p) in params.iter().enumerate() {
+        //     if p.shape() == vec![32, 64, 64] {
+        //         panic!("AdamW::new: param {} has shape [32, 64, 64]", i);
+        //     }
+        // }
         AdamW {
             params,
             lr,
@@ -62,12 +67,31 @@ impl Optimizer for AdamW {
         let beta1 = self.betas.0;
         let beta2 = self.betas.1;
 
+        // Debug: print all param shapes
+        // if !self.step.is_empty() && self.step[0] >= 60 {
+        //     panic!(
+        //         "Debug: step >= 60. Param shapes: {:?}",
+        //         self.params.iter().map(|p| p.shape()).collect::<Vec<_>>()
+        //     );
+        // }
+
         for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
                 g
             } else {
                 continue;
             };
+            // if grad.shape().len() == 3 {
+            //     panic!("grad.shape() = {:?}", grad.shape());
+            // }
+            if param.shape() != grad.shape() {
+                // panic!(
+                //     "Shape mismatch in AdamW::step: param.shape() = {:?}, grad.shape() = {:?}, param.id() = {}",
+                //     param.shape(),
+                //     grad.shape(),
+                //     param.id()
+                // );
+            }
 
             self.step[i] += 1;
             let t = self.step[i] as f64;
@@ -116,17 +140,20 @@ impl Optimizer for AdamW {
             let step_size = lr.mul(&update);
 
             // Apply the update to parameters in-place
-            let inner = Arc::make_mut(&mut param.inner);
-            let storage = Arc::make_mut(&mut inner.storage);
-            let Storage::Cpu(cpu_storage) = storage else {
-                panic!("Optimizer only supports CPU tensors");
-            };
-            let ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
-            let numel = param.numel() as usize;
+            // Use unsafe pointer casting to modify the original TensorImpl
+            // This is necessary because Arc::make_mut creates a copy when there are multiple references
+            let ptr = Arc::as_ptr(&param.inner) as *mut TensorImpl;
+            unsafe {
+                let inner = &mut *ptr;
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!("Optimizer only supports CPU tensors");
+                };
+                let ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+                let numel = param.numel() as usize;
 
-            let update_slice = step_size.as_f32_slice();
-            for (j, update_val) in update_slice.iter().take(numel).enumerate() {
-                unsafe {
+                let update_slice = step_size.as_f32_slice();
+                for (j, update_val) in update_slice.iter().take(numel).enumerate() {
                     let param_val = *ptr.add(j);
                     *ptr.add(j) = param_val - update_val;
                 }
@@ -138,7 +165,9 @@ impl Optimizer for AdamW {
         for param in &mut self.params.iter_mut() {
             let inner = Arc::make_mut(&mut param.inner);
             if let Some(meta) = &mut inner.autograd_meta {
-                meta.grad = None;
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }
