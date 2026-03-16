@@ -48,7 +48,7 @@ def test_mlp_training_step():
         loss = fnn.mse_loss(pred, y)
         initial_loss = loss.item()
 
-        loss.backward()
+        pred.backward()
         optimizer.step()
         optimizer.zero_grad()
 

@@ -69,21 +69,8 @@ def stack(tensors, dim=0):
     first = tensors[0]
     if hasattr(first, "numpy"):
         first_data = first.numpy()
-
-        # Handle 0-dimensional (scalar) tensors
-        if first_data.ndim == 0:
-            # For scalars, just create a 1D tensor with the values
-            total_tensors = len(tensors)
-            result_data = [0.0] * total_tensors
-            for i, t in enumerate(tensors):
-                t_data = t.numpy()
-                result_data[i] = t_data.item() if t_data.ndim == 0 else t_data[0]
-            result = fnn.tensor(result_data, [total_tensors])
-            if dim != 0:
-                result = result.transpose(dim, 0)
-            return result
-
         numel = len(first_data)
+
         total_tensors = len(tensors)
         result_data = [0.0] * (numel * total_tensors)
 

@@ -68,17 +68,16 @@ impl Clone for GpuContext {
 impl GpuContext {
     fn new(device_id: usize) -> Self {
         let instance = wgpu::Instance::default();
-        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
-
-        let adapter = if device_id < adapters.len() {
-            adapters.swap_remove(device_id)
-        } else {
-            panic!("No GPU adapter found for device_id: {}", device_id);
-        };
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))
+        .expect("No GPU adapter found");
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some(&format!("fastnn-gpu-device-{}", device_id)),
+                label: Some("fastnn-gpu-device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::downlevel_defaults(),
                 memory_hints: wgpu::MemoryHints::Performance,
@@ -137,7 +136,7 @@ impl GpuContext {
         }
 
         let mut pool = self.buffer_pool.write();
-        let buffers = pool.entry(bucket).or_default();
+        let buffers = pool.entry(bucket).or_insert_with(Vec::new);
 
         // Limit pool size to prevent unbounded growth
         const MAX_BUFFERS_PER_BUCKET: usize = 16;
@@ -145,12 +144,6 @@ impl GpuContext {
             buffers.push(buffer);
         }
         // Otherwise, buffer is dropped (reclaimed by GPU allocator)
-    }
-
-    /// Release all buffers in pool (useful for cleanup)
-    pub fn clear_buffer_pool(&self) {
-        let mut pool = self.buffer_pool.write();
-        pool.clear();
     }
 
     /// Ensure persistent staging buffer is large enough for given size
@@ -208,31 +201,22 @@ impl GpuContext {
         let size = std::mem::size_of_val(cpu_data);
         let buffer = self.acquire_buffer(size);
 
-        // Use persistent staging buffer for CPU-to-GPU transfers
-        let staging = self.ensure_staging_buffer_cpu_to_gpu(size);
-
-        // Map staging buffer for writing
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let staging_slice = staging.slice(..size as u64);
-        staging_slice.map_async(wgpu::MapMode::Write, move |result| {
-            let _ = sender.send(result);
+        // Use temporary staging buffer (not persistent for now)
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{}_staging", label)),
+            size: size as u64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
         });
 
-        self.device.poll(wgpu::Maintain::Wait);
-        receiver
-            .recv()
-            .unwrap()
-            .expect("Failed to map staging buffer for write");
-
-        // Copy data to staging buffer
         {
-            let mut range = staging_slice.get_mapped_range_mut();
+            let mut range = staging.slice(..).get_mapped_range_mut();
             range.copy_from_slice(bytemuck::cast_slice(cpu_data));
         }
 
         staging.unmap();
 
-        // Copy from staging buffer to actual GPU buffer
+        // Copy to actual buffer
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -248,43 +232,6 @@ impl GpuContext {
     pub fn create_gpu_buffer_from_data(&self, data: &[f32], label: &str) -> GpuBuffer {
         let size = std::mem::size_of_val(data);
         let buffer = self.get_or_create_gpu_buffer(data, label);
-
-        let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
-        GpuBuffer {
-            id,
-            buffer: Arc::new(buffer),
-            size,
-            device_id: self.device_id,
-        }
-    }
-
-    pub fn create_gpu_buffer_from_bytes(&self, data: &[u8], label: &str) -> GpuBuffer {
-        let size = data.len();
-        let buffer = self.acquire_buffer(size);
-
-        // Use temporary staging buffer
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("{}_staging", label)),
-            size: size as u64,
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
-            mapped_at_creation: true,
-        });
-
-        {
-            let mut range = staging.slice(..).get_mapped_range_mut();
-            range.copy_from_slice(data);
-        }
-
-        staging.unmap();
-
-        // Copy to actual buffer
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some(&format!("{}_copy", label)),
-            });
-        encoder.copy_buffer_to_buffer(&staging, 0, &buffer, 0, size as u64);
-        self.queue.submit(Some(encoder.finish()));
 
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
         GpuBuffer {
@@ -476,32 +423,8 @@ pub struct GpuBuffer {
 }
 
 fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
-    // Convert GPU tensors to CPU first
-    let is_gpu = tensor.inner.is_gpu();
-    let storage_type = match tensor.inner.storage.as_ref() {
-        Storage::Cpu(_) => "Cpu",
-        Storage::Wgpu(_) => "Wgpu",
-    };
-
-    let cpu_tensor = if is_gpu {
-        tensor.to_cpu()
-    } else {
-        tensor.clone()
-    };
-
-    let cpu_is_gpu = cpu_tensor.inner.is_gpu();
-    let cpu_storage_type = match cpu_tensor.inner.storage.as_ref() {
-        Storage::Cpu(_) => "Cpu",
-        Storage::Wgpu(_) => "Wgpu",
-    };
-
-    if cpu_is_gpu {
-        panic!("to_cpu() returned a GPU tensor! Original is_gpu: {}, cpu is_gpu: {}, original storage: {}, cpu storage: {}, original device: {:?}", 
-            is_gpu, cpu_is_gpu, storage_type, cpu_storage_type, tensor.device());
-    }
-
-    let numel = cpu_tensor.inner.numel() as usize;
-    let ptr = cpu_tensor.data_ptr_f32();
+    let numel = tensor.inner.numel() as usize;
+    let ptr = tensor.data_ptr_f32();
     unsafe { std::slice::from_raw_parts(ptr, numel).to_vec() }
 }
 
@@ -515,28 +438,17 @@ fn create_output_tensor(data: Vec<f32>, shape: Vec<i64>, device: TensorDevice) -
     ))
 }
 
-// ADD shader with vectorized operations for better GPU utilization
+// Simple ADD shader (non-vectorized for debugging)
 const ADD_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read> a: array<f32>;
 @group(0) @binding(1) var<storage, read> b: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    let vec_idx = idx * 4u;
-    
-    if (vec_idx + 3u < arrayLength(&output)) {
-        var a_vec = vec4<f32>(a[vec_idx], a[vec_idx + 1u], a[vec_idx + 2u], a[vec_idx + 3u]);
-        var b_vec = vec4<f32>(b[vec_idx], b[vec_idx + 1u], b[vec_idx + 2u], b[vec_idx + 3u]);
-        var out_vec = a_vec + b_vec;
-        output[vec_idx] = out_vec.x;
-        output[vec_idx + 1u] = out_vec.y;
-        output[vec_idx + 2u] = out_vec.z;
-        output[vec_idx + 3u] = out_vec.w;
-    } else if (idx < arrayLength(&output)) {
-        output[idx] = a[idx] + b[idx];
-    }
+    if (idx >= arrayLength(&output)) { return; }
+    output[idx] = a[idx] + b[idx];
 }
 "#;
 
@@ -751,25 +663,12 @@ const GELU_SHADER: &str = r#"
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    let vec_idx = idx * 4u;
-    
-    if (vec_idx + 3u < arrayLength(&output)) {
-        var x_vec = vec4<f32>(input[vec_idx], input[vec_idx + 1u], input[vec_idx + 2u], input[vec_idx + 3u]);
-        var x3_vec = x_vec * x_vec * x_vec;
-        var in_arg_vec = vec4<f32>(0.7978846, 0.7978846, 0.7978846, 0.7978846) * (x_vec + vec4<f32>(0.044715, 0.044715, 0.044715, 0.044715) * x3_vec);
-        var t_vec = tanh(in_arg_vec);
-        var out_vec = vec4<f32>(0.5, 0.5, 0.5, 0.5) * x_vec * (vec4<f32>(1.0, 1.0, 1.0, 1.0) + t_vec);
-        output[vec_idx] = out_vec.x;
-        output[vec_idx + 1u] = out_vec.y;
-        output[vec_idx + 2u] = out_vec.z;
-        output[vec_idx + 3u] = out_vec.w;
-    } else if (idx < arrayLength(&output)) {
-        let x = input[idx];
-        let x3 = x * x * x;
-        let in_arg = 0.7978846 * (x + 0.044715 * x3);
-        let t = tanh(in_arg);
-        output[idx] = 0.5 * x * (1.0 + t);
-    }
+    if (idx >= arrayLength(&output)) { return; }
+    let x = input[idx];
+    let x3 = x * x * x;
+    let in_arg = 0.7978846 * (x + 0.044715 * x3);
+    let t = tanh(in_arg);
+    output[idx] = 0.5 * x * (1.0 + t);
 }
 "#;
 
@@ -980,10 +879,7 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        // Cap workgroup count at 65535 (wgpu limit)
-        let num_workgroups = (numel as u64).div_ceil(256) as u32;
-        let x_groups = num_workgroups.min(65535);
-        compute_pass.dispatch_workgroups(x_groups, 1, 1);
+        compute_pass.dispatch_workgroups((numel as u64).div_ceil(256) as u32, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
@@ -1011,12 +907,7 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
     let a_buffer = if let Some(buffer) = a.inner.get_or_create_gpu_buffer(device_id) {
         buffer
     } else {
-        // If tensor is on a different GPU device, move it to the target device
-        let a_on_target = match a.device() {
-            TensorDevice::Wgpu(id) if id != device_id => a.to_gpu(device_id),
-            _ => a.clone(),
-        };
-        let a_data = get_tensor_data(&a_on_target);
+        let a_data = get_tensor_data(a);
         let gpu_buffer = ctx.create_gpu_buffer_from_data(&a_data, "a");
         a.inner
             .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
@@ -1026,12 +917,7 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
     let b_buffer = if let Some(buffer) = b.inner.get_or_create_gpu_buffer(device_id) {
         buffer
     } else {
-        // If tensor is on a different GPU device, move it to the target device
-        let b_on_target = match b.device() {
-            TensorDevice::Wgpu(id) if id != device_id => b.to_gpu(device_id),
-            _ => b.clone(),
-        };
-        let b_data = get_tensor_data(&b_on_target);
+        let b_data = get_tensor_data(b);
         let gpu_buffer = ctx.create_gpu_buffer_from_data(&b_data, "b");
         b.inner
             .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
@@ -1071,10 +957,7 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        // Cap workgroup count at 65535 (wgpu limit)
-        let num_workgroups = (numel as u64).div_ceil(256) as u32;
-        let x_groups = num_workgroups.min(65535);
-        compute_pass.dispatch_workgroups(x_groups, 1, 1);
+        compute_pass.dispatch_workgroups((numel as u64).div_ceil(256) as u32, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
     ctx.device.poll(wgpu::Maintain::Wait);
@@ -1238,9 +1121,8 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
         });
         compute_pass.set_pipeline(&pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        // Cap workgroup dimensions at 65535 (wgpu limit)
-        let x_groups = n.div_ceil(8).min(65535);
-        let y_groups = m.div_ceil(8).min(65535);
+        let x_groups = n.div_ceil(8);
+        let y_groups = m.div_ceil(8);
         compute_pass.dispatch_workgroups(x_groups as u32, y_groups as u32, 1);
     }
     ctx.queue.submit([encoder.finish()]);
@@ -1258,306 +1140,4 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
         output_shape.iter().copied().collect(),
         DType::F32,
     ))]
-}
-
-// Reduction operation shaders
-#[allow(dead_code)]
-// SUM reduction shader - reduces along a dimension
-const SUM_REDUCE_SHADER: &str = r#"
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let output_idx = global_id.x;
-    // Each workgroup computes one output element
-    // For now, assume 2D tensor (m, n) and reduce along dim 1 (sum columns)
-    // This is a simplified version for the benchmark
-}
-"#;
-
-// MEAN reduction shader
-#[allow(dead_code)]
-const MEAN_REDUCE_SHADER: &str = r#"
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let output_idx = global_id.x;
-}
-"#;
-
-// MAX reduction shader
-#[allow(dead_code)]
-const MAX_REDUCE_SHADER: &str = r#"
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let output_idx = global_id.x;
-}
-"#;
-
-// MIN reduction shader
-#[allow(dead_code)]
-const MIN_REDUCE_SHADER: &str = r#"
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let output_idx = global_id.x;
-}
-"#;
-
-// Run reduction kernel (simplified version for 2D tensors reducing along dimension 1)
-fn run_reduction_kernel(
-    input: &Tensor,
-    dim: usize,
-    keepdim: bool,
-    _shader: &str,
-    name: &str,
-    device_id: usize,
-    op: &str,
-) -> Tensor {
-    let ctx = get_context(device_id);
-    let input_shape = input.shape().to_vec();
-    let ndim = input_shape.len();
-
-    // Validate dim
-    let dim = if dim >= ndim { ndim - 1 } else { dim };
-
-    // Calculate output shape
-    let mut output_shape = input_shape.clone();
-    if keepdim {
-        output_shape[dim] = 1;
-    } else {
-        output_shape.remove(dim);
-    }
-    if output_shape.is_empty() {
-        output_shape = vec![1];
-    }
-
-    let output_numel = output_shape.iter().product::<i64>() as usize;
-
-    // Get input buffer
-    let input_buffer = if let Some(buffer) = input.inner.get_or_create_gpu_buffer(device_id) {
-        buffer
-    } else {
-        let input_data = get_tensor_data(input);
-        let gpu_buffer = ctx.create_gpu_buffer_from_data(&input_data, "input");
-        input
-            .inner
-            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
-        gpu_buffer.buffer
-    };
-
-    // Create output buffer
-    let output_buffer = ctx.create_buffer(output_numel * 4, "output");
-
-    // For 2D tensors, optimize common reduction cases
-    if ndim == 2 {
-        let m = input_shape[0] as usize;
-        let n = input_shape[1] as usize;
-
-        let reduce_shader = match op {
-            "sum" => format!(
-                r#"
-                @group(0) @binding(0) var<storage, read> input: array<f32>;
-                @group(0) @binding(1) var<storage, read_write> output: array<f32>;
-                
-                @compute @workgroup_size(256)
-                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-                    let row = global_id.x;
-                    if (row >= {}) {{ return; }}
-                    
-                    var sum = 0.0;
-                    for (var col = 0u; col < {}; col = col + 1u) {{
-                        let idx = row * {} + col;
-                        sum += input[idx];
-                    }}
-                    output[row] = sum;
-                }}
-            "#,
-                m, n, n
-            ),
-            "mean" => format!(
-                r#"
-                @group(0) @binding(0) var<storage, read> input: array<f32>;
-                @group(0) @binding(1) var<storage, read_write> output: array<f32>;
-                
-                @compute @workgroup_size(256)
-                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-                    let row = global_id.x;
-                    if (row >= {}) {{ return; }}
-                    
-                    var sum = 0.0;
-                    for (var col = 0u; col < {}; col = col + 1u) {{
-                        let idx = row * {} + col;
-                        sum += input[idx];
-                    }}
-                    output[row] = sum / {};
-                }}
-            "#,
-                m, n, n, n as f32
-            ),
-            "max" => format!(
-                r#"
-                @group(0) @binding(0) var<storage, read> input: array<f32>;
-                @group(0) @binding(1) var<storage, read_write> output: array<f32>;
-                
-                @compute @workgroup_size(256)
-                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-                    let row = global_id.x;
-                    if (row >= {}) {{ return; }}
-                    
-                    var max_val = -3.4028235e38; // f32::MIN
-                    for (var col = 0u; col < {}; col = col + 1u) {{
-                        let idx = row * {} + col;
-                        let val = input[idx];
-                        if (val > max_val) {{
-                            max_val = val;
-                        }}
-                    }}
-                    output[row] = max_val;
-                }}
-            "#,
-                m, n, n
-            ),
-            "min" => format!(
-                r#"
-                @group(0) @binding(0) var<storage, read> input: array<f32>;
-                @group(0) @binding(1) var<storage, read_write> output: array<f32>;
-                
-                @compute @workgroup_size(256)
-                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
-                    let row = global_id.x;
-                    if (row >= {}) {{ return; }}
-                    
-                    var min_val = 3.4028235e38; // f32::MAX
-                    for (var col = 0u; col < {}; col = col + 1u) {{
-                        let idx = row * {} + col;
-                        let val = input[idx];
-                        if (val < min_val) {{
-                            min_val = val;
-                        }}
-                    }}
-                    output[row] = min_val;
-                }}
-            "#,
-                m, n, n
-            ),
-            _ => panic!("Unknown reduction op: {}", op),
-        };
-
-        let pipeline = ctx.create_pipeline(name, &reduce_shader);
-
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(name),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: input_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: output_buffer.buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(name) });
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(name),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-            // Dispatch one workgroup per row, but cap at 65535 (wgpu limit)
-            let num_workgroups = (m as u64).div_ceil(256) as u32;
-            let x_groups = num_workgroups.min(65535);
-            let y_groups = (num_workgroups as u64).div_ceil(65536) as u32;
-            compute_pass.dispatch_workgroups(x_groups, y_groups.max(1), 1);
-        }
-        ctx.queue.submit([encoder.finish()]);
-        ctx.device.poll(wgpu::Maintain::Wait);
-    } else {
-        // For other cases, fall back to CPU implementation
-        // Move input to CPU, compute, then move result back to GPU
-        let input_cpu = input.to_cpu();
-        let result_cpu = match op {
-            "sum" => input_cpu.sum(dim as i32, keepdim),
-            "mean" => input_cpu.mean(dim as i32, keepdim),
-            "max" => input_cpu.max(dim as i32, keepdim),
-            _ => input_cpu.sum(dim as i32, keepdim),
-        };
-        return result_cpu.to_gpu(device_id);
-    }
-
-    // Create tensor with GPU storage
-    let storage = Arc::new(Storage::Wgpu(GpuStorage {
-        buffer: output_buffer.buffer,
-        nbytes: output_numel * 4,
-        device_id,
-        staging: RwLock::new(None),
-    }));
-    Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ))
-}
-
-pub fn gpu_sum(a: &Tensor, dim: usize, keepdim: bool, device_id: usize) -> Vec<Tensor> {
-    vec![run_reduction_kernel(
-        a,
-        dim,
-        keepdim,
-        "",
-        "sum_reduce",
-        device_id,
-        "sum",
-    )]
-}
-
-pub fn gpu_mean(a: &Tensor, dim: usize, keepdim: bool, device_id: usize) -> Vec<Tensor> {
-    vec![run_reduction_kernel(
-        a,
-        dim,
-        keepdim,
-        "",
-        "mean_reduce",
-        device_id,
-        "mean",
-    )]
-}
-
-pub fn gpu_max(a: &Tensor, dim: usize, keepdim: bool, device_id: usize) -> Vec<Tensor> {
-    vec![run_reduction_kernel(
-        a,
-        dim,
-        keepdim,
-        "",
-        "max_reduce",
-        device_id,
-        "max",
-    )]
-}
-
-pub fn gpu_min(a: &Tensor, dim: usize, keepdim: bool, device_id: usize) -> Vec<Tensor> {
-    vec![run_reduction_kernel(
-        a,
-        dim,
-        keepdim,
-        "",
-        "min_reduce",
-        device_id,
-        "min",
-    )]
 }

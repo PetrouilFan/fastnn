@@ -2,15 +2,13 @@
 
 **fastnn** is a high-performance, lightweight neural network framework built from scratch in Rust with seamless Python bindings. It is designed to be a fast, hardware-efficient alternative to mainstream deep learning libraries, providing hardware-accelerated CPU and GPU compute via a familiar PyTorch-like Python API.
 
-**Version:** v0.4.0 - Multi-GPU Support with Distributed Data Parallel
-
 
 ## Features
 
 
 - **Blazing Fast CPU Kernels:** Hand-written SIMD instructions (AVX2, AVX512 for x86_64, and NEON for ARM) with optimized approximations for transcendental functions (e.g., Cephes-style fast `exp` and `log`).
 - **Multi-Threading:** Automatic work distribution across CPU cores using `rayon` for parallelized tensor computations.
-- **GPU Acceleration:** Cross-platform hardware acceleration using `wgpu` (WebGPU) to run compute shaders with vectorized operations (ADD, GELU, MUL, DIV) and optimized matrix multiplication kernels. GPU speedups include **152x for MatMul** (512×1024×512) and **14x for GELU** (1000×1000).
+- **GPU Acceleration:** Cross-platform hardware acceleration using `wgpu` (WebGPU) to run compute shaders with a dedicated GPU memory pool and context manager.
 - **Native Autograd:** Built-in automatic differentiation engine supporting tracking, backward passes, and context managers (`no_grad()`).
 - **Python Bindings (`PyO3`):** Train and evaluate models natively in Python without sacrificing the performance of the underlying Rust implementation.
 - **Optimized Convolutions:** Supports `im2col` transforms and specialized kernels (e.g., 1x1, depthwise, 3x3) optimized for specific stride/dilation configurations.
@@ -47,25 +45,8 @@ fastnn/
     └── kernels/
         ├── cpu.rs        # Highly optimized SIMD and scalar CPU operations
         ├── blas.rs       # Matrix multiplication routines
-        └── gpu/          # WebGPU contexts, compute pipelines, and vectorized shaders
+        └── gpu/          # WebGPU contexts, compute pipelines, and buffers
 ```
-
-## GPU Performance
-
-fastnn includes highly optimized GPU kernels with vectorized shader operations:
-
-| Operation | Size | GPU Speedup | Notes |
-|-----------|------|-------------|-------|
-| MatMul | 512×1024×512 | **152x** | Tiled matrix multiplication |
-| GELU | 1000×1000 | **14x** | Vectorized tanh computation |
-| Sigmoid | 1000×1000 | **11x** | Vectorized operations |
-| Add | 1000×1000 | **4x** | Vectorized vec4 operations |
-
-**Key GPU Optimizations:**
-- Vectorized ADD shader: Changed from scalar to vec4 operations (4x processing per thread)
-- Vectorized GELU shader: Implemented vectorized tanh and GELU computations
-- Shader consistency: All binary operations now use vectorized shaders
-- Optimized MatMul: Tiled matrix multiplication with shared memory
 
 ## Installation
 
@@ -80,7 +61,7 @@ fastnn includes highly optimized GPU kernels with vectorized shader operations:
 Clone the repository and install it as an editable Python package using uv (or pip):
 
 ```bash
-git clone https://github.com/PetrouilFan/fastnn.git
+git clone https://github.com/yourusername/fastnn.git
 cd fastnn
 uv pip install -e .[dev]
 ```
@@ -132,13 +113,7 @@ print(f"Loss: {loss.item()}")
 By default, operations run on the CPU. You can change the global device configuration via the API:
 
 ```python
-# Switch to WebGPU Compute
-fn._set_default_device("gpu:0")
-
-# Or specify device per tensor
-a = fn.randn([1000, 1000], device="gpu")
-b = fn.randn([1000, 1000], device="gpu")
-c = a @ b  # GPU-accelerated matrix multiplication
+fn._set_default_device("gpu:0") # Switch to WebGPU Compute
 ```
 
 ### Multithreading
@@ -157,56 +132,3 @@ Tests are built using pytest. You can run the testing and benchmarking suites us
 pytest
 pytest --benchmark-only
 ```
-
-### GPU Benchmarking
-
-To benchmark GPU performance:
-
-```bash
-python tests/bench_gpu_simple.py  # Quick GPU vs CPU comparison
-python tests/bench_gpu.py         # Comprehensive GPU benchmark suite
-```
-
-**Performance Note:** GPU acceleration shows best results for medium-to-large tensors (>100×100). Small tensor operations may have overhead from kernel launches and data transfers.
-
-### Multi-GPU Training
-
-fastnn now supports multi-GPU training via Distributed Data Parallel (DDP) with bucketed AllReduce gradient synchronization.
-
-```python
-import fastnn as fnn
-
-# Create model replicas for each GPU
-model_gpu0 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
-model_gpu1 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
-
-# Initialize DataParallel
-dp_model = fnn.DataParallel(
-    [model_gpu0, model_gpu1],
-    device_ids=[0, 1],
-    weights=[0.6, 0.4]  # Optional: weighted data split
-)
-
-# Training loop
-optimizers = [
-    fnn.Adam(dp_model.replicas[0].parameters(), lr=1e-3),
-    fnn.Adam(dp_model.replicas[1].parameters(), lr=1e-3)
-]
-
-for x_batch, y_batch in dataloader:
-    loss = dp_model.forward_backward(x_batch, y_batch, fnn.cross_entropy_loss)
-    dp_model.sync_gradients()
-    
-    for opt in optimizers:
-        opt.step()
-        opt.zero_grad()
-    
-    # Optional: Adjust weights based on GPU performance
-    dp_model.adjust_weights_based_on_performance()
-```
-
-**Key Features:**
-- **Weighted Data Splitting**: Automatically distributes data based on GPU capabilities
-- **Bucketed AllReduce**: Efficient gradient synchronization using optimized Rust implementation
-- **Dynamic Load Balancing**: Adjusts workload distribution based on measured GPU performance
-- **Thread-safe Execution**: Concurrent forward/backward passes across multiple GPUs

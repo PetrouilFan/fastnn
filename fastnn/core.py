@@ -1,24 +1,6 @@
 import contextlib
 import fastnn._core as _core
 
-# Expose classes from _core
-PyTransformerEncoder = _core.PyTransformerEncoder
-Linear = _core.Linear
-Conv2d = _core.Conv2d
-LayerNorm = _core.LayerNorm
-BatchNorm1d = _core.BatchNorm1d
-Dropout = _core.Dropout
-Embedding = _core.Embedding
-ReLU = _core.ReLU
-Gelu = _core.Gelu
-Sigmoid = _core.Sigmoid
-Tanh = _core.Tanh
-SiLU = _core.SiLU
-
-# Additional classes that may be needed
-# Note: MultiHeadAttention is in Rust but not exposed via PyO3 yet
-# We'll use the full TransformerEncoder which includes it
-
 
 def sum(a, dim=None, keepdim=False):
     if dim is None:

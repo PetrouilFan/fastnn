@@ -10,29 +10,10 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    // Check if either tensor is on GPU
-    let device_id = match (a.device(), b.device()) {
-        (Device::Wgpu(id), _) => Some(id),
-        (_, Device::Wgpu(id)) => Some(id),
-        _ => None,
-    };
-
-    if let Some(device_id) = device_id {
-        // Move tensors to the target GPU device if needed
-        let a_gpu = match a.device() {
-            Device::Cpu => a.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
-            _ => a.clone(),
-        };
-        let b_gpu = match b.device() {
-            Device::Cpu => b.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
-            _ => b.clone(),
-        };
-        return gpu::gpu_add(&a_gpu, &b_gpu, device_id);
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_add(a, b, device_id);
     }
 
-    // Both are CPU
     let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
@@ -58,29 +39,10 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    // Check if either tensor is on GPU
-    let device_id = match (a.device(), b.device()) {
-        (Device::Wgpu(id), _) => Some(id),
-        (_, Device::Wgpu(id)) => Some(id),
-        _ => None,
-    };
-
-    if let Some(device_id) = device_id {
-        // Move tensors to the target GPU device if needed
-        let a_gpu = match a.device() {
-            Device::Cpu => a.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
-            _ => a.clone(),
-        };
-        let b_gpu = match b.device() {
-            Device::Cpu => b.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
-            _ => b.clone(),
-        };
-        return gpu::gpu_sub(&a_gpu, &b_gpu, device_id);
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_sub(a, b, device_id);
     }
 
-    // Both are CPU
     let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
@@ -106,29 +68,10 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    // Check if either tensor is on GPU
-    let device_id = match (a.device(), b.device()) {
-        (Device::Wgpu(id), _) => Some(id),
-        (_, Device::Wgpu(id)) => Some(id),
-        _ => None,
-    };
-
-    if let Some(device_id) = device_id {
-        // Move tensors to the target GPU device if needed
-        let a_gpu = match a.device() {
-            Device::Cpu => a.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
-            _ => a.clone(),
-        };
-        let b_gpu = match b.device() {
-            Device::Cpu => b.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
-            _ => b.clone(),
-        };
-        return gpu::gpu_mul(&a_gpu, &b_gpu, device_id);
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_mul(a, b, device_id);
     }
 
-    // Both are CPU
     let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
@@ -154,29 +97,10 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    // Check if either tensor is on GPU
-    let device_id = match (a.device(), b.device()) {
-        (Device::Wgpu(id), _) => Some(id),
-        (_, Device::Wgpu(id)) => Some(id),
-        _ => None,
-    };
-
-    if let Some(device_id) = device_id {
-        // Move tensors to the target GPU device if needed
-        let a_gpu = match a.device() {
-            Device::Cpu => a.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
-            _ => a.clone(),
-        };
-        let b_gpu = match b.device() {
-            Device::Cpu => b.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
-            _ => b.clone(),
-        };
-        return gpu::gpu_div(&a_gpu, &b_gpu, device_id);
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_div(a, b, device_id);
     }
 
-    // Both are CPU
     let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
@@ -509,26 +433,8 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    // Check if either tensor is on GPU
-    let device_id = match (a.device(), b.device()) {
-        (Device::Wgpu(id), _) => Some(id),
-        (_, Device::Wgpu(id)) => Some(id),
-        _ => None,
-    };
-
-    if let Some(device_id) = device_id {
-        // Move tensors to the target GPU device if needed
-        let a_gpu = match a.device() {
-            Device::Cpu => a.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => a.to_gpu(device_id),
-            _ => a.clone(),
-        };
-        let b_gpu = match b.device() {
-            Device::Cpu => b.to_gpu(device_id),
-            Device::Wgpu(id) if id != device_id => b.to_gpu(device_id),
-            _ => b.clone(),
-        };
-        return gpu::gpu_matmul(&a_gpu, &b_gpu, device_id);
+    if let Device::Wgpu(device_id) = a.device() {
+        return gpu::gpu_matmul(a, b, device_id);
     }
 
     let a_shape = a.shape();
@@ -593,89 +499,6 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
-fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let a = args[0];
-    let dim = if args.len() > 1 {
-        args[1].item() as usize
-    } else {
-        0
-    };
-    let keepdim = if args.len() > 2 {
-        args[2].item() != 0.0
-    } else {
-        false
-    };
-
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_sum(a, dim, keepdim, device_id);
-    }
-
-    // CPU fallback
-    // This would call the CPU sum kernel, but for now we'll just panic
-    // since the CPU implementation is already in cpu.rs
-    panic!("CPU sum kernel not implemented in gpu/ops.rs - should use cpu.rs");
-}
-
-fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let a = args[0];
-    let dim = if args.len() > 1 {
-        args[1].item() as usize
-    } else {
-        0
-    };
-    let keepdim = if args.len() > 2 {
-        args[2].item() != 0.0
-    } else {
-        false
-    };
-
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_mean(a, dim, keepdim, device_id);
-    }
-
-    panic!("CPU mean kernel not implemented in gpu/ops.rs");
-}
-
-fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let a = args[0];
-    let dim = if args.len() > 1 {
-        args[1].item() as usize
-    } else {
-        0
-    };
-    let keepdim = if args.len() > 2 {
-        args[2].item() != 0.0
-    } else {
-        false
-    };
-
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_max(a, dim, keepdim, device_id);
-    }
-
-    panic!("CPU max kernel not implemented in gpu/ops.rs");
-}
-
-fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let a = args[0];
-    let dim = if args.len() > 1 {
-        args[1].item() as usize
-    } else {
-        0
-    };
-    let keepdim = if args.len() > 2 {
-        args[2].item() != 0.0
-    } else {
-        false
-    };
-
-    if let Device::Wgpu(device_id) = a.device() {
-        return gpu::gpu_min(a, dim, keepdim, device_id);
-    }
-
-    panic!("CPU min kernel not implemented in gpu/ops.rs");
-}
-
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Wgpu, add_kernel as KernelFn);
@@ -698,8 +521,4 @@ fn register_kernels() {
     register("tanh", DispatchKey::Wgpu, tanh_kernel as KernelFn);
     register("silu", DispatchKey::Wgpu, silu_kernel as KernelFn);
     register("matmul", DispatchKey::Wgpu, matmul_kernel as KernelFn);
-    register("sum", DispatchKey::Wgpu, sum_kernel as KernelFn);
-    register("mean", DispatchKey::Wgpu, mean_kernel as KernelFn);
-    register("max", DispatchKey::Wgpu, max_kernel as KernelFn);
-    register("min", DispatchKey::Wgpu, min_kernel as KernelFn);
 }

@@ -1,5 +1,5 @@
 use crate::autograd::{Edge, Node};
-use crate::tensor::Tensor;
+use crate::tensor::{Tensor, TensorImpl};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -8,10 +8,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         return;
     }
 
-    let grad_output = grad_output.unwrap_or_else(|| {
-        // Create scalar gradient on the same device as root
-        Tensor::full(vec![], 1.0, root.dtype(), root.device())
-    });
+    let grad_output = grad_output.unwrap_or_else(|| Tensor::from_scalar(1.0));
 
     // Map from tensor_id to accumulated gradient
     let mut grads: HashMap<usize, Tensor> = HashMap::new();
@@ -91,13 +88,15 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             if let Some(grad_input) = grad_input_opt {
                 if input_tensor.is_leaf() {
                     // Accumulate gradient for leaf tensor
-                    if let Some(meta) = &input_tensor.inner.autograd_meta {
-                        if let Ok(mut lock) = meta.lock() {
-                            if let Some(existing_grad) = &mut lock.grad {
+                    let tensor_impl_ptr = Arc::as_ptr(&input_tensor.inner);
+                    unsafe {
+                        let tensor_impl = &mut *(tensor_impl_ptr as *mut TensorImpl);
+                        if let Some(meta) = &mut tensor_impl.autograd_meta {
+                            if let Some(existing_grad) = &mut meta.grad {
                                 // In-place addition for gradient accumulation
                                 existing_grad.add_(grad_input);
                             } else {
-                                lock.grad = Some(grad_input.clone());
+                                meta.grad = Some(grad_input.clone());
                             }
                         }
                     }

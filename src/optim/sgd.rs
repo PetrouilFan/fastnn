@@ -98,9 +98,7 @@ impl Optimizer for SGD {
         for param in &mut self.params.iter_mut() {
             let inner = Arc::make_mut(&mut param.inner);
             if let Some(meta) = &mut inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
+                meta.grad = None;
             }
         }
     }

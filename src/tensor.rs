@@ -17,7 +17,7 @@ pub struct TensorImpl {
     pub dtype: DType,
     pub device: Device,
     pub version_counter: Arc<AtomicU64>,
-    pub autograd_meta: Option<Arc<std::sync::Mutex<AutogradMeta>>>,
+    pub autograd_meta: Option<AutogradMeta>,
 }
 
 impl TensorImpl {
@@ -103,23 +103,7 @@ impl TensorImpl {
         if self.is_contiguous() {
             return Tensor::new(self.clone());
         }
-        // If not contiguous, we need to copy the data to a new contiguous layout
-        let data = self.as_f32_slice().to_vec();
-        let sizes = self.sizes.clone();
-        let mut new_tensor = Tensor::from_vec(data, sizes.to_vec());
-
-        // Preserve autograd metadata but without grad_fn (contiguous creates a copy)
-        if let Some(meta) = &self.autograd_meta {
-            let meta_lock = meta.lock().unwrap();
-            if meta_lock.requires_grad {
-                let new_meta = AutogradMeta::new_non_leaf(true);
-                // Don't clone grad_fn - contiguous creates a copy, so it's a leaf
-                Arc::make_mut(&mut new_tensor.inner).autograd_meta =
-                    Some(Arc::new(std::sync::Mutex::new(new_meta)));
-            }
-        }
-
-        new_tensor
+        self.view(self.sizes.clone()).into()
     }
 
     pub fn view(&self, sizes: SmallVec<[i64; 8]>) -> TensorImpl {
@@ -145,10 +129,8 @@ impl TensorImpl {
 
         if autograd::is_grad_enabled() {
             if let Some(meta) = &self.autograd_meta {
-                if let Ok(lock) = meta.lock() {
-                    if lock.requires_grad {
-                        new.set_requires_grad(true);
-                    }
+                if meta.requires_grad {
+                    new.set_requires_grad(true);
                 }
             }
         }
@@ -354,13 +336,13 @@ impl TensorImpl {
 
         TensorImpl {
             storage: Arc::clone(&self.storage),
-            sizes,
+            sizes: new_sizes,
             strides: new_strides,
             storage_offset: self.storage_offset,
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: self.autograd_meta.clone(),
+            autograd_meta: None,
         }
         .into()
     }
@@ -405,19 +387,15 @@ impl TensorImpl {
     pub fn requires_grad(&self) -> bool {
         self.autograd_meta
             .as_ref()
-            .map(|m| m.lock().unwrap().requires_grad)
+            .map(|m| m.requires_grad)
             .unwrap_or(false)
     }
 
     pub fn set_requires_grad(&mut self, requires_grad: bool) {
         if self.autograd_meta.is_none() {
-            self.autograd_meta = Some(Arc::new(std::sync::Mutex::new(AutogradMeta::new(
-                requires_grad,
-            ))));
+            self.autograd_meta = Some(AutogradMeta::new(requires_grad));
         } else if let Some(meta) = &mut self.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.requires_grad = requires_grad;
-            }
+            meta.requires_grad = requires_grad;
         }
     }
 
@@ -430,21 +408,20 @@ impl TensorImpl {
     }
 
     pub fn grad(&self) -> Option<Tensor> {
-        self.autograd_meta.as_ref()?.lock().unwrap().grad.clone()
+        self.autograd_meta.as_ref()?.grad.clone()
     }
 
     pub fn set_grad(&mut self, grad: Option<Tensor>) {
         if let Some(meta) = &mut self.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = grad;
-            }
+            meta.grad = grad;
         }
     }
 
     pub fn set_grad_for_tensor(tensor: &Tensor, grad: Option<Tensor>) {
-        if let Some(meta) = &tensor.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = grad;
+        let ptr = Arc::as_ptr(&tensor.inner) as *mut TensorImpl;
+        unsafe {
+            if let Some(meta) = (*ptr).autograd_meta.as_mut() {
+                meta.grad = grad;
             }
         }
     }
@@ -452,12 +429,12 @@ impl TensorImpl {
     pub fn is_leaf(&self) -> bool {
         self.autograd_meta
             .as_ref()
-            .map(|m| m.lock().unwrap().is_leaf)
+            .map(|m| m.is_leaf)
             .unwrap_or(true)
     }
 
     pub fn grad_fn(&self) -> Option<Arc<dyn autograd::Node>> {
-        self.autograd_meta.as_ref()?.lock().unwrap().grad_fn.clone()
+        self.autograd_meta.as_ref()?.grad_fn.clone()
     }
 
     pub fn detach(&self) -> Tensor {
@@ -490,22 +467,15 @@ impl TensorImpl {
         self.version_counter.load(Ordering::SeqCst)
     }
 
-    #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ptr(),
             Storage::Wgpu(_) => {
-                let location = std::panic::Location::caller();
-                panic!(
-                    "Cannot get CPU pointer from GPU storage. Use .to_cpu() first.\nCalled from: {}:{}",
-                    location.file(),
-                    location.line()
-                );
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
             }
         }
     }
 
-    #[track_caller]
     pub fn data_ptr_f32(&self) -> *const f32 {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
@@ -513,14 +483,7 @@ impl TensorImpl {
                 unsafe { ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
-                let location = std::panic::Location::caller();
-                panic!(
-                    "Cannot get CPU pointer from GPU storage. Device: {:?}, Storage: {:?}\nLocation: {}:{}",
-                    self.device,
-                    self.storage.as_ref(),
-                    location.file(),
-                    location.line()
-                );
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
             }
         }
     }
@@ -565,12 +528,12 @@ impl TensorImpl {
 
     /// Check if storage is on GPU
     pub fn is_gpu(&self) -> bool {
-        matches!(self.device, Device::Wgpu(_))
+        matches!(self.storage.as_ref(), Storage::Wgpu(_))
     }
 
     /// Check if storage is on CPU
     pub fn is_cpu(&self) -> bool {
-        matches!(self.device, Device::Cpu)
+        matches!(self.storage.as_ref(), Storage::Cpu(_))
     }
 
     /// Get GPU buffer reference if on GPU
@@ -697,37 +660,13 @@ impl Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let numel: i64 = sizes.iter().product();
         let nbytes = (numel * dtype.size() as i64) as usize;
-
+        // Create CPU storage first (GPU buffers are created on-demand)
+        let storage = Arc::new(Storage::new_cpu(dtype, nbytes));
+        // Use new_with_device for GPU tensors to track the target device
         match device {
-            Device::Cpu => {
-                let storage = Arc::new(Storage::new_cpu(dtype, nbytes));
-                Tensor::new(TensorImpl::new(storage, sizes, dtype))
-            }
-            Device::Wgpu(device_id) => {
-                // Create actual GPU storage for GPU tensors
-                use crate::kernels::gpu::get_context;
-                let ctx = get_context(device_id);
-                let buffer = ctx.create_buffer(nbytes, "zeros");
-
-                let storage = Arc::new(Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes,
-                    device_id,
-                    staging: RwLock::new(None),
-                }));
-
-                let strides = compute_strides(&sizes);
-
-                Tensor::new(TensorImpl {
-                    storage,
-                    sizes,
-                    strides,
-                    storage_offset: 0,
-                    dtype,
-                    device: Device::Wgpu(device_id),
-                    version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: None,
-                })
+            Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
+            Device::Wgpu(_) => {
+                Tensor::new(TensorImpl::new_with_device(storage, sizes, device, dtype))
             }
         }
     }
@@ -789,66 +728,40 @@ impl Tensor {
 
     pub fn full(shape: Vec<i64>, value: f32, dtype: DType, device: Device) -> Self {
         let mut t = Self::zeros(shape, dtype, device);
+        let numel = t.inner.numel() as usize;
+        let inner = Arc::make_mut(&mut t.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage for full()");
+        };
+        let ptr = cpu_storage.data.as_mut_ptr();
 
-        match device {
-            Device::Cpu => {
-                let numel = t.inner.numel() as usize;
-                let inner = Arc::make_mut(&mut t.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    panic!("Expected CPU storage for full()");
-                };
-                let ptr = cpu_storage.data.as_mut_ptr();
-
-                match dtype {
-                    DType::F32 => {
-                        let f32_ptr = ptr as *mut f32;
-                        for i in 0..numel {
-                            unsafe {
-                                *f32_ptr.add(i) = value;
-                            }
-                        }
+        match dtype {
+            DType::F32 => {
+                let f32_ptr = ptr as *mut f32;
+                for i in 0..numel {
+                    unsafe {
+                        *f32_ptr.add(i) = value;
                     }
-                    DType::F64 => {
-                        let f64_ptr = ptr as *mut f64;
-                        for i in 0..numel {
-                            unsafe {
-                                *f64_ptr.add(i) = value as f64;
-                            }
-                        }
-                    }
-                    DType::I32 => {
-                        let i32_ptr = ptr as *mut i32;
-                        for i in 0..numel {
-                            unsafe {
-                                *i32_ptr.add(i) = value as i32;
-                            }
-                        }
-                    }
-                    _ => {}
                 }
             }
-            Device::Wgpu(device_id) => {
-                // For GPU tensors, use a kernel to fill with value
-                // Create a scalar tensor with the value and broadcast it
-                use crate::kernels::gpu::get_context;
-                let ctx = get_context(device_id);
-
-                // Create a buffer with the value
-                let numel = t.inner.numel() as usize;
-                let data = vec![value; numel];
-                let buffer = ctx.create_gpu_buffer_from_data(&data, "full");
-
-                // Update the tensor's storage
-                let inner = Arc::make_mut(&mut t.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                *storage = Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes: numel * 4,
-                    device_id,
-                    staging: RwLock::new(None),
-                });
+            DType::F64 => {
+                let f64_ptr = ptr as *mut f64;
+                for i in 0..numel {
+                    unsafe {
+                        *f64_ptr.add(i) = value as f64;
+                    }
+                }
             }
+            DType::I32 => {
+                let i32_ptr = ptr as *mut i32;
+                for i in 0..numel {
+                    unsafe {
+                        *i32_ptr.add(i) = value as i32;
+                    }
+                }
+            }
+            _ => {}
         }
         t
     }
@@ -887,38 +800,12 @@ impl Tensor {
 
     pub fn view(&self, shape: Vec<i64>) -> Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let output: Tensor = self.inner.view(sizes).into();
-
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let backward = autograd::ViewBackward::new(self.clone(), edges);
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(std::sync::Arc::new(backward));
-            let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            output
-        }
+        self.inner.view(sizes).into()
     }
 
     pub fn reshape(&self, shape: Vec<i64>) -> Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let output = self.inner.reshape(sizes);
-
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let backward = autograd::ViewBackward::new(self.clone(), edges);
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(std::sync::Arc::new(backward));
-            let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            output
-        }
+        self.inner.reshape(sizes)
     }
 
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
@@ -931,20 +818,7 @@ impl Tensor {
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
-        let output = self.inner.squeeze(dim);
-
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let backward = autograd::ViewBackward::new(self.clone(), edges);
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(std::sync::Arc::new(backward));
-            let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            output
-        }
+        self.inner.squeeze(dim)
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Tensor {
@@ -957,20 +831,7 @@ impl Tensor {
     }
 
     pub fn slice(&self, dim: usize, start: i64, end: i64, step: i64) -> Tensor {
-        let output = self.inner.slice(dim, start, end, step);
-
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let backward = autograd::SliceBackward::new(self.clone(), dim, start, end, step, edges);
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(std::sync::Arc::new(backward));
-            let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            output
-        }
+        self.inner.slice(dim, start, end, step)
     }
 
     pub fn to_dtype(&self, dtype: DType) -> Tensor {
@@ -986,9 +847,7 @@ impl Tensor {
     }
 
     pub fn requires_grad_(&self, requires_grad: bool) -> Tensor {
-        let mut inner = self.inner.clone();
-        Arc::make_mut(&mut inner).set_requires_grad(requires_grad);
-        Tensor::new(inner.as_ref().clone())
+        self.inner.requires_grad_(requires_grad)
     }
 
     pub fn grad(&self) -> Option<Tensor> {
@@ -1140,12 +999,10 @@ impl Tensor {
         }
     }
 
-    #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
         self.inner.data_ptr()
     }
 
-    #[track_caller]
     pub fn data_ptr_f32(&self) -> *const f32 {
         self.inner.data_ptr_f32()
     }
@@ -1173,20 +1030,7 @@ impl Tensor {
     /// Move tensor to CPU memory
     pub fn to_cpu(&self) -> Tensor {
         match self.inner.storage.as_ref() {
-            Storage::Cpu(_) => {
-                // Storage is already CPU, but device might be GPU (lazy GPU tensor)
-                // Return a clone with CPU device
-                Tensor::new(TensorImpl {
-                    storage: self.inner.storage.clone(),
-                    sizes: self.inner.sizes.clone(),
-                    strides: self.inner.strides.clone(),
-                    storage_offset: self.inner.storage_offset,
-                    dtype: self.inner.dtype,
-                    device: Device::Cpu,
-                    version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: self.inner.autograd_meta.clone(),
-                })
-            }
+            Storage::Cpu(_) => self.clone(),
             Storage::Wgpu(gpu) => {
                 // Read GPU buffer to CPU
                 use crate::kernels::gpu::get_context;
@@ -1205,7 +1049,7 @@ impl Tensor {
                     dtype: self.inner.dtype,
                     device: Device::Cpu,
                     version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: self.inner.autograd_meta.clone(),
+                    autograd_meta: None,
                 })
             }
         }
@@ -1215,38 +1059,10 @@ impl Tensor {
     pub fn to_gpu(&self, device_id: usize) -> Tensor {
         match self.inner.storage.as_ref() {
             Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),
-            Storage::Wgpu(gpu) => {
-                // Tensor is on a different GPU device, need to move it
-                // First read from the source GPU, then write to target GPU
-                use crate::kernels::gpu::get_context;
-                let src_ctx = get_context(gpu.device_id);
-                let f32_data = src_ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
-                let byte_data = bytemuck::cast_slice(&f32_data);
-
-                let dst_ctx = get_context(device_id);
-                let buffer = dst_ctx.create_gpu_buffer_from_bytes(byte_data, "to_gpu");
-
-                let storage = Arc::new(Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes: gpu.nbytes,
-                    device_id,
-                    staging: RwLock::new(None),
-                }));
-
-                Tensor::new(TensorImpl {
-                    storage,
-                    sizes: self.inner.sizes.clone(),
-                    strides: self.inner.strides.clone(),
-                    storage_offset: self.inner.storage_offset,
-                    dtype: self.inner.dtype,
-                    device: Device::Wgpu(device_id),
-                    version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: self.inner.autograd_meta.clone(),
-                })
-            }
             _ => {
-                // CPU storage or "lazy GPU" tensor - get CPU data
+                // Get CPU data
                 let cpu_data = self.as_f32_slice().to_vec();
+                let shape = self.shape();
                 let dtype = self.inner.dtype;
 
                 // Create GPU tensor
@@ -1261,27 +1077,23 @@ impl Tensor {
                     staging: RwLock::new(None),
                 }));
 
+                let sizes: SmallVec<[i64; 8]> = shape.iter().copied().collect();
                 Tensor::new(TensorImpl {
                     storage,
-                    sizes: self.inner.sizes.clone(),
+                    sizes,
                     strides: self.inner.strides.clone(),
                     storage_offset: self.inner.storage_offset,
                     dtype,
                     device: Device::Wgpu(device_id),
                     version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: self.inner.autograd_meta.clone(),
+                    autograd_meta: None,
                 })
             }
         }
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
-        // Determine dispatch key based on both tensors' devices
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
-        };
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("add", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1294,8 +1106,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1305,17 +1116,6 @@ impl Tensor {
     /// In-place addition for gradient accumulation
     /// This is used internally by the autograd engine to accumulate gradients
     pub fn add_(&mut self, other: &Tensor) -> &mut Self {
-        // For GPU tensors, we need to use dispatch-based addition
-        if self.inner.is_gpu() || other.inner.is_gpu() {
-            // Perform addition using the dispatch system
-            // Use &*self to get &Tensor from &mut Tensor
-            let result = (self as &Tensor).add(other);
-            // Update self with the result
-            *self = result;
-            return self;
-        }
-
-        // CPU path: direct memory manipulation
         let self_inner = Arc::make_mut(&mut self.inner);
         let dtype = self_inner.dtype;
         let numel = self_inner.numel() as usize;
@@ -1358,11 +1158,7 @@ impl Tensor {
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
-        };
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("sub", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1375,8 +1171,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1384,11 +1179,7 @@ impl Tensor {
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
-        };
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("mul", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1401,8 +1192,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1410,11 +1200,7 @@ impl Tensor {
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
-        };
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("div", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1427,8 +1213,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1436,11 +1221,7 @@ impl Tensor {
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
-        };
+        let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("matmul", dispatch_key, &[self, other]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
@@ -1453,8 +1234,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1471,8 +1251,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1489,8 +1268,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1507,8 +1285,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1525,8 +1302,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1543,8 +1319,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1561,8 +1336,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1579,8 +1353,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1597,30 +1370,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            output
-        }
-    }
-
-    pub fn softmax(&self, dim: i32) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch(
-            "softmax",
-            dispatch_key,
-            &[self, &Tensor::from_scalar(dim as f32)],
-        );
-        let output = result[0].clone();
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let backward = autograd::SoftmaxBackward::new(output.clone(), dim as usize, edges);
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(std::sync::Arc::new(backward));
-            let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1637,33 +1387,11 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
         }
-    }
-
-    pub fn fused_linear_gelu(&self, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
-        let device = match (self.device(), weight.device()) {
-            (Device::Wgpu(id), _) => Device::Wgpu(id),
-            (_, Device::Wgpu(id)) => Device::Wgpu(id),
-            _ => {
-                if let Some(b) = bias {
-                    b.device()
-                } else {
-                    Device::Cpu
-                }
-            }
-        };
-        let dispatch_key = device_to_dispatch_key(device);
-        let args: Vec<&Tensor> = match bias {
-            Some(b) => vec![self, weight, b],
-            None => vec![self, weight],
-        };
-        let result = dispatch("fused_linear_gelu", dispatch_key, &args);
-        result[0].clone()
     }
 
     pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {
@@ -1696,8 +1424,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1722,8 +1449,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output
@@ -1764,8 +1490,7 @@ impl Tensor {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(meta);
             output
         } else {
             output

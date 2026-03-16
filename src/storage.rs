@@ -153,12 +153,8 @@ impl Device {
         match s {
             "cpu" | "CPU" => Some(Device::Cpu),
             "gpu" | "GPU" | "wgpu" | "Wgpu" => Some(Device::Wgpu(0)),
-            s if s.starts_with("gpu:") => {
+            s if s.starts_with("gpu:") || s.starts_with("wgpu:") => {
                 let idx: usize = s[4..].parse().ok()?;
-                Some(Device::Wgpu(idx))
-            }
-            s if s.starts_with("wgpu:") => {
-                let idx: usize = s[5..].parse().ok()?;
                 Some(Device::Wgpu(idx))
             }
             _ => None,
