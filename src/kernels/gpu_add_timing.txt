@@ -1,0 +1,2 @@
+// This is the exact content of run_binary_kernel function
+// I'll add timing to this function

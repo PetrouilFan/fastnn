@@ -1,6 +1,8 @@
 import numpy as np
 import fastnn._core as _core
 
+__version__ = "0.4.0"
+
 from fastnn.core import no_grad, set_seed, set_num_threads, set_default_device
 from fastnn.data import DataLoader, Dataset, TensorDataset
 from fastnn.callbacks import (
@@ -9,6 +11,7 @@ from fastnn.callbacks import (
     LearningRateScheduler,
     CSVLogger,
 )
+from fastnn.parallel import DataParallel
 
 __all__ = [
     "no_grad",
@@ -22,6 +25,7 @@ __all__ = [
     "ModelCheckpoint",
     "LearningRateScheduler",
     "CSVLogger",
+    "DataParallel",
     "models",
 ]
 
@@ -66,7 +70,17 @@ def _patch_numpy(tensor_cls):
     # tensor_cls.__getitem__ = _new_getitem
 
 
+def _patch_backward(tensor_cls):
+    _original_backward = tensor_cls.backward
+
+    def _new_backward(self, grad=None):
+        return _original_backward(self, grad)
+
+    tensor_cls.backward = _new_backward
+
+
 _patch_numpy(_core.PyTensor)
+_patch_backward(_core.PyTensor)
 
 zeros = _core.zeros
 ones = _core.ones
@@ -155,6 +169,11 @@ class PySequential:
             if hasattr(layer, "parameters"):
                 params.extend(layer.parameters())
         return params
+
+    def to_gpu(self, device_id):
+        for layer in self.layers:
+            if hasattr(layer, "to_gpu"):
+                layer.to_gpu(device_id)
 
     def train(self):
         for layer in self.layers:
