@@ -723,13 +723,9 @@ fn argmax(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     use dispatcher::dispatch;
     let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
-        "max",
+        "argmax",
         dispatch_key,
-        &[
-            &a.inner,
-            &Tensor::from_scalar(dim as f32),
-            &Tensor::from_scalar(1.0),
-        ],
+        &[&a.inner, &Tensor::from_scalar(dim as f32)],
     );
     PyTensor::from_tensor(result[0].clone())
 }
@@ -741,13 +737,9 @@ fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     use dispatcher::dispatch;
     let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
-        "min",
+        "argmin",
         dispatch_key,
-        &[
-            &a.inner,
-            &Tensor::from_scalar(dim as f32),
-            &Tensor::from_scalar(1.0),
-        ],
+        &[&a.inner, &Tensor::from_scalar(dim as f32)],
     );
     PyTensor::from_tensor(result[0].clone())
 }
