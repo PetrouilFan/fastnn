@@ -8231,7 +8231,8 @@ fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         .collect();
     let mut output = Tensor::zeros(output_shape.clone(), weight.dtype(), weight.device());
 
-    let indices_ptr = indices.data_ptr() as *const f32;
+    // Read indices as i32 (or i64 depending on dtype) to avoid precision loss with f32
+    let indices_ptr = indices.data_ptr() as *const i32;
     let weight_ptr = weight.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
@@ -8295,7 +8296,8 @@ impl Node for EmbeddingBackward {
 
         // Accumulate gradients from output
         let grad_output_ptr = grad_output.data_ptr() as *const f32;
-        let indices_ptr = indices.data_ptr() as *const f32;
+        // Read indices as i32 to avoid precision loss with f32
+        let indices_ptr = indices.data_ptr() as *const i32;
         let weight_grad_inner = Arc::make_mut(&mut weight_grad.inner);
         let weight_grad_storage = Arc::make_mut(&mut weight_grad_inner.storage);
         let Storage::Cpu(cpu_storage) = weight_grad_storage else {
@@ -8324,7 +8326,7 @@ impl Node for EmbeddingBackward {
     }
 
     fn num_inputs(&self) -> usize {
-        1
+        2
     }
 
     fn name(&self) -> &str {
