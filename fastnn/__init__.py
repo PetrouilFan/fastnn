@@ -63,12 +63,6 @@ def _patch_numpy(tensor_cls):
 
     tensor_cls.numpy = _new_numpy
 
-    # NOTE: Removed __getitem__ patch as it returns numpy arrays and breaks autograd.
-    # Users should use .numpy()[idx] explicitly if they want numpy indexing.
-    # def _new_getitem(self, idx):
-    #     return self.numpy()[idx]
-    # tensor_cls.__getitem__ = _new_getitem
-
 
 def _patch_backward(tensor_cls):
     _original_backward = tensor_cls.backward
