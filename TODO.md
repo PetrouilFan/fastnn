@@ -268,12 +268,12 @@
   Apply in both the Rust kernel and the Python binding path.
   Commit: `perf(kernels): use Ziggurat (StandardNormal) instead of Box-Muller for randn`
 
-- [ ] **PERF-13** `fastnn/data.py` — `DataLoader.shuffle()` re-allocates `indices` list every epoch.
+- [x] **PERF-13** `fastnn/data.py` — `DataLoader.shuffle()` re-allocates `indices` list every epoch.
   Fix: pre-allocate `self.indices = list(range(len(dataset)))` in `__init__`, then shuffle in-place:
   ```python
   random.shuffle(self.indices)  # in-place, no re-alloc
   ```
-  Commit: `perf(data): shuffle DataLoader indices in-place to avoid reallocation`
+  Commit: `perf(data): shuffle DataLoader indices in-place to avoid reallocation` ✓
 
 - [ ] **PERF-1** `src/optim/adam.rs` and `src/optim/adamw.rs` — Each optimizer step allocates
   ~6–8 intermediate tensors per parameter.
@@ -349,14 +349,14 @@
   On backward, if cache is `Some`, use it directly; otherwise compute and store.
   Commit: `perf(autograd): cache topological sort for static computation graphs`
 
-- [ ] **PERF-10** `src/autograd/engine.rs` — Gradient accumulation allocates a new tensor for each `add`.
+- [x] **PERF-10** `src/autograd/engine.rs` — Gradient accumulation allocates a new tensor for each `add`.
   Fix: replace `grad_in = grad_in.add(&incoming)` with in-place accumulation.
   Implement `Tensor::add_assign_inplace(&mut self, other: &Tensor)` that writes directly into
   `self`'s storage buffer using a SIMD loop, with no allocation.
   Use it in the backward accumulation loop.
-  Commit: `perf(autograd): in-place gradient accumulation to eliminate allocs`
+  Commit: `perf(autograd): in-place gradient accumulation to eliminate allocs` ✓
 
-- [ ] **PERF-15** `src/kernels/cpu.rs` — `CHUNK_MEMBOUND` threshold (`numel > 2048`) is used
+- [x] **PERF-15** `src/kernels/cpu.rs` — `CHUNK_MEMBOUND` threshold (`numel > 2048`) is used
   uniformly for both heavy and cheap ops. For cheap ops (relu, abs, neg, exp) the Rayon thread
   spawn overhead dominates for tensors under ~32K elements.
   Fix: define per-category thresholds:
@@ -367,7 +367,7 @@
   const THRESHOLD_REDUCTION: usize = 2_048;        // sum, mean, max
   ```
   Replace all `numel > 2048` checks with the appropriate category constant.
-  Commit: `perf(kernels): tune per-operation parallelism thresholds`
+  Commit: `perf(kernels): tune per-operation parallelism thresholds` ✓
 
 - [x] **PERF-19** `src/kernels/cpu.rs` — The `wide` crate is already a dependency but only used
   in AArch64 tanh. All x86 paths for `gelu`, `silu`, `exp` use raw intrinsics and scalarize
