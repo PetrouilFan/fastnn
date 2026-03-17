@@ -34,6 +34,11 @@ class DataLoader:
         drop_last: bool = False,
         num_workers: int = 0,
     ):
+        if num_workers > 0:
+            raise NotImplementedError(
+                f"num_workers={num_workers} > 0 is not yet supported. "
+                "Use num_workers=0 for single-threaded data loading."
+            )
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
