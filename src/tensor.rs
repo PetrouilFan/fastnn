@@ -1379,6 +1379,55 @@ impl Tensor {
         self
     }
 
+    /// In-place multiplication
+    pub fn mul_(&mut self, other: &Tensor) -> &mut Self {
+        if self.inner.is_gpu() || other.inner.is_gpu() {
+            let result = (self as &Tensor).mul(other);
+            *self = result;
+            return self;
+        }
+
+        let self_inner = Arc::make_mut(&mut self.inner);
+        let dtype = self_inner.dtype;
+        let numel = self_inner.numel() as usize;
+        let self_storage = Arc::make_mut(&mut self_inner.storage);
+
+        match (self_storage, other.inner.storage.as_ref()) {
+            (Storage::Cpu(cpu_self), Storage::Cpu(cpu_other)) => match dtype {
+                DType::F32 => {
+                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut f32;
+                    let other_ptr = cpu_other.data.as_ptr() as *const f32;
+                    for i in 0..numel {
+                        unsafe {
+                            *self_ptr.add(i) *= *other_ptr.add(i);
+                        }
+                    }
+                }
+                DType::F64 => {
+                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut f64;
+                    let other_ptr = cpu_other.data.as_ptr() as *const f64;
+                    for i in 0..numel {
+                        unsafe {
+                            *self_ptr.add(i) *= *other_ptr.add(i);
+                        }
+                    }
+                }
+                DType::I32 => {
+                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut i32;
+                    let other_ptr = cpu_other.data.as_ptr() as *const i32;
+                    for i in 0..numel {
+                        unsafe {
+                            *self_ptr.add(i) *= *other_ptr.add(i);
+                        }
+                    }
+                }
+                _ => unimplemented!("mul_ for dtype {:?}", dtype),
+            },
+            _ => unimplemented!("mul_ for non-CPU storage"),
+        }
+        self
+    }
+
     pub fn sub(&self, other: &Tensor) -> Tensor {
         let dispatch_key = match (self.device(), other.device()) {
             (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
