@@ -5987,6 +5987,7 @@ fn small_matrix_matmul(
 
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
+                    // Scalar fallback (not SIMD) - handle remaining elements
                     let mut sum0 = 0.0f32;
                     let mut sum1 = 0.0f32;
                     let mut sum2 = 0.0f32;
