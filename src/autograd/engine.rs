@@ -3,7 +3,7 @@ use crate::tensor::Tensor;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
+pub fn backward(root: &Tensor, grad_output: Option<Tensor>, retain_graph: bool) {
     if !root.requires_grad() {
         return;
     }
