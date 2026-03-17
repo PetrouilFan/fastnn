@@ -342,12 +342,12 @@
   3. Keep the string→OpId lookup only for the Python API boundary; internal Rust code uses `OpId` directly.
   Commit: `perf(dispatcher): replace HashMap dispatch with flat array indexed by OpId enum`
 
-- [ ] **PERF-9** `src/autograd/engine.rs` — Topological sort is rebuilt on every `.backward()` call
+- [x] **PERF-9** `src/autograd/engine.rs` — Topological sort is rebuilt on every `.backward()` call
   even for static graphs that never change between training steps.
   Fix: cache the topo order as `Option<Vec<Arc<dyn Node>>>` on the root tensor's autograd metadata.
   Invalidate (set to `None`) whenever `requires_grad` is changed or a new operation creates a new node.
   On backward, if cache is `Some`, use it directly; otherwise compute and store.
-  Commit: `perf(autograd): cache topological sort for static computation graphs`
+  Commit: `perf(autograd): cache topological sort for static computation graphs` ✓
 
 - [x] **PERF-10** `src/autograd/engine.rs` — Gradient accumulation allocates a new tensor for each `add`.
   Fix: replace `grad_in = grad_in.add(&incoming)` with in-place accumulation.

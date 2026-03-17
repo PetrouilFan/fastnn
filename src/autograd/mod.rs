@@ -25,6 +25,9 @@ pub struct AutogradMeta {
     pub grad: Option<Tensor>,
     pub grad_fn: Option<Arc<dyn Node>>,
     pub is_leaf: bool,
+    /// Cached topological order for static computation graphs
+    /// This is reused across multiple backward() calls for the same graph
+    pub topo_order_cache: Option<Vec<Arc<dyn Node>>>,
 }
 
 impl AutogradMeta {
@@ -34,6 +37,7 @@ impl AutogradMeta {
             grad: None,
             grad_fn: None,
             is_leaf: true,
+            topo_order_cache: None,
         }
     }
 
@@ -43,7 +47,14 @@ impl AutogradMeta {
             grad: None,
             grad_fn: None,
             is_leaf: false,
+            topo_order_cache: None,
         }
+    }
+
+    /// Invalidate the topological order cache
+    /// This should be called when the computation graph changes
+    pub fn invalidate_topo_cache(&mut self) {
+        self.topo_order_cache = None;
     }
 }
 
