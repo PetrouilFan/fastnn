@@ -146,10 +146,10 @@ impl PyTensor {
         self.inner.is_leaf()
     }
 
-    #[pyo3(signature = (grad=None))]
-    fn backward(&self, grad: Option<PyTensor>) {
+    #[pyo3(signature = (grad=None, retain_graph=false))]
+    fn backward(&self, grad: Option<PyTensor>, retain_graph: bool) {
         let grad_tensor = grad.map(|g| g.inner);
-        crate::autograd::backward(&self.inner, grad_tensor);
+        crate::autograd::backward(&self.inner, grad_tensor, retain_graph);
     }
 
     #[pyo3(signature = (grad))]
