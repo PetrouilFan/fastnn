@@ -381,7 +381,8 @@ impl TensorImpl {
         }
 
         let mut sizes = self.sizes.clone();
-        let numel = ((end - start) / step as usize) + 1;
+        // Use ceiling division to properly handle non-unit steps
+        let numel = (end - start + step as usize - 1) / step as usize;
         sizes[dim] = numel as i64;
 
         let storage_offset = self.storage_offset + (start as i64) * self.strides[dim];
