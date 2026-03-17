@@ -105,10 +105,10 @@ impl Optimizer for Adam {
             let denom = v_hat.add(&Tensor::from_scalar(self.eps as f32)).sqrt();
             let update = m_hat.div(&denom);
 
+            // Apply weight decay as L2 regularization
             if self.weight_decay != 0.0 {
                 let weight_decay_term = param.mul(&Tensor::from_scalar(self.weight_decay as f32));
-                let lr = Tensor::from_scalar(self.lr as f32);
-                let _decay = lr.mul(&weight_decay_term);
+                update = update.add(&weight_decay_term);
             }
 
             let lr = Tensor::from_scalar(self.lr as f32);
