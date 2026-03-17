@@ -6102,7 +6102,7 @@ fn single_threaded_matmul(
                                         let mut acc1 = _mm256_setzero_ps();
                                         let mut kk = k_tile;
 
-                                        while kk + 8 <= k_max {
+                                        while kk + 16 <= k_max {
                                             let a0 = _mm256_loadu_ps(a_ptr.add(
                                                 bat_a_offset
                                                     + i * a_stride_0 as usize
@@ -6127,32 +6127,25 @@ fn single_threaded_matmul(
 
                                             acc0 = _mm256_fmadd_ps(a0, b0, acc0);
                                             acc1 = _mm256_fmadd_ps(a1, b1, acc1);
-
-                                            #[cfg(feature = "prefetch")]
-                                            {
-                                                _mm_prefetch(
-                                                    b_ptr.add(
-                                                        bat_b_offset
-                                                            + (kk + TILE_SIZE)
-                                                                * b_stride_0 as usize
-                                                            + j * b_stride_1 as usize,
-                                                    )
-                                                        as *const i8,
-                                                    _MM_HINT_T0,
-                                                );
-                                                _mm_prefetch(
-                                                    a_ptr.add(
-                                                        bat_a_offset
-                                                            + i * a_stride_0 as usize
-                                                            + (kk + TILE_SIZE)
-                                                                * a_stride_1 as usize,
-                                                    )
-                                                        as *const i8,
-                                                    _MM_HINT_T0,
-                                                );
-                                            }
-
                                             kk += 16;
+                                        }
+
+                                        // Handle remaining 8 elements with 8-wide loop
+                                        while kk + 8 <= k_max {
+                                            let a0 = _mm256_loadu_ps(a_ptr.add(
+                                                bat_a_offset
+                                                    + i * a_stride_0 as usize
+                                                    + kk * a_stride_1 as usize,
+                                            ));
+
+                                            let b0 = _mm256_loadu_ps(b_ptr.add(
+                                                bat_b_offset
+                                                    + kk * b_stride_0 as usize
+                                                    + j * b_stride_1 as usize,
+                                            ));
+
+                                            acc0 = _mm256_fmadd_ps(a0, b0, acc0);
+                                            kk += 8;
                                         }
 
                                         let acc = _mm256_add_ps(acc0, acc1);
@@ -6160,6 +6153,7 @@ fn single_threaded_matmul(
                                         _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
                                         sum += acc_arr.assume_init().iter().sum::<f32>();
 
+                                        // Scalar tail for remaining < 8 elements
                                         while kk < k_max {
                                             let a_val = *a_ptr.add(
                                                 bat_a_offset
