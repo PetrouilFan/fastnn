@@ -164,14 +164,26 @@ impl PyTensor {
 
     #[pyo3(signature = (dim = None, keepdim = false))]
     fn sum(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        let dim = dim.unwrap_or(0);
-        PyTensor::from_tensor(self.inner.sum(dim, keepdim))
+        let result = if let Some(d) = dim {
+            self.inner.sum(d, keepdim)
+        } else {
+            // Full reduction: reshape to 1D and sum
+            let flat = self.inner.reshape(vec![-1]);
+            flat.sum(0, keepdim)
+        };
+        PyTensor::from_tensor(result)
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
     fn mean(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        let dim = dim.unwrap_or(0);
-        PyTensor::from_tensor(self.inner.mean(dim, keepdim))
+        let result = if let Some(d) = dim {
+            self.inner.mean(d, keepdim)
+        } else {
+            // Full reduction: reshape to 1D and mean
+            let flat = self.inner.reshape(vec![-1]);
+            flat.mean(0, keepdim)
+        };
+        PyTensor::from_tensor(result)
     }
 
     fn view(&self, shape: Vec<i64>) -> PyTensor {
@@ -656,15 +668,27 @@ fn embedding(weight: &PyTensor, indices: &PyTensor) -> PyTensor {
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let dim = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.sum(dim, keepdim))
+    let result = if let Some(d) = dim {
+        a.inner.sum(d, keepdim)
+    } else {
+        // Full reduction: reshape to 1D and sum
+        let flat = a.inner.reshape(vec![-1]);
+        flat.sum(0, keepdim)
+    };
+    PyTensor::from_tensor(result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let dim = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.mean(dim, keepdim))
+    let result = if let Some(d) = dim {
+        a.inner.mean(d, keepdim)
+    } else {
+        // Full reduction: reshape to 1D and mean
+        let flat = a.inner.reshape(vec![-1]);
+        flat.mean(0, keepdim)
+    };
+    PyTensor::from_tensor(result)
 }
 
 #[pyfunction]
