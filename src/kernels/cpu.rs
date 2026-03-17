@@ -6442,37 +6442,40 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let in_features = in_features as usize;
     let out_features = out_features as usize;
 
+    let total = batch_size * out_features;
+    let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, batch_size * in_features) };
+    let w_slice = unsafe { std::slice::from_raw_parts(w_ptr, out_features * in_features) };
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, total) };
+
+    let b_slice = bias.map(|b| {
+        let b_ptr = b.data_ptr_f32();
+        unsafe { std::slice::from_raw_parts(b_ptr, out_features) }
+    });
+
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        let total = batch_size * out_features;
 
-        let x_usize = x_ptr as usize;
-        let w_usize = w_ptr as usize;
-        let out_usize = out_ptr as usize;
+        out_slice
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, out_val)| {
+                let batch_idx = idx / out_features;
+                let out_idx = idx % out_features;
 
-        (0..total).into_par_iter().for_each(|idx| {
-            let batch_idx = idx / out_features;
-            let out_idx = idx % out_features;
+                let mut sum = 0.0f32;
+                for k in 0..in_features {
+                    let x_offset = batch_idx * in_features + k;
+                    let w_offset = out_idx * in_features + k;
+                    sum += x_slice[x_offset] * w_slice[w_offset];
+                }
 
-            let mut sum = 0.0f32;
-            for k in 0..in_features {
-                let x_offset = batch_idx * in_features + k;
-                let w_offset = out_idx * in_features + k;
-                let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
-                let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
-                sum += x_val * w_val;
-            }
+                if let Some(b) = b_slice {
+                    sum += b[out_idx];
+                }
 
-            if let Some(b) = bias {
-                let b_ptr = b.data_ptr_f32();
-                sum += unsafe { *b_ptr.add(out_idx) };
-            }
-
-            unsafe {
-                *((out_usize + idx * 4) as *mut f32) = sum.max(0.0);
-            };
-        });
+                *out_val = sum.max(0.0);
+            });
     }
     #[cfg(not(feature = "parallel"))]
     {
@@ -6482,19 +6485,15 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 for k in 0..in_features {
                     let x_offset = batch_idx * in_features + k;
                     let w_offset = out_idx * in_features + k;
-                    let x_val = unsafe { *x_ptr.add(x_offset) };
-                    let w_val = unsafe { *w_ptr.add(w_offset) };
-                    sum += x_val * w_val;
+                    sum += x_slice[x_offset] * w_slice[w_offset];
                 }
 
-                if let Some(b) = bias {
-                    let b_ptr = b.data_ptr_f32();
-                    sum += unsafe { *b_ptr.add(out_idx) };
+                if let Some(b) = b_slice {
+                    sum += b[out_idx];
                 }
 
-                unsafe {
-                    *out_ptr.add(batch_idx * out_features + out_idx) = sum.max(0.0);
-                };
+                let out_idx_flat = batch_idx * out_features + out_idx;
+                out_slice[out_idx_flat] = sum.max(0.0);
             }
         }
     }
@@ -6545,39 +6544,41 @@ fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let in_features = in_features as usize;
     let out_features = out_features as usize;
 
+    let total = batch_size * out_features;
+    let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, batch_size * in_features) };
+    let w_slice = unsafe { std::slice::from_raw_parts(w_ptr, out_features * in_features) };
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, total) };
+
+    let b_slice = bias.map(|b| {
+        let b_ptr = b.data_ptr_f32();
+        unsafe { std::slice::from_raw_parts(b_ptr, out_features) }
+    });
+
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        let total = batch_size * out_features;
 
-        let x_usize = x_ptr as usize;
-        let w_usize = w_ptr as usize;
-        let out_usize = out_ptr as usize;
+        out_slice
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, out_val)| {
+                let batch_idx = idx / out_features;
+                let out_idx = idx % out_features;
 
-        (0..total).into_par_iter().for_each(|idx| {
-            let batch_idx = idx / out_features;
-            let out_idx = idx % out_features;
+                let mut sum = 0.0f32;
+                for k in 0..in_features {
+                    let x_offset = batch_idx * in_features + k;
+                    let w_offset = out_idx * in_features + k;
+                    sum += x_slice[x_offset] * w_slice[w_offset];
+                }
 
-            let mut sum = 0.0f32;
-            for k in 0..in_features {
-                let x_offset = batch_idx * in_features + k;
-                let w_offset = out_idx * in_features + k;
-                let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
-                let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
-                sum += x_val * w_val;
-            }
+                if let Some(b) = b_slice {
+                    sum += b[out_idx];
+                }
 
-            if let Some(b) = bias {
-                let b_ptr = b.data_ptr_f32();
-                sum += unsafe { *b_ptr.add(out_idx) };
-            }
-
-            // SiLU: x / (1.0 + (-x).exp())
-            let silu_val = sum / (1.0 + (-sum).exp());
-            unsafe {
-                *((out_usize + idx * 4) as *mut f32) = silu_val;
-            };
-        });
+                // SiLU: x / (1.0 + (-x).exp())
+                *out_val = sum / (1.0 + (-sum).exp());
+            });
     }
     #[cfg(not(feature = "parallel"))]
     {
@@ -6587,21 +6588,16 @@ fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 for k in 0..in_features {
                     let x_offset = batch_idx * in_features + k;
                     let w_offset = out_idx * in_features + k;
-                    let x_val = unsafe { *x_ptr.add(x_offset) };
-                    let w_val = unsafe { *w_ptr.add(w_offset) };
-                    sum += x_val * w_val;
+                    sum += x_slice[x_offset] * w_slice[w_offset];
                 }
 
-                if let Some(b) = bias {
-                    let b_ptr = b.data_ptr_f32();
-                    sum += unsafe { *b_ptr.add(out_idx) };
+                if let Some(b) = b_slice {
+                    sum += b[out_idx];
                 }
 
                 // SiLU: x / (1.0 + (-x).exp())
-                let silu_val = sum / (1.0 + (-sum).exp());
-                unsafe {
-                    *out_ptr.add(batch_idx * out_features + out_idx) = silu_val;
-                };
+                let out_idx_flat = batch_idx * out_features + out_idx;
+                out_slice[out_idx_flat] = sum / (1.0 + (-sum).exp());
             }
         }
     }
