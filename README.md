@@ -1,212 +1,350 @@
 # fastnn
 
-**fastnn** is a high-performance, lightweight neural network framework built from scratch in Rust with seamless Python bindings. It is designed to be a fast, hardware-efficient alternative to mainstream deep learning libraries, providing hardware-accelerated CPU and GPU compute via a familiar PyTorch-like Python API.
+**fastnn** is a high-performance, production-grade neural network framework built from scratch in Rust with seamless Python bindings. It delivers hardware-accelerated CPU and GPU compute through a familiar PyTorch-like API, without the overhead of mainstream deep learning stacks.
 
-**Version:** v0.4.0 - Multi-GPU Support with Distributed Data Parallel
+> **Version:** v0.4.0 — Multi-GPU Support with Distributed Data Parallel
 
+[![CI](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml/badge.svg)](https://github.com/PetrouilFan/fastnn/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
+[![Rust: stable](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
+
+---
+
+## Overview
+
+fastnn is designed for researchers and engineers who need both the ergonomics of Python and the raw performance of systems-level code. It is implemented entirely in Rust and exposed to Python via [PyO3](https://pyo3.rs), making it a fast, dependency-light alternative for training and inference workloads.
+
+**Core design goals:**
+- Zero-compromise performance via hand-written SIMD kernels and GPU compute shaders
+- A clean, PyTorch-compatible Python API with no learning curve
+- Portable acceleration across x86-64 (AVX2/AVX512), ARM (NEON), and GPU (WebGPU/wgpu)
+- First-class autograd with full backward pass support
+
+---
 
 ## Features
 
+- **Vectorized CPU Kernels** — Hand-optimized SIMD kernels targeting AVX2, AVX512, and ARM NEON, with runtime dispatch to the best available instruction set. Includes Cephes-style fast approximations for transcendental functions (`exp`, `log`).
+- **GPU Acceleration** — Cross-platform GPU compute via [wgpu](https://wgpu.rs) (WebGPU). Vectorized `vec4` shaders for elementwise ops and tiled matrix multiplication with shared memory.
+- **Multi-threading** — Automatic parallelism across CPU cores using [rayon](https://github.com/rayon-rs/rayon), with cache-aware chunking for memory-bound and compute-bound workloads.
+- **Native Autograd** — Built-in automatic differentiation engine with operation tracking, backward passes, and `no_grad` context support.
+- **Multi-GPU Training** — Distributed Data Parallel (DDP) with bucketed AllReduce gradient synchronization and dynamic load balancing across GPUs.
+- **PyO3 Python Bindings** — Train and evaluate models from Python with a PyTorch-like API. No Python performance penalty on the hot path.
+- **Optimized Convolutions** — im2col-based Conv2d with specialized kernels for 1×1, depthwise, and 3×3 convolutions at various stride/dilation configurations.
+- **BLAS Integration** — Optional OpenBLAS backend for matrix multiplication on large tensors.
+- **Training Utilities** — Datasets, DataLoaders, and Keras-style Callbacks (EarlyStopping, ModelCheckpoint, LearningRateScheduler, CSVLogger).
 
-- **Blazing Fast CPU Kernels:** Hand-written SIMD instructions (AVX2, AVX512 for x86_64, and NEON for ARM) with optimized approximations for transcendental functions (e.g., Cephes-style fast `exp` and `log`).
-- **Multi-Threading:** Automatic work distribution across CPU cores using `rayon` for parallelized tensor computations.
-- **GPU Acceleration:** Cross-platform hardware acceleration using `wgpu` (WebGPU) to run compute shaders with vectorized operations (ADD, GELU, MUL, DIV) and optimized matrix multiplication kernels. GPU speedups include **152x for MatMul** (512×1024×512) and **14x for GELU** (1000×1000).
-- **Native Autograd:** Built-in automatic differentiation engine supporting tracking, backward passes, and context managers (`no_grad()`).
-- **Python Bindings (`PyO3`):** Train and evaluate models natively in Python without sacrificing the performance of the underlying Rust implementation.
-- **Optimized Convolutions:** Supports `im2col` transforms and specialized kernels (e.g., 1x1, depthwise, 3x3) optimized for specific stride/dilation configurations.
-
-
-## Core Components
-
-
-The framework ships with the essential building blocks for modern deep learning:
-
-
-- **Tensors & Math:** Full support for multidimensional tensors, broadcasting, matrix multiplication (BLAS-accelerated), and standard mathematical operations.
-- **Layers:** `Linear`, `Conv2d`, `Embedding`, `LayerNorm`, `BatchNorm1d`, `Dropout`.
-- **Activations:** `ReLU`, `GELU`, `Sigmoid`, `Tanh`, `SiLU`, `Softmax`, `LogSoftmax`.
-- **Loss Functions:** `MSE`, `CrossEntropy`.
-- **Optimizers:** `SGD`, `Adam`, `AdamW`.
-
-
-## Project Structure
-
-
-```text
-fastnn/
-├── Cargo.toml            # Rust dependencies (PyO3, rayon, wgpu, etc.)
-├── uv.lock               # Python dependency management (uv)
-└── src/
-    ├── lib.rs            # Python module export & PyO3 bindings
-    ├── tensor.rs         # Core Tensor struct, dimensions, and striding logic
-    ├── autograd/         # Automatic differentiation and tape tracking
-    ├── nn/               # Neural network layers (Linear, Conv2d, etc.)
-    ├── optim/            # Model optimizers
-    ├── dispatcher/       # Dynamic kernel dispatch (CPU vs GPU)
-    ├── storage/          # Memory backend management (Device allocation)
-    └── kernels/
-        ├── cpu.rs        # Highly optimized SIMD and scalar CPU operations
-        ├── blas.rs       # Matrix multiplication routines
-        └── gpu/          # WebGPU contexts, compute pipelines, and vectorized shaders
-```
+---
 
 ## GPU Performance
 
-fastnn includes highly optimized GPU kernels with vectorized shader operations:
+Benchmarks measured against equivalent PyTorch CPU operations on medium-to-large tensors.
 
-| Operation | Size | GPU Speedup | Notes |
-|-----------|------|-------------|-------|
-| MatMul | 512×1024×512 | **152x** | Tiled matrix multiplication |
-| GELU | 1000×1000 | **14x** | Vectorized tanh computation |
-| Sigmoid | 1000×1000 | **11x** | Vectorized operations |
-| Add | 1000×1000 | **4x** | Vectorized vec4 operations |
+| Operation           | Tensor Size      | GPU Speedup | Notes                                 |
+|---------------------|------------------|-------------|---------------------------------------|
+| MatMul              | 512×1024×512     | **152×**    | Tiled matmul with shared memory       |
+| GELU                | 1000×1000        | **14×**     | Vectorized `tanh` computation         |
+| Sigmoid             | 1000×1000        | **11×**     | Vectorized shader operations          |
+| Add                 | 1000×1000        | **4×**      | `vec4` vectorized elementwise shader  |
 
-**Key GPU Optimizations:**
-- Vectorized ADD shader: Changed from scalar to vec4 operations (4x processing per thread)
-- Vectorized GELU shader: Implemented vectorized tanh and GELU computations
-- Shader consistency: All binary operations now use vectorized shaders
-- Optimized MatMul: Tiled matrix multiplication with shared memory
+> **Note:** GPU acceleration shows the highest gains for medium-to-large tensors (≥ 100×100). Small tensor operations may be bound by kernel launch and data transfer overhead.
+
+---
+
+## Project Structure
+
+```
+fastnn/
+├── Cargo.toml                  # Rust dependencies (PyO3, rayon, wgpu, ...)
+├── pyproject.toml              # Python package configuration (maturin)
+├── Makefile                    # Common dev tasks (install, build, test, bench)
+├── src/
+│   ├── lib.rs                  # Python module export & PyO3 bindings
+│   ├── tensor.rs               # Core Tensor struct, shape, strides, dtype
+│   ├── storage/                # Memory backend, device allocation (CPU/GPU)
+│   ├── autograd/               # Automatic differentiation tape and backward graph
+│   ├── dispatcher/             # Dynamic kernel dispatch (CPU vs GPU)
+│   ├── kernels/
+│   │   ├── cpu.rs              # SIMD kernels: AVX2, AVX512, NEON, scalar fallbacks
+│   │   ├── blas.rs             # BLAS-accelerated matrix multiplication
+│   │   └── gpu/                # WebGPU compute pipelines and WGSL shaders
+│   ├── nn/                     # Neural network layers, activations, attention
+│   ├── optim/                  # SGD, Adam, AdamW optimizers
+│   ├── train/                  # Trainer, callbacks, metrics, loss functions
+│   └── io/                     # Model serialization (safetensors), DLPack
+├── fastnn/                     # Python package
+│   ├── __init__.py             # Public API surface
+│   ├── nn.py                   # Sequential, ModuleList
+│   ├── parallel.py             # DataParallel / DDP
+│   ├── models/                 # Pre-built models: MLP, Transformer
+│   ├── data.py                 # Dataset, TensorDataset, DataLoader
+│   └── callbacks.py            # Training callbacks
+└── tests/
+    ├── bench/                  # Benchmarks vs PyTorch (CPU & GPU)
+    └── *.py                    # Unit and integration tests
+```
+
+---
 
 ## Installation
 
 ### Prerequisites
 
-- **Rust**: The latest stable Rust toolchain (via rustup).
-- **Python**: Python 3.12+
-- **uv**: For Python dependency management (recommended).
+| Tool    | Version   | Purpose                          |
+|---------|-----------|----------------------------------|
+| Rust    | stable    | Build the core library           |
+| Python  | ≥ 3.12    | Python bindings                  |
+| uv      | latest    | Python dependency management     |
 
-### Building the Project
+Install Rust via [rustup](https://rustup.rs):
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-Clone the repository and install it as an editable Python package using uv (or pip):
+### Build & Install
 
 ```bash
 git clone https://github.com/PetrouilFan/fastnn.git
 cd fastnn
-uv pip install -e .[dev]
+
+# Install and build (editable mode, with dev dependencies)
+uv pip install -e ".[dev]"
+
+# Or using the Makefile
+make install
 ```
 
-**Note**: The `[dev]` flag installs testing dependencies like pytest, pytest-benchmark, and numpy.
+The `[dev]` flag installs testing dependencies including `pytest`, `pytest-benchmark`, and `numpy`.
 
-## Quick Start (Python)
+### Platform Notes
 
-Because fastnn exposes a PyTorch-like API, you can easily define models and execute operations directly from Python:
+fastnn auto-selects the best CPU instruction set at runtime:
+- **x86-64:** AVX512 → AVX2 → scalar fallback
+- **ARM64:** NEON intrinsics
+- **GPU:** WebGPU via `wgpu` (Vulkan, Metal, DX12, or WebGPU backends)
 
-```python
-import fastnn as fn
+---
 
+## Quick Start
 
-# Define a simple multi-layer perceptron
-model = fn.Sequential(
-    fn.Linear(128, 64),
-    fn.ReLU(),
-    fn.Linear(64, 10)
-)
-
-
-# Initialize optimizer
-optimizer = fn.PyAdam(model.parameters(), lr=0.001)
-
-
-# Forward pass
-inputs = fn.randn() # Batch of 32
-targets = fn.randint(low=0, high=10, shape=)
-
-
-# Compute predictions
-outputs = model(inputs)
-
-
-# Calculate loss & step
-loss = fn.cross_entropy_loss(outputs, targets)
-loss.backward()
-optimizer.step()
-
-
-print(f"Loss: {loss.item()}")
-```
-
-## Advanced Configuration
-
-### Device Management
-
-By default, operations run on the CPU. You can change the global device configuration via the API:
-
-```python
-# Switch to WebGPU Compute
-fn._set_default_device("gpu:0")
-
-# Or specify device per tensor
-a = fn.randn([1000, 1000], device="gpu")
-b = fn.randn([1000, 1000], device="gpu")
-c = a @ b  # GPU-accelerated matrix multiplication
-```
-
-### Multithreading
-
-fastnn leverages rayon for heavy parallel lifting. You can adjust the number of threads allocated to CPU compute:
-
-```python
-fn._set_num_threads(8)
-```
-
-## Testing and Benchmarking
-
-Tests are built using pytest. You can run the testing and benchmarking suites using:
-
-```bash
-pytest
-pytest --benchmark-only
-```
-
-### GPU Benchmarking
-
-To benchmark GPU performance:
-
-```bash
-python tests/bench_gpu_simple.py  # Quick GPU vs CPU comparison
-python tests/bench_gpu.py         # Comprehensive GPU benchmark suite
-```
-
-**Performance Note:** GPU acceleration shows best results for medium-to-large tensors (>100×100). Small tensor operations may have overhead from kernel launches and data transfers.
-
-### Multi-GPU Training
-
-fastnn now supports multi-GPU training via Distributed Data Parallel (DDP) with bucketed AllReduce gradient synchronization.
+### Basic Usage
 
 ```python
 import fastnn as fnn
 
-# Create model replicas for each GPU
+# Create tensors
+a = fnn.randn([1000, 1000])
+b = fnn.randn([1000, 1000])
+c = a @ b  # BLAS/SIMD-accelerated matmul
+
+# Define a model
+model = fnn.Sequential(
+    fnn.Linear(128, 64),
+    fnn.ReLU(),
+    fnn.Linear(64, 10),
+)
+
+optimizer = fnn.Adam(model.parameters(), lr=0.001)
+inputs  = fnn.randn([32, 128])
+targets = fnn.randint(low=0, high=10, shape=[32])
+
+# Training step
+outputs = model(inputs)
+loss    = fnn.cross_entropy_loss(outputs, targets)
+loss.backward()
+optimizer.step()
+optimizer.zero_grad()
+
+print(f"Loss: {loss.item():.4f}")
+```
+
+### GPU Acceleration
+
+```python
+import fastnn as fnn
+
+# Switch to WebGPU
+fnn.set_default_device("gpu:0")
+
+a = fnn.randn([1000, 1000], device="gpu")
+b = fnn.randn([1000, 1000], device="gpu")
+c = a @ b  # GPU-accelerated matrix multiplication
+```
+
+### Multi-GPU Training (DDP)
+
+```python
+import fastnn as fnn
+
+# Create identical model replicas for each GPU
 model_gpu0 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
 model_gpu1 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
 
-# Initialize DataParallel
+# Wrap in DataParallel with optional weighted data splitting
 dp_model = fnn.DataParallel(
     [model_gpu0, model_gpu1],
     device_ids=[0, 1],
-    weights=[0.6, 0.4]  # Optional: weighted data split
+    weights=[0.6, 0.4],  # Proportional to GPU memory/speed
 )
 
-# Training loop
 optimizers = [
     fnn.Adam(dp_model.replicas[0].parameters(), lr=1e-3),
-    fnn.Adam(dp_model.replicas[1].parameters(), lr=1e-3)
+    fnn.Adam(dp_model.replicas[1].parameters(), lr=1e-3),
 ]
 
 for x_batch, y_batch in dataloader:
     loss = dp_model.forward_backward(x_batch, y_batch, fnn.cross_entropy_loss)
-    dp_model.sync_gradients()
-    
+    dp_model.sync_gradients()         # Bucketed AllReduce
     for opt in optimizers:
         opt.step()
         opt.zero_grad()
-    
-    # Optional: Adjust weights based on GPU performance
-    dp_model.adjust_weights_based_on_performance()
+
+    dp_model.adjust_weights_based_on_performance()  # Dynamic load balancing
 ```
 
-**Key Features:**
-- **Weighted Data Splitting**: Automatically distributes data based on GPU capabilities
-- **Bucketed AllReduce**: Efficient gradient synchronization using optimized Rust implementation
-- **Dynamic Load Balancing**: Adjusts workload distribution based on measured GPU performance
-- **Thread-safe Execution**: Concurrent forward/backward passes across multiple GPUs
+### Training with Callbacks
+
+```python
+import fastnn as fnn
+
+model     = fnn.models.MLP(input_dim=2, hidden_dims=[16, 16], output_dim=1, activation="relu")
+optimizer = fnn.Adam(model.parameters(), lr=1e-2)
+
+ds     = fnn.TensorDataset(X, y)
+loader = fnn.DataLoader(ds, batch_size=4, shuffle=True)
+
+callbacks = [
+    fnn.EarlyStopping(monitor="loss", patience=10),
+    fnn.ModelCheckpoint(dirpath="./checkpoints", monitor="loss", save_best_only=True),
+    fnn.LearningRateScheduler(schedule="cosine", lr=1e-2, T_max=100),
+]
+
+model.train()
+for epoch in range(100):
+    total_loss = 0
+    for batch_x, batch_y in loader:
+        pred = model(batch_x)
+        loss = fnn.mse_loss(pred, batch_y)
+        total_loss += loss.item()
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+# Inference without gradient tracking
+with fnn.no_grad():
+    preds = model(X)
+    print(preds.numpy().round(2))
+```
+
+### Controlling Parallelism
+
+```python
+# Set CPU thread count for parallel kernels
+fnn.set_num_threads(8)
+
+# Inspect memory and registered ops
+print(fnn.allocator_stats())
+print(fnn.list_registered_ops())
+```
+
+---
+
+## API Reference
+
+### Tensor Creation
+
+| Function                          | Description                         |
+|-----------------------------------|-------------------------------------|
+| `fnn.tensor(data, shape)`         | Create tensor from a Python list    |
+| `fnn.zeros(shape)`                | Tensor of zeros                     |
+| `fnn.ones(shape)`                 | Tensor of ones                      |
+| `fnn.full(shape, value)`          | Tensor filled with a value          |
+| `fnn.eye(n)`                      | Identity matrix                     |
+| `fnn.arange(end)`                 | Integer range `[0, end)`            |
+| `fnn.linspace(start, end, n)`     | Linearly spaced values              |
+| `fnn.randn(shape)`                | Random normal (Gaussian)            |
+| `fnn.rand(shape)`                 | Random uniform `[0, 1)`             |
+| `fnn.randint(low, high, shape)`   | Random integers in `[low, high)`    |
+
+### Neural Network Modules
+
+| Module                                              | Description                         |
+|-----------------------------------------------------|-------------------------------------|
+| `fnn.Linear(in, out, bias=True)`                    | Fully connected layer               |
+| `fnn.Conv2d(cin, cout, kernel, stride, padding)`    | 2D convolution                      |
+| `fnn.LayerNorm(shape)`                              | Layer normalization                 |
+| `fnn.BatchNorm1d(features)`                         | Batch normalization                 |
+| `fnn.Dropout(p)`                                    | Dropout regularization              |
+| `fnn.Embedding(num, dim)`                           | Learned word embeddings             |
+| `fnn.ReLU` / `fnn.GELU` / `fnn.Sigmoid` / `fnn.Tanh` / `fnn.SiLU` | Activation layers |
+| `fnn.Sequential(*layers)`                           | Sequential layer container          |
+| `fnn.ModuleList(modules)`                           | Indexable module list               |
+
+### Optimizers
+
+| Optimizer                                                         | Description          |
+|-------------------------------------------------------------------|----------------------|
+| `fnn.SGD(params, lr, momentum=0, weight_decay=0)`                | Stochastic Gradient Descent |
+| `fnn.Adam(params, lr, betas=(0.9, 0.999), eps=1e-8)`             | Adam                 |
+| `fnn.AdamW(params, lr, betas=(0.9, 0.999), weight_decay=0.01)`   | AdamW (decoupled L2) |
+
+### Loss Functions
+
+| Function                                  | Description             |
+|-------------------------------------------|-------------------------|
+| `fnn.mse_loss(pred, target)`              | Mean squared error      |
+| `fnn.cross_entropy_loss(logits, target)`  | Cross-entropy loss      |
+
+---
+
+## Testing & Benchmarking
+
+```bash
+# Run unit and integration tests
+pytest
+
+# Run benchmarks only
+pytest --benchmark-only
+
+# CPU benchmark suite (fastnn vs PyTorch)
+python tests/bench/fastnn.py
+
+# GPU vs CPU comparison (quick)
+python tests/bench/bench_gpu_simple.py
+
+# Full GPU benchmark suite
+python tests/bench/bench_gpu.py
+```
+
+---
+
+## Building from Source
+
+```bash
+# Development build (faster compile, unoptimized)
+maturin develop
+
+# Release build (full optimizations: LTO, codegen-units=1, opt-level=3)
+maturin build --release
+
+# Or via Makefile
+make build
+```
+
+Cargo feature flags:
+
+| Feature       | Description                                      |
+|---------------|--------------------------------------------------|
+| `simd`        | Enable SIMD kernels (AVX2, AVX512, NEON)         |
+| `parallel`    | Enable Rayon multi-threaded parallelism          |
+| `simd-avx512` | Enable AVX-512 kernels (requires AVX512-capable CPU) |
+| `openblas`    | Link against OpenBLAS for large matmul           |
+| `prefetch`    | Enable software prefetching in matmul kernels    |
+
+---
+
+## License
+
+fastnn is licensed under the [MIT License](LICENSE).  
+Copyright © 2026 Petros Fanioudakis
