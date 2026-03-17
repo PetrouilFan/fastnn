@@ -921,6 +921,28 @@ impl Tensor {
         }
     }
 
+    /// Fused reshape and permute operation to reduce intermediate allocations
+    /// This is useful for attention mechanisms where reshape+permute is common
+    pub fn reshape_permute(&self, shape: Vec<i64>, perm: Vec<i64>) -> Tensor {
+        // First reshape
+        let reshaped = self.reshape(shape);
+        // Then permute
+        let output = reshaped.permute(perm);
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::ViewBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+            output
+        } else {
+            output
+        }
+    }
+
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
         self.inner.transpose(dim0, dim1)
     }

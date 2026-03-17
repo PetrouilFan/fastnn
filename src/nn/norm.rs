@@ -1,11 +1,11 @@
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
-use crate::storage::DType;
 use crate::tensor::Tensor;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 pub struct LayerNorm {
+    #[allow(dead_code)]
     pub normalized_shape: i64,
     pub weight: Option<Tensor>,
     pub bias: Option<Tensor>,
@@ -36,27 +36,20 @@ impl Module for LayerNorm {
         let shape = x.shape();
         let _ndim = shape.len();
 
-        let weight = self.weight.clone().unwrap_or_else(|| {
-            Tensor::full(
-                vec![self.normalized_shape],
-                1.0,
-                DType::F32,
-                crate::storage::Device::Cpu,
-            )
-        });
-        let bias = self.bias.clone().unwrap_or_else(|| {
-            Tensor::full(
-                vec![self.normalized_shape],
-                0.0,
-                DType::F32,
-                crate::storage::Device::Cpu,
-            )
-        });
+        // Use references to avoid cloning weight/bias on every forward pass
+        let weight = self
+            .weight
+            .as_ref()
+            .unwrap_or_else(|| panic!("LayerNorm weight is required but was None"));
+        let bias = self
+            .bias
+            .as_ref()
+            .unwrap_or_else(|| panic!("LayerNorm bias is required but was None"));
 
         let result = dispatch(
             "layer_norm",
             DispatchKey::Cpu,
-            &[x, x, &weight, &bias, &Tensor::from_scalar(self.eps as f32)],
+            &[x, x, weight, bias, &Tensor::from_scalar(self.eps as f32)],
         );
 
         let output = result[0].clone();
@@ -68,8 +61,8 @@ impl Module for LayerNorm {
         if x.requires_grad() || weight.requires_grad() || bias.requires_grad() {
             let edges = {
                 let mut edges = crate::autograd::make_edge(x);
-                edges.extend(crate::autograd::make_edge(&weight));
-                edges.extend(crate::autograd::make_edge(&bias));
+                edges.extend(crate::autograd::make_edge(weight));
+                edges.extend(crate::autograd::make_edge(bias));
                 edges
             };
             let backward = crate::autograd::LayerNormBackward::new(
