@@ -87,7 +87,8 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>, _retain_graph: bool)
         let input_tensors = node.inputs();
 
         // Process each input gradient
-        for (input_tensor, grad_input_opt) in input_tensors.iter().zip(grad_inputs.iter()) {
+        // PERF-10: Use into_iter() to consume grad_inputs and avoid cloning
+        for (input_tensor, grad_input_opt) in input_tensors.iter().zip(grad_inputs.into_iter()) {
             if let Some(grad_input) = grad_input_opt {
                 if input_tensor.is_leaf() {
                     // Accumulate gradient for leaf tensor
@@ -95,9 +96,10 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>, _retain_graph: bool)
                         if let Ok(mut lock) = meta.lock() {
                             if let Some(existing_grad) = &mut lock.grad {
                                 // In-place addition for gradient accumulation
-                                existing_grad.add_(grad_input);
+                                existing_grad.add_(&grad_input);
                             } else {
-                                lock.grad = Some(grad_input.clone());
+                                // PERF-10: Take ownership instead of cloning
+                                lock.grad = Some(grad_input);
                             }
                         }
                     }
@@ -105,9 +107,10 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>, _retain_graph: bool)
                     // For non-leaf tensors, accumulate in grads map
                     let input_id = input_tensor.id();
                     if let Some(existing_grad) = grads.get_mut(&input_id) {
-                        existing_grad.add_(grad_input);
+                        existing_grad.add_(&grad_input);
                     } else {
-                        grads.insert(input_id, grad_input.clone());
+                        // PERF-10: Take ownership instead of cloning
+                        grads.insert(input_id, grad_input);
                     }
 
                     // Add this tensor's grad_fn to queue if it hasn't been processed
