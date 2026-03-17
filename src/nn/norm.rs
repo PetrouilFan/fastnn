@@ -1,11 +1,11 @@
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
-use crate::storage::DType;
 use crate::tensor::Tensor;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 pub struct LayerNorm {
+    #[allow(dead_code)]
     pub normalized_shape: i64,
     pub weight: Option<Tensor>,
     pub bias: Option<Tensor>,
@@ -61,8 +61,8 @@ impl Module for LayerNorm {
         if x.requires_grad() || weight.requires_grad() || bias.requires_grad() {
             let edges = {
                 let mut edges = crate::autograd::make_edge(x);
-                edges.extend(crate::autograd::make_edge(&weight));
-                edges.extend(crate::autograd::make_edge(&bias));
+                edges.extend(crate::autograd::make_edge(weight));
+                edges.extend(crate::autograd::make_edge(bias));
                 edges
             };
             let backward = crate::autograd::LayerNormBackward::new(
