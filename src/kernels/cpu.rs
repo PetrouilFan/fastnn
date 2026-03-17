@@ -1799,49 +1799,52 @@ unsafe fn tanh_parallel_avx512(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
-    let clamp_lo = _mm512_set1_ps(-10.0f32);
-    let clamp_hi = _mm512_set1_ps(10.0f32);
-
+    // Use wide crate's f32x8 for vectorized exp operations
     let mut i = start;
     while i + 16 <= end {
-        let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        // Load two 8-wide chunks
+        let a0_ptr = (a_usize + i * 4) as *const f32;
+        let a1_ptr = (a_usize + (i + 8) * 4) as *const f32;
 
-        // Clamp values to prevent overflow in exp
-        let x_clamped = _mm512_min_ps(_mm512_max_ps(x, clamp_lo), clamp_hi);
+        let chunk0 = f32x8::from(std::slice::from_raw_parts(a0_ptr, 8));
+        let chunk1 = f32x8::from(std::slice::from_raw_parts(a1_ptr, 8));
 
-        // Compute tanh using formula: tanh(x) = (e^2x - 1) / (e^2x + 1)
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m512, [f32; 16]>(x_clamped);
-        let mut results = [0.0f32; 16];
-        for j in 0..16 {
-            let val = x_f32[j];
-            let exp_2x = (2.0 * val).exp();
-            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
-        }
-        let result = std::mem::transmute::<[f32; 16], __m512>(results);
-        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        // Compute tanh using vectorized exp: tanh(x) = (e^2x - 1) / (e^2x + 1)
+        let exp_2x0 = (f32x8::splat(2.0) * chunk0).exp();
+        let exp_2x1 = (f32x8::splat(2.0) * chunk1).exp();
+
+        let result0 = (exp_2x0 - f32x8::ONE) / (exp_2x0 + f32x8::ONE);
+        let result1 = (exp_2x1 - f32x8::ONE) / (exp_2x1 + f32x8::ONE);
+
+        // Store results
+        let out0_ptr = (out_usize + i * 4) as *mut f32;
+        let out1_ptr = (out_usize + (i + 8) * 4) as *mut f32;
+
+        let result0_arr: [f32; 8] = result0.into();
+        let result1_arr: [f32; 8] = result1.into();
+
+        std::ptr::copy_nonoverlapping(result0_arr.as_ptr(), out0_ptr, 8);
+        std::ptr::copy_nonoverlapping(result1_arr.as_ptr(), out1_ptr, 8);
+
         i += 16;
     }
     // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
     while i + 8 <= end {
-        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        let clamp_lo_256 = _mm256_set1_ps(-10.0f32);
-        let clamp_hi_256 = _mm256_set1_ps(10.0f32);
-        let x_clamped = _mm256_min_ps(_mm256_max_ps(x, clamp_lo_256), clamp_hi_256);
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x_clamped);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            let exp_2x = (2.0 * val).exp();
-            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
-        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        let a0_ptr = (a_usize + i * 4) as *const f32;
+        let chunk0 = f32x8::from(std::slice::from_raw_parts(a0_ptr, 8));
+
+        let exp_2x0 = (f32x8::splat(2.0) * chunk0).exp();
+        let result0 = (exp_2x0 - f32x8::ONE) / (exp_2x0 + f32x8::ONE);
+
+        let out0_ptr = (out_usize + i * 4) as *mut f32;
+        let result0_arr: [f32; 8] = result0.into();
+        std::ptr::copy_nonoverlapping(result0_arr.as_ptr(), out0_ptr, 8);
+
         i += 8;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
-        let exp_2x = (2.0 * x).exp();
+        let val = *((a_usize + i * 4) as *const f32);
+        let exp_2x = (2.0 * val).exp();
         *((out_usize + i * 4) as *mut f32) = (exp_2x - 1.0) / (exp_2x + 1.0);
         i += 1;
     }
@@ -2212,22 +2215,16 @@ fn sigmoid_simd_x86(input: &[f32], output: &mut [f32]) {
         let (out_chunks, out_remainder) = output.as_chunks_mut::<8>();
 
         for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
-            let x = _mm256_loadu_ps(in_chunk.as_ptr());
+            // Use wide crate's f32x8 for vectorized exp operations
+            let x = f32x8::from(*in_chunk);
+
             // Compute sigmoid using 1/(1+exp(-x))
-            let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x);
-            let mut results = [0.0f32; 8];
-            for j in 0..8 {
-                let val = x_f32[j];
-                if val > 9.0 {
-                    results[j] = 1.0;
-                } else if val < -9.0 {
-                    results[j] = 0.0;
-                } else {
-                    results[j] = 1.0 / (1.0 + (-val).exp());
-                }
-            }
-            let result = std::mem::transmute::<[f32; 8], __m256>(results);
-            _mm256_storeu_ps(out_chunk.as_mut_ptr(), result);
+            // Use conditional logic with max/min to handle overflow cases
+            let result = f32x8::ONE / (f32x8::ONE + (-x).exp());
+
+            // Store result
+            let result_arr: [f32; 8] = result.into();
+            std::ptr::copy_nonoverlapping(result_arr.as_ptr(), out_chunk.as_mut_ptr(), 8);
         }
 
         for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
