@@ -189,15 +189,6 @@ impl TensorImpl {
         self.view(new_sizes).into()
     }
 
-    /// Fused reshape and permute operation to reduce intermediate allocations
-    /// This is useful for attention mechanisms where reshape+permute is common
-    pub fn reshape_permute(&self, shape: Vec<i64>, perm: Vec<i64>) -> Tensor {
-        // First reshape to target shape
-        let reshaped = self.reshape(shape.into());
-        // Then permute
-        reshaped.permute(perm)
-    }
-
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
         let ndim = self.ndim();
         if dim0 >= ndim || dim1 >= ndim {
@@ -933,7 +924,10 @@ impl Tensor {
     /// Fused reshape and permute operation to reduce intermediate allocations
     /// This is useful for attention mechanisms where reshape+permute is common
     pub fn reshape_permute(&self, shape: Vec<i64>, perm: Vec<i64>) -> Tensor {
-        let output = self.inner.reshape_permute(shape, perm);
+        // First reshape
+        let reshaped = self.reshape(shape);
+        // Then permute
+        let output = reshaped.permute(perm);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
