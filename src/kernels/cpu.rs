@@ -8,7 +8,7 @@
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
-use crate::kernels::blas::{matmul_blas, MIN_BLAS_SIZE};
+use crate::kernels::blas::{matmul_blas, matmul_blas_with_transpose, MIN_BLAS_SIZE};
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
@@ -138,18 +138,17 @@ unsafe fn fast_exp_avx2(x: __m256) -> __m256 {
 #[target_feature(enable = "avx512f")]
 #[inline]
 unsafe fn fast_exp_avx512(x: __m512) -> __m512 {
-    // For now, use a simpler approach: process 16 floats as 2x 8 floats with AVX2
-    // This is a temporary implementation - Section 3 will improve this
+    // Process 16 floats as 2x 8 floats with AVX2
     let x_lo = _mm512_castps512_ps256(x);
-    let x_hi = _mm512_extractf32x4_ps(x, 1);
+    let x_hi = _mm512_extractf32x8_ps(x, 1);
 
     let exp_lo = fast_exp_avx2(x_lo);
-    let exp_hi = fast_exp_avx2(_mm256_castps128_ps256(x_hi));
+    let exp_hi = fast_exp_avx2(x_hi);
 
     let result_lo = _mm512_castps256_ps512(exp_lo);
-    let result_hi = _mm256_castps256_ps128(exp_hi);
+    let result_hi = exp_hi;
 
-    _mm512_insertf32x4(result_lo, result_hi, 1)
+    _mm512_insertf32x8(result_lo, result_hi, 1)
 }
 
 // Fast log approximation using integer exponent extraction
@@ -210,15 +209,15 @@ unsafe fn fast_log_avx2(x: __m256) -> __m256 {
 unsafe fn fast_log_avx512(x: __m512) -> __m512 {
     // Use fast_log_avx2 on each 256-bit half
     let x_lo = _mm512_castps512_ps256(x);
-    let x_hi = _mm512_extractf32x4_ps(x, 1);
+    let x_hi = _mm512_extractf32x8_ps(x, 1);
 
     let log_lo = fast_log_avx2(x_lo);
-    let log_hi = fast_log_avx2(_mm256_castps128_ps256(x_hi));
+    let log_hi = fast_log_avx2(x_hi);
 
     let result_lo = _mm512_castps256_ps512(log_lo);
-    let result_hi = _mm256_castps256_ps128(log_hi);
+    let result_hi = log_hi;
 
-    _mm512_insertf32x4(result_lo, result_hi, 1)
+    _mm512_insertf32x8(result_lo, result_hi, 1)
 }
 
 // Parallel SIMD kernels - AVX2 version
@@ -1093,6 +1092,17 @@ unsafe fn sub_parallel_avx2(
     let end = std::cmp::min(start + chunk_size, numel);
 
     let mut i = start;
+    while i + 16 <= end {
+        let a0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let a1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let b0 = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let b1 = _mm256_loadu_ps((b_usize + (i + 8) * 4) as *const f32);
+        let r0 = _mm256_sub_ps(a0, b0);
+        let r1 = _mm256_sub_ps(a1, b1);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, r0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
+        i += 16;
+    }
     while i + 8 <= end {
         let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
         let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
@@ -1397,11 +1407,24 @@ unsafe fn fused_mul_add_parallel_avx2(
     let end = std::cmp::min(start + chunk_size, numel);
 
     let mut i = start;
+    while i + 16 <= end {
+        let a0 = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
+        let a1 = _mm256_loadu_ps((a_usize + (i + 8) * 4) as *const f32);
+        let b0 = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
+        let b1 = _mm256_loadu_ps((b_usize + (i + 8) * 4) as *const f32);
+        let c0 = _mm256_loadu_ps((c_usize + i * 4) as *const f32);
+        let c1 = _mm256_loadu_ps((c_usize + (i + 8) * 4) as *const f32);
+        // a * b + c using FMA
+        let r0 = _mm256_fmadd_ps(a0, b0, c0);
+        let r1 = _mm256_fmadd_ps(a1, b1, c1);
+        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, r0);
+        _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
+        i += 16;
+    }
     while i + 8 <= end {
         let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
         let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
         let c_vec = _mm256_loadu_ps((c_usize + i * 4) as *const f32);
-        // a * b + c using FMA
         let result = _mm256_fmadd_ps(a_vec, b_vec, c_vec);
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
@@ -5392,11 +5415,25 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 }
 
 fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    use std::io::Write;
+    let mut debug_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/matmul_debug.log")
+        .unwrap();
+    writeln!(debug_file, "DEBUG: Entered matmul_kernel").unwrap();
+
     let a = args[0];
     let b = args[1];
 
     let a_shape = a.shape();
     let b_shape = b.shape();
+    writeln!(
+        debug_file,
+        "DEBUG: a_shape={:?}, b_shape={:?}",
+        a_shape, b_shape
+    )
+    .unwrap();
 
     if a_shape.len() < 2 || b_shape.len() < 2 {
         panic!("matmul: both tensors must have at least 2 dimensions");
@@ -5406,8 +5443,54 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let k = a_shape[a_shape.len() - 1] as i32;
     let n = b_shape[b_shape.len() - 1] as i32;
 
-    if b_shape[b_shape.len() - 2] as i32 != k {
-        panic!("matmul: {} != {}", b_shape[b_shape.len() - 2], k);
+    // Detect transposed matrices by checking strides
+    // A contiguous matrix [rows, cols] has strides [cols, 1]
+    // A transposed matrix (from [rows, cols]) has strides [1, rows]
+    let a_strides = a.strides();
+    let b_strides = b.strides();
+    let a_is_transposed =
+        a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] >= a_shape[a_shape.len() - 2];
+    let b_is_transposed =
+        b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] >= b_shape[b_shape.len() - 2];
+
+    // Debug the transposition detection
+    eprintln!(
+        "DEBUG: b_strides[0]={}, b_strides[1]={}, b_shape[0]={}, check={}",
+        b_strides[0],
+        b_strides[1],
+        b_shape[0],
+        b_strides[0] == 1 && b_strides[1] >= b_shape[0]
+    );
+
+    // Debug output
+    eprintln!(
+        "DEBUG matmul: a_shape={:?}, b_shape={:?}, b_strides={:?}, b_is_transposed={}",
+        a_shape, b_shape, b_strides, b_is_transposed
+    );
+
+    // For matmul: A[m, k] @ B[k, n] = C[m, n]
+    // When B is transposed (shape [n, k] representing original [k, n]):
+    // The transposed view has shape [n, k] where n is the original outer dim
+    // and k is the original inner dim
+    if b_is_transposed {
+        // B is transposed: shape [n, k] represents original matrix [k, n]
+        // For matmul A[m,k] @ B[k,n], we need B's inner dim (k) to match A's inner dim (k)
+        // In the transposed view, B's inner dim is b_shape[-1] (which is k)
+        let b_inner_dim = b_shape[b_shape.len() - 1] as i32; // This is k
+        if b_inner_dim != k {
+            panic!(
+                "matmul: transposed B dimensions incompatible: A[{}, {}] @ B.T[{}, {}]",
+                m,
+                k,
+                b_shape[b_shape.len() - 2],
+                b_shape[b_shape.len() - 1]
+            );
+        }
+    } else {
+        // Standard case: B is not transposed, shape [k, n]
+        if b_shape[b_shape.len() - 2] as i32 != k {
+            panic!("matmul: {} != {}", b_shape[b_shape.len() - 2], k);
+        }
     }
 
     // Use custom tiled matmul
@@ -5454,13 +5537,6 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_cols = a_shape[a_shape.len() - 1] as usize;
     let b_cols = b_shape[b_shape.len() - 1] as usize;
 
-    let use_blas = batch == 1
-        && m as usize >= MIN_BLAS_SIZE
-        && n as usize >= MIN_BLAS_SIZE
-        && k as usize >= MIN_BLAS_SIZE
-        && a.is_contiguous()
-        && b.is_contiguous();
-
     let a_strides = a.strides();
     let b_strides = b.strides();
 
@@ -5471,12 +5547,37 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let a_batch_stride = if a.ndim() > 2 { a_strides[0] } else { 0 };
     let b_batch_stride = if b.ndim() > 2 { b_strides[0] } else { 0 };
+    // Detect transposed matrices by checking strides
+    // For row-major contiguous matrix [rows, cols], stride_0 = cols, stride_1 = 1
+    // For transposed [rows, cols] stored as [cols, rows], stride_0 = 1, stride_1 = rows
+    let a_is_transposed = a_stride_0 == 1 && a_stride_1 == a_rows as i64;
+    let b_is_transposed = b_stride_0 == 1 && b_stride_1 == k as i64;
+
+    // For BLAS, we need contiguous matrices or simple 2D transposition
+    // A transposed matrix has stride_0 = 1 and stride_1 = original_rows
+    let a_valid_for_blas = a.is_contiguous() || a_is_transposed;
+    let b_valid_for_blas = b.is_contiguous() || b_is_transposed;
+
+    let use_blas = batch == 1
+        && m as usize >= MIN_BLAS_SIZE
+        && n as usize >= MIN_BLAS_SIZE
+        && k as usize >= MIN_BLAS_SIZE
+        && a_valid_for_blas
+        && b_valid_for_blas;
 
     if use_blas {
-        // BLAS requires contiguous matrices. If we reach here, a and b are contiguous.
+        // For BLAS, we can handle transposed matrices by passing the transpose flag
         let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
         let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
-        let result = matmul_blas(a_slice, b_slice, m as usize, k as usize, n as usize);
+        let result = matmul_blas_with_transpose(
+            a_slice,
+            b_slice,
+            m as usize,
+            k as usize,
+            n as usize,
+            a_is_transposed,
+            b_is_transposed,
+        );
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, m as usize * n as usize) };
         out_slice.copy_from_slice(&result);
     } else {
@@ -6282,6 +6383,11 @@ fn linear_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_features = w_shape[0];
 
     let x_flat = x.reshape(vec![batch_size, in_features]);
+
+    // w has shape [out_features, in_features]
+    // We need to compute x_flat @ w.T (where w.T has shape [in_features, out_features])
+    // The matmul kernel will detect that w is transposed by checking its strides
+    // and use the appropriate BLAS transpose flag
     let w_t = w.transpose(0, 1);
 
     let mut result = (x_flat.matmul(&w_t)).reshape(
