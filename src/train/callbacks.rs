@@ -208,6 +208,35 @@ impl CSVLogger {
 
 impl Callback for CSVLogger {
     fn on_epoch_end(&mut self, epoch: usize, logs: &mut TrainLogs) {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        if !self.header_written {
+            if let Ok(mut file) = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&self.filepath)
+            {
+                // Write header
+                let header: Vec<String> = logs.metrics.keys().cloned().collect();
+                writeln!(file, "epoch,{}", header.join(",")).ok();
+                self.header_written = true;
+            }
+        }
+
+        if self.header_written {
+            if let Ok(mut file) = OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&self.filepath)
+            {
+                let values: Vec<String> =
+                    logs.metrics.values().map(|v| format!("{:.6}", v)).collect();
+                writeln!(file, "{},{}", epoch, values.join(",")).ok();
+            }
+        }
+
         if self.verbose {
             println!("Epoch {} metrics: {:?}", epoch, logs.metrics);
         }
