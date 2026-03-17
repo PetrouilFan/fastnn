@@ -365,7 +365,11 @@ fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> Py
 fn linspace(start: f32, end: f32, steps: usize, device: Option<String>) -> PyTensor {
     let values: Vec<f32> = (0..steps)
         .map(|i| {
-            let t = i as f32 / (steps - 1) as f32;
+            let t = if steps <= 1 {
+                0.0
+            } else {
+                i as f32 / (steps - 1) as f32
+            };
             start * (1.0 - t) + end * t
         })
         .collect();
@@ -428,9 +432,11 @@ fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
 #[pyfunction]
 #[pyo3(signature = (shape, low, high, device = None))]
 fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyTensor {
+    use rand::Rng;
     let numel: i64 = shape.iter().product();
+    let mut rng = rand::thread_rng();
     let values: Vec<f32> = (0..numel as usize)
-        .map(|_| (rand::random::<i32>() % (high - low) + low) as f32)
+        .map(|_| rng.gen_range(low..high) as f32)
         .collect();
     let device = device
         .as_ref()
