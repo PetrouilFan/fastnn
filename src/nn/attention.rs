@@ -94,9 +94,19 @@ impl MultiHeadAttention {
             let qkv = qkv.reshape(vec![batch, seq_len, 3, self.num_heads, self.head_dim]);
 
             // Split into Q, K, V without copying
-            let q = qkv.slice(2, 0, 1, 1).squeeze(Some(2));
-            let k = qkv.slice(2, 1, 2, 1).squeeze(Some(2));
-            let v = qkv.slice(2, 2, 3, 1).squeeze(Some(2));
+            // Slice and permute directly to [batch, num_heads, seq_len, head_dim]
+            let q = qkv
+                .slice(2, 0, 1, 1)
+                .squeeze(Some(2))
+                .permute(vec![0, 2, 1, 3]); // [batch, seq_len, num_heads, head_dim] -> [batch, num_heads, seq_len, head_dim]
+            let k = qkv
+                .slice(2, 1, 2, 1)
+                .squeeze(Some(2))
+                .permute(vec![0, 2, 1, 3]); // [batch, seq_len, num_heads, head_dim] -> [batch, num_heads, seq_len, head_dim]
+            let v = qkv
+                .slice(2, 2, 3, 1)
+                .squeeze(Some(2))
+                .permute(vec![0, 2, 1, 3]); // [batch, seq_len, num_heads, head_dim] -> [batch, num_heads, seq_len, head_dim]
 
             (q, k, v)
         } else {
@@ -104,32 +114,35 @@ impl MultiHeadAttention {
             let q = self.q_proj.forward(x);
             let k = self.k_proj.forward(x);
             let v = self.v_proj.forward(x);
+
+            // Reshape and transpose to [batch, num_heads, seq_len, head_dim]
+            let q = q.reshape_permute(
+                vec![batch, seq_len, self.num_heads, self.head_dim],
+                vec![0, 2, 1, 3],
+            );
+            let k = k.reshape_permute(
+                vec![batch, seq_len, self.num_heads, self.head_dim],
+                vec![0, 2, 1, 3],
+            );
+            let v = v.reshape_permute(
+                vec![batch, seq_len, self.num_heads, self.head_dim],
+                vec![0, 2, 1, 3],
+            );
+
             (q, k, v)
         };
-
-        // 2. Reshape and transpose to [batch, num_heads, seq_len, head_dim]
-        // Q: [batch, seq_len, num_heads, head_dim] -> [batch, num_heads, seq_len, head_dim]
-        let q = q
-            .reshape(vec![batch, seq_len, self.num_heads, self.head_dim])
-            .permute(vec![0, 2, 1, 3])
-            .contiguous();
-
-        // K: [batch, seq_len, num_heads, head_dim] -> [batch, num_heads, seq_len, head_dim]
-        let k = k
-            .reshape(vec![batch, seq_len, self.num_heads, self.head_dim])
-            .permute(vec![0, 2, 1, 3])
-            .contiguous();
-
-        // V: [batch, seq_len, num_heads, head_dim] -> [batch, num_heads, seq_len, head_dim]
-        let v = v
-            .reshape(vec![batch, seq_len, self.num_heads, self.head_dim])
-            .permute(vec![0, 2, 1, 3])
-            .contiguous();
 
         // 3. Compute attention scores with scale factor
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         // Q @ K^T: [batch, num_heads, seq_len, head_dim] @ [batch, num_heads, head_dim, seq_len]
+        // Only make contiguous right before matmul
+        let q = if q.is_contiguous() { q } else { q.contiguous() };
         let k_t = k.permute(vec![0, 1, 3, 2]);
+        let k_t = if k_t.is_contiguous() {
+            k_t
+        } else {
+            k_t.contiguous()
+        };
         let mut attn_scores = q.matmul(&k_t);
         attn_scores = attn_scores.mul(&Tensor::from_scalar(scale));
 
@@ -138,14 +151,18 @@ impl MultiHeadAttention {
 
         // 5. Apply attention to values
         // attn_weights @ V: [batch, num_heads, seq_len, seq_len] @ [batch, num_heads, seq_len, head_dim]
+        let v = if v.is_contiguous() { v } else { v.contiguous() };
         let context = attn_weights.matmul(&v);
 
         // 6. Reshape back to [batch, seq_len, d_model]
-        let context = context.permute(vec![0, 2, 1, 3]).contiguous().reshape(vec![
-            batch,
-            seq_len,
-            self.d_model,
-        ]);
+        // Only make contiguous right before output projection
+        let context = context.permute(vec![0, 2, 1, 3]);
+        let context = if context.is_contiguous() {
+            context
+        } else {
+            context.contiguous()
+        };
+        let context = context.reshape(vec![batch, seq_len, self.d_model]);
 
         // 7. Output projection
         self.out_proj.forward(&context)
