@@ -1635,10 +1635,6 @@ impl Tensor {
         // For simplicity, no autograd for now (can be added later if needed)
         output
     }
-        } else {
-            output
-        }
-    }
 
     pub fn tanh(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
