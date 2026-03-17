@@ -44,6 +44,8 @@ class DataLoader:
         self.shuffle = shuffle
         self.drop_last = drop_last
         self.num_workers = num_workers
+        # PERF-13: Pre-allocate indices to avoid re-allocation every epoch
+        self.indices = list(range(len(dataset)))
 
     def __len__(self):
         n = len(self.dataset)
@@ -52,11 +54,11 @@ class DataLoader:
         return math.ceil(n / self.batch_size)
 
     def __iter__(self):
-        indices = list(range(len(self.dataset)))
+        # PERF-13: Shuffle in-place to avoid re-allocation
         if self.shuffle:
-            random.shuffle(indices)
-        for start in range(0, len(indices), self.batch_size):
-            batch_idx = indices[start : start + self.batch_size]
+            random.shuffle(self.indices)
+        for start in range(0, len(self.indices), self.batch_size):
+            batch_idx = self.indices[start : start + self.batch_size]
             if self.drop_last and len(batch_idx) < self.batch_size:
                 break
             yield tuple(

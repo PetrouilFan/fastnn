@@ -29,13 +29,20 @@ use wide::f32x4;
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 use wide::f32x8;
 
-// Memory-bound elementwise ops: 64KB working set
-const CHUNK_MEMBOUND: usize = 1024 * 16; // 16K f32 = 64KB (L1 cache fit)
+// PERF-15: Per-operation parallelism thresholds for optimal load balancing
+// Cheap unary ops (relu, abs, neg, clamp): larger threshold as they have low overhead
+const THRESHOLD_CHEAP_UNARY: usize = 32_768; // 32K elements ~ 128KB
+                                             // Transcendental ops (exp, log, sqrt, sin, cos, tanh, gelu, silu): moderate threshold
+const THRESHOLD_TRANSCENDENTAL: usize = 8_192; // 8K elements ~ 32KB
+                                               // Binary ops (add, sub, mul, div): smaller threshold
+const THRESHOLD_BINARY: usize = 4_096; // 4K elements ~ 16KB
+                                       // Reduction ops (sum, mean, max, min): smallest threshold due to higher overhead
+const THRESHOLD_REDUCTION: usize = 2_048; // 2K elements ~ 8KB
 
-// Compute-bound transcendental ops: smaller for better load balancing
-const CHUNK_TRANSCENDENTAL: usize = 1024 * 4; // 4K f32 = 16KB
+// Legacy constants for backward compatibility (mapped to new thresholds)
+const CHUNK_MEMBOUND: usize = THRESHOLD_CHEAP_UNARY;
+const CHUNK_TRANSCENDENTAL: usize = THRESHOLD_TRANSCENDENTAL;
 
-// Matrix ops: larger chunks for better BLAS-level locality
 // SIMD-only threshold (non-parallel)
 // This constant is used to determine when to use SIMD operations
 #[allow(dead_code)]
@@ -1675,6 +1682,190 @@ unsafe fn sigmoid_parallel_neon(
     }
 }
 
+// Parallel exp AVX2 kernel using wide crate
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn exp_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping((a_usize + i * 4) as *const f32, chunk_data.as_mut_ptr(), 8);
+        let x = f32x8::from(chunk_data);
+        let result = x.exp();
+        let out_chunk_data: [f32; 8] = result.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), (out_usize + i * 4) as *mut f32, 8);
+        i += 8;
+    }
+    while i < end {
+        unsafe {
+            let val = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = val.exp();
+        }
+        i += 1;
+    }
+}
+
+// Parallel exp AVX512 kernel using wide crate
+#[cfg(all(feature = "simd", target_arch = "x86_64", feature = "simd_avx512"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn exp_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        // First 8 elements
+        let mut chunk_data0: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping((a_usize + i * 4) as *const f32, chunk_data0.as_mut_ptr(), 8);
+        let x0 = f32x8::from(chunk_data0);
+        let result0 = x0.exp();
+        let out_chunk_data0: [f32; 8] = result0.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data0.as_ptr(), (out_usize + i * 4) as *mut f32, 8);
+
+        // Next 8 elements
+        let mut chunk_data1: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(
+            (a_usize + (i + 8) * 4) as *const f32,
+            chunk_data1.as_mut_ptr(),
+            8,
+        );
+        let x1 = f32x8::from(chunk_data1);
+        let result1 = x1.exp();
+        let out_chunk_data1: [f32; 8] = result1.into();
+        std::ptr::copy_nonoverlapping(
+            out_chunk_data1.as_ptr(),
+            (out_usize + (i + 8) * 4) as *mut f32,
+            8,
+        );
+
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping((a_usize + i * 4) as *const f32, chunk_data.as_mut_ptr(), 8);
+        let x = f32x8::from(chunk_data);
+        let result = x.exp();
+        let out_chunk_data: [f32; 8] = result.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), (out_usize + i * 4) as *mut f32, 8);
+        i += 8;
+    }
+    while i < end {
+        unsafe {
+            let val = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = val.exp();
+        }
+        i += 1;
+    }
+}
+
+// Parallel log AVX2 kernel using wide crate
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn log_parallel_avx2(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 8 <= end {
+        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping((a_usize + i * 4) as *const f32, chunk_data.as_mut_ptr(), 8);
+        let x = f32x8::from(chunk_data);
+        let result = x.ln();
+        let out_chunk_data: [f32; 8] = result.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), (out_usize + i * 4) as *mut f32, 8);
+        i += 8;
+    }
+    while i < end {
+        unsafe {
+            let val = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = val.ln();
+        }
+        i += 1;
+    }
+}
+
+// Parallel log AVX512 kernel using wide crate
+#[cfg(all(feature = "simd", target_arch = "x86_64", feature = "simd_avx512"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn log_parallel_avx512(
+    chunk_idx: usize,
+    chunk_size: usize,
+    numel: usize,
+    a_usize: usize,
+    out_usize: usize,
+) {
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+
+    let mut i = start;
+    while i + 16 <= end {
+        // First 8 elements
+        let mut chunk_data0: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping((a_usize + i * 4) as *const f32, chunk_data0.as_mut_ptr(), 8);
+        let x0 = f32x8::from(chunk_data0);
+        let result0 = x0.ln();
+        let out_chunk_data0: [f32; 8] = result0.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data0.as_ptr(), (out_usize + i * 4) as *mut f32, 8);
+
+        // Next 8 elements
+        let mut chunk_data1: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(
+            (a_usize + (i + 8) * 4) as *const f32,
+            chunk_data1.as_mut_ptr(),
+            8,
+        );
+        let x1 = f32x8::from(chunk_data1);
+        let result1 = x1.ln();
+        let out_chunk_data1: [f32; 8] = result1.into();
+        std::ptr::copy_nonoverlapping(
+            out_chunk_data1.as_ptr(),
+            (out_usize + (i + 8) * 4) as *mut f32,
+            8,
+        );
+
+        i += 16;
+    }
+    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
+    while i + 8 <= end {
+        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping((a_usize + i * 4) as *const f32, chunk_data.as_mut_ptr(), 8);
+        let x = f32x8::from(chunk_data);
+        let result = x.ln();
+        let out_chunk_data: [f32; 8] = result.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), (out_usize + i * 4) as *mut f32, 8);
+        i += 8;
+    }
+    while i < end {
+        unsafe {
+            let val = *((a_usize + i * 4) as *const f32);
+            *((out_usize + i * 4) as *mut f32) = val.ln();
+        }
+        i += 1;
+    }
+}
+
 // Parallel tanh AVX2 kernel using exact computation
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -2249,7 +2440,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > THRESHOLD_BINARY {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
@@ -2442,7 +2633,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         && a_shape.len() == 2
         && b_shape.len() == 1
         && a_shape[1] == b_shape[0]
-        && a_numel > 2048
+        && a_numel > THRESHOLD_BINARY
     {
         let n = a_shape[0] as usize;
         let d = a_shape[1] as usize;
@@ -2847,7 +3038,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > THRESHOLD_BINARY {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
@@ -3027,7 +3218,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         && a_shape.len() == 2
         && b_shape.len() == 1
         && a_shape[1] == b_shape[0]
-        && a_numel > 2048
+        && a_numel > THRESHOLD_BINARY
     {
         let n = a_shape[0] as usize;
         let d = a_shape[1] as usize;
@@ -3433,7 +3624,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > THRESHOLD_BINARY {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
@@ -3626,7 +3817,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         && a_shape.len() == 2
         && b_shape.len() == 1
         && a_shape[1] == b_shape[0]
-        && a_numel > 2048
+        && a_numel > THRESHOLD_BINARY
     {
         let n = a_shape[0] as usize;
         let d = a_shape[1] as usize;
@@ -4059,7 +4250,8 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Check if broadcasting is needed - only use parallel path when shapes are equal
     let needs_broadcast = a_shape != b_shape;
-    let use_parallel = a.is_contiguous() && b.is_contiguous() && numel > 2048 && !needs_broadcast;
+    let use_parallel =
+        a.is_contiguous() && b.is_contiguous() && numel > THRESHOLD_BINARY && !needs_broadcast;
 
     if use_parallel {
         #[cfg(feature = "parallel")]
@@ -4235,7 +4427,7 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         && a_shape.len() == 2
         && b_shape.len() == 1
         && a_shape[1] == b_shape[0]
-        && numel > 2048
+        && numel > THRESHOLD_BINARY
     {
         // SIMD fast-path for [N, D] / [D] broadcast
         let n = a_shape[0] as usize;
@@ -4606,509 +4798,7 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = numel.div_ceil(chunk_size);
-
-            let a_usize = a_ptr as usize;
-            let out_usize = out_ptr as usize;
-
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            match SIMD_LEVEL.get_or_init(detect_simd_level) {
-                SimdLevel::Avx512 => {
-                    (0..num_chunks)
-                        .into_par_iter()
-                        .for_each(|chunk_idx| unsafe {
-                            neg_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                        });
-                }
-                SimdLevel::Avx2 => {
-                    (0..num_chunks)
-                        .into_par_iter()
-                        .for_each(|chunk_idx| unsafe {
-                            neg_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                        });
-                }
-                SimdLevel::Scalar => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        neg_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-                }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                    neg_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                });
-            }
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            match SIMD_LEVEL.get_or_init(detect_simd_level) {
-                SimdLevel::Avx512 => unsafe {
-                    let mut i = 0usize;
-                    while i + 16 <= numel {
-                        let a_vec = _mm512_loadu_ps(a_ptr.add(i));
-                        let result = _mm512_xor_ps(a_vec, _mm512_set1_ps(-0.0f32));
-                        _mm512_storeu_ps(out_ptr.add(i), result);
-                        i += 16;
-                    }
-                    while i + 8 <= numel {
-                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
-                        let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
-                        _mm256_storeu_ps(out_ptr.add(i), result);
-                        i += 8;
-                    }
-                    while i < numel {
-                        *out_ptr.add(i) = -*a_ptr.add(i);
-                        i += 1;
-                    }
-                },
-                SimdLevel::Avx2 => unsafe {
-                    let mut i = 0usize;
-                    while i + 16 <= numel {
-                        let a0 = _mm256_loadu_ps(a_ptr.add(i));
-                        let a1 = _mm256_loadu_ps(a_ptr.add(i + 8));
-                        let r0 = _mm256_xor_ps(a0, _mm256_set1_ps(-0.0f32));
-                        let r1 = _mm256_xor_ps(a1, _mm256_set1_ps(-0.0f32));
-                        _mm256_storeu_ps(out_ptr.add(i), r0);
-                        _mm256_storeu_ps(out_ptr.add(i + 8), r1);
-                        i += 16;
-                    }
-                    while i + 8 <= numel {
-                        let a_vec = _mm256_loadu_ps(a_ptr.add(i));
-                        let result = _mm256_xor_ps(a_vec, _mm256_set1_ps(-0.0f32));
-                        _mm256_storeu_ps(out_ptr.add(i), result);
-                        i += 8;
-                    }
-                    while i < numel {
-                        *out_ptr.add(i) = -*a_ptr.add(i);
-                        i += 1;
-                    }
-                },
-                SimdLevel::Scalar => {
-                    for idx in 0..numel {
-                        unsafe {
-                            *out_ptr.add(idx) = -*a_ptr.add(idx);
-                        }
-                    }
-                }
-            }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                unsafe {
-                    let mut i = 0usize;
-                    while i + 16 <= numel {
-                        let a0 = vld1q_f32(a_ptr.add(i));
-                        let a1 = vld1q_f32(a_ptr.add(i + 4));
-                        let a2 = vld1q_f32(a_ptr.add(i + 8));
-                        let a3 = vld1q_f32(a_ptr.add(i + 12));
-
-                        let r0 = vnegq_f32(a0);
-                        let r1 = vnegq_f32(a1);
-                        let r2 = vnegq_f32(a2);
-                        let r3 = vnegq_f32(a3);
-
-                        vst1q_f32(out_ptr.add(i), r0);
-                        vst1q_f32(out_ptr.add(i + 4), r1);
-                        vst1q_f32(out_ptr.add(i + 8), r2);
-                        vst1q_f32(out_ptr.add(i + 12), r3);
-
-                        i += 16;
-                    }
-                    while i + 4 <= numel {
-                        let a_vec = vld1q_f32(a_ptr.add(i));
-                        let result = vnegq_f32(a_vec);
-                        vst1q_f32(out_ptr.add(i), result);
-                        i += 4;
-                    }
-                    while i < numel {
-                        *out_ptr.add(i) = -*a_ptr.add(i);
-                        i += 1;
-                    }
-                }
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
-            {
-                for idx in 0..numel {
-                    unsafe {
-                        *out_ptr.add(idx) = -*a_ptr.add(idx);
-                    }
-                }
-            }
-        }
-    } else {
-        for idx in 0..numel {
-            unsafe {
-                let val = *a_ptr.add(idx);
-                *out_ptr.add(idx) = -val;
-            }
-        }
-    }
-
-    vec![output]
-}
-
-fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let a = args[0];
-
-    let iter = TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-
-    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
-
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
-    };
-    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
-
-    if a.is_contiguous() && numel > 2048 {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = numel.div_ceil(chunk_size);
-
-            let a_usize = a_ptr as usize;
-            let out_usize = out_ptr as usize;
-
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            match SIMD_LEVEL.get_or_init(detect_simd_level) {
-                SimdLevel::Avx512 => {
-                    (0..num_chunks)
-                        .into_par_iter()
-                        .for_each(|chunk_idx| unsafe {
-                            abs_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                        });
-                }
-                SimdLevel::Avx2 => {
-                    (0..num_chunks)
-                        .into_par_iter()
-                        .for_each(|chunk_idx| unsafe {
-                            abs_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                        });
-                }
-                SimdLevel::Scalar => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        abs_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-                }
-            }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        abs_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
-            {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                    abs_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                });
-            }
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                unsafe {
-                    let mut i = 0usize;
-                    while i + 16 <= numel {
-                        let a0 = vld1q_f32(a_ptr.add(i));
-                        let a1 = vld1q_f32(a_ptr.add(i + 4));
-                        let a2 = vld1q_f32(a_ptr.add(i + 8));
-                        let a3 = vld1q_f32(a_ptr.add(i + 12));
-
-                        let r0 = vabsq_f32(a0);
-                        let r1 = vabsq_f32(a1);
-                        let r2 = vabsq_f32(a2);
-                        let r3 = vabsq_f32(a3);
-
-                        vst1q_f32(out_ptr.add(i), r0);
-                        vst1q_f32(out_ptr.add(i + 4), r1);
-                        vst1q_f32(out_ptr.add(i + 8), r2);
-                        vst1q_f32(out_ptr.add(i + 12), r3);
-
-                        i += 16;
-                    }
-                    while i + 4 <= numel {
-                        let a_vec = vld1q_f32(a_ptr.add(i));
-                        let result = vabsq_f32(a_vec);
-                        vst1q_f32(out_ptr.add(i), result);
-                        i += 4;
-                    }
-                    while i < numel {
-                        *out_ptr.add(i) = (*a_ptr.add(i)).abs();
-                        i += 1;
-                    }
-                }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "aarch64")))]
-            {
-                for idx in 0..numel {
-                    unsafe {
-                        *out_ptr.add(idx) = (*a_ptr.add(idx)).abs();
-                    }
-                }
-            }
-        }
-    } else {
-        for idx in 0..numel {
-            unsafe {
-                let val = *a_ptr.add(idx);
-                *out_ptr.add(idx) = val.abs();
-            }
-        }
-    }
-
-    vec![output]
-}
-
-// Parallel exp AVX2 kernel using wide crate
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn exp_parallel_avx2(
-    chunk_idx: usize,
-    chunk_size: usize,
-    numel: usize,
-    a_usize: usize,
-    out_usize: usize,
-) {
-    let start = chunk_idx * chunk_size;
-    let end = std::cmp::min(start + chunk_size, numel);
-
-    let a_ptr = a_usize as *const f32;
-    let out_ptr = out_usize as *mut f32;
-
-    let mut i = start;
-    while i + 8 <= end {
-        let mut chunk_data: [f32; 8] = std::mem::zeroed();
-        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data.as_mut_ptr(), 8);
-        let x = f32x8::from(chunk_data);
-        let result = x.exp();
-        let out_chunk_data: [f32; 8] = result.into();
-        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), out_ptr.add(i), 8);
-        i += 8;
-    }
-    while i < end {
-        *out_ptr.add(i) = (*a_ptr.add(i)).exp();
-        i += 1;
-    }
-}
-
-// Parallel exp AVX512 kernel using wide crate (processing 16 elements as 2x f32x8)
-#[cfg(all(feature = "simd", target_arch = "x86_64", feature = "simd_avx512"))]
-#[target_feature(enable = "avx512f")]
-unsafe fn exp_parallel_avx512(
-    chunk_idx: usize,
-    chunk_size: usize,
-    numel: usize,
-    a_usize: usize,
-    out_usize: usize,
-) {
-    let start = chunk_idx * chunk_size;
-    let end = std::cmp::min(start + chunk_size, numel);
-
-    let a_ptr = a_usize as *const f32;
-    let out_ptr = out_usize as *mut f32;
-
-    let mut i = start;
-    while i + 16 <= end {
-        // First 8 elements
-        let mut chunk_data0: [f32; 8] = std::mem::zeroed();
-        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data0.as_mut_ptr(), 8);
-        let x0 = f32x8::from(chunk_data0);
-        let result_0 = x0.exp();
-        let out_chunk_data0: [f32; 8] = result_0.into();
-        std::ptr::copy_nonoverlapping(out_chunk_data0.as_ptr(), out_ptr.add(i), 8);
-
-        // Next 8 elements
-        let mut chunk_data1: [f32; 8] = std::mem::zeroed();
-        std::ptr::copy_nonoverlapping(a_ptr.add(i + 8), chunk_data1.as_mut_ptr(), 8);
-        let x1 = f32x8::from(chunk_data1);
-        let result_1 = x1.exp();
-        let out_chunk_data1: [f32; 8] = result_1.into();
-        std::ptr::copy_nonoverlapping(out_chunk_data1.as_ptr(), out_ptr.add(i + 8), 8);
-
-        i += 16;
-    }
-    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
-    while i + 8 <= end {
-        let mut chunk_data: [f32; 8] = std::mem::zeroed();
-        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data.as_mut_ptr(), 8);
-        let x = f32x8::from(chunk_data);
-        let result = x.exp();
-        let out_chunk_data: [f32; 8] = result.into();
-        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), out_ptr.add(i), 8);
-        i += 8;
-    }
-    while i < end {
-        *out_ptr.add(i) = (*a_ptr.add(i)).exp();
-        i += 1;
-    }
-}
-
-// Parallel exp NEON kernel using wide::f32x4
-#[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[allow(dead_code)]
-unsafe fn exp_parallel_neon(
-    chunk_idx: usize,
-    chunk_size: usize,
-    numel: usize,
-    a_usize: usize,
-    out_usize: usize,
-) {
-    let start = chunk_idx * chunk_size;
-    let end = std::cmp::min(start + chunk_size, numel);
-
-    let a_ptr = a_usize as *const f32;
-    let out_ptr = out_usize as *mut f32;
-    let a_ptr_arr = a_ptr as *const [f32; 4];
-    let out_ptr_arr = out_ptr as *mut [f32; 4];
-
-    let mut i = start;
-    while i + 4 <= end {
-        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
-        let result = x.exp();
-        unsafe {
-            *out_ptr_arr.add(i / 4) = result.into();
-        }
-        i += 4;
-    }
-    while i < end {
-        *out_ptr.add(i) = (*a_ptr.add(i)).exp();
-        i += 1;
-    }
-}
-
-// Parallel log AVX2 kernel using fast_log_avx2
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-unsafe fn log_parallel_avx2(
-    chunk_idx: usize,
-    chunk_size: usize,
-    numel: usize,
-    a_usize: usize,
-    out_usize: usize,
-) {
-    let start = chunk_idx * chunk_size;
-    let end = std::cmp::min(start + chunk_size, numel);
-
-    let mut i = start;
-    while i + 8 <= end {
-        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        let result = fast_log_avx2(x);
-        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-        i += 8;
-    }
-    while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).ln();
-        i += 1;
-    }
-}
-
-// Parallel log AVX512 kernel using fast_log_avx512
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f")]
-unsafe fn log_parallel_avx512(
-    chunk_idx: usize,
-    chunk_size: usize,
-    numel: usize,
-    a_usize: usize,
-    out_usize: usize,
-) {
-    let start = chunk_idx * chunk_size;
-    let end = std::cmp::min(start + chunk_size, numel);
-
-    let mut i = start;
-    while i + 16 <= end {
-        let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
-        let result = fast_log_avx512(x);
-        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
-        i += 16;
-    }
-    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
-    while i + 8 <= end {
-        let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        let result = fast_log_avx2(x);
-        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-        i += 8;
-    }
-    while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).ln();
-        i += 1;
-    }
-}
-
-// Parallel log NEON kernel using wide::f32x4
-#[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[allow(dead_code)]
-unsafe fn log_parallel_neon(
-    chunk_idx: usize,
-    chunk_size: usize,
-    numel: usize,
-    a_usize: usize,
-    out_usize: usize,
-) {
-    let start = chunk_idx * chunk_size;
-    let end = std::cmp::min(start + chunk_size, numel);
-
-    let a_ptr = a_usize as *const f32;
-    let out_ptr = out_usize as *mut f32;
-    let a_ptr_arr = a_ptr as *const [f32; 4];
-    let out_ptr_arr = out_ptr as *mut [f32; 4];
-
-    let mut i = start;
-    while i + 4 <= end {
-        let x = f32x4::from(unsafe { *a_ptr_arr.add(i / 4) });
-        let result = x.ln();
-        unsafe {
-            *out_ptr_arr.add(i / 4) = result.into();
-        }
-        i += 4;
-    }
-    while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).ln();
-        i += 1;
-    }
-}
-
-fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let a = args[0];
-
-    let iter = TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-
-    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
-
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
-    };
-    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
-
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -5230,7 +4920,7 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -5444,7 +5134,7 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -5566,7 +5256,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_CHEAP_UNARY {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -5676,6 +5366,139 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+// PERF-15: abs kernel using wide crate for SIMD
+fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+
+    let iter = TensorIterator::build_for_unary(a);
+    let output_shape = iter.output_shape.to_vec();
+
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    if a.is_contiguous() && numel > THRESHOLD_CHEAP_UNARY {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..numel).into_par_iter().for_each(|i| unsafe {
+                let val = *((a_usize + i * 4) as *const f32);
+                *((out_usize + i * 4) as *mut f32) = val.abs();
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for idx in 0..numel {
+                unsafe {
+                    let val = *a_ptr.add(idx);
+                    *out_ptr.add(idx) = val.abs();
+                }
+            }
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let val = *a_ptr.add(idx);
+                *out_ptr.add(idx) = val.abs();
+            }
+        }
+    }
+
+    vec![output]
+}
+
+// PERF-15: exp kernel using wide crate for SIMD
+fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+
+    let iter = TensorIterator::build_for_unary(a);
+    let output_shape = iter.output_shape.to_vec();
+
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
+
+    let numel = output_shape.iter().product::<i64>() as usize;
+    let a_ptr = a.data_ptr() as *const f32;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                SimdLevel::Avx512 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            exp_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            exp_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        let start = chunk_idx * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, numel);
+                        let a_usize_local = a_usize;
+                        let out_usize_local = out_usize;
+                        for i in start..end {
+                            unsafe {
+                                let val = *((a_usize_local + i * 4) as *const f32);
+                                *((out_usize_local + i * 4) as *mut f32) = val.exp();
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for idx in 0..numel {
+                unsafe {
+                    let val = *a_ptr.add(idx);
+                    *out_ptr.add(idx) = val.exp();
+                }
+            }
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let val = *a_ptr.add(idx);
+                *out_ptr.add(idx) = val.exp();
+            }
+        }
+    }
+
+    vec![output]
+}
+
 #[inline]
 fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
@@ -5698,7 +5521,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && b.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && b.is_contiguous() && numel > THRESHOLD_BINARY {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -5935,7 +5758,7 @@ fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && b.is_contiguous() && c.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && b.is_contiguous() && c.is_contiguous() && numel > THRESHOLD_BINARY {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -6331,7 +6154,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -6462,7 +6285,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -6583,7 +6406,7 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -6700,11 +6523,11 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = CHUNK_MEMBOUND;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
             let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
@@ -10002,7 +9825,7 @@ fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_CHEAP_UNARY {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -10054,7 +9877,7 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
+    if a.is_contiguous() && numel > THRESHOLD_TRANSCENDENTAL {
         #[cfg(feature = "parallel")]
         {
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
@@ -10097,7 +9920,7 @@ fn maximum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+    if a_contig && b_contig && a_shape == b_shape && a_numel > THRESHOLD_BINARY {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
