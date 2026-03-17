@@ -8394,7 +8394,11 @@ fn linspace_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let values: Vec<f32> = (0..steps)
         .map(|i| {
-            let t = i as f32 / (steps - 1) as f32;
+            let t = if steps <= 1 {
+                0.0
+            } else {
+                i as f32 / (steps - 1) as f32
+            };
             start * (1.0 - t) + end * t
         })
         .collect();
@@ -8459,7 +8463,7 @@ fn randint_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut rng = rand::thread_rng();
     let numel: i64 = shape.iter().product();
     let values: Vec<f32> = (0..numel as usize)
-        .map(|_| (rng.gen::<i32>() % (high - low) + low) as f32)
+        .map(|_| rng.gen_range(low..high) as f32)
         .collect();
 
     vec![Tensor::from_vec(values, shape)]
