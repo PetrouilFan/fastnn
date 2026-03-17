@@ -42,11 +42,6 @@ impl AdamW {
 
         let step: Vec<u64> = vec![0; params.len()];
 
-        // for (i, p) in params.iter().enumerate() {
-        //     if p.shape() == vec![32, 64, 64] {
-        //         panic!("AdamW::new: param {} has shape [32, 64, 64]", i);
-        //     }
-        // }
         AdamW {
             params,
             lr,
@@ -66,14 +61,6 @@ impl Optimizer for AdamW {
     fn step(&mut self) {
         let beta1 = self.betas.0;
         let beta2 = self.betas.1;
-
-        // Debug: print all param shapes
-        // if !self.step.is_empty() && self.step[0] >= 60 {
-        //     panic!(
-        //         "Debug: step >= 60. Param shapes: {:?}",
-        //         self.params.iter().map(|p| p.shape()).collect::<Vec<_>>()
-        //     );
-        // }
 
         for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
