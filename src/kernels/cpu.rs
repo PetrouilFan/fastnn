@@ -7083,6 +7083,136 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+fn argmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim = if args.len() > 1 {
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
+    } else {
+        0
+    };
+
+    let a_shape = a.shape();
+    let ndim = a_shape.len();
+    let dim = if dim >= ndim { ndim - 1 } else { dim };
+
+    let mut output_shape: Vec<i64> = a_shape.clone();
+    output_shape[dim] = 1;
+
+    let mut output = Tensor::zeros(output_shape.clone(), DType::I32, a.device());
+
+    let a_ptr = a.data_ptr() as *const f32;
+    let a_storage_offset = a.inner.storage_offset as usize;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut i32;
+
+    let dim_size = a_shape[dim] as usize;
+    let mut strides_before = 1i64;
+    let mut strides_after = 1i64;
+
+    for i in 0..dim {
+        strides_before *= a_shape[i];
+    }
+    for i in (dim + 1)..ndim {
+        strides_after *= a_shape[i];
+    }
+
+    for block in 0..(strides_before as usize * strides_after as usize) {
+        let mut max_val = f32::NEG_INFINITY;
+        let mut max_idx = 0usize;
+        for i in 0..dim_size {
+            let a_idx = (block / (strides_after as usize)) * dim_size * (strides_after as usize)
+                + i * (strides_after as usize)
+                + block % (strides_after as usize);
+            unsafe {
+                let val = *a_ptr.add(a_idx + a_storage_offset);
+                if val > max_val {
+                    max_val = val;
+                    max_idx = i;
+                }
+            }
+        }
+        unsafe {
+            *out_ptr.add(block) = max_idx as i32;
+        }
+    }
+
+    vec![output]
+}
+
+fn argmin_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim = if args.len() > 1 {
+        let dim_i32 = args[1].item() as i32;
+        let a_shape = a.shape();
+        let ndim = a_shape.len() as i32;
+        let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
+        dim_normalized as usize
+    } else {
+        0
+    };
+
+    let a_shape = a.shape();
+    let ndim = a_shape.len();
+    let dim = if dim >= ndim { ndim - 1 } else { dim };
+
+    let mut output_shape: Vec<i64> = a_shape.clone();
+    output_shape[dim] = 1;
+
+    let mut output = Tensor::zeros(output_shape.clone(), DType::I32, a.device());
+
+    let a_ptr = a.data_ptr() as *const f32;
+    let a_storage_offset = a.inner.storage_offset as usize;
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_ptr = cpu_storage.data.as_mut_ptr() as *mut i32;
+
+    let dim_size = a_shape[dim] as usize;
+    let mut strides_before = 1i64;
+    let mut strides_after = 1i64;
+
+    for i in 0..dim {
+        strides_before *= a_shape[i];
+    }
+    for i in (dim + 1)..ndim {
+        strides_after *= a_shape[i];
+    }
+
+    for block in 0..(strides_before as usize * strides_after as usize) {
+        let mut min_val = f32::INFINITY;
+        let mut min_idx = 0usize;
+        for i in 0..dim_size {
+            let a_idx = (block / (strides_after as usize)) * dim_size * (strides_after as usize)
+                + i * (strides_after as usize)
+                + block % (strides_after as usize);
+            unsafe {
+                let val = *a_ptr.add(a_idx + a_storage_offset);
+                if val < min_val {
+                    min_val = val;
+                    min_idx = i;
+                }
+            }
+        }
+        unsafe {
+            *out_ptr.add(block) = min_idx as i32;
+        }
+    }
+
+    vec![output]
+}
+
 fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let dim = if args.len() > 1 {
@@ -8809,6 +8939,8 @@ fn register_kernels() {
     register("mean", DispatchKey::Cpu, mean_kernel as KernelFn);
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);
     register("min", DispatchKey::Cpu, min_kernel as KernelFn);
+    register("argmax", DispatchKey::Cpu, argmax_kernel as KernelFn);
+    register("argmin", DispatchKey::Cpu, argmin_kernel as KernelFn);
     register("softmax", DispatchKey::Cpu, softmax_kernel as KernelFn);
     register(
         "log_softmax",
