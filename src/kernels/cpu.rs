@@ -4896,20 +4896,19 @@ unsafe fn exp_parallel_avx2(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
-    let a_ptr_arr = a_ptr as *const [f32; 8];
-    let out_ptr_arr = out_ptr as *mut [f32; 8];
 
     let mut i = start;
     while i + 8 <= end {
-        let x = f32x8::from(unsafe { *a_ptr_arr.add(i / 8) });
+        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data.as_mut_ptr(), 8);
+        let x = f32x8::from(chunk_data);
         let result = x.exp();
-        unsafe {
-            *out_ptr_arr.add(i / 8) = result.into();
-        }
+        let out_chunk_data: [f32; 8] = result.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), out_ptr.add(i), 8);
         i += 8;
     }
     while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).exp();
+        *out_ptr.add(i) = (*a_ptr.add(i)).exp();
         i += 1;
     }
 }
@@ -4929,38 +4928,39 @@ unsafe fn exp_parallel_avx512(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
-    let a_ptr_arr = a_ptr as *const [f32; 8];
-    let out_ptr_arr = out_ptr as *mut [f32; 8];
 
     let mut i = start;
     while i + 16 <= end {
         // First 8 elements
-        let x0 = f32x8::from(unsafe { *a_ptr_arr.add(i / 8) });
+        let mut chunk_data0: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data0.as_mut_ptr(), 8);
+        let x0 = f32x8::from(chunk_data0);
         let result_0 = x0.exp();
-        unsafe {
-            *out_ptr_arr.add(i / 8) = result_0.into();
-        }
+        let out_chunk_data0: [f32; 8] = result_0.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data0.as_ptr(), out_ptr.add(i), 8);
 
         // Next 8 elements
-        let x1 = f32x8::from(unsafe { *a_ptr_arr.add(i / 8 + 1) });
+        let mut chunk_data1: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(a_ptr.add(i + 8), chunk_data1.as_mut_ptr(), 8);
+        let x1 = f32x8::from(chunk_data1);
         let result_1 = x1.exp();
-        unsafe {
-            *out_ptr_arr.add(i / 8 + 1) = result_1.into();
-        }
+        let out_chunk_data1: [f32; 8] = result_1.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data1.as_ptr(), out_ptr.add(i + 8), 8);
 
         i += 16;
     }
     // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
     while i + 8 <= end {
-        let x = f32x8::from(unsafe { *a_ptr_arr.add(i / 8) });
+        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data.as_mut_ptr(), 8);
+        let x = f32x8::from(chunk_data);
         let result = x.exp();
-        unsafe {
-            *out_ptr_arr.add(i / 8) = result.into();
-        }
+        let out_chunk_data: [f32; 8] = result.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), out_ptr.add(i), 8);
         i += 8;
     }
     while i < end {
-        *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).exp();
+        *out_ptr.add(i) = (*a_ptr.add(i)).exp();
         i += 1;
     }
 }
@@ -6129,8 +6129,6 @@ unsafe fn gelu_parallel_avx2(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
-    let a_ptr_arr = a_ptr as *const [f32; 8];
-    let out_ptr_arr = out_ptr as *mut [f32; 8];
 
     let sqrt_2_over_pi = f32x8::splat(0.7978846f32);
     let coeff = f32x8::splat(0.044715f32);
@@ -6140,7 +6138,10 @@ unsafe fn gelu_parallel_avx2(
 
     let mut i = start;
     while i + 8 <= end {
-        let x = f32x8::from(unsafe { *a_ptr_arr.add(i / 8) });
+        // Load unaligned data into a local array
+        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data.as_mut_ptr(), 8);
+        let x = f32x8::from(chunk_data);
 
         // Compute x^3
         let x2 = x * x;
@@ -6158,16 +6159,17 @@ unsafe fn gelu_parallel_avx2(
         let result = half * x;
         let result = result * (one + tanh);
 
-        unsafe {
-            *out_ptr_arr.add(i / 8) = result.into();
-        }
+        // Store unaligned
+        let out_chunk_data: [f32; 8] = result.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), out_ptr.add(i), 8);
+
         i += 8;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
+        let x = *a_ptr.add(i);
         let x3 = x * x * x;
         let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
-        *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+        *out_ptr.add(i) = 0.5 * x * (1.0 + t);
         i += 1;
     }
 }
@@ -6187,8 +6189,6 @@ unsafe fn gelu_parallel_avx512(
 
     let a_ptr = a_usize as *const f32;
     let out_ptr = out_usize as *mut f32;
-    let a_ptr_arr = a_ptr as *const [f32; 8];
-    let out_ptr_arr = out_ptr as *mut [f32; 8];
 
     let sqrt_2_over_pi = f32x8::splat(0.7978846f32);
     let coeff = f32x8::splat(0.044715f32);
@@ -6200,7 +6200,9 @@ unsafe fn gelu_parallel_avx512(
     // Process 16 elements at a time (2x f32x8)
     while i + 16 <= end {
         // First 8 elements
-        let x0 = f32x8::from(unsafe { *a_ptr_arr.add(i / 8) });
+        let mut chunk_data0: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data0.as_mut_ptr(), 8);
+        let x0 = f32x8::from(chunk_data0);
         let x2_0 = x0 * x0;
         let x3_0 = x0 * x2_0;
         let inner_0 = (coeff * x3_0) + x0;
@@ -6209,12 +6211,13 @@ unsafe fn gelu_parallel_avx512(
         let tanh_0 = (exp_2x_0 - one) / (exp_2x_0 + one);
         let result_0 = half * x0;
         let result_0 = result_0 * (one + tanh_0);
-        unsafe {
-            *out_ptr_arr.add(i / 8) = result_0.into();
-        }
+        let out_chunk_data0: [f32; 8] = result_0.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data0.as_ptr(), out_ptr.add(i), 8);
 
         // Next 8 elements
-        let x1 = f32x8::from(unsafe { *a_ptr_arr.add(i / 8 + 1) });
+        let mut chunk_data1: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(a_ptr.add(i + 8), chunk_data1.as_mut_ptr(), 8);
+        let x1 = f32x8::from(chunk_data1);
         let x2_1 = x1 * x1;
         let x3_1 = x1 * x2_1;
         let inner_1 = (coeff * x3_1) + x1;
@@ -6223,15 +6226,16 @@ unsafe fn gelu_parallel_avx512(
         let tanh_1 = (exp_2x_1 - one) / (exp_2x_1 + one);
         let result_1 = half * x1;
         let result_1 = result_1 * (one + tanh_1);
-        unsafe {
-            *out_ptr_arr.add(i / 8 + 1) = result_1.into();
-        }
+        let out_chunk_data1: [f32; 8] = result_1.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data1.as_ptr(), out_ptr.add(i + 8), 8);
 
         i += 16;
     }
     // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
     while i + 8 <= end {
-        let x = f32x8::from(unsafe { *a_ptr_arr.add(i / 8) });
+        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data.as_mut_ptr(), 8);
+        let x = f32x8::from(chunk_data);
         let x2 = x * x;
         let x3 = x * x2;
         let inner = (coeff * x3) + x;
@@ -6240,16 +6244,15 @@ unsafe fn gelu_parallel_avx512(
         let tanh = (exp_2x - one) / (exp_2x + one);
         let result = half * x;
         let result = result * (one + tanh);
-        unsafe {
-            *out_ptr_arr.add(i / 8) = result.into();
-        }
+        let out_chunk_data: [f32; 8] = result.into();
+        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), out_ptr.add(i), 8);
         i += 8;
     }
     while i < end {
-        let x = *((a_usize + i * 4) as *const f32);
+        let x = *a_ptr.add(i);
         let x3 = x * x * x;
         let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
-        *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+        *out_ptr.add(i) = 0.5 * x * (1.0 + t);
         i += 1;
     }
 }
@@ -6714,23 +6717,24 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
                 let a_ptr = a_usize as *const f32;
                 let out_ptr = out_usize as *mut f32;
-                let a_ptr_arr = a_ptr as *const [f32; 8];
-                let out_ptr_arr = out_ptr as *mut [f32; 8];
 
                 let mut i = start;
                 while i + 8 <= end {
                     unsafe {
-                        let x = f32x8::from(*a_ptr_arr.add(i / 8));
+                        let mut chunk_data: [f32; 8] = std::mem::zeroed();
+                        std::ptr::copy_nonoverlapping(a_ptr.add(i), chunk_data.as_mut_ptr(), 8);
+                        let x = f32x8::from(chunk_data);
                         let one = f32x8::splat(1.0);
                         let result = x / (one + (-x).exp());
-                        *out_ptr_arr.add(i / 8) = result.into();
+                        let out_chunk_data: [f32; 8] = result.into();
+                        std::ptr::copy_nonoverlapping(out_chunk_data.as_ptr(), out_ptr.add(i), 8);
                     }
                     i += 8;
                 }
                 while i < end {
                     unsafe {
-                        let x = *((a_usize + i * 4) as *const f32);
-                        *((out_usize + i * 4) as *mut f32) = x / (1.0 + (-x).exp());
+                        let x = *a_ptr.add(i);
+                        *out_ptr.add(i) = x / (1.0 + (-x).exp());
                     }
                     i += 1;
                 }
