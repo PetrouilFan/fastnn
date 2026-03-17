@@ -8591,37 +8591,6 @@ fn randint_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![Tensor::from_vec(values, shape)]
 }
 
-#[allow(dead_code)]
-fn read_f32(slice: &[u8], dtype: DType) -> f32 {
-    match dtype {
-        DType::F32 => {
-            let ptr = slice.as_ptr() as *const f32;
-            unsafe { *ptr }
-        }
-        DType::F64 => {
-            let ptr = slice.as_ptr() as *const f64;
-            unsafe { *ptr as f32 }
-        }
-        DType::I32 => {
-            let ptr = slice.as_ptr() as *const i32;
-            unsafe { *ptr as f32 }
-        }
-        DType::I64 => {
-            let ptr = slice.as_ptr() as *const i64;
-            unsafe { *ptr as f32 }
-        }
-        _ => 0.0,
-    }
-}
-
-#[allow(dead_code)]
-fn write_f32(slice: &[u8], val: f32) {
-    let ptr = slice.as_ptr() as *mut u8;
-    unsafe {
-        *(ptr as *mut f32) = val;
-    }
-}
-
 fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let min_val = args[1].item();
@@ -8946,6 +8915,7 @@ fn register_kernels() {
 
     // GPU fallback for cross_entropy_loss (moves to CPU for computation)
     fn cross_entropy_loss_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
+        eprintln!("[fastnn WARNING] cross_entropy_loss: GPU kernel not implemented, falling back to CPU. This incurs a PCIe transfer penalty.");
         // Move inputs to CPU, compute, then move result back to GPU
         let pred_cpu = args[0].to_cpu();
         let target_cpu = args[1].to_cpu();
@@ -8993,6 +8963,7 @@ fn register_kernels() {
 
     // GPU fallback for gt_scalar (moves to CPU for computation)
     fn gt_scalar_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
+        eprintln!("[fastnn WARNING] gt_scalar: GPU kernel not implemented, falling back to CPU. This incurs a PCIe transfer penalty.");
         let input_cpu = args[0].to_cpu();
         let threshold = args[1].item();
         let result_cpu = gt_scalar_kernel(&[&input_cpu, &Tensor::from_scalar(threshold)]);
