@@ -5,7 +5,6 @@ Pytest test suite for Transformer encoder.
 import numpy as np
 import fastnn as fnn
 from fastnn.models import Transformer
-import pytest
 
 
 def test_transformer_forward():
