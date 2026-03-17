@@ -58,17 +58,13 @@ impl Optimizer for SGD {
 
             if self.momentum != 0.0 {
                 let velocity = &mut self.velocity[i];
-                *velocity = velocity
-                    .clone()
-                    .mul(&Tensor::from_scalar(self.momentum as f32))
-                    .add(&grad.clone());
+                // Use in-place operations to avoid allocation
+                velocity.mul_(&Tensor::from_scalar(self.momentum as f32));
+                velocity.add_(&grad);
 
                 if self.nesterov {
-                    grad = grad.add(
-                        &velocity
-                            .clone()
-                            .mul(&Tensor::from_scalar(self.momentum as f32)),
-                    );
+                    let mom = Tensor::from_scalar(self.momentum as f32);
+                    grad = grad.add(&velocity.clone().mul(&mom));
                 } else {
                     grad = velocity.clone();
                 }
