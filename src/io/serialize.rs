@@ -1,16 +1,35 @@
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use safetensors::tensor::TensorView;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Write};
 
 #[allow(dead_code)]
 pub fn save_model(model: &dyn Module, path: &str) {
     let params = model.named_parameters();
 
-    let mut tensors: HashMap<String, Vec<f32>> = HashMap::new();
+    // Build tensors map for safetensors
+    let mut tensors: HashMap<String, TensorView> = HashMap::new();
     let mut metadata: HashMap<String, serde_json::Value> = HashMap::new();
 
     for (name, tensor) in &params {
-        tensors.insert(name.clone(), tensor.to_numpy());
+        // Get the raw data as bytes
+        let data = tensor.to_numpy();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                data.as_ptr() as *const u8,
+                data.len() * std::mem::size_of::<f32>(),
+            )
+        };
+
+        // Create TensorView with the data and shape
+        let shape: Vec<usize> = tensor.shape().iter().map(|&s| s as usize).collect();
+        let view = TensorView::new(safetensors::DType::F32, &shape, bytes)
+            .expect("Failed to create TensorView");
+
+        tensors.insert(name.clone(), view);
+
         metadata.insert(
             name.clone(),
             serde_json::json!({
@@ -20,19 +39,50 @@ pub fn save_model(model: &dyn Module, path: &str) {
         );
     }
 
-    // Save safetensors (simplified - would use actual safetensors crate)
-    let _json_meta = serde_json::json!({
-        "format": "fastnn",
-        "version": "0.3.0",
-        "metadata": metadata,
-    });
-
-    println!("Saved model to {} with {} parameters", path, params.len());
+    // Serialize to file
+    if let Ok(file) = File::create(path) {
+        let mut writer = BufWriter::new(file);
+        if let Err(e) = safetensors::serialize_to_file(&tensors, &Some(&metadata), &mut writer) {
+            eprintln!("Failed to save model: {}", e);
+        } else {
+            println!("Saved model to {} with {} parameters", path, params.len());
+        }
+    } else {
+        eprintln!("Failed to create file: {}", path);
+    }
 }
 
 #[allow(dead_code)]
 pub fn load_model(path: &str, _model_class: Option<&str>) -> HashMap<String, Tensor> {
-    // Would load from safetensors file
-    println!("Loaded model from {}", path);
-    HashMap::new()
+    let mut result = HashMap::new();
+
+    if let Ok(file) = File::open(path) {
+        let reader = BufReader::new(file);
+        match safetensors::load(reader) {
+            Ok(safe_tensors) => {
+                for (name, tensor) in safe_tensors {
+                    let shape: Vec<i64> = tensor.shape().iter().map(|&s| s as i64).collect();
+                    let data = tensor.data();
+                    let float_slice = unsafe {
+                        std::slice::from_raw_parts(
+                            data.as_ptr() as *const f32,
+                            data.len() / std::mem::size_of::<f32>(),
+                        )
+                    };
+                    let vec_data = float_slice.to_vec();
+                    result.insert(name, Tensor::from_vec(vec_data, shape));
+                }
+                println!(
+                    "Loaded model from {} with {} parameters",
+                    path,
+                    result.len()
+                );
+            }
+            Err(e) => eprintln!("Failed to load model: {}", e),
+        }
+    } else {
+        eprintln!("Failed to open file: {}", path);
+    }
+
+    result
 }
