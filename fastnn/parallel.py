@@ -141,7 +141,16 @@ class DataParallel:
         # Update epoch times with measured GPU times
         self.epoch_times = gpu_times
 
-        return sum(losses) / len(losses)
+        # Weighted average based on actual batch sizes per GPU
+        batch_sizes = [
+            split_indices[i + 1] - split_indices[i] for i in range(len(self.device_ids))
+        ]
+        total_samples = sum(batch_sizes)
+        if total_samples > 0:
+            avg_loss = sum(l * n for l, n in zip(losses, batch_sizes)) / total_samples
+        else:
+            avg_loss = sum(losses) / len(losses)
+        return avg_loss
 
     def sync_gradients(self):
         """Synchronize gradients across all devices using bucketed AllReduce.
