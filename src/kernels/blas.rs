@@ -29,21 +29,46 @@ extern "C" {
 
 #[cfg(all(feature = "openblas", not(target_os = "windows")))]
 pub fn matmul_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    matmul_blas_with_transpose(a, b, m, k, n, false, false)
+}
+
+#[cfg(all(feature = "openblas", not(target_os = "windows")))]
+pub fn matmul_blas_with_transpose(
+    a: &[f32],
+    b: &[f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    trans_a: bool,
+    trans_b: bool,
+) -> Vec<f32> {
     let mut c = vec![0.0f32; m * n];
+
+    // CBLAS transpose flags: 111 = NoTrans, 112 = Trans
+    let transa = if trans_a { 112 } else { 111 };
+    let transb = if trans_b { 112 } else { 111 };
+
+    // For RowMajor:
+    // If A is NoTrans (m×k): lda = k
+    // If A is Trans (k×m stored as m×k): lda = m
+    // If B is NoTrans (k×n): ldb = n
+    // If B is Trans (n×k stored as k×n): ldb = k
+    let lda = if trans_a { m as i32 } else { k as i32 };
+    let ldb = if trans_b { k as i32 } else { n as i32 };
 
     unsafe {
         cblas_sgemm(
             101, // RowMajor
-            111, // NoTrans
-            111, // NoTrans
+            transa,
+            transb,
             m as i32,
             n as i32,
             k as i32,
             1.0,
             a.as_ptr(),
-            k as i32,
+            lda,
             b.as_ptr(),
-            n as i32,
+            ldb,
             0.0,
             c.as_mut_ptr(),
             n as i32,
@@ -55,25 +80,56 @@ pub fn matmul_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f3
 
 #[cfg(not(all(feature = "openblas", not(target_os = "windows"))))]
 pub fn matmul_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    matmul_blas_with_transpose(a, b, m, k, n, false, false)
+}
+
+#[cfg(not(all(feature = "openblas", not(target_os = "windows"))))]
+pub fn matmul_blas_with_transpose(
+    a: &[f32],
+    b: &[f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    trans_a: bool,
+    trans_b: bool,
+) -> Vec<f32> {
     use matrixmultiply::sgemm;
 
     let mut c = vec![0.0f32; m * n];
 
+    // matrixmultiply expects row-major order
+    // For C = A @ B with A[m×k], B[k×n], C[m×n]
+    // If A is transposed: A is stored as k×m, so dimensions become A[k×m], B[m×n], C[k×n]
+    // If B is transposed: B is stored as n×k, so dimensions become A[m×n], B[n×k], C[m×k]
+    let (m_final, k_final, n_final, lda, ldb, ldc) = if trans_a && trans_b {
+        // A transposed: k×m, B transposed: n×k -> C[k×n]
+        (k, n, m, k as isize, 1isize, k as isize)
+    } else if trans_a {
+        // A transposed: k×m, B not transposed: k×n -> C[k×n]
+        (k, m, n, k as isize, n as isize, k as isize)
+    } else if trans_b {
+        // A not transposed: m×k, B transposed: n×k -> C[m×n]
+        (m, n, k, k as isize, 1isize, n as isize)
+    } else {
+        // No transposes: A[m×k], B[k×n] -> C[m×n]
+        (m, k, n, k as isize, n as isize, n as isize)
+    };
+
     unsafe {
         sgemm(
-            m,
-            k,
-            n,
+            m_final,
+            k_final,
+            n_final,
             1.0f32,
             a.as_ptr(),
-            k as isize,
+            lda,
             1isize,
             b.as_ptr(),
-            n as isize,
+            ldb,
             1isize,
             0.0f32,
             c.as_mut_ptr(),
-            n as isize,
+            ldc,
             1isize,
         );
     }
