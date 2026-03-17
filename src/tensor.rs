@@ -1622,6 +1622,23 @@ impl Tensor {
         }
     }
 
+    /// Element-wise maximum of two tensors
+    pub fn maximum(&self, other: &Tensor) -> Tensor {
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
+        let result = dispatch("maximum", dispatch_key, &[self, other]);
+        let output = result[0].clone();
+        // For simplicity, no autograd for now (can be added later if needed)
+        output
+    }
+        } else {
+            output
+        }
+    }
+
     pub fn tanh(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("tanh", dispatch_key, &[self]);

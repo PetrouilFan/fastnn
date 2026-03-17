@@ -8601,6 +8601,95 @@ fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+fn maximum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let b = args[1];
+
+    let a_shape = a.inner.sizes.as_slice();
+    let b_shape = b.inner.sizes.as_slice();
+    let a_contig = a.is_contiguous();
+    let b_contig = b.is_contiguous();
+    let a_numel = a.inner.numel() as usize;
+
+    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+        let output_shape = a_shape.to_vec();
+        let numel = a_numel;
+
+        let mut output = Tensor::empty(output_shape, a.dtype(), a.device());
+
+        let a_ptr = a.data_ptr_f32();
+        let b_ptr = b.data_ptr_f32();
+
+        let output_inner = Arc::make_mut(&mut output.inner);
+        let output_storage = Arc::make_mut(&mut output_inner.storage);
+        let Storage::Cpu(cpu_storage) = output_storage else {
+            panic!("Expected CPU storage");
+        };
+        let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            let a_usize = a_ptr as usize;
+            let b_usize = b_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            (0..num_chunks)
+                .into_par_iter()
+                .for_each(|chunk_idx| unsafe {
+                    let start = chunk_idx * chunk_size;
+                    let end = std::cmp::min(start + chunk_size, numel);
+                    for i in start..end {
+                        let val_a = *((a_usize + i * 4) as *const f32);
+                        let val_b = *((b_usize + i * 4) as *const f32);
+                        *((out_usize + i * 4) as *mut f32) = val_a.max(val_b);
+                    }
+                });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for idx in 0..numel {
+                unsafe {
+                    let val_a = *a_ptr.add(idx);
+                    let val_b = *b_ptr.add(idx);
+                    *out_ptr.add(idx) = val_a.max(val_b);
+                }
+            }
+        }
+
+        vec![output]
+    } else {
+        // Fallback for non-contiguous or smaller tensors
+        let iter = TensorIterator::build_for_binary(a, b);
+        let output_shape = iter.output_shape.to_vec();
+
+        let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+
+        let numel = output_shape.iter().product::<i64>() as usize;
+        let output_inner = Arc::make_mut(&mut output.inner);
+        let output_storage = Arc::make_mut(&mut output_inner.storage);
+        let Storage::Cpu(cpu_storage) = output_storage else {
+            panic!("Expected CPU storage");
+        };
+        let out_ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+
+        for idx in 0..numel {
+            unsafe {
+                let a_idx = iter.input_index(0, idx);
+                let b_idx = iter.input_index(1, idx);
+                let val_a = *(a.data_ptr() as *const f32).add(a_idx);
+                let val_b = *(b.data_ptr() as *const f32).add(b_idx);
+                *out_ptr.add(idx) = val_a.max(val_b);
+            }
+        }
+
+        vec![output]
+    }
+}
+
 fn gt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let threshold = args[1].item();
@@ -8687,6 +8776,7 @@ fn register_kernels() {
     register("silu", DispatchKey::Cpu, silu_kernel as KernelFn);
     register("clamp", DispatchKey::Cpu, clamp_kernel as KernelFn);
     register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
+    register("maximum", DispatchKey::Cpu, maximum_kernel as KernelFn);
     register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
     register("linear", DispatchKey::Cpu, linear_kernel as KernelFn);
     register(
