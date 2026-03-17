@@ -275,7 +275,7 @@
   ```
   Commit: `perf(data): shuffle DataLoader indices in-place to avoid reallocation` ✓
 
-- [ ] **PERF-1** `src/optim/adam.rs` and `src/optim/adamw.rs` — Each optimizer step allocates
+- [x] **PERF-1** `src/optim/adam.rs` and `src/optim/adamw.rs` — Each optimizer step allocates
   ~6–8 intermediate tensors per parameter.
   Fix: implement a fused in-place parameter update kernel `adam_update_kernel` in `cpu.rs` that
   takes raw pointers to `param`, `m`, `v`, `grad` and updates all in a single SIMD loop:
@@ -287,7 +287,7 @@
   param[i] -= lr * m_hat / (sqrt(v_hat) + eps) + wd * param[i]
   ```
   All in one pass, zero heap allocations. Register as `"adam_update"` in the dispatcher.
-  Commit: `perf(optim): fused in-place Adam/AdamW parameter update kernel`
+  Commit: `perf(optim): fused in-place Adam/AdamW parameter update kernel` ✓
 
 - [ ] **PERF-3** `src/kernels/cpu.rs` — `layer_norm_kernel` and `batch_norm_kernel` make 8+
   dispatcher roundtrips (mean, var, std, normalize each as separate ops).
