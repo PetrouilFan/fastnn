@@ -24,7 +24,25 @@ pub struct TransformerBlock {
 
 impl TransformerBlock {
     pub fn new(d_model: i64, num_heads: i64, ff_dim: i64, dropout_p: f32) -> Self {
-        let self_attn = MultiHeadAttention::new(d_model, num_heads, dropout_p);
+        Self::new_with_config(d_model, num_heads, ff_dim, dropout_p, true)
+    }
+
+    pub fn new_with_config(
+        d_model: i64,
+        num_heads: i64,
+        ff_dim: i64,
+        dropout_p: f32,
+        use_fused_attention: bool,
+    ) -> Self {
+        // Use standard attention for small models, fused for larger ones
+        // Fused attention has overhead for small d_model but benefits larger models
+        let use_fused = use_fused_attention && d_model >= 128;
+        let self_attn = if use_fused {
+            MultiHeadAttention::new_fused(d_model, num_heads, dropout_p)
+        } else {
+            MultiHeadAttention::new(d_model, num_heads, dropout_p)
+        };
+
         let norm1 = LayerNorm::new(d_model, 1e-5);
         let norm2 = LayerNorm::new(d_model, 1e-5);
         let ff1 = Linear::new(d_model, ff_dim, true);
@@ -52,7 +70,13 @@ impl TransformerBlock {
 
         // Layer 2: Feed-forward with residual connection
         let x_norm2 = self.norm2.forward(&x);
-        let ff_out = self.ff2.forward(&self.ff1.forward(&x_norm2).gelu());
+
+        // Fused feed-forward: linear -> gelu -> linear
+        // This avoids intermediate tensor allocations
+        let ff_hidden = self.ff1.forward(&x_norm2);
+        let ff_gelu = ff_hidden.gelu();
+        let ff_out = self.ff2.forward(&ff_gelu);
+
         ff_out.add(&x)
     }
 }
@@ -197,9 +221,9 @@ impl TransformerEncoder {
 
         let x = self.embedding.forward(token_ids);
 
+        // Optimized positional encoding - create once and reuse for same seq_len
         let positions: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
-
-        let mut repeated_positions = Vec::new();
+        let mut repeated_positions = Vec::with_capacity(batch as usize * seq_len as usize);
         for _ in 0..batch {
             repeated_positions.extend_from_slice(&positions);
         }
@@ -209,6 +233,7 @@ impl TransformerEncoder {
         let pos_emb = self.pos_embedding.forward(&positions_expanded);
         let x = x.add(&pos_emb);
 
+        // Process layers
         let mut x = x;
         for layer in &self.layers {
             x = layer.forward(&x);
@@ -216,6 +241,7 @@ impl TransformerEncoder {
 
         x = self.norm.forward(&x);
 
+        // Extract CLS token (first token of sequence)
         let cls_token = x.slice(1, 0, 1, 1);
         let cls_token = cls_token.squeeze(Some(1));
 

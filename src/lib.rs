@@ -17,12 +17,15 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 use pyo3::PyAny;
 use rand::Rng;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
 use tensor::{Tensor, TensorImpl};
 
 // Thread-local default device storage
 static DEFAULT_DEVICE: OnceLock<RwLock<Device>> = OnceLock::new();
+
+// Global seeded RNG for deterministic initialization
+static SEEDED_RNG: OnceLock<Mutex<rand::rngs::StdRng>> = OnceLock::new();
 
 fn get_default_device() -> Device {
     let guard = DEFAULT_DEVICE
@@ -819,13 +822,29 @@ fn _no_grad_exit() {
 
 #[pyfunction]
 fn _set_seed(seed: u64) {
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
-    // Set the seed for the random number generator
-    // Note: This is a simple implementation that sets the seed for the current thread
-    // In a real implementation, you might want to use a thread-local RNG
-    let _rng = StdRng::seed_from_u64(seed);
-    // Note: We're not actually using the RNG anywhere yet, so this is a placeholder
+    // Initialize or re-initialize the global seeded RNG with the given seed
+    if let Some(rng_lock) = SEEDED_RNG.get() {
+        // Re-seed the existing RNG
+        if let Ok(mut rng) = rng_lock.lock() {
+            *rng = rand::rngs::StdRng::seed_from_u64(seed);
+        }
+    } else {
+        // Initialize the RNG for the first time
+        SEEDED_RNG.get_or_init(|| Mutex::new(rand::rngs::StdRng::seed_from_u64(seed)));
+    }
+}
+
+// Helper function to get a random f32 from the global seeded RNG
+// Falls back to rand::random() if the RNG is not initialized
+pub fn random_f32() -> f32 {
+    if let Some(rng_lock) = SEEDED_RNG.get() {
+        if let Ok(mut rng) = rng_lock.try_lock() {
+            return rng.gen::<f32>();
+        }
+    }
+    // Fallback to non-deterministic random if RNG is not initialized
+    rand::random::<f32>()
 }
 
 #[cfg(feature = "parallel")]
@@ -1532,14 +1551,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
     // Optimized implementation: average gradients across replicas
     // param_groups is a list of parameter lists, one per replica
-    
+
     if param_groups.is_empty() {
         return Ok(());
     }
-    
+
     let num_replicas = param_groups.len();
     let num_params = param_groups[0].len();
-    
+
     // Check all replicas have the same number of parameters
     for group in &param_groups {
         if group.len() != num_params {
@@ -1548,16 +1567,16 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
             ));
         }
     }
-    
+
     // Pre-allocate gradients vector to avoid repeated allocations
     let mut gradients = Vec::with_capacity(num_replicas);
     let num_replicas_tensor = crate::tensor::Tensor::from_scalar(num_replicas as f32);
-    
+
     // For each parameter index, average gradients across replicas
     for param_idx in 0..num_params {
         // Clear gradients vector for reuse (keeps capacity)
         gradients.clear();
-        
+
         // Collect gradients from all replicas
         let mut all_have_grad = true;
         for replica_idx in 0..num_replicas {
@@ -1570,25 +1589,25 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
                 break;
             }
         }
-        
+
         if !all_have_grad {
             continue;
         }
-        
+
         // If we collected gradients from all replicas, average them
         if gradients.len() == num_replicas {
             // Compute average gradient: sum all gradients and divide by num_replicas
             // Start with first gradient as base
             let mut avg_grad = gradients[0].clone();
-            
+
             // Add remaining gradients (skip first since it's already in avg_grad)
             for i in 1..gradients.len() {
                 avg_grad = avg_grad.add(&gradients[i]);
             }
-            
+
             // Divide by number of replicas
             avg_grad = avg_grad.div(&num_replicas_tensor);
-            
+
             // Set the averaged gradient back to all parameters
             // Create the PyTensor once and reuse for all replicas
             let avg_grad_py = PyTensor::from_tensor(avg_grad.clone());
@@ -1598,6 +1617,6 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
             }
         }
     }
-    
+
     Ok(())
 }
