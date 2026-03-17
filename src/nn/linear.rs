@@ -16,7 +16,7 @@ impl Linear {
         let scale = (2.0 / in_features as f32).sqrt();
 
         let weight_data: Vec<f32> = (0..in_features * out_features)
-            .map(|_| (rand::random::<f32>() - 0.5) * 2.0 * scale)
+            .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
             .collect();
         let weight = Tensor::from_vec(weight_data, vec![in_features, out_features]);
         let weight = weight.requires_grad_(true);

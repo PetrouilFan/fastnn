@@ -37,7 +37,7 @@ impl Conv2d {
 
         let weight_data: Vec<f32> =
             (0..out_channels * in_channels / groups * kernel_size * kernel_size)
-                .map(|_| (rand::random::<f32>() - 0.5) * 2.0 * scale)
+                .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
                 .collect();
         let weight = Tensor::from_vec(
             weight_data,

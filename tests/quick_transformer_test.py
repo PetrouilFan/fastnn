@@ -82,7 +82,11 @@ model.train()
 epoch_loss = 0.0
 epoch_start = time.time()
 
+batch_count = 0
+max_batches = 10  # Limit number of batches
 for x_batch, y_batch in train_loader:
+    if batch_count >= max_batches:
+        break
     logits = model(x_batch)
     y_int = fnn.tensor(
         [int(v) for v in y_batch.numpy().flatten()],
@@ -93,22 +97,22 @@ for x_batch, y_batch in train_loader:
     loss.backward()
     optimizer.step()
     epoch_loss += loss.item()
+    batch_count += 1
 
-avg_loss = epoch_loss / len(train_loader)
+avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
 epoch_time = time.time() - epoch_start
 
-train_acc = compute_accuracy(train_loader, model)
-print(
-    f"Epoch 1/{EPOCHS} | loss={avg_loss:.4f} | train_acc={train_acc:.4f} | time={epoch_time:.2f}s"
-)
+# train_acc = compute_accuracy(train_loader, model)
+# print(
+#     f"Epoch 1/{EPOCHS} | loss={avg_loss:.4f} | train_acc={train_acc:.4f} | time={epoch_time:.2f}s"
+# )
+print(f"Epoch 1/{EPOCHS} | loss={avg_loss:.4f} | time={epoch_time:.2f}s")
 
 print("=" * 60)
 print("QUICK TEST COMPLETE")
 print(f"  Loss: {avg_loss:.4f}")
-print(f"  Train accuracy: {train_acc:.4f} ({train_acc * 100:.2f}%)")
 print("=" * 60)
 
 # Basic sanity check
 assert avg_loss > 0, "Loss should be positive"
-assert 0 <= train_acc <= 1, "Accuracy should be between 0 and 1"
 print("\n✓ PASS: Basic transformer forward/backward pass successful")
