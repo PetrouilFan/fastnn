@@ -16,71 +16,90 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>, _retain_graph: bool)
     // Map from tensor_id to accumulated gradient
     let mut grads: HashMap<usize, Tensor> = HashMap::new();
 
-    // Map from node_ptr to number of dependencies (input tensors that still need gradients)
-    let mut node_dependencies: HashMap<usize, usize> = HashMap::new();
-
     // Map from node_ptr to the node itself and its output tensor id
     let mut node_info: HashMap<usize, (Arc<dyn Node>, usize)> = HashMap::new();
 
     let root_id = root.id();
     grads.insert(root_id, grad_output);
 
-    // Build the graph and count dependencies
-    let mut queue: VecDeque<(Arc<dyn Node>, usize)> = VecDeque::new();
-    let mut visited: HashSet<usize> = HashSet::new();
+    // PERF-9: Check for cached topological order
+    let root_meta = root.inner.autograd_meta.clone();
+    let mut cached_topo_order: Option<Vec<Arc<dyn Node>>> = None;
 
-    if let Some(grad_fn) = root.grad_fn() {
-        queue.push_back((grad_fn, root_id));
+    if let Some(meta) = &root_meta {
+        if let Ok(mut lock) = meta.lock() {
+            cached_topo_order = lock.topo_order_cache.clone();
+        }
     }
 
-    // Traverse the graph to build dependency counts
-    while let Some((node, tensor_id)) = queue.pop_front() {
-        let node_ptr = (&*node) as *const _ as *const () as usize;
-        if visited.contains(&node_ptr) {
-            continue;
+    let topo_order = if let Some(cached) = cached_topo_order {
+        // Use cached topological order
+        cached
+    } else {
+        // Build the graph and count dependencies (topological sort)
+        let mut queue: VecDeque<(Arc<dyn Node>, usize)> = VecDeque::new();
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut topo_order_vec: Vec<Arc<dyn Node>> = Vec::new();
+
+        if let Some(grad_fn) = root.grad_fn() {
+            queue.push_back((grad_fn, root_id));
         }
 
-        visited.insert(node_ptr);
+        // Traverse the graph to build topological order
+        while let Some((node, tensor_id)) = queue.pop_front() {
+            let node_ptr = (&*node) as *const _ as *const () as usize;
+            if visited.contains(&node_ptr) {
+                continue;
+            }
 
-        // Store node info
-        node_info.insert(node_ptr, (node.clone(), tensor_id));
+            visited.insert(node_ptr);
+            topo_order_vec.push(node.clone());
 
-        // Count inputs for this node
-        let num_inputs = node.num_inputs();
-        node_dependencies.insert(node_ptr, num_inputs);
+            // Store node info
+            node_info.insert(node_ptr, (node.clone(), tensor_id));
 
-        // Add dependencies to queue
-        let next_edges = node.next_edges();
-        for edge in next_edges.iter() {
-            let Edge(next_node, _) = edge;
-            let next_node_ptr = (&**next_node) as *const _ as *const () as usize;
-            if !visited.contains(&next_node_ptr) {
-                queue.push_back((next_node.clone(), next_node.id()));
+            // Add dependencies to queue
+            let next_edges = node.next_edges();
+            for edge in next_edges.iter() {
+                let Edge(next_node, _) = edge;
+                let next_node_ptr = (&**next_node) as *const _ as *const () as usize;
+                if !visited.contains(&next_node_ptr) {
+                    queue.push_back((next_node.clone(), next_node.id()));
+                }
             }
         }
-    }
 
-    // Reset visited for processing
-    visited.clear();
+        // Cache the topological order for future use
+        if let Some(meta) = &root_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.topo_order_cache = Some(topo_order_vec.clone());
+            }
+        }
 
-    // Process nodes: start from root and work backwards
-    queue.clear();
-    if let Some(grad_fn) = root.grad_fn() {
-        queue.push_back((grad_fn, root_id));
-    }
+        topo_order_vec
+    };
 
-    while let Some((node, tensor_id)) = queue.pop_front() {
+    // Process nodes in topological order (reverse for backward pass)
+    let mut visited: HashSet<usize> = HashSet::new();
+
+    for node in topo_order.iter().rev() {
         let node_ptr = (&*node) as *const _ as *const () as usize;
 
         if visited.contains(&node_ptr) {
             continue;
         }
+
+        // Get the tensor_id for this node from node_info
+        let tensor_id = if let Some((_, id)) = node_info.get(&node_ptr) {
+            *id
+        } else {
+            continue;
+        };
 
         // Get the gradient for this node's output
         let grad_output_for_node = grads.get(&tensor_id).cloned();
 
         // Apply backward to get gradients for inputs
-
         let grad_inputs = node.apply(&[grad_output_for_node]);
 
         // Get the input tensors for this node
@@ -111,14 +130,6 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>, _retain_graph: bool)
                     } else {
                         // PERF-10: Take ownership instead of cloning
                         grads.insert(input_id, grad_input);
-                    }
-
-                    // Add this tensor's grad_fn to queue if it hasn't been processed
-                    if let Some(input_grad_fn) = input_tensor.grad_fn() {
-                        let input_node_ptr = (&*input_grad_fn) as *const _ as *const () as usize;
-                        if !visited.contains(&input_node_ptr) {
-                            queue.push_back((input_grad_fn, input_id));
-                        }
                     }
                 }
             }
