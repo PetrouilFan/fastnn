@@ -1422,6 +1422,60 @@ impl Node for ViewBackward {
     }
 }
 
+pub struct ReshapePermuteBackward {
+    pub input: Tensor,
+    pub shape: Vec<i64>,
+    pub perm: Vec<i64>,
+    pub edges: Vec<Edge>,
+}
+
+fn compute_inverse_permutation(perm: &[i64]) -> Vec<i64> {
+    let mut inv_perm = vec![0; perm.len()];
+    for (i, &p) in perm.iter().enumerate() {
+        inv_perm[p as usize] = i as i64;
+    }
+    inv_perm
+}
+
+impl ReshapePermuteBackward {
+    pub fn new(input: Tensor, shape: Vec<i64>, perm: Vec<i64>, edges: Vec<Edge>) -> Self {
+        ReshapePermuteBackward {
+            input,
+            shape,
+            perm,
+            edges,
+        }
+    }
+}
+
+impl Node for ReshapePermuteBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs[0].clone().unwrap();
+        // Compute inverse permutation and apply it
+        let inv_perm = compute_inverse_permutation(&self.perm);
+        let grad = grad.permute(inv_perm);
+        // Then reshape back to input shape
+        let grad = grad.reshape(self.input.shape());
+        vec![Some(grad)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "ReshapePermuteBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
+}
+
 #[allow(dead_code)]
 pub struct SliceBackward {
     pub input: Tensor,

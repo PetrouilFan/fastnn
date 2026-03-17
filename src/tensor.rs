@@ -189,6 +189,16 @@ impl TensorImpl {
         self.view(new_sizes).into()
     }
 
+    /// Fused reshape and permute operation to reduce intermediate allocations
+    pub fn reshape_permute(&self, shape: Vec<i64>, perm: Vec<i64>) -> Tensor {
+        // First reshape to target shape using view
+        let shape_small: SmallVec<[i64; 8]> = shape.into();
+        let reshaped_impl = self.view(shape_small);
+        let reshaped: Tensor = reshaped_impl.into();
+        // Then permute
+        reshaped.permute(perm)
+    }
+
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
         let ndim = self.ndim();
         if dim0 >= ndim || dim1 >= ndim {
@@ -924,14 +934,12 @@ impl Tensor {
     /// Fused reshape and permute operation to reduce intermediate allocations
     /// This is useful for attention mechanisms where reshape+permute is common
     pub fn reshape_permute(&self, shape: Vec<i64>, perm: Vec<i64>) -> Tensor {
-        // First reshape
-        let reshaped = self.reshape(shape);
-        // Then permute
-        let output = reshaped.permute(perm);
+        // Call the TensorImpl method to do the actual reshape and permute
+        let output = self.inner.reshape_permute(shape.clone(), perm.clone());
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = autograd::ViewBackward::new(self.clone(), edges);
+            let backward = autograd::ReshapePermuteBackward::new(self.clone(), shape, perm, edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
