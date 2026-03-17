@@ -36,27 +36,20 @@ impl Module for LayerNorm {
         let shape = x.shape();
         let _ndim = shape.len();
 
-        let weight = self.weight.clone().unwrap_or_else(|| {
-            Tensor::full(
-                vec![self.normalized_shape],
-                1.0,
-                DType::F32,
-                crate::storage::Device::Cpu,
-            )
-        });
-        let bias = self.bias.clone().unwrap_or_else(|| {
-            Tensor::full(
-                vec![self.normalized_shape],
-                0.0,
-                DType::F32,
-                crate::storage::Device::Cpu,
-            )
-        });
+        // Use references to avoid cloning weight/bias on every forward pass
+        let weight = self
+            .weight
+            .as_ref()
+            .unwrap_or_else(|| panic!("LayerNorm weight is required but was None"));
+        let bias = self
+            .bias
+            .as_ref()
+            .unwrap_or_else(|| panic!("LayerNorm bias is required but was None"));
 
         let result = dispatch(
             "layer_norm",
             DispatchKey::Cpu,
-            &[x, x, &weight, &bias, &Tensor::from_scalar(self.eps as f32)],
+            &[x, x, weight, bias, &Tensor::from_scalar(self.eps as f32)],
         );
 
         let output = result[0].clone();
