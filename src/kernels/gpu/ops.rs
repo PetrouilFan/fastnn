@@ -566,10 +566,6 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_data = a.data_ptr_f32();
     let b_data = b.data_ptr_f32();
 
-    let _a_rows = a_shape[a_shape.len() - 2] as usize;
-    let a_cols = a_shape[a_shape.len() - 1] as usize;
-    let b_cols = b_shape[b_shape.len() - 1] as usize;
-
     // Use BLAS/SIMD optimized matmul instead of naive triple loop
     // This is a fallback for CPU tensors when GPU is not available
     use crate::kernels::blas::matmul_blas;
@@ -582,7 +578,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_slice = unsafe { std::slice::from_raw_parts(b_data, k as usize * b_cols) };
 
     let result = matmul_blas(a_slice, b_slice, m as usize, k as usize, n as usize);
-    let mut output_data = result;
+    let output_data = result;
 
     let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
     let output = Tensor::new(crate::tensor::TensorImpl::new(
