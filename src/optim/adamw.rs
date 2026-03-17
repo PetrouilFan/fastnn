@@ -104,8 +104,8 @@ impl Optimizer for AdamW {
                 .mul(&Tensor::from_scalar((1.0 / bias_correction1) as f32));
 
             let v_hat = if self.amsgrad {
-                let max_v = self.v[i].clone().max(0, false);
-                self.v_hat[i] = max_v;
+                // Use element-wise max instead of spatial max along dim 0
+                self.v_hat[i] = self.v_hat[i].maximum(&self.v[i]);
                 self.v_hat[i]
                     .clone()
                     .mul(&Tensor::from_scalar((1.0 / bias_correction2) as f32))
