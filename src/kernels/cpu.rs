@@ -2282,7 +2282,8 @@ fn broadcast_index_decomposition(
 ) -> usize {
     let ndim = out_shape.len();
     // Precompute multipliers: multipliers[i] = product(out_shape[i+1..])
-    let mut multipliers = vec![0usize; ndim];
+    // Use SmallVec for heap allocation avoidance on small dimensions
+    let mut multipliers = smallvec::SmallVec::<[usize; 8]>::from_elem(0, ndim);
     let mut mult = 1usize;
     for i in (0..ndim).rev() {
         multipliers[i] = mult;
