@@ -2,12 +2,12 @@
 
 ## BLOCK 1 — CRITICAL CRASHES (fix these first, they make the library unusable)
 
-- [ ] **BUG-19** `src/optim/adamw.rs` — Remove the debug `panic!` at step 60:
+- [x] **BUG-19** `src/optim/adamw.rs` — Remove the debug `panic!` at step 60:
   `if !self.step.is_empty() && self.step[0] == 60 { panic!(...) }`
   Delete this entire block. It unconditionally crashes ALL training at step 60.
-  Commit: `fix(optim): remove debug panic at step 60 in AdamW`
+  Commit: `fix(optim): remove debug panic at step 60 in AdamW` ✓
 
-- [ ] **BUG-20** `src/optim/adamw.rs` — Remove the debug `panic!` in `AdamW::new()`:
+- [x] **BUG-20** `src/optim/adamw.rs` — Remove the debug `panic!` in `AdamW::new()`:
   `if p.shape() == vec![32, 64, 64] { panic!(...) }`
   Delete this entire block. It crashes initialization of any model with a [32,64,64] parameter.
   Commit: `fix(optim): remove debug panic for shape [32,64,64] in AdamW::new`
@@ -16,13 +16,13 @@
 
 ## BLOCK 2 — SILENT CORRECTNESS BUGS (training produces wrong results silently)
 
-- [ ] **BUG-35** `src/optim/sgd.rs` — SGD momentum velocity is reset to zeros on EVERY step.
+- [x] **BUG-35** `src/optim/sgd.rs` — SGD momentum velocity is reset to zeros on EVERY step.
   The velocity tensor is allocated fresh inside `step()` each call.
   Fix: move velocity state to a `Vec<Tensor>` field on the `SGD` struct (same pattern as Adam's `m`/`v` fields),
   initialized in `SGD::new()` as zeros matching param shapes, and updated in-place each step.
   Commit: `fix(optim): persist SGD momentum velocity across steps`
 
-- [ ] **BUG-18** `src/optim/adam.rs` — Weight decay is computed but NEVER applied.
+- [x] **BUG-18** `src/optim/adam.rs` — Weight decay is computed but NEVER applied.
   The `decay` tensor is computed but not subtracted from `param`.
   Fix: after computing `step_size`, apply:
   `param = param - step_size - decay`
@@ -30,7 +30,7 @@
   Note: AdamW correctly decouples weight decay; Adam should apply it as L2 on the gradient.
   Commit: `fix(optim): apply weight decay in Adam step`
 
-- [ ] **BUG-21** `src/optim/adamw.rs` — AMSGrad uses `.max(dim, keepdim)` (spatial max over dimension 0)
+- [x] **BUG-21** `src/optim/adamw.rs` — AMSGrad uses `.max(dim, keepdim)` (spatial max over dimension 0)
   instead of element-wise max across time steps.
   Fix: replace `self.v[i].clone().max(0, false)` with an element-wise max between
   `self.v_hat[i]` (previous max) and `self.v[i]` (current second moment):
@@ -38,14 +38,14 @@
   then assign `self.v_hat[i] = tensor_elementwise_max(self.v_hat[i].clone(), self.v[i].clone())`.
   Commit: `fix(optim): fix AMSGrad v_hat to use element-wise temporal max`
 
-- [ ] **BUG-25** `fastnn/__init__.py` — The `__getitem__` monkey-patch returns a raw numpy array,
+- [x] **BUG-25** `fastnn/__init__.py` — The `__getitem__` monkey-patch returns a raw numpy array,
   breaking autograd for any indexing inside a gradient-tracked computation.
   The comment in the file already says it was intentionally removed — but then it's added back.
   Fix: remove the `new_get_item` function and the line `tensorcls.__getitem__ = new_get_item` entirely.
   Users who need numpy indexing should call `.numpy()[idx]` explicitly.
   Commit: `fix(python): remove __getitem__ patch that breaks autograd`
 
-- [ ] **BUG-1** `src/kernels/cpu.rs` (`linspace_kernel`) and `src/lib.rs` (`linspace` Python binding) —
+- [x] **BUG-1** `src/kernels/cpu.rs` (`linspace_kernel`) and `src/lib.rs` (`linspace` Python binding) —
   Division by zero when `steps == 1`: `i as f32 / (steps - 1) as f32` = `0/0 = NaN`.
   Fix in BOTH places:
   ```rust
@@ -53,17 +53,17 @@
   ```
   Commit: `fix(kernels): fix linspace division by zero when steps=1`
 
-- [ ] **BUG-2** `src/kernels/cpu.rs` (`randint_kernel`) and `src/lib.rs` (`randint` Python binding) —
+- [x] **BUG-2** `src/kernels/cpu.rs` (`randint_kernel`) and `src/lib.rs` (`randint` Python binding) —
   `rng.gen::<i32>() % (high - low)` has modulo bias and panics on negative values.
   Fix in BOTH places: replace with `rng.gen_range(low..high)` from the `rand` crate.
   Commit: `fix(kernels): use gen_range for unbiased randint`
 
-- [ ] **BUG-4** `src/kernels/cpu.rs` (`EmbeddingBackward`) — `num_inputs()` returns `1` but
+- [x] **BUG-4** `src/kernels/cpu.rs` (`EmbeddingBackward`) — `num_inputs()` returns `1` but
   the backward node stores `[weight, indices]` (2 inputs).
   Fix: change `fn num_inputs(&self) -> usize { 1 }` to return `2`.
   Commit: `fix(autograd): fix EmbeddingBackward num_inputs returning 1 instead of 2`
 
-- [ ] **BUG-5** `src/kernels/cpu.rs` (`embedding_kernel` and `EmbeddingBackward`) —
+- [x] **BUG-5** `src/kernels/cpu.rs` (`embedding_kernel` and `EmbeddingBackward`) —
   Indices tensor is cast as `*const f32` and then read as float and cast to usize.
   For vocab sizes > 16M this loses precision (f32 has only 23-bit mantissa).
   Fix: read indices as `*const i32` (or check dtype and handle i32/i64 appropriately),
@@ -75,20 +75,20 @@
   Apply the same fix in `EmbeddingBackward::apply`.
   Commit: `fix(kernels): read embedding indices as i32 not f32`
 
-- [ ] **BUG-14** `src/lib.rs` — `sum()` and `mean()` Python wrappers default `dim=None` to `dim=0`
+- [x] **BUG-14** `src/lib.rs` — `sum()` and `mean()` Python wrappers default `dim=None` to `dim=0`
   silently via `dim.unwrap_or(0)`. A user calling `fnn.sum(t)` expecting full reduction gets
   only axis-0 reduction.
   Fix: when `dim` is `None`, perform a full reduction (flatten then sum/mean) rather than defaulting to 0.
   Implement a `full_reduce` path that reshapes to 1D and calls sum/mean with dim=0.
   Commit: `fix(python): sum/mean with dim=None performs full reduction`
 
-- [ ] **BUG-6** `src/train/loss.rs` — Cross-entropy with `reduction="none"` returns a zero tensor
+- [x] **BUG-6** `src/train/loss.rs` — Cross-entropy with `reduction="none"` returns a zero tensor
   of the input shape instead of per-sample losses.
   Fix: implement the actual per-sample loss computation:
   for each sample i, compute `-log(softmax(logits[i])[target[i]])` and store in output[i].
   Commit: `fix(loss): cross_entropy reduction=none returns per-sample losses`
 
-- [ ] **BUG-32** `src/nn/attention.rs` — Causal mask created as `[seq_len, seq_len]` 2D tensor
+- [x] **BUG-32** `src/nn/attention.rs` — Causal mask created as `[seq_len, seq_len]` 2D tensor
   is added to attention scores of shape `[B, H, S, S]` without explicit unsqueeze for B and H dims.
   Fix: unsqueeze the mask to `[1, 1, seq_len, seq_len]` before adding, so it broadcasts correctly
   over batch and head dimensions:
@@ -98,7 +98,7 @@
   ```
   Commit: `fix(attention): unsqueeze causal mask for correct batched broadcast`
 
-- [ ] **BUG-31** `src/tensor.rs` — `Tensor::slice` with `step != 1` uses integer truncation
+- [x] **BUG-31** `src/tensor.rs` — `Tensor::slice` with `step != 1` uses integer truncation
   `(stop - start) / step` which silently drops the last partial window.
   Fix: use ceiling division:
   ```rust
@@ -106,14 +106,14 @@
   ```
   Commit: `fix(tensor): fix slice size ceiling division for non-unit steps`
 
-- [ ] **BUG-15** `src/lib.rs` — `argmax` and `argmin` dispatch to the `max`/`min` kernel with
+- [x] **BUG-15** `src/lib.rs` — `argmax` and `argmin` dispatch to the `max`/`min` kernel with
   `keepdim=1.0` as a proxy for "return indices mode". This conflates value-returning and
   index-returning semantics in the same kernel.
   Fix: implement dedicated `argmax_kernel` and `argmin_kernel` in `cpu.rs` that find the index
   of the max/min element and return it as a tensor, then register them separately in the dispatcher.
   Commit: `fix(kernels): implement dedicated argmax/argmin kernels`
 
-- [ ] **BUG-9** `src/kernels/cpu.rs` — FMA matmul loop guard is `kk + 8 <= k_max` but the loop
+- [x] **BUG-9** `src/kernels/cpu.rs` — FMA matmul loop guard is `kk + 8 <= k_max` but the loop
   body reads two 8-float windows at `kk` and `kk+8` (16 floats total) and advances `kk += 16`.
   The final 8-element window can read 8 bytes past the buffer end.
   Fix: change loop guard to `kk + 16 <= k_max`:
@@ -126,20 +126,20 @@
   ```
   Commit: `fix(kernels): fix FMA matmul loop guard to prevent OOB read`
 
-- [ ] **BUG-23** `src/kernels/cpu.rs` — `fused_linear_relu` and `fused_linear_silu` parallel paths
+- [x] **BUG-23** `src/kernels/cpu.rs` — `fused_linear_relu` and `fused_linear_silu` parallel paths
   cast raw pointers to `usize` and dereference them inside Rayon closures using byte-offset arithmetic
   with hardcoded `* 4` (assumes sizeof(f32)==4). This is technically UB and fragile.
   Fix: use `std::slice::from_raw_parts` to create slices before entering the parallel region,
   then pass slice references into the closure. Use `bytemuck` for safe casting if needed.
   Commit: `fix(kernels): replace raw pointer arithmetic with safe slices in fused linear kernels`
 
-- [ ] **BUG-24** `src/train/trainer.rs` — `Trainer::fit` only inserts `train_loss` into `TrainLogs`.
+- [x] **BUG-24** `src/train/trainer.rs` — `Trainer::fit` only inserts `train_loss` into `TrainLogs`.
   `EarlyStopping(monitor="val_loss")` will never find the key and will never trigger.
   Fix: after the validation loop, compute `val_loss` and insert it into `logs.metrics`
   with key `"val_loss"` before calling `on_epoch_end` callbacks.
   Commit: `fix(trainer): pass val_loss to callbacks for early stopping`
 
-- [ ] **BUG-29** `fastnn/parallel.py` — `DataParallel.forward_backward` averages losses with
+- [x] **BUG-29** `fastnn/parallel.py` — `DataParallel.forward_backward` averages losses with
   `sum(losses) / len(losses)` ignoring that GPUs have unequal batch sizes (weighted split).
   Fix: compute weighted average using actual batch sizes:
   ```python
@@ -148,7 +148,7 @@
   ```
   Commit: `fix(parallel): weighted loss averaging in DDP forward_backward`
 
-- [ ] **BUG-26** `src/train/callbacks.rs` — `LearningRateScheduler` "step" schedule uses
+- [x] **BUG-26** `src/train/callbacks.rs` — `LearningRateScheduler` "step" schedule uses
   `self.lr * self.gamma.powf(epoch / self.step_size as f64)` which is exponential decay,
   not step decay. Integer division is needed so LR only drops at multiples of `step_size`.
   Fix:
@@ -162,7 +162,7 @@
 
 ## BLOCK 3 — INCOMPLETE / STUB IMPLEMENTATIONS
 
-- [ ] **BUG-7** `src/io/serialize.rs` — `save_model` prints "Saved model" but never writes a file.
+- [x] **BUG-7** `src/io/serialize.rs` — `save_model` prints "Saved model" but never writes a file.
   The `safetensors` crate is already in `Cargo.toml`. Implement actual saving:
   1. Collect all named parameters from the model via `parameters()`.
   2. Build a `HashMap<String, safetensors::tensor::TensorView>` from them.
@@ -170,7 +170,7 @@
   Also implement `load_model` symmetrically using `safetensors::load`.
   Commit: `feat(io): implement save_model and load_model using safetensors`
 
-- [ ] **BUG-27** `src/train/callbacks.rs` — `ModelCheckpoint::on_epoch_end` prints a message
+- [x] **BUG-27** `src/train/callbacks.rs` — `ModelCheckpoint::on_epoch_end` prints a message
   but never writes to disk. `dirpath` is stored but unused.
   Fix: when `is_best || !self.save_best_only`, call the now-working `save_model()` with path
   `format!("{}/checkpoint_epoch_{}.safetensors", self.dirpath, epoch)`.
@@ -178,19 +178,19 @@
   to accept an optional `&dyn Module` parameter, or store an `Arc<Mutex<dyn Module>>` in the callback.
   Commit: `feat(callbacks): implement actual file saving in ModelCheckpoint`
 
-- [ ] **BUG-28** `src/train/callbacks.rs` — `CSVLogger` never writes to a CSV file.
+- [x] **BUG-28** `src/train/callbacks.rs` — `CSVLogger` never writes to a CSV file.
   Fix: on first `on_epoch_end` call, create the file at `self.filepath`, write a CSV header
   from `logs.metrics.keys()`. On subsequent calls, append a row of values.
   Use `std::fs::OpenOptions::append(true)` for appending.
   Commit: `feat(callbacks): implement CSV writing in CSVLogger`
 
-- [ ] **BUG-30** `fastnn/data.py` — `DataLoader` with `num_workers > 0` silently no-ops.
+- [x] **BUG-30** `fastnn/data.py` — `DataLoader` with `num_workers > 0` silently no-ops.
   Fix: either implement basic prefetching using Python `threading.Thread` with a queue,
   or raise `NotImplementedError("num_workers > 0 is not yet supported")` with a clear message.
   Do not silently ignore user intent.
   Commit: `fix(data): raise error or implement threading for num_workers > 0`
 
-- [ ] **BUG-22** `src/autograd/engine.rs` — No `retain_graph` support. Calling `.backward()` twice
+- [x] **BUG-22** `src/autograd/engine.rs` — No `retain_graph` support. Calling `.backward()` twice
   panics or silently returns wrong gradients.
   Fix: add `retain_graph: bool` parameter to the `backward()` function.
   When `retain_graph=false` (default), behavior is unchanged.
@@ -403,13 +403,13 @@
 
 ## BLOCK 6 — CLEANUP
 
-- [ ] **BUG-17** `src/kernels/cpu.rs` — `read_f32` and `write_f32` are marked `#[allow(dead_code)]`
+- [x] **BUG-17** `src/kernels/cpu.rs` — `read_f32` and `write_f32` are marked `#[allow(dead_code)]`
   and are never used anywhere. Either wire them up to replace the raw pointer reads in kernels
   (for a safer API), or delete them.
   Decision: delete them since all kernels now use safe slice patterns (from PERF-5 above).
   Commit: `chore(kernels): remove unused read_f32/write_f32 utilities`
 
-- [ ] **BUG-16** `src/kernels/cpu.rs` — GPU cross-entropy fallback silently transfers to CPU
+- [x] **BUG-16** `src/kernels/cpu.rs` — GPU cross-entropy fallback silently transfers to CPU
   with no warning. Add a `eprintln!` or `log::warn!` so users know this is happening:
   ```rust
   eprintln!("[fastnn WARNING] cross_entropy_loss: GPU kernel not implemented, falling back to CPU. This incurs a PCIe transfer penalty.");
@@ -417,7 +417,7 @@
   Same for `gt_scalar` GPU fallback.
   Commit: `fix(kernels): warn on silent GPU→CPU fallbacks`
 
-- [ ] **BUG-3** `src/kernels/cpu.rs` — The `#[cfg(not(simd))]` scalar fallback block inside
+- [x] **BUG-3** `src/kernels/cpu.rs` — The `#[cfg(not(simd))]` scalar fallback block inside
   `single_threaded_matmul` is placed inside the `unsafe` block for the FMA path, referencing
   variables not in scope. Dead code, but it prevents clean compilation with `--cfg simd`.
   Fix: move the fallback block outside the `if is_x86_feature_detected!("fma")` block,
