@@ -10073,6 +10073,146 @@ fn sign_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+/// PERF-1: Fused Adam/AdamW update kernel
+/// Updates parameters, momentum, and velocity in a single pass without intermediate allocations
+///
+/// # Arguments
+/// * `args` - [param, m, v, grad, v_hat (optional for amsgrad)]
+/// * Additional args: lr, beta1, beta2, eps, weight_decay, step
+fn adam_update_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let param = args[0];
+    let m = args[1];
+    let v = args[2];
+    let grad = args[3];
+    let has_v_hat = args.len() > 4 && args[4].shape().len() > 0;
+    let v_hat = if has_v_hat { Some(args[4]) } else { None };
+
+    let lr = args[args.len() - 6].item() as f32;
+    let beta1 = args[args.len() - 5].item() as f32;
+    let beta2 = args[args.len() - 4].item() as f32;
+    let eps = args[args.len() - 3].item() as f32;
+    let weight_decay = args[args.len() - 2].item() as f32;
+    let step = args[args.len() - 1].item() as f32;
+
+    let numel = param.inner.numel() as usize;
+
+    // Get raw pointers to the data
+    let param_ptr = param.data_ptr() as *mut f32;
+    let m_ptr = m.data_ptr() as *mut f32;
+    let v_ptr = v.data_ptr() as *mut f32;
+    let grad_ptr = grad.data_ptr() as *const f32;
+    let v_hat_ptr = v_hat.map(|t| t.data_ptr() as *mut f32);
+
+    // Compute bias corrections
+    let bias_correction1 = 1.0 - beta1.powf(step);
+    let bias_correction2 = 1.0 - beta2.powf(step);
+    let inv_bias_correction1 = 1.0 / bias_correction1;
+    let inv_bias_correction2 = 1.0 / bias_correction2;
+
+    // Parallel update loop
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+
+        // Convert pointers to usize for thread-safe passing
+        let param_usize = param_ptr as usize;
+        let m_usize = m_ptr as usize;
+        let v_usize = v_ptr as usize;
+        let grad_usize = grad_ptr as usize;
+        let v_hat_usize = v_hat_ptr.map(|p| p as usize);
+
+        // Process in chunks for better cache locality
+        let chunk_size = std::cmp::max(1, THRESHOLD_BINARY / 4);
+        let num_chunks = numel.div_ceil(chunk_size);
+
+        (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+            let start = chunk_idx * chunk_size;
+            let end = std::cmp::min(start + chunk_size, numel);
+
+            // Convert back to pointers in each thread
+            let param_ptr = param_usize as *mut f32;
+            let m_ptr = m_usize as *mut f32;
+            let v_ptr = v_usize as *mut f32;
+            let grad_ptr = grad_usize as *const f32;
+            let v_hat_ptr = v_hat_usize.map(|p| p as *mut f32);
+
+            for i in start..end {
+                unsafe {
+                    let param_val = *param_ptr.add(i);
+                    let m_val = *m_ptr.add(i);
+                    let v_val = *v_ptr.add(i);
+                    let grad_val = *grad_ptr.add(i);
+
+                    // Update momentum: m = beta1 * m + (1 - beta1) * grad
+                    let m_new = beta1 * m_val + (1.0 - beta1) * grad_val;
+                    *m_ptr.add(i) = m_new;
+
+                    // Update velocity: v = beta2 * v + (1 - beta2) * grad^2
+                    let grad_sq = grad_val * grad_val;
+                    let v_new = beta2 * v_val + (1.0 - beta2) * grad_sq;
+                    *v_ptr.add(i) = v_new;
+
+                    // Compute bias-corrected estimates
+                    let m_hat = m_new * inv_bias_correction1;
+                    let v_hat_val = v_new * inv_bias_correction2;
+
+                    // Update v_hat if amsgrad (element-wise max for AdamW compatibility)
+                    if let Some(vh_ptr) = v_hat_ptr {
+                        let existing_v_hat = *vh_ptr.add(i);
+                        *vh_ptr.add(i) = existing_v_hat.max(v_hat_val);
+                    }
+
+                    // Compute update: param -= lr * m_hat / (sqrt(v_hat) + eps) + wd * param
+                    let denom = (v_hat_val).sqrt() + eps;
+                    let update = lr * m_hat / denom;
+                    let weight_decay_term = weight_decay * param_val;
+                    *param_ptr.add(i) = param_val - update - weight_decay_term;
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for i in 0..numel {
+            unsafe {
+                let param_val = *param_ptr.add(i);
+                let m_val = *m_ptr.add(i);
+                let v_val = *v_ptr.add(i);
+                let grad_val = *grad_ptr.add(i);
+
+                // Update momentum: m = beta1 * m + (1 - beta1) * grad
+                let m_new = beta1 * m_val + (1.0 - beta1) * grad_val;
+                *m_ptr.add(i) = m_new;
+
+                // Update velocity: v = beta2 * v + (1 - beta2) * grad^2
+                let grad_sq = grad_val * grad_val;
+                let v_new = beta2 * v_val + (1.0 - beta2) * grad_sq;
+                *v_ptr.add(i) = v_new;
+
+                // Compute bias-corrected estimates
+                let m_hat = m_new * inv_bias_correction1;
+                let v_hat_val = v_new * inv_bias_correction2;
+
+                // Update v_hat if amsgrad (element-wise max for AdamW compatibility)
+                if let Some(vh_ptr) = v_hat_ptr {
+                    let existing_v_hat = *vh_ptr.add(i);
+                    *vh_ptr.add(i) = existing_v_hat.max(v_hat_val);
+                }
+
+                // Compute update: param -= lr * m_hat / (sqrt(v_hat) + eps) + wd * param
+                let denom = (v_hat_val).sqrt() + eps;
+                let update = lr * m_hat / denom;
+                let weight_decay_term = weight_decay * param_val;
+                *param_ptr.add(i) = param_val - update - weight_decay_term;
+            }
+        }
+    }
+
+    // Return empty vec since we modified in-place
+    vec![]
+}
+
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Cpu, add_kernel as KernelFn);
@@ -10206,4 +10346,11 @@ fn register_kernels() {
         gt_scalar_gpu_fallback as KernelFn,
     );
     register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
+
+    // PERF-1: Fused Adam/AdamW update kernel - single pass, no allocations
+    register(
+        "adam_update",
+        DispatchKey::Cpu,
+        adam_update_kernel as KernelFn,
+    );
 }
