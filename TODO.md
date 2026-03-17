@@ -202,7 +202,7 @@
 
 ## BLOCK 4 — SIMD / VECTORIZATION BUGS
 
-- [ ] **BUG-8** `src/kernels/cpu.rs` — AVX-512 `tanh` kernel loads a `__m512` (16 floats) then
+- [x] **BUG-8** `src/kernels/cpu.rs` — AVX-512 `tanh` kernel loads a `__m512` (16 floats) then
   immediately transmutes to `[f32; 16]` and processes element by element. The SIMD load is wasted.
   Fix: use the `wide` crate's `f32x8` (two iterations of 8) with `.exp()` which is fully vectorized:
   ```rust
@@ -213,7 +213,7 @@
   Mirror the pattern already used correctly in the AArch64 tanh path.
   Commit: `perf(kernels): fix AVX-512 tanh to use vectorized exp via wide crate`
 
-- [ ] **PERF-7** `src/kernels/cpu.rs` — `sigmoid_simd_x86` loads 8 floats into AVX2 register
+- [x] **PERF-7** `src/kernels/cpu.rs` — `sigmoid_simd_x86` loads 8 floats into AVX2 register
   then immediately transmutes back to scalar array and processes one by one.
   Fix: same as tanh — use `f32x8` from the `wide` crate:
   ```rust
@@ -227,7 +227,7 @@
 
 ## BLOCK 5 — PERFORMANCE OPTIMIZATIONS (implement after all bugs fixed)
 
-- [ ] **PERF-2** `src/kernels/cpu.rs` — `broadcast_index_decomposition` allocates a `Vec` on the
+- [x] **PERF-2** `src/kernels/cpu.rs` — `broadcast_index_decomposition` allocates a `Vec` on the
   heap inside a hot loop called once per output element.
   Fix: change `let mut multipliers = vec![0usize; ndim]` to
   `let mut multipliers = smallvec::SmallVec::<[usize; 8]>::from_elem(0, ndim)`.
@@ -235,7 +235,7 @@
   up to 8 dimensions (covers 99.9% of real use cases).
   Commit: `perf(kernels): use SmallVec for broadcast_index_decomposition multipliers`
 
-- [ ] **PERF-11** `src/kernels/cpu.rs` — The SIMD fast-path in `add_kernel` (and sub/mul/div)
+- [x] **PERF-11** `src/kernels/cpu.rs` — The SIMD fast-path in `add_kernel` (and sub/mul/div)
   requires `a_shape == b_shape`. The most common case in neural nets — `[B, D] + [D]` bias add —
   always falls to the slow scalar broadcast path.
   Fix: add a second fast path specifically for the `[N, D] + [D]` broadcast pattern:
@@ -243,7 +243,7 @@
   same `b` slice to each row of `a`. This covers `Linear`, `LayerNorm`, and `BatchNorm` bias adds.
   Commit: `perf(kernels): add SIMD fast-path for [N,D]+[D] broadcast add`
 
-- [ ] **PERF-12** `src/kernels/cpu.rs` — `embedding_kernel` copies rows element by element.
+- [x] **PERF-12** `src/kernels/cpu.rs` — `embedding_kernel` copies rows element by element.
   Fix: replace the inner `j` loop with `std::ptr::copy_nonoverlapping`:
   ```rust
   unsafe {
@@ -258,7 +258,7 @@
   accumulation since it's a += not =, but the inner loop over `j` can be replaced with a SIMD sum).
   Commit: `perf(kernels): use ptr::copy_nonoverlapping for embedding row copies`
 
-- [ ] **PERF-8** `src/lib.rs` and `src/kernels/cpu.rs` — `randn` uses Box-Muller transform
+- [x] **PERF-8** `src/lib.rs` and `src/kernels/cpu.rs` — `randn` uses Box-Muller transform
   (one `ln()` + one `cos()` per 2 samples). Replace with the `StandardNormal` distribution
   from `rand_distr` crate which uses the much faster Ziggurat method:
   ```rust
@@ -369,7 +369,7 @@
   Replace all `numel > 2048` checks with the appropriate category constant.
   Commit: `perf(kernels): tune per-operation parallelism thresholds`
 
-- [ ] **PERF-19** `src/kernels/cpu.rs` — The `wide` crate is already a dependency but only used
+- [x] **PERF-19** `src/kernels/cpu.rs` — The `wide` crate is already a dependency but only used
   in AArch64 tanh. All x86 paths for `gelu`, `silu`, `exp` use raw intrinsics and scalarize
   for transcendentals.
   Fix: for `gelu_kernel`, `silu_kernel`, `exp_kernel` on x86_64, use `f32x8` from `wide`:
@@ -379,7 +379,7 @@
   *out_chunk = result.into();
   ```
   This gives vectorized transcendentals without needing AVX-512.
-  Commit: `perf(kernels): use wide crate f32x8 for gelu/silu/exp on x86_64`
+  Commit: `perf(kernels): use wide crate f32x8 for gelu/silu/exp on x86_64` ✓
 
 - [ ] **PERF-18** `fastnn/parallel.py` — DDP `sync_gradients` does one Python-level `add` + `div`
   dispatch per parameter in a Python loop.
