@@ -418,6 +418,8 @@ impl TensorImpl {
         } else if let Some(meta) = &mut self.autograd_meta {
             if let Ok(mut lock) = meta.lock() {
                 lock.requires_grad = requires_grad;
+                // PERF-9: Invalidate topological order cache when requires_grad changes
+                lock.topo_order_cache = None;
             }
         }
     }
