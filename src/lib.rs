@@ -1472,14 +1472,29 @@ impl PyTransformerEncoder {
     }
 }
 
+use std::collections::HashMap;
+
 #[pyfunction]
-fn save_model(_model: Py<PyAny>, path: String) {
-    println!("Saved model to {}", path);
+fn save_model(_model: Py<PyAny>, path: String) -> PyResult<()> {
+    // Note: This is a simplified implementation that doesn't actually save the model
+    // due to Python/Rust interop complexity. In a real implementation, you would need to:
+    // 1. Extract the model's parameters from the Python object
+    // 2. Convert them to Rust Tensor objects
+    // 3. Call the Rust save_model function
+    println!("Note: Python model saving is not fully implemented yet. Use Rust APIs directly.");
+    println!("Saved model placeholder to {}", path);
+    Ok(())
 }
 
 #[pyfunction]
-fn load_model(path: String, _model_class: Option<Py<PyAny>>) {
-    println!("Loaded model from {}", path);
+fn load_model_py(
+    path: String,
+    _model_class: Option<Py<PyAny>>,
+) -> PyResult<std::collections::HashMap<String, PyTensor>> {
+    // Note: This is a simplified implementation
+    println!("Note: Python model loading is not fully implemented yet. Use Rust APIs directly.");
+    println!("Loaded model placeholder from {}", path);
+    Ok(std::collections::HashMap::new())
 }
 
 #[pymodule]
@@ -1541,7 +1556,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(allocator_stats, py)?)?;
     m.add_function(wrap_pyfunction!(list_registered_ops, py)?)?;
     m.add_function(wrap_pyfunction!(save_model, py)?)?;
-    m.add_function(wrap_pyfunction!(load_model, py)?)?;
+    m.add_function(wrap_pyfunction!(load_model_py, py)?)?;
 
     m.add_class::<Linear>()?;
     m.add_class::<Conv2d>()?;
