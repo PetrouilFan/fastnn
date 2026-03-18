@@ -25,9 +25,6 @@ pub struct AutogradMeta {
     pub grad: Option<Tensor>,
     pub grad_fn: Option<Arc<dyn Node>>,
     pub is_leaf: bool,
-    /// Cached topological order for static computation graphs
-    /// This is reused across multiple backward() calls for the same graph
-    pub topo_order_cache: Option<Vec<Arc<dyn Node>>>,
 }
 
 impl AutogradMeta {
@@ -37,7 +34,6 @@ impl AutogradMeta {
             grad: None,
             grad_fn: None,
             is_leaf: true,
-            topo_order_cache: None,
         }
     }
 
@@ -47,14 +43,7 @@ impl AutogradMeta {
             grad: None,
             grad_fn: None,
             is_leaf: false,
-            topo_order_cache: None,
         }
-    }
-
-    /// Invalidate the topological order cache
-    /// This should be called when the computation graph changes
-    pub fn invalidate_topo_cache(&mut self) {
-        self.topo_order_cache = None;
     }
 }
 
@@ -496,6 +485,13 @@ impl Node for MatmulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
+        // Debug: print shapes
+        eprintln!(
+            "MatmulBackward: a.shape={:?}, b.shape={:?}, grad.shape={:?}",
+            a.shape(),
+            b.shape(),
+            grad.shape()
+        );
         // if (a.shape() == vec![32, 64, 64] && b.shape() == vec![64, 64])
         //     && grad.shape() == vec![32, 64, 64]
         // {
