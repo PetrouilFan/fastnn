@@ -494,7 +494,7 @@ impl TensorImpl {
     #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
         match &self.storage.as_ref() {
-            Storage::Cpu(cpu) => cpu.data.as_ptr(),
+            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
                 panic!(
@@ -510,8 +510,9 @@ impl TensorImpl {
     pub fn data_ptr_f32(&self) -> *const f32 {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ptr() as *const f32;
-                unsafe { ptr.add(self.storage_offset as usize) }
+                let ptr = cpu.data.as_ref().as_ptr() as *const u8;
+                let ptr = unsafe { ptr.add(self.storage_offset as usize) } as *const f32;
+                ptr
             }
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
@@ -526,11 +527,15 @@ impl TensorImpl {
         }
     }
 
-    pub fn data_ptr_f32_mut(&self) -> *mut f32 {
-        match &self.storage.as_ref() {
+    pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
+        match self.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ptr() as *mut f32;
-                unsafe { ptr.add(self.storage_offset as usize) }
+                // cpu.data is &Arc<Vec<u8>>
+                // We need to get a pointer to the underlying Vec<u8>'s data
+                // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
+                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                let ptr = unsafe { ptr.add(self.storage_offset as usize) } as *mut f32;
+                ptr
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
@@ -541,7 +546,7 @@ impl TensorImpl {
     pub fn as_f32_slice(&self) -> &[f32] {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => unsafe {
-                let ptr = cpu.data.as_ptr() as *const f32;
+                let ptr = cpu.data.as_ref().as_ptr() as *const f32;
                 let numel = self.numel() as usize;
                 std::slice::from_raw_parts(ptr, numel)
             },
@@ -552,16 +557,9 @@ impl TensorImpl {
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        match &self.storage.as_ref() {
-            Storage::Cpu(cpu) => unsafe {
-                let ptr = cpu.data.as_ptr() as *mut f32;
-                let numel = self.numel() as usize;
-                std::slice::from_raw_parts_mut(ptr, numel)
-            },
-            Storage::Wgpu(_) => {
-                panic!("Cannot slice GPU storage. Use .to_cpu() first.");
-            }
-        }
+        let ptr = self.data_ptr_f32_mut();
+        let numel = self.numel() as usize;
+        unsafe { std::slice::from_raw_parts_mut(ptr, numel) }
     }
 
     /// Check if storage is on GPU
@@ -618,6 +616,8 @@ impl TensorImpl {
 
 impl Clone for TensorImpl {
     fn clone(&self) -> Self {
+        // Clone the storage by cloning the Arc<Mutex<Storage>>
+        // This shares the same Mutex<Storage> between clones
         TensorImpl {
             storage: Arc::clone(&self.storage),
             sizes: self.sizes.clone(),
@@ -673,9 +673,10 @@ impl Tensor {
         let Storage::Cpu(cpu_storage) = storage_mut else {
             panic!("Expected CPU storage");
         };
-        let data = cpu_storage.data.as_mut_ptr() as *mut f32;
+        let data = Arc::make_mut(&mut cpu_storage.data);
+        let ptr = data.as_mut_ptr() as *mut f32;
         unsafe {
-            *data = value;
+            *ptr = value;
         }
         let sizes: SmallVec<[i64; 8]> = smallvec![];
         Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
@@ -775,7 +776,8 @@ impl Tensor {
         let Storage::Cpu(cpu_storage) = storage else {
             panic!("Expected CPU storage for ones()");
         };
-        let ptr = cpu_storage.data.as_mut_ptr();
+        let data = Arc::make_mut(&mut cpu_storage.data);
+        let ptr = data.as_mut_ptr();
         match dtype {
             DType::F32 => {
                 let f32_ptr = ptr as *mut f32;
@@ -817,7 +819,7 @@ impl Tensor {
                 let Storage::Cpu(cpu_storage) = storage else {
                     panic!("Expected CPU storage for full()");
                 };
-                let ptr = cpu_storage.data.as_mut_ptr();
+                let ptr = Arc::make_mut(&mut cpu_storage.data).as_mut_ptr();
 
                 match dtype {
                     DType::F32 => {
@@ -1058,7 +1060,7 @@ impl Tensor {
         }
 
         let ptr = match self.inner.storage.as_ref() {
-            Storage::Cpu(cpu) => cpu.data.as_ptr(),
+            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
             Storage::Wgpu(_) => {
                 panic!("Cannot call item() on GPU tensor. Use .cpu() first.");
             }
@@ -1080,6 +1082,14 @@ impl Tensor {
                 let i64_ptr = ptr as *const i64;
                 unsafe { *i64_ptr.add(self.inner.storage_offset as usize) as f32 }
             }
+            DType::BF16 => {
+                let bf16_ptr = ptr as *const half::bf16;
+                unsafe { f32::from(*bf16_ptr.add(self.inner.storage_offset as usize)) }
+            }
+            DType::F16 => {
+                let f16_ptr = ptr as *const half::f16;
+                unsafe { f32::from(*f16_ptr.add(self.inner.storage_offset as usize)) }
+            }
             _ => panic!("Unsupported dtype for item()"),
         }
     }
@@ -1091,7 +1101,7 @@ impl Tensor {
                     DType::F32 => {
                         // Use stride-aware indexing
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
-                        let data = cpu.data.as_ptr() as *const f32;
+                        let data = cpu.data.as_ref().as_ptr() as *const f32;
 
                         // Create an iterator over all elements using strides
                         let mut indices = vec![0i64; self.inner.ndim()];
@@ -1121,7 +1131,7 @@ impl Tensor {
                     DType::F64 => {
                         // Similar for F64
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
-                        let data = cpu.data.as_ptr() as *const f64;
+                        let data = cpu.data.as_ref().as_ptr() as *const f64;
 
                         let mut indices = vec![0i64; self.inner.ndim()];
 
@@ -1148,7 +1158,7 @@ impl Tensor {
                     DType::I32 => {
                         // Similar for I32
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
-                        let data = cpu.data.as_ptr() as *const i32;
+                        let data = cpu.data.as_ref().as_ptr() as *const i32;
 
                         let mut indices = vec![0i64; self.inner.ndim()];
 
@@ -1160,6 +1170,60 @@ impl Tensor {
 
                             unsafe {
                                 result.push(*data.add(linear_idx as usize) as f32);
+                            }
+
+                            for dim in (0..self.inner.ndim()).rev() {
+                                indices[dim] += 1;
+                                if indices[dim] < self.inner.sizes[dim] {
+                                    break;
+                                }
+                                indices[dim] = 0;
+                            }
+                        }
+                        result
+                    }
+                    DType::BF16 => {
+                        // Similar for BF16
+                        let mut result = Vec::with_capacity(self.inner.numel() as usize);
+                        let data = cpu.data.as_ref().as_ptr() as *const half::bf16;
+
+                        let mut indices = vec![0i64; self.inner.ndim()];
+
+                        for _ in 0..self.inner.numel() {
+                            let mut linear_idx = self.inner.storage_offset;
+                            for (i, &stride) in self.inner.strides.iter().enumerate() {
+                                linear_idx += indices[i] * stride;
+                            }
+
+                            unsafe {
+                                result.push(f32::from(*data.add(linear_idx as usize)));
+                            }
+
+                            for dim in (0..self.inner.ndim()).rev() {
+                                indices[dim] += 1;
+                                if indices[dim] < self.inner.sizes[dim] {
+                                    break;
+                                }
+                                indices[dim] = 0;
+                            }
+                        }
+                        result
+                    }
+                    DType::F16 => {
+                        // Similar for F16
+                        let mut result = Vec::with_capacity(self.inner.numel() as usize);
+                        let data = cpu.data.as_ref().as_ptr() as *const half::f16;
+
+                        let mut indices = vec![0i64; self.inner.ndim()];
+
+                        for _ in 0..self.inner.numel() {
+                            let mut linear_idx = self.inner.storage_offset;
+                            for (i, &stride) in self.inner.strides.iter().enumerate() {
+                                linear_idx += indices[i] * stride;
+                            }
+
+                            unsafe {
+                                result.push(f32::from(*data.add(linear_idx as usize)));
                             }
 
                             for dim in (0..self.inner.ndim()).rev() {
@@ -1192,15 +1256,72 @@ impl Tensor {
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        Arc::make_mut(&mut self.inner).data_ptr_f32_mut()
+        // Return raw pointer to potentially shared data.
+        // This matches PyTorch's behavior where Storage is shared but modified in place.
+        // Writing to this pointer is unsafe if multiple threads access the same data.
+        let inner = &self.inner; // &Arc<TensorImpl>
+        match inner.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                // cpu.data is &Arc<Vec<u8>>
+                // We need to get a pointer to the underlying Vec<u8>'s data
+                // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
+                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                let ptr = unsafe { ptr.add(inner.storage_offset as usize) } as *mut f32;
+                ptr
+            }
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+            }
+        }
+    }
+
+    /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
+    pub fn data_ptr_mut(&mut self) -> *mut u8 {
+        let inner = &self.inner;
+        match inner.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                unsafe { ptr.add(inner.storage_offset as usize) }
+            }
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+            }
+        }
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
-        self.inner.as_f32_slice()
+        // For BF16/F16 types, we need to convert to F32
+        match self.inner.dtype {
+            DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
+                self.inner.as_f32_slice()
+            }
+            DType::BF16 | DType::F16 => {
+                // For half-precision types, we need to convert to F32
+                // This requires creating a new tensor with F32 dtype
+                // For now, we'll panic as this is not yet fully implemented
+                panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
+            }
+        }
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        Arc::make_mut(&mut self.inner).as_f32_slice_mut()
+        // For BF16/F16 types, we cannot directly get a mutable f32 slice
+        // The data is stored in half-precision format
+        // For operations that need f32, use the dtype-specific operations
+        match self.inner.dtype {
+            DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
+                // Unsafe: we get a mutable reference to the inner TensorImpl
+                // This is safe *only* if we have unique ownership of the Arc.
+                // But Arc::make_mut clones if shared.
+                // So we use unsafe cast to get &mut TensorImpl without cloning.
+                // This matches PyTorch's behavior where Storage is shared but modified in place.
+                let inner = unsafe { &mut *(Arc::as_ptr(&self.inner) as *mut TensorImpl) };
+                inner.as_f32_slice_mut()
+            }
+            DType::BF16 | DType::F16 => {
+                panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
+            }
+        }
     }
 
     pub fn increment_version(&self) {
@@ -1234,7 +1355,7 @@ impl Tensor {
                 let ctx = get_context(gpu.device_id);
                 let data = ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
                 let storage = Arc::new(Storage::Cpu(CpuStorage {
-                    data: bytemuck::cast_slice(&data).to_vec(),
+                    data: Arc::new(bytemuck::cast_slice(&data).to_vec()),
                     nbytes: gpu.nbytes,
                     gpu_buffer_cache: RwLock::new(HashMap::new()),
                 }));
@@ -1357,43 +1478,66 @@ impl Tensor {
         }
 
         // CPU path: direct memory manipulation
-        let self_inner = Arc::make_mut(&mut self.inner);
-        let dtype = self_inner.dtype;
-        let numel = self_inner.numel() as usize;
-        let self_storage = Arc::make_mut(&mut self_inner.storage);
+        let dtype = self.inner.dtype;
+        let numel = self.inner.numel() as usize;
 
-        match (self_storage, other.inner.storage.as_ref()) {
-            (Storage::Cpu(cpu_self), Storage::Cpu(cpu_other)) => match dtype {
-                DType::F32 => {
-                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut f32;
-                    let other_ptr = cpu_other.data.as_ptr() as *const f32;
-                    for i in 0..numel {
-                        unsafe {
-                            *self_ptr.add(i) += *other_ptr.add(i);
-                        }
+        // Use data_ptr_f32_mut for in-place update (as per user's suggestion)
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+
+        match dtype {
+            DType::F32 => {
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) += *other_ptr.add(i);
                     }
                 }
-                DType::F64 => {
-                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut f64;
-                    let other_ptr = cpu_other.data.as_ptr() as *const f64;
-                    for i in 0..numel {
-                        unsafe {
-                            *self_ptr.add(i) += *other_ptr.add(i);
-                        }
+            }
+            DType::F64 => {
+                let self_ptr = self_ptr as *mut f64;
+                let other_ptr = other_ptr as *const f64;
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) += *other_ptr.add(i);
                     }
                 }
-                DType::I32 => {
-                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut i32;
-                    let other_ptr = cpu_other.data.as_ptr() as *const i32;
-                    for i in 0..numel {
-                        unsafe {
-                            *self_ptr.add(i) += *other_ptr.add(i);
-                        }
+            }
+            DType::I32 => {
+                let self_ptr = self_ptr as *mut i32;
+                let other_ptr = other_ptr as *const i32;
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) += *other_ptr.add(i);
                     }
                 }
-                _ => unimplemented!("add_ for dtype {:?}", dtype),
-            },
-            _ => unimplemented!("add_ for non-CPU storage"),
+            }
+            DType::BF16 => {
+                // For BF16, we need to upcast to F32 for computation
+                // Use data_ptr_mut() to get correct byte offset for 2-byte types
+                let self_ptr = self.data_ptr_mut() as *mut half::bf16;
+                let other_ptr = other.data_ptr() as *const half::bf16;
+                for i in 0..numel {
+                    unsafe {
+                        let self_val = f32::from(*self_ptr.add(i));
+                        let other_val = f32::from(*other_ptr.add(i));
+                        *self_ptr.add(i) = half::bf16::from_f32(self_val + other_val);
+                    }
+                }
+            }
+            DType::F16 => {
+                // For F16, we need to upcast to F32 for computation
+                // Use data_ptr_mut() to get correct byte offset for 2-byte types
+                let self_ptr = self.data_ptr_mut() as *mut half::f16;
+                let other_ptr = other.data_ptr() as *const half::f16;
+                for i in 0..numel {
+                    unsafe {
+                        let self_val = f32::from(*self_ptr.add(i));
+                        let other_val = f32::from(*other_ptr.add(i));
+                        *self_ptr.add(i) = half::f16::from_f32(self_val + other_val);
+                    }
+                }
+            }
+            _ => unimplemented!("add_ for dtype {:?}", dtype),
         }
         self
     }
@@ -1406,43 +1550,66 @@ impl Tensor {
             return self;
         }
 
-        let self_inner = Arc::make_mut(&mut self.inner);
-        let dtype = self_inner.dtype;
-        let numel = self_inner.numel() as usize;
-        let self_storage = Arc::make_mut(&mut self_inner.storage);
+        let dtype = self.inner.dtype;
+        let numel = self.inner.numel() as usize;
 
-        match (self_storage, other.inner.storage.as_ref()) {
-            (Storage::Cpu(cpu_self), Storage::Cpu(cpu_other)) => match dtype {
-                DType::F32 => {
-                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut f32;
-                    let other_ptr = cpu_other.data.as_ptr() as *const f32;
-                    for i in 0..numel {
-                        unsafe {
-                            *self_ptr.add(i) *= *other_ptr.add(i);
-                        }
+        // Use data_ptr_f32_mut for in-place update (as per user's suggestion)
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+
+        match dtype {
+            DType::F32 => {
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) *= *other_ptr.add(i);
                     }
                 }
-                DType::F64 => {
-                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut f64;
-                    let other_ptr = cpu_other.data.as_ptr() as *const f64;
-                    for i in 0..numel {
-                        unsafe {
-                            *self_ptr.add(i) *= *other_ptr.add(i);
-                        }
+            }
+            DType::F64 => {
+                let self_ptr = self_ptr as *mut f64;
+                let other_ptr = other_ptr as *const f64;
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) *= *other_ptr.add(i);
                     }
                 }
-                DType::I32 => {
-                    let self_ptr = cpu_self.data.as_mut_ptr() as *mut i32;
-                    let other_ptr = cpu_other.data.as_ptr() as *const i32;
-                    for i in 0..numel {
-                        unsafe {
-                            *self_ptr.add(i) *= *other_ptr.add(i);
-                        }
+            }
+            DType::I32 => {
+                let self_ptr = self_ptr as *mut i32;
+                let other_ptr = other_ptr as *const i32;
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) *= *other_ptr.add(i);
                     }
                 }
-                _ => unimplemented!("mul_ for dtype {:?}", dtype),
-            },
-            _ => unimplemented!("mul_ for non-CPU storage"),
+            }
+            DType::BF16 => {
+                // For BF16, we need to upcast to F32 for computation
+                // Use data_ptr_mut() to get correct byte offset for 2-byte types
+                let self_ptr = self.data_ptr_mut() as *mut half::bf16;
+                let other_ptr = other.data_ptr() as *const half::bf16;
+                for i in 0..numel {
+                    unsafe {
+                        let self_val = f32::from(*self_ptr.add(i));
+                        let other_val = f32::from(*other_ptr.add(i));
+                        *self_ptr.add(i) = half::bf16::from_f32(self_val * other_val);
+                    }
+                }
+            }
+            DType::F16 => {
+                // For F16, we need to upcast to F32 for computation
+                // Use data_ptr_mut() to get correct byte offset for 2-byte types
+                let self_ptr = self.data_ptr_mut() as *mut half::f16;
+                let other_ptr = other.data_ptr() as *const half::f16;
+                for i in 0..numel {
+                    unsafe {
+                        let self_val = f32::from(*self_ptr.add(i));
+                        let other_val = f32::from(*other_ptr.add(i));
+                        *self_ptr.add(i) = half::f16::from_f32(self_val * other_val);
+                    }
+                }
+            }
+            _ => unimplemented!("mul_ for dtype {:?}", dtype),
         }
         self
     }
