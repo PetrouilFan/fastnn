@@ -511,7 +511,8 @@ impl TensorImpl {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 let ptr = cpu.data.as_ref().as_ptr();
-                (unsafe { ptr.add(self.storage_offset as usize) }) as *const f32
+                // storage_offset is in elements, multiply by size of f32 (4 bytes)
+                (unsafe { ptr.add(self.storage_offset as usize * 4) }) as *const f32
             }
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
@@ -533,7 +534,8 @@ impl TensorImpl {
                 // We need to get a pointer to the underlying Vec<u8>'s data
                 // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                (unsafe { ptr.add(self.storage_offset as usize) }) as *mut f32
+                // storage_offset is in elements, multiply by size of f32 (4 bytes)
+                (unsafe { ptr.add(self.storage_offset as usize * 4) }) as *mut f32
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
@@ -1264,7 +1266,8 @@ impl Tensor {
                 // We need to get a pointer to the underlying Vec<u8>'s data
                 // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                (unsafe { ptr.add(inner.storage_offset as usize) }) as *mut f32
+                // storage_offset is in elements, so multiply by size of f32 (4 bytes)
+                (unsafe { ptr.add(inner.storage_offset as usize * 4) }) as *mut f32
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
@@ -1278,7 +1281,14 @@ impl Tensor {
         match inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                unsafe { ptr.add(inner.storage_offset as usize) }
+                // For BF16/F16, storage_offset is in elements, multiply by 2 bytes
+                // For F32/F64, this will be incorrect but we use data_ptr_f32_mut instead
+                let elem_size = match inner.dtype {
+                    DType::F32 | DType::I32 | DType::Bool => 4,
+                    DType::F64 | DType::I64 => 8,
+                    DType::F16 | DType::BF16 => 2,
+                };
+                unsafe { ptr.add(inner.storage_offset as usize * elem_size) }
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
