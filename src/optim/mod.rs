@@ -1,5 +1,6 @@
 pub mod adam;
 pub mod adamw;
+pub mod muon;
 pub mod sgd;
 
 use crate::tensor::Tensor;

@@ -67,3 +67,19 @@ def set_default_device(device: str):
         device: Device string, e.g., "cpu", "gpu", "wgpu", "gpu:0"
     """
     _core._set_default_device(device)
+
+
+def checkpoint(inputs):
+    """Enable gradient checkpointing to save memory during training.
+
+    This is a placeholder implementation that returns the inputs as-is.
+    In a full implementation, this would store the computation graph
+    for recomputation during the backward pass.
+
+    Args:
+        inputs: List of input tensors
+
+    Returns:
+        List of output tensors (currently just returns inputs)
+    """
+    return _core.checkpoint(inputs)

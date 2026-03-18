@@ -165,7 +165,7 @@ impl TensorIterator {
                 }
 
                 let ptr = match input.tensor.inner.storage.as_ref() {
-                    crate::storage::Storage::Cpu(cpu) => cpu.data.as_ptr(),
+                    crate::storage::Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
                     crate::storage::Storage::Wgpu(_) => {
                         panic!("Iterator doesn't support GPU storage. Use .to_cpu() first.");
                     }
@@ -212,7 +212,7 @@ impl TensorIterator {
                 }
 
                 let ptr = match input.tensor.inner.storage.as_ref() {
-                    crate::storage::Storage::Cpu(cpu) => cpu.data.as_ptr(),
+                    crate::storage::Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
                     crate::storage::Storage::Wgpu(_) => {
                         panic!("Iterator doesn't support GPU storage. Use .to_cpu() first.");
                     }

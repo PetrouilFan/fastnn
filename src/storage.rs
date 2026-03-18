@@ -87,7 +87,7 @@ impl Device {
 // CPU storage variant - with optional lazy GPU buffer cache
 #[derive(Debug)]
 pub struct CpuStorage {
-    pub data: Vec<u8>,
+    pub data: Arc<Vec<u8>>,
     pub nbytes: usize,
     // Lazy GPU buffer cache: maps device_id -> GPU buffer
     // This avoids repeated CPU->GPU transfers for tensors used in multiple GPU ops
@@ -133,9 +133,9 @@ impl Storage {
     // Create CPU storage
     pub fn new_cpu(_dtype: DType, nbytes: usize) -> Self {
         let data = if nbytes > 0 {
-            vec![0u8; nbytes]
+            Arc::new(vec![0u8; nbytes])
         } else {
-            vec![]
+            Arc::new(vec![])
         };
 
         if let Some(stats) = ALLOC_STATS.get() {
@@ -169,7 +169,7 @@ impl Storage {
             Device::Cpu => {
                 let mut storage = Storage::new_cpu(dtype, nbytes);
                 if let Storage::Cpu(cpu) = &mut storage {
-                    let ptr = cpu.data.as_mut_ptr() as *mut T;
+                    let ptr = Arc::make_mut(&mut cpu.data).as_mut_ptr() as *mut T;
                     unsafe {
                         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
                     }
@@ -181,7 +181,7 @@ impl Storage {
                 // The actual GPU buffer will be created on-demand when needed
                 let mut cpu_storage = Storage::new_cpu(dtype, nbytes);
                 if let Storage::Cpu(cpu) = &mut cpu_storage {
-                    let ptr = cpu.data.as_mut_ptr() as *mut T;
+                    let ptr = Arc::make_mut(&mut cpu.data).as_mut_ptr() as *mut T;
                     unsafe {
                         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
                     }
@@ -193,7 +193,7 @@ impl Storage {
 
     pub fn as_ptr<T>(&self) -> *const T {
         match self {
-            Storage::Cpu(cpu) => cpu.data.as_ptr() as *const T,
+            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr() as *const T,
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use to_cpu() first.")
             }
@@ -202,7 +202,10 @@ impl Storage {
 
     pub fn as_mut_ptr<T>(&mut self) -> *mut T {
         match self {
-            Storage::Cpu(cpu) => cpu.data.as_mut_ptr() as *mut T,
+            Storage::Cpu(cpu) => {
+                let data = Arc::make_mut(&mut cpu.data);
+                data.as_mut_ptr() as *mut T
+            }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use to_cpu() first.")
             }
