@@ -1546,14 +1546,17 @@ impl Node for SliceBackward {
 
 /// CheckpointNode for gradient checkpointing
 /// Stores a function and its inputs to recompute during backward pass
+#[allow(clippy::type_complexity)]
 pub struct CheckpointNode {
     pub inputs: Vec<Tensor>,
     pub edges: Vec<Edge>,
+    #[allow(clippy::type_complexity)]
     pub checkpoint_fn: Box<dyn Fn(&[Tensor]) -> Vec<Tensor> + Send + Sync>,
     pub output_ids: Vec<usize>,
 }
 
 impl CheckpointNode {
+    #[allow(clippy::type_complexity)]
     pub fn new(
         inputs: Vec<Tensor>,
         edges: Vec<Edge>,
@@ -1570,12 +1573,13 @@ impl CheckpointNode {
 }
 
 impl Node for CheckpointNode {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+    #[allow(clippy::unused_async)]
+    fn apply(&self, _grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         // For checkpointing, we need to recompute the forward pass
         // to get the intermediate activations needed for backward
 
         // Recompute forward pass with gradients enabled
-        let outputs = (self.checkpoint_fn)(&self.inputs);
+        let _outputs = (self.checkpoint_fn)(&self.inputs);
 
         // Return None for inputs - the gradients will be computed by the actual backward ops
         vec![None; self.inputs.len()]
