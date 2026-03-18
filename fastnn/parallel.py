@@ -147,7 +147,9 @@ class DataParallel:
         ]
         total_samples = sum(batch_sizes)
         if total_samples > 0:
-            avg_loss = sum(l * n for l, n in zip(losses, batch_sizes)) / total_samples
+            avg_loss = (
+                sum(loss * n for loss, n in zip(losses, batch_sizes)) / total_samples
+            )
         else:
             avg_loss = sum(losses) / len(losses)
         return avg_loss
