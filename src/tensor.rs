@@ -510,9 +510,10 @@ impl TensorImpl {
     pub fn data_ptr_f32(&self) -> *const f32 {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr();
-                // storage_offset is in elements, multiply by size of f32 (4 bytes)
-                (unsafe { ptr.add(self.storage_offset as usize * 4) }) as *const f32
+                let ptr = cpu.data.as_ref().as_ptr() as *const u8;
+                // storage_offset is in elements, cast to f32 pointer first
+                let f32_ptr = ptr as *const f32;
+                unsafe { f32_ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
@@ -534,8 +535,9 @@ impl TensorImpl {
                 // We need to get a pointer to the underlying Vec<u8>'s data
                 // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                // storage_offset is in elements, multiply by size of f32 (4 bytes)
-                (unsafe { ptr.add(self.storage_offset as usize * 4) }) as *mut f32
+                // storage_offset is in elements, cast to f32 pointer first
+                let f32_ptr = ptr as *mut f32;
+                unsafe { f32_ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
@@ -1276,13 +1278,13 @@ impl Tensor {
     }
 
     /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
+    /// Note: storage_offset is in elements, so we need to multiply by element size
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
         let inner = &self.inner;
         match inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                // For BF16/F16, storage_offset is in elements, multiply by 2 bytes
-                // For F32/F64, this will be incorrect but we use data_ptr_f32_mut instead
+                // storage_offset is in elements, convert to bytes based on dtype
                 let elem_size = match inner.dtype {
                     DType::F32 | DType::I32 | DType::Bool => 4,
                     DType::F64 | DType::I64 => 8,
