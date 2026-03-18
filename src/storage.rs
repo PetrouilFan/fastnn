@@ -1,100 +1,11 @@
-use mimalloc::MiMalloc;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-#[global_allocator]
-static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
-
 #[allow(dead_code)]
 static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
-
-#[allow(dead_code)]
-const MAX_CACHED_BLOCKS: usize = 64;
-const POOL_THRESHOLD: usize = 8 * 1024 * 1024;
-
-const NUM_SIZE_CLASSES: usize = 16;
-const SIZE_CLASSES: &[usize] = &[
-    64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288,
-    1048576, 2097152,
-];
-
-fn get_size_class(size: usize) -> usize {
-    for &class in SIZE_CLASSES.iter() {
-        if size <= class {
-            return class;
-        }
-    }
-    SIZE_CLASSES[NUM_SIZE_CLASSES - 1]
-}
-
-struct MemoryPool {
-    free_blocks: Vec<Vec<u8>>,
-    total_cached: usize,
-}
-
-impl MemoryPool {
-    fn new() -> Self {
-        Self {
-            free_blocks: Vec::with_capacity(NUM_SIZE_CLASSES),
-            total_cached: 0,
-        }
-    }
-
-    fn allocate(&mut self, size: usize) -> Vec<u8> {
-        if size == 0 {
-            return vec![];
-        }
-
-        if size > POOL_THRESHOLD {
-            return vec![0u8; size];
-        }
-
-        let size_class = get_size_class(size);
-
-        for i in 0..self.free_blocks.len() {
-            if self.free_blocks[i].len() >= size_class {
-                let block = self.free_blocks.swap_remove(i);
-                self.total_cached = self.total_cached.saturating_sub(block.len());
-                return block;
-            }
-        }
-
-        let rounded_size = (size + 63) & !63;
-        vec![0u8; rounded_size]
-    }
-
-    #[allow(dead_code)]
-    fn deallocate(&mut self, data: Vec<u8>) {
-        if data.is_empty() {
-            return;
-        }
-
-        let rounded_size = (data.len() + 63) & !63;
-
-        if rounded_size > POOL_THRESHOLD || self.total_cached > POOL_THRESHOLD {
-            return;
-        }
-
-        let current_size = self.total_cached;
-        if current_size + rounded_size > POOL_THRESHOLD {
-            return;
-        }
-
-        if self.free_blocks.len() < MAX_CACHED_BLOCKS {
-            self.total_cached += rounded_size;
-            self.free_blocks.push(data);
-        }
-    }
-}
-
-static MEMORY_POOL: std::sync::OnceLock<RwLock<MemoryPool>> = std::sync::OnceLock::new();
-
-fn get_memory_pool() -> &'static RwLock<MemoryPool> {
-    MEMORY_POOL.get_or_init(|| RwLock::new(MemoryPool::new()))
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
@@ -222,8 +133,7 @@ impl Storage {
     // Create CPU storage
     pub fn new_cpu(_dtype: DType, nbytes: usize) -> Self {
         let data = if nbytes > 0 {
-            let pool = get_memory_pool();
-            pool.write().allocate(nbytes)
+            vec![0u8; nbytes]
         } else {
             vec![]
         };
