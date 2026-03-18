@@ -2,7 +2,7 @@
 
 **fastnn** is a high-performance, production-grade neural network framework built from scratch in Rust with seamless Python bindings. It delivers hardware-accelerated CPU and GPU compute through a familiar PyTorch-like API, without the overhead of mainstream deep learning stacks.
 
-> **Version:** v0.4.0 — Multi-GPU Support with Distributed Data Parallel
+> **Version:** v0.5.0 — Stability and Performance Fixes
 
 [![CI](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml/badge.svg)](https://github.com/PetrouilFan/fastnn/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
