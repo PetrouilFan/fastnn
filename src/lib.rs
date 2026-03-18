@@ -6,6 +6,7 @@ mod kernels;
 mod nn;
 mod optim;
 mod storage;
+mod storage_pool;
 mod tensor;
 mod train;
 

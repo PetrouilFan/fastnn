@@ -1,6 +1,7 @@
 use crate::autograd::{self, AutogradMeta};
 use crate::dispatcher::{device_to_dispatch_key, dispatch};
 use crate::storage::{CpuStorage, DType, Device, GpuStorage, Storage};
+use crate::storage_pool::get_storage_pool;
 use parking_lot::RwLock;
 use smallvec::smallvec;
 use smallvec::SmallVec;
@@ -630,6 +631,16 @@ impl Clone for TensorImpl {
     }
 }
 
+impl Drop for TensorImpl {
+    fn drop(&mut self) {
+        // If we are the last owner of the storage, return it to the pool
+        if Arc::strong_count(&self.storage) == 1 {
+            let storage = self.storage.clone();
+            get_storage_pool().release(storage);
+        }
+    }
+}
+
 fn compute_strides(sizes: &[i64]) -> SmallVec<[i64; 8]> {
     let mut strides: SmallVec<[i64; 8]> = smallvec![0; sizes.len()];
     if sizes.is_empty() {
@@ -698,48 +709,56 @@ impl Tensor {
         let numel: i64 = sizes.iter().product();
         let nbytes = (numel * dtype.size() as i64) as usize;
 
-        match device {
-            Device::Cpu => {
-                let storage = Arc::new(Storage::new_cpu(dtype, nbytes));
-                Tensor::new(TensorImpl::new(storage, sizes, dtype))
-            }
+        let storage = match device {
+            Device::Cpu => get_storage_pool().acquire(nbytes, device),
             Device::Wgpu(device_id) => {
-                // Create actual GPU storage for GPU tensors
                 use crate::kernels::gpu::get_context;
                 let ctx = get_context(device_id);
                 let buffer = ctx.create_buffer(nbytes, "zeros");
-
-                let storage = Arc::new(Storage::Wgpu(GpuStorage {
+                Arc::new(Storage::Wgpu(GpuStorage {
                     buffer: buffer.buffer,
                     nbytes,
                     device_id,
                     staging: RwLock::new(None),
-                }));
-
-                let strides = compute_strides(&sizes);
-
-                Tensor::new(TensorImpl {
-                    storage,
-                    sizes,
-                    strides,
-                    storage_offset: 0,
-                    dtype,
-                    device: Device::Wgpu(device_id),
-                    version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: None,
-                })
+                }))
             }
-        }
+        };
+
+        let strides = compute_strides(&sizes);
+        Tensor::new(TensorImpl {
+            storage,
+            sizes,
+            strides,
+            storage_offset: 0,
+            dtype,
+            device,
+            version_counter: Arc::new(AtomicU64::new(0)),
+            autograd_meta: None,
+        })
     }
 
     pub fn empty(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let numel: i64 = sizes.iter().product();
         let nbytes = (numel * dtype.size() as i64) as usize;
-        // Create uninitialized storage
-        let storage = Storage::new_cpu(dtype, nbytes);
-        let storage = Arc::new(storage);
-        // Use new_with_device for GPU tensors to track the target device
+
+        let storage = match device {
+            Device::Cpu => get_storage_pool().acquire(nbytes, device),
+            Device::Wgpu(device_id) => {
+                // For GPU empty, we create a new buffer (uninitialized)
+                // Note: GPU buffers are not zeroed by default
+                use crate::kernels::gpu::get_context;
+                let ctx = get_context(device_id);
+                let buffer = ctx.create_buffer(nbytes, "empty");
+                Arc::new(Storage::Wgpu(GpuStorage {
+                    buffer: buffer.buffer,
+                    nbytes,
+                    device_id,
+                    staging: RwLock::new(None),
+                }))
+            }
+        };
+
         match device {
             Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
             Device::Wgpu(_) => {
