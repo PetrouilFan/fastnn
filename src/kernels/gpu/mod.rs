@@ -3,7 +3,6 @@ use crate::tensor::Tensor;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -445,11 +444,11 @@ impl GpuContext {
 
     /// Generate a cache key for a shader/pipeline based on op_name, dtype, and naga version
     fn get_cache_key(&self, op_name: &str, dtype: DType, wgsl: &str) -> String {
-        // Use a hash of the WGSL source to ensure uniqueness
-        use std::collections::hash_map::DefaultHasher;
+        // Use a deterministic hash (fnv) to ensure cache keys are consistent across runs
+        use fnv::FnvHasher;
         use std::hash::{Hash, Hasher};
 
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FnvHasher::default();
         op_name.hash(&mut hasher);
         dtype.hash(&mut hasher);
         wgsl.hash(&mut hasher);
@@ -459,26 +458,19 @@ impl GpuContext {
     }
 
     /// Try to load a compiled pipeline from cache
-    fn load_pipeline_from_cache(&self, cache_key: &str) -> Option<ComputePipeline> {
-        let cache_path = self.shader_cache_dir.join(cache_key);
-        if !cache_path.exists() {
-            return None;
-        }
-
-        // For now, we'll just check if the file exists as a cache hit indicator
-        // A full implementation would deserialize the pipeline binary data
-        // However, WGPU doesn't provide direct serialization of ComputePipeline
-        // So we'll use a simpler approach: cache the shader module instead
+    /// Note: WGPU doesn't support serializing ComputePipeline, so this is currently a no-op
+    /// The in-memory cache (self.pipelines) handles caching within a single process
+    fn load_pipeline_from_cache(&self, _cache_key: &str) -> Option<ComputePipeline> {
+        // WGPU doesn't provide direct serialization of ComputePipeline
+        // File-based caching is not currently feasible
         None
     }
 
     /// Save a compiled pipeline to cache
-    fn save_pipeline_to_cache(&self, cache_key: &str) {
-        // Create a marker file to indicate cache hit
-        let cache_path = self.shader_cache_dir.join(cache_key);
-        if let Ok(mut file) = fs::File::create(cache_path) {
-            let _ = file.write_all(b"cached");
-        }
+    /// Note: WGPU doesn't support serializing ComputePipeline, so this is currently a no-op
+    fn save_pipeline_to_cache(&self, _cache_key: &str) {
+        // WGPU doesn't provide direct serialization of ComputePipeline
+        // File-based caching is not currently feasible
     }
 
     pub fn get_or_create_shader(&self, name: &str, wgsl: &str) -> ShaderModule {

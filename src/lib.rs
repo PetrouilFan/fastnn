@@ -20,7 +20,7 @@ use pyo3::PyAny;
 use rand::Rng;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
-use tensor::{Tensor, TensorImpl};
+use tensor::Tensor;
 
 // Thread-local default device storage
 static DEFAULT_DEVICE: OnceLock<RwLock<Device>> = OnceLock::new();
@@ -116,11 +116,9 @@ impl PyTensor {
 
     #[pyo3(signature = (requires_grad))]
     fn requires_grad_(&mut self, requires_grad: bool) -> PyTensor {
-        // Get a raw pointer to the TensorImpl
-        let ptr = Arc::as_ptr(&self.inner.inner) as *mut TensorImpl;
-        unsafe {
-            (*ptr).set_requires_grad(requires_grad);
-        }
+        // Use Arc::make_mut to ensure exclusive ownership before modifying
+        let inner = Arc::make_mut(&mut self.inner.inner);
+        inner.set_requires_grad(requires_grad);
         PyTensor {
             inner: self.inner.clone(),
         }
@@ -822,11 +820,16 @@ fn _no_grad_exit() {
 }
 
 #[pyfunction]
-#[pyo3(signature = (inputs))]
-fn checkpoint(inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
+#[pyo3(signature = (fn_name, inputs))]
+#[allow(unused_variables)]
+fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
     // For now, checkpoint just returns the inputs as outputs
     // A full implementation would store the function and recompute during backward
     // This is a placeholder that demonstrates the API
+
+    // Note: PyO3 doesn't easily support passing Python callables to Rust.
+    // A full implementation would need to store the Python function and call it during backward.
+    // For now, we just return the inputs as-is (identity function).
 
     // Just return the inputs as outputs (identity function)
     // In a real implementation, this would store the computation graph

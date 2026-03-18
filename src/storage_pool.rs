@@ -25,7 +25,23 @@ impl StoragePool {
 
                 if let Some(storages) = buffers.get_mut(&key) {
                     if let Some(storage) = storages.pop() {
-                        return storage;
+                        // Zero the buffer before reuse to preserve `zeros` semantics
+                        // Strategy: Clone the Storage to get mutable access, zero it, return Arc
+                        // This ensures we get a unique copy with zeroed data
+                        let mut storage_clone = (*storage).clone();
+                        match &mut storage_clone {
+                            Storage::Cpu(cpu) => {
+                                // Get mutable access to the Vec<u8> and zero it
+                                let data = Arc::make_mut(&mut cpu.data);
+                                data.fill(0);
+                            }
+                            Storage::Wgpu(_) => {
+                                // GPU storage - can't zero here without a kernel
+                                // Caller (Tensor::zeros) handles GPU case separately
+                            }
+                        }
+                        // Return the cloned storage with zeroed data
+                        return Arc::new(storage_clone);
                     }
                 }
 

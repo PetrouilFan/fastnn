@@ -69,7 +69,7 @@ def set_default_device(device: str):
     _core._set_default_device(device)
 
 
-def checkpoint(inputs):
+def checkpoint(fn, inputs):
     """Enable gradient checkpointing to save memory during training.
 
     This is a placeholder implementation that returns the inputs as-is.
@@ -77,9 +77,14 @@ def checkpoint(inputs):
     for recomputation during the backward pass.
 
     Args:
+        fn: The function to checkpoint (currently not fully implemented)
         inputs: List of input tensors
 
     Returns:
         List of output tensors (currently just returns inputs)
     """
-    return _core.checkpoint(inputs)
+    # Note: PyO3 doesn't easily support passing Python callables to Rust.
+    # The function is passed as a string name for now.
+    # A full implementation would store the Python function and call it during backward.
+    fn_name = fn.__name__ if hasattr(fn, "__name__") else str(fn)
+    return _core.checkpoint(fn_name, inputs)

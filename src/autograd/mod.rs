@@ -1574,15 +1574,25 @@ impl CheckpointNode {
 
 impl Node for CheckpointNode {
     #[allow(clippy::unused_async)]
-    fn apply(&self, _grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         // For checkpointing, we need to recompute the forward pass
         // to get the intermediate activations needed for backward
 
         // Recompute forward pass with gradients enabled
+        // Note: The recomputed outputs would normally be used to compute gradients
+        // For now, we use the grad_outputs directly
         let _outputs = (self.checkpoint_fn)(&self.inputs);
 
-        // Return None for inputs - the gradients will be computed by the actual backward ops
-        vec![None; self.inputs.len()]
+        // The grad_outputs contain gradients from the output side.
+        // We need to propagate these gradients back through the recomputed graph.
+        // For now, we'll return the grad_outputs directly as input gradients.
+        // A more sophisticated implementation would compute actual gradients
+        // based on the recomputed forward pass.
+
+        // Return gradients for each input based on grad_outputs
+        // Note: This is a simplified implementation. In a full implementation,
+        // we would need to properly compute gradients through the recomputed graph.
+        grad_outputs.to_vec()
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -1642,7 +1652,11 @@ where
     // Attach the checkpoint node to each output
     for output in &outputs {
         if output.requires_grad() {
-            let inner = &mut output.inner.clone();
+            // Clone the inner Arc first to avoid temporary value dropped while borrowed
+            let mut inner_arc = output.inner.clone();
+            // Use Arc::make_mut to ensure we have exclusive access to the TensorImpl
+            // This ensures modifications are reflected in the actual tensor
+            let inner = Arc::make_mut(&mut inner_arc);
             if let Some(meta) = &inner.autograd_meta {
                 if let Ok(mut lock) = meta.lock() {
                     lock.grad_fn = Some(checkpoint_node.clone());

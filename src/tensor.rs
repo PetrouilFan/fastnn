@@ -1261,15 +1261,17 @@ impl Tensor {
         // Return raw pointer to potentially shared data.
         // This matches PyTorch's behavior where Storage is shared but modified in place.
         // Writing to this pointer is unsafe if multiple threads access the same data.
-        let inner = &self.inner; // &Arc<TensorImpl>
-        match inner.storage.as_ref() {
+        // Safety: We ensure exclusive access by using Arc::make_mut at each level.
+        let inner = Arc::make_mut(&mut self.inner); // Ensure exclusive access to TensorImpl
+        let storage = Arc::make_mut(&mut inner.storage); // Ensure exclusive access to Storage
+        match storage {
             Storage::Cpu(cpu) => {
-                // cpu.data is &Arc<Vec<u8>>
-                // We need to get a pointer to the underlying Vec<u8>'s data
-                // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
-                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                // cpu.data is &mut Arc<Vec<u8>>
+                // Use Arc::make_mut to ensure exclusive ownership of the Vec<u8>
+                let data = Arc::make_mut(&mut cpu.data);
+                let ptr = data.as_mut_ptr();
                 // storage_offset is in elements, so multiply by size of f32 (4 bytes)
-                (unsafe { ptr.add(inner.storage_offset as usize * 4) }) as *mut f32
+                unsafe { ptr.add(inner.storage_offset as usize * 4) as *mut f32 }
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
@@ -1280,10 +1282,14 @@ impl Tensor {
     /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
     /// Note: storage_offset is in elements, so we need to multiply by element size
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        let inner = &self.inner;
-        match inner.storage.as_ref() {
+        // Ensure exclusive ownership by using Arc::make_mut at each level
+        let inner = Arc::make_mut(&mut self.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        match storage {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                // Use Arc::make_mut to ensure exclusive ownership of the Vec<u8>
+                let data = Arc::make_mut(&mut cpu.data);
+                let ptr = data.as_mut_ptr();
                 // storage_offset is in elements, convert to bytes based on dtype
                 let elem_size = match inner.dtype {
                     DType::F32 | DType::I32 | DType::Bool => 4,
@@ -1319,12 +1325,10 @@ impl Tensor {
         // For operations that need f32, use the dtype-specific operations
         match self.inner.dtype {
             DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                // Unsafe: we get a mutable reference to the inner TensorImpl
-                // This is safe *only* if we have unique ownership of the Arc.
-                // But Arc::make_mut clones if shared.
-                // So we use unsafe cast to get &mut TensorImpl without cloning.
-                // This matches PyTorch's behavior where Storage is shared but modified in place.
-                let inner = unsafe { &mut *(Arc::as_ptr(&self.inner) as *mut TensorImpl) };
+                // Use Arc::make_mut to ensure exclusive ownership
+                // This will clone the TensorImpl if there are multiple Arc owners,
+                // ensuring we have unique access before getting a mutable slice
+                let inner = Arc::make_mut(&mut self.inner);
                 inner.as_f32_slice_mut()
             }
             DType::BF16 | DType::F16 => {
