@@ -510,7 +510,7 @@ impl TensorImpl {
     pub fn data_ptr_f32(&self) -> *const f32 {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr() as *const u8;
+                let ptr = cpu.data.as_ref().as_ptr();
                 // storage_offset is in elements, cast to f32 pointer first
                 let f32_ptr = ptr as *const f32;
                 unsafe { f32_ptr.add(self.storage_offset as usize) }
