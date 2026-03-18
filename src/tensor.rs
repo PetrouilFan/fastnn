@@ -1277,13 +1277,41 @@ impl Tensor {
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        Arc::make_mut(&mut self.inner).data_ptr_f32_mut()
+        let inner = &self.inner;
+        match inner.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                // cpu.data is &Arc<Vec<u8>>
+                // storage_offset is in elements, cast to f32 pointer first
+                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                let f32_ptr = ptr as *mut f32;
+                unsafe { f32_ptr.add(inner.storage_offset as usize) }
+            }
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+            }
+        }
     }
 
     /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
     /// Note: storage_offset is in elements, so we need to multiply by element size
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        Arc::make_mut(&mut self.inner).data_ptr_mut()
+        let inner = &self.inner;
+        match inner.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                // cpu.data is &Arc<Vec<u8>>
+                // storage_offset is in elements, convert to bytes based on dtype
+                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                let elem_size = match inner.dtype {
+                    DType::F32 | DType::I32 | DType::Bool => 4,
+                    DType::F64 | DType::I64 => 8,
+                    DType::F16 | DType::BF16 => 2,
+                };
+                unsafe { ptr.add(inner.storage_offset as usize * elem_size) }
+            }
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+            }
+        }
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
