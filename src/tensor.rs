@@ -532,10 +532,10 @@ impl TensorImpl {
         match self.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 // cpu.data is &Arc<Vec<u8>>
-                // storage_offset is in BYTES, not elements
-                // Get pointer to underlying Vec<u8> data, add byte offset, then cast to f32
+                // storage_offset is in elements, cast to f32 pointer first
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                unsafe { ptr.add(self.storage_offset as usize) as *mut f32 }
+                let f32_ptr = ptr as *mut f32;
+                unsafe { f32_ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
@@ -547,10 +547,16 @@ impl TensorImpl {
         match self.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 // cpu.data is &Arc<Vec<u8>>
-                // storage_offset is in BYTES, not elements
-                // Get pointer to underlying Vec<u8> data and add offset
+                // storage_offset is in elements, convert to bytes based on dtype
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                unsafe { ptr.add(self.storage_offset as usize) }
+                // storage_offset is in elements, so we need to multiply by element size
+                // but since we're returning a byte pointer, we add the byte offset
+                let elem_size = match self.dtype {
+                    DType::F32 | DType::I32 | DType::Bool => 4,
+                    DType::F64 | DType::I64 => 8,
+                    DType::F16 | DType::BF16 => 2,
+                };
+                unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
