@@ -89,7 +89,7 @@ impl LossFn for CrossEntropyLoss {
                 continue;
             }
 
-            losses[b] = log_sum_exp - class_logit;
+            losses[b] = log_sum_exp + max_logit - class_logit;
 
             // Final check to ensure losses[b] is never NaN or infinity
             if losses[b].is_nan() || losses[b].is_infinite() {
