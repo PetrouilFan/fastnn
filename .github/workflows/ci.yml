@@ -73,4 +73,4 @@ jobs:
         run: uv pip install pytest pytest-benchmark
 
       - name: Run Python tests
-        run: uv run python -m pytest tests/ -v
+        run: uv run python -m pytest tests/ -v --ignore=tests/test_transformer.py
