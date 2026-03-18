@@ -381,8 +381,7 @@ impl TensorImpl {
         }
 
         let mut sizes = self.sizes.clone();
-        // Use ceiling division to properly handle non-unit steps
-        let numel = (end - start + step as usize - 1) / step as usize;
+        let numel = ((end - start) / step as usize) + 1;
         sizes[dim] = numel as i64;
 
         let storage_offset = self.storage_offset + (start as i64) * self.strides[dim];
@@ -418,8 +417,6 @@ impl TensorImpl {
         } else if let Some(meta) = &mut self.autograd_meta {
             if let Ok(mut lock) = meta.lock() {
                 lock.requires_grad = requires_grad;
-                // PERF-9: Invalidate topological order cache when requires_grad changes
-                lock.topo_order_cache = None;
             }
         }
     }
@@ -1623,19 +1620,6 @@ impl Tensor {
         } else {
             output
         }
-    }
-
-    /// Element-wise maximum of two tensors
-    pub fn maximum(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
-        };
-        let result = dispatch("maximum", dispatch_key, &[self, other]);
-        let output = result[0].clone();
-        // For simplicity, no autograd for now (can be added later if needed)
-        output
     }
 
     pub fn tanh(&self) -> Tensor {
