@@ -5415,25 +5415,13 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 }
 
 fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    use std::io::Write;
-    let mut debug_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/matmul_debug.log")
-        .unwrap();
-    writeln!(debug_file, "DEBUG: Entered matmul_kernel").unwrap();
+    // Removed debug file writing that was causing issues on Windows
 
     let a = args[0];
     let b = args[1];
 
     let a_shape = a.shape();
     let b_shape = b.shape();
-    writeln!(
-        debug_file,
-        "DEBUG: a_shape={:?}, b_shape={:?}",
-        a_shape, b_shape
-    )
-    .unwrap();
 
     if a_shape.len() < 2 || b_shape.len() < 2 {
         panic!("matmul: both tensors must have at least 2 dimensions");
@@ -5452,21 +5440,6 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] >= a_shape[a_shape.len() - 2];
     let b_is_transposed =
         b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] >= b_shape[b_shape.len() - 2];
-
-    // Debug the transposition detection
-    eprintln!(
-        "DEBUG: b_strides[0]={}, b_strides[1]={}, b_shape[0]={}, check={}",
-        b_strides[0],
-        b_strides[1],
-        b_shape[0],
-        b_strides[0] == 1 && b_strides[1] >= b_shape[0]
-    );
-
-    // Debug output
-    eprintln!(
-        "DEBUG matmul: a_shape={:?}, b_shape={:?}, b_strides={:?}, b_is_transposed={}",
-        a_shape, b_shape, b_strides, b_is_transposed
-    );
 
     // For matmul: A[m, k] @ B[k, n] = C[m, n]
     // When B is transposed (shape [n, k] representing original [k, n]):
