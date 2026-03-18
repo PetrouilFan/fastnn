@@ -532,12 +532,25 @@ impl TensorImpl {
         match self.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 // cpu.data is &Arc<Vec<u8>>
-                // We need to get a pointer to the underlying Vec<u8>'s data
-                // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
+                // storage_offset is in BYTES, not elements
+                // Get pointer to underlying Vec<u8> data, add byte offset, then cast to f32
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                // storage_offset is in elements, cast to f32 pointer first
-                let f32_ptr = ptr as *mut f32;
-                unsafe { f32_ptr.add(self.storage_offset as usize) }
+                unsafe { ptr.add(self.storage_offset as usize) as *mut f32 }
+            }
+            Storage::Wgpu(_) => {
+                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
+            }
+        }
+    }
+
+    pub fn data_ptr_mut(&mut self) -> *mut u8 {
+        match self.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                // cpu.data is &Arc<Vec<u8>>
+                // storage_offset is in BYTES, not elements
+                // Get pointer to underlying Vec<u8> data and add offset
+                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                unsafe { ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
@@ -1258,50 +1271,13 @@ impl Tensor {
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        // Return raw pointer to potentially shared data.
-        // This matches PyTorch's behavior where Storage is shared but modified in place.
-        // Writing to this pointer is unsafe if multiple threads access the same data.
-        // Safety: We ensure exclusive access by using Arc::make_mut at each level.
-        let inner = Arc::make_mut(&mut self.inner); // Ensure exclusive access to TensorImpl
-        let storage = Arc::make_mut(&mut inner.storage); // Ensure exclusive access to Storage
-        match storage {
-            Storage::Cpu(cpu) => {
-                // cpu.data is &mut Arc<Vec<u8>>
-                // Use Arc::make_mut to ensure exclusive ownership of the Vec<u8>
-                let data = Arc::make_mut(&mut cpu.data);
-                let ptr = data.as_mut_ptr();
-                // storage_offset is in elements, so multiply by size of f32 (4 bytes)
-                unsafe { ptr.add(inner.storage_offset as usize * 4) as *mut f32 }
-            }
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
-        }
+        Arc::make_mut(&mut self.inner).data_ptr_f32_mut()
     }
 
     /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
     /// Note: storage_offset is in elements, so we need to multiply by element size
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        // Ensure exclusive ownership by using Arc::make_mut at each level
-        let inner = Arc::make_mut(&mut self.inner);
-        let storage = Arc::make_mut(&mut inner.storage);
-        match storage {
-            Storage::Cpu(cpu) => {
-                // Use Arc::make_mut to ensure exclusive ownership of the Vec<u8>
-                let data = Arc::make_mut(&mut cpu.data);
-                let ptr = data.as_mut_ptr();
-                // storage_offset is in elements, convert to bytes based on dtype
-                let elem_size = match inner.dtype {
-                    DType::F32 | DType::I32 | DType::Bool => 4,
-                    DType::F64 | DType::I64 => 8,
-                    DType::F16 | DType::BF16 => 2,
-                };
-                unsafe { ptr.add(inner.storage_offset as usize * elem_size) }
-            }
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
-        }
+        Arc::make_mut(&mut self.inner).data_ptr_mut()
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
@@ -1497,6 +1473,10 @@ impl Tensor {
         // Use data_ptr_f32_mut for in-place update (as per user's suggestion)
         let self_ptr = self.data_ptr_f32_mut();
         let other_ptr = other.data_ptr_f32();
+
+        // Debug: print first few values
+        // println!("add_ called: numel={}, self_ptr={:p}, other_ptr={:p}", numel, self_ptr, other_ptr);
+        // println!("  self[0]={}, other[0]={}", unsafe { *self_ptr }, unsafe { *other_ptr });
 
         match dtype {
             DType::F32 => {
