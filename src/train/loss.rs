@@ -35,7 +35,7 @@ impl LossFn for CrossEntropyLoss {
 
             let max_logit = pred_data[base_idx..base_idx + num_classes]
                 .iter()
-                .fold(f32::MIN, |max, &x| if x > max { x } else { max });
+                .fold(f32::NEG_INFINITY, |max, &x| if x > max { x } else { max });
 
             let mut sum_exp = 0.0f32;
             for c in 0..num_classes {
