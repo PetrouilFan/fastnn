@@ -5471,7 +5471,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     // For matmul: A[m, k] @ B[k, n] = C[m, n]
     // When B is transposed (shape [n, k] representing original [k, n]):
     // The transposed view has shape [n, k] where n is the original outer dim
-    // and k is the original inner dim (now at position 0)
+    // and k is the original inner dim
     if b_is_transposed {
         // B is transposed: shape [n, k] represents original matrix [k, n]
         // For matmul A[m,k] @ B[k,n], we need B's inner dim (k) to match A's inner dim (k)
