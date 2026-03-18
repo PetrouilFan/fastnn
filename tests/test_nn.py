@@ -57,6 +57,47 @@ def test_mlp_training_step():
     assert initial_loss is not None
 
 
+def test_muon_optimizer():
+    # Test Muon optimizer with 2D weight matrix
+    linear = fnn.Linear(10, 5)
+    # Use non-zero input to avoid numerical issues with very small gradients
+    x = fnn.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]], [1, 10])
+    y = fnn.tensor([[1.0]], [1, 5])
+
+    # Get initial parameters
+    initial_params = [p.numpy().copy() for p in linear.parameters()]
+
+    # Use Muon optimizer
+    optimizer = fnn.Muon(
+        linear.parameters(), lr=0.01, momentum=0.9, weight_decay=0.0, nesterov=True
+    )
+
+    # Training loop
+    initial_loss = None
+    for _ in range(5):
+        pred = linear(x)
+        # Use mean reduction to get a scalar loss
+        loss = fnn.mse_loss(pred, y, reduction="mean")
+        # loss should be a scalar tensor (shape [1])
+        assert loss.shape == [1]
+        initial_loss = loss.item()
+
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+    assert initial_loss is not None
+    # Check that weights are updated (not all zero)
+    for i, param in enumerate(linear.parameters()):
+        param_data = param.numpy()
+        import numpy as np
+
+        # Check that parameters have changed from initial values
+        assert not np.allclose(param_data, initial_params[i]), (
+            f"Parameter {i} was not updated"
+        )
+
+
 def test_zero_grad():
     linear = fnn.Linear(10, 5)
     x = fnn.ones([2, 10])
@@ -99,3 +140,43 @@ def test_dropout():
     y_eval = dropout(x)
 
     assert y_train.shape == y_eval.shape == [10, 10]
+
+
+def test_bf16_support():
+    # Test BF16 tensor creation
+    x = fnn.zeros([3, 4], dtype="bf16")
+    assert x.shape == [3, 4]
+    assert x.dtype == "bf16"
+
+    # Test BF16 tensor operations
+    y = fnn.ones([3, 4], dtype="bf16")
+    z = x + y
+    assert z.shape == [3, 4]
+    assert z.dtype == "bf16"
+
+    # Test item() method
+    scalar = fnn.zeros([1], dtype="bf16")
+    val = scalar.item()
+    assert isinstance(val, float)
+
+    # Test numpy() conversion
+    arr = x.numpy()
+    assert len(arr) == 3
+
+
+def test_f16_support():
+    # Test F16 tensor creation
+    x = fnn.zeros([3, 4], dtype="f16")
+    assert x.shape == [3, 4]
+    assert x.dtype == "f16"
+
+    # Test F16 tensor operations
+    y = fnn.ones([3, 4], dtype="f16")
+    z = x + y
+    assert z.shape == [3, 4]
+    assert z.dtype == "f16"
+
+    # Test item() method
+    scalar = fnn.zeros([1], dtype="f16")
+    val = scalar.item()
+    assert isinstance(val, float)

@@ -822,6 +822,20 @@ fn _no_grad_exit() {
 }
 
 #[pyfunction]
+#[pyo3(signature = (inputs))]
+fn checkpoint(inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
+    // For now, checkpoint just returns the inputs as outputs
+    // A full implementation would store the function and recompute during backward
+    // This is a placeholder that demonstrates the API
+
+    // Just return the inputs as outputs (identity function)
+    // In a real implementation, this would store the computation graph
+    // for recomputation during the backward pass
+
+    Ok(inputs)
+}
+
+#[pyfunction]
 fn _set_seed(seed: u64) {
     use rand::SeedableRng;
     // Initialize or re-initialize the global seeded RNG with the given seed
@@ -1390,6 +1404,43 @@ impl PyAdamW {
 }
 
 #[pyclass]
+struct PyMuon {
+    inner: optim::muon::Muon,
+}
+
+#[pymethods]
+impl PyMuon {
+    #[new]
+    #[pyo3(signature = (params, lr = 0.025, momentum = 0.95, weight_decay = 0.0, nesterov = true))]
+    fn new(
+        params: Vec<PyTensor>,
+        lr: f64,
+        momentum: f64,
+        weight_decay: f64,
+        nesterov: bool,
+    ) -> Self {
+        let tensors: Vec<tensor::Tensor> = params.into_iter().map(|p| p.inner).collect();
+        PyMuon {
+            inner: optim::muon::Muon::new(tensors, lr, momentum, weight_decay, nesterov),
+        }
+    }
+
+    fn step(&mut self) {
+        self.inner.step();
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn state_dict(&self) -> String {
+        "{}".to_string()
+    }
+
+    fn load_state_dict(&mut self, _state: String) {}
+}
+
+#[pyclass]
 struct PyTransformerEncoder {
     inner: nn::transformer::TransformerEncoder,
 }
@@ -1513,6 +1564,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cross_entropy_loss, py)?)?;
     m.add_function(wrap_pyfunction!(_no_grad_enter, py)?)?;
     m.add_function(wrap_pyfunction!(_no_grad_exit, py)?)?;
+    m.add_function(wrap_pyfunction!(checkpoint, py)?)?;
     m.add_function(wrap_pyfunction!(_set_seed, py)?)?;
     m.add_function(wrap_pyfunction!(_set_num_threads, py)?)?;
     m.add_function(wrap_pyfunction!(_get_num_threads, py)?)?;
@@ -1538,6 +1590,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySGD>()?;
     m.add_class::<PyAdam>()?;
     m.add_class::<PyAdamW>()?;
+    m.add_class::<PyMuon>()?;
     m.add_class::<PyTransformerEncoder>()?;
 
     m.add_class::<PyTensor>()?;
