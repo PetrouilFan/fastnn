@@ -39,7 +39,7 @@ impl Muon {
     /// For a matrix X with shape [m, k], we orthogonalize rows: X = 1.5 * X - 0.5 * X * X^T * X
     fn newton_schulz_iteration(a: &Tensor, num_iterations: usize) -> Tensor {
         // Compute Frobenius norm: sqrt(sum(x * x))
-        let norm_squared = a.mul(&a).sum(-1, false).sum(-1, false);
+        let norm_squared = a.mul(a).sum(-1, false).sum(-1, false);
         let norm = norm_squared.sqrt();
         let norm_val = norm.item();
 
