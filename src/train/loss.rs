@@ -33,18 +33,54 @@ impl LossFn for CrossEntropyLoss {
         for (b, target_val) in target_data.iter().take(batch_size).enumerate() {
             let base_idx = b * num_classes;
 
+            // Check for NaN in target_val
+            if target_val.is_nan() {
+                losses[b] = 0.0; // or some default value
+                continue;
+            }
+
+            let target_class = *target_val as usize;
+            if target_class >= num_classes {
+                // Target class is out of bounds
+                losses[b] = 0.0;
+                continue;
+            }
+
             let max_logit = pred_data[base_idx..base_idx + num_classes]
                 .iter()
                 .fold(f32::NEG_INFINITY, |max, &x| if x > max { x } else { max });
 
+            // Check if max_logit is NaN or infinity
+            if max_logit.is_nan() || max_logit.is_infinite() {
+                losses[b] = 0.0;
+                continue;
+            }
+
             let mut sum_exp = 0.0f32;
             for c in 0..num_classes {
-                sum_exp += (pred_data[base_idx + c] - max_logit).exp();
+                let diff = pred_data[base_idx + c] - max_logit;
+                // Check for NaN or infinity in diff
+                if diff.is_nan() || diff.is_infinite() {
+                    sum_exp = f32::INFINITY;
+                    break;
+                }
+                sum_exp += diff.exp();
             }
-            let log_sum_exp = sum_exp.ln();
 
-            let target_class = *target_val as usize;
+            // Check if sum_exp is NaN or infinity
+            if sum_exp.is_nan() || sum_exp.is_infinite() {
+                losses[b] = 0.0;
+                continue;
+            }
+
+            let log_sum_exp = sum_exp.ln();
             let class_logit = pred_data[base_idx + target_class];
+
+            // Check for NaN in class_logit
+            if class_logit.is_nan() {
+                losses[b] = 0.0;
+                continue;
+            }
 
             losses[b] = log_sum_exp - class_logit;
             total_loss += losses[b];
