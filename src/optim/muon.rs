@@ -79,7 +79,6 @@ impl Muon {
 
 impl Optimizer for Muon {
     fn step(&mut self) {
-        println!("Muon::step() called with {} parameters", self.params.len());
         for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
                 g
@@ -123,13 +122,6 @@ impl Optimizer for Muon {
 
                 // Apply update (subtract for gradient descent)
                 let update = step_size.neg();
-
-                // Debug: print update values
-                let update_slice = update.as_f32_slice();
-                println!(
-                    "Update sample (first 3): [{:.6}, {:.6}, {:.6}]",
-                    update_slice[0], update_slice[1], update_slice[2]
-                );
 
                 param.add_(&update);
                 param.increment_version();
