@@ -7305,13 +7305,13 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
             use std::arch::x86_64::*;
-            let mut max_logit = f32::MIN;
+            let mut max_logit = f32::NEG_INFINITY;
             let mut i = 0;
 
             if is_x86_feature_detected!("avx2") {
                 unsafe {
                     let ptr = logits_data.as_ptr().add(base_idx);
-                    let mut max_vec = _mm256_set1_ps(f32::MIN);
+                    let mut max_vec = _mm256_set1_ps(f32::NEG_INFINITY);
                     for _ in 0..(num_classes / 8) {
                         let vec = _mm256_loadu_ps(ptr.add(i));
                         max_vec = _mm256_max_ps(max_vec, vec);
@@ -7373,7 +7373,7 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
         {
-            let mut max_logit = f32::MIN;
+            let mut max_logit = f32::NEG_INFINITY;
             for c in 0..num_classes {
                 let val = logits_data[base_idx + c];
                 if val > max_logit {
