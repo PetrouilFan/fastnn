@@ -104,23 +104,11 @@ impl Optimizer for Muon {
                     .mul(&Tensor::from_scalar(self.momentum as f32))
                     .add(&effective_grad);
 
-                // Compute the update direction
-                let update_dir = if self.nesterov {
-                    // Nesterov: orthogonalize the lookahead vector (momentum * m + grad)
-                    // The effective_grad already contains grad + weight_decay
-                    // lookahead = momentum * m + effective_grad
-                    let lookahead = self.m[i]
-                        .clone()
-                        .mul(&Tensor::from_scalar(self.momentum as f32))
-                        .add(&effective_grad);
-                    Self::newton_schulz_iteration(&lookahead, 5)
-                } else {
-                    // Standard: orthogonalize the momentum
-                    Self::newton_schulz_iteration(&self.m[i], 5)
-                };
+                // Orthogonalize the momentum
+                let ortho_momentum = Self::newton_schulz_iteration(&self.m[i], 5);
 
                 let lr = Tensor::from_scalar(self.lr as f32);
-                let step_size = lr.mul(&update_dir);
+                let step_size = lr.mul(&ortho_momentum);
 
                 // Apply update (subtract for gradient descent)
                 let update = step_size.neg();
