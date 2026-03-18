@@ -1,6 +1,6 @@
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
 use crate::storage::Storage;
-use crate::tensor::{Tensor, TensorImpl};
+use crate::tensor::Tensor;
 use std::sync::Arc;
 
 pub struct AdamW {
@@ -140,22 +140,21 @@ impl Optimizer for AdamW {
             let step_size = lr.mul(&update);
 
             // Apply the update to parameters in-place
-            // Use unsafe pointer casting to modify the original TensorImpl
-            // This is necessary because Arc::make_mut creates a copy when there are multiple references
-            let ptr = Arc::as_ptr(&param.inner) as *mut TensorImpl;
-            unsafe {
-                let inner = &mut *ptr;
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    panic!("Optimizer only supports CPU tensors");
-                };
-                let data = Arc::make_mut(&mut cpu_storage.data);
-                let ptr = data.as_mut_ptr() as *mut f32;
-                let numel = param.numel() as usize;
+            // Use Arc::make_mut to ensure exclusive ownership before modifying
+            // This ensures we have unique access to the storage
+            let inner = Arc::make_mut(&mut param.inner);
+            let storage = Arc::make_mut(&mut inner.storage);
+            let Storage::Cpu(cpu_storage) = storage else {
+                panic!("Optimizer only supports CPU tensors");
+            };
+            let data = Arc::make_mut(&mut cpu_storage.data);
+            let ptr = data.as_mut_ptr() as *mut f32;
+            let numel = param.numel() as usize;
 
-                let update_slice = step_size.as_f32_slice();
-                for (j, update_val) in update_slice.iter().take(numel).enumerate() {
-                    let param_val = *ptr.add(j);
+            let update_slice = step_size.as_f32_slice();
+            for (j, update_val) in update_slice.iter().take(numel).enumerate() {
+                let param_val = unsafe { *ptr.add(j) };
+                unsafe {
                     *ptr.add(j) = param_val - update_val;
                 }
             }

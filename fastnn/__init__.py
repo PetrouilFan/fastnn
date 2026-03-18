@@ -1,7 +1,7 @@
 import numpy as np
 import fastnn._core as _core
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from fastnn.core import (
     no_grad,
