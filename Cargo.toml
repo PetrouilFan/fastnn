@@ -26,6 +26,7 @@ wide         = "0.7"
 wgpu         = "24"
 pollster     = "0.4"
 openblas-src = { version = "0.10", optional = true }
+fnv          = "1.0"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"
