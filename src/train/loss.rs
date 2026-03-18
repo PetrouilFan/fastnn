@@ -67,8 +67,8 @@ impl LossFn for CrossEntropyLoss {
                 sum_exp += diff.exp();
             }
 
-            // Check if sum_exp is NaN or infinity
-            if sum_exp.is_nan() || sum_exp.is_infinite() {
+            // Check if sum_exp is NaN, infinity, or zero
+            if sum_exp.is_nan() || sum_exp.is_infinite() || sum_exp == 0.0 {
                 losses[b] = 0.0;
                 continue;
             }
