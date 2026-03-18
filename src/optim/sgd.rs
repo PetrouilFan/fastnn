@@ -77,7 +77,8 @@ impl Optimizer for SGD {
             let Storage::Cpu(cpu_storage) = storage else {
                 panic!("Optimizer only supports CPU tensors");
             };
-            let ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+            let data = Arc::make_mut(&mut cpu_storage.data);
+            let ptr = data.as_mut_ptr() as *mut f32;
             let numel = param.numel() as usize;
 
             let update_slice = update.as_f32_slice();
