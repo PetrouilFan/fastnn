@@ -226,11 +226,7 @@ impl Callback for CSVLogger {
         }
 
         if self.header_written {
-            if let Ok(mut file) = OpenOptions::new()
-                .write(true)
-                .append(true)
-                .open(&self.filepath)
-            {
+            if let Ok(mut file) = OpenOptions::new().append(true).open(&self.filepath) {
                 let values: Vec<String> =
                     logs.metrics.values().map(|v| format!("{:.6}", v)).collect();
                 writeln!(file, "{},{}", epoch, values.join(",")).ok();
