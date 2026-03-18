@@ -105,18 +105,18 @@ def test_memory_pool_reuse():
     # We check allocator_stats before and after creating/dropping tensors
 
     # Get initial stats
-    stats_before = fnn.allocator_stats()
+    fnn.allocator_stats()
     # Create a tensor
     t = fnn.zeros([1000], dtype="f32")
     # Drop it (by reassigning or letting it go out of scope)
-    t = None
+    del t
 
     # Create another tensor of same size (should reuse memory)
     t2 = fnn.zeros([1000], dtype="f32")
-    t2 = None
+    del t2
 
     # Get final stats
-    stats_after = fnn.allocator_stats()
+    fnn.allocator_stats()
 
     # If pooling works, total_allocated should not increase significantly
     # (it might increase slightly for initial setup, but not per tensor)
@@ -149,7 +149,7 @@ def test_memory_pool_reuse():
 
     # Create one more
     t_final = fnn.zeros([1000], dtype="f32")
-    t_final = None
+    del t_final
     gc.collect()
 
     # If we got here without crashing, basic pooling logic is likely working.

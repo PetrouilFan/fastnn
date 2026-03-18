@@ -24,6 +24,7 @@ __all__ = [
     "set_seed",
     "set_num_threads",
     "set_default_device",
+    "checkpoint",
     "DataLoader",
     "Dataset",
     "TensorDataset",
