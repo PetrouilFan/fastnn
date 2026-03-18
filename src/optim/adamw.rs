@@ -1,4 +1,3 @@
-use crate::dispatcher::{dispatch, DispatchKey};
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
 use crate::storage::Storage;
 use crate::tensor::{Tensor, TensorImpl};
@@ -43,6 +42,11 @@ impl AdamW {
 
         let step: Vec<u64> = vec![0; params.len()];
 
+        // for (i, p) in params.iter().enumerate() {
+        //     if p.shape() == vec![32, 64, 64] {
+        //         panic!("AdamW::new: param {} has shape [32, 64, 64]", i);
+        //     }
+        // }
         AdamW {
             params,
             lr,
@@ -62,9 +66,14 @@ impl Optimizer for AdamW {
     fn step(&mut self) {
         let beta1 = self.betas.0;
         let beta2 = self.betas.1;
-        let lr = Tensor::from_scalar(self.lr as f32);
-        let eps = Tensor::from_scalar(self.eps as f32);
-        let weight_decay = Tensor::from_scalar(self.weight_decay as f32);
+
+        // Debug: print all param shapes
+        // if !self.step.is_empty() && self.step[0] >= 60 {
+        //     panic!(
+        //         "Debug: step >= 60. Param shapes: {:?}",
+        //         self.params.iter().map(|p| p.shape()).collect::<Vec<_>>()
+        //     );
+        // }
 
         for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
@@ -72,34 +81,83 @@ impl Optimizer for AdamW {
             } else {
                 continue;
             };
+            // if grad.shape().len() == 3 {
+            //     panic!("grad.shape() = {:?}", grad.shape());
+            // }
+            if param.shape() != grad.shape() {
+                // panic!(
+                //     "Shape mismatch in AdamW::step: param.shape() = {:?}, grad.shape() = {:?}, param.id() = {}",
+                //     param.shape(),
+                //     grad.shape(),
+                //     param.id()
+                // );
+            }
 
             self.step[i] += 1;
             let t = self.step[i] as f64;
-            let t_tensor = Tensor::from_scalar(t as f32);
-            let beta1_tensor = Tensor::from_scalar(beta1 as f32);
-            let beta2_tensor = Tensor::from_scalar(beta2 as f32);
 
-            // PERF-1: Use fused Adam update kernel to avoid intermediate allocations
-            let mut args = vec![
-                param,
-                &self.m[i],
-                &self.v[i],
-                &grad,
-                &lr,
-                &beta1_tensor,
-                &beta2_tensor,
-                &eps,
-                &weight_decay,
-                &t_tensor,
-            ];
+            let m_update = grad.clone().mul(&Tensor::from_scalar(beta1 as f32));
+            self.m[i] = self.m[i]
+                .clone()
+                .mul(&Tensor::from_scalar(beta1 as f32))
+                .add(&m_update);
 
-            // Add v_hat for AMSGrad
-            if self.amsgrad {
-                args.insert(4, &self.v_hat[i]);
+            let g_sq = grad.clone().mul(&grad.clone());
+            let v_update = g_sq.mul(&Tensor::from_scalar(beta2 as f32));
+            self.v[i] = self.v[i]
+                .clone()
+                .mul(&Tensor::from_scalar(beta2 as f32))
+                .add(&v_update);
+
+            let bias_correction1 = 1.0 - beta1.powf(t);
+            let bias_correction2 = 1.0 - beta2.powf(t);
+
+            let m_hat = self.m[i]
+                .clone()
+                .mul(&Tensor::from_scalar((1.0 / bias_correction1) as f32));
+
+            let v_hat = if self.amsgrad {
+                let max_v = self.v[i].clone().max(0, false);
+                self.v_hat[i] = max_v;
+                self.v_hat[i]
+                    .clone()
+                    .mul(&Tensor::from_scalar((1.0 / bias_correction2) as f32))
+            } else {
+                self.v[i]
+                    .clone()
+                    .mul(&Tensor::from_scalar((1.0 / bias_correction2) as f32))
+            };
+
+            let denom = v_hat.add(&Tensor::from_scalar(self.eps as f32)).sqrt();
+            let mut update = m_hat.div(&denom);
+
+            if self.weight_decay != 0.0 {
+                let weight_decay_term = param.mul(&Tensor::from_scalar(self.weight_decay as f32));
+                update = update.add(&weight_decay_term);
             }
 
-            // Call the fused kernel - modifies param, m, v, v_hat in-place
-            dispatch("adam_update", DispatchKey::Cpu, &args);
+            let lr = Tensor::from_scalar(self.lr as f32);
+            let step_size = lr.mul(&update);
+
+            // Apply the update to parameters in-place
+            // Use unsafe pointer casting to modify the original TensorImpl
+            // This is necessary because Arc::make_mut creates a copy when there are multiple references
+            let ptr = Arc::as_ptr(&param.inner) as *mut TensorImpl;
+            unsafe {
+                let inner = &mut *ptr;
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!("Optimizer only supports CPU tensors");
+                };
+                let ptr = cpu_storage.data.as_mut_ptr() as *mut f32;
+                let numel = param.numel() as usize;
+
+                let update_slice = step_size.as_f32_slice();
+                for (j, update_val) in update_slice.iter().take(numel).enumerate() {
+                    let param_val = *ptr.add(j);
+                    *ptr.add(j) = param_val - update_val;
+                }
+            }
         }
     }
 

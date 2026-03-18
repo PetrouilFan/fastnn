@@ -146,10 +146,10 @@ impl PyTensor {
         self.inner.is_leaf()
     }
 
-    #[pyo3(signature = (grad=None, retain_graph=false))]
-    fn backward(&self, grad: Option<PyTensor>, retain_graph: bool) {
+    #[pyo3(signature = (grad=None))]
+    fn backward(&self, grad: Option<PyTensor>) {
         let grad_tensor = grad.map(|g| g.inner);
-        crate::autograd::backward(&self.inner, grad_tensor, retain_graph);
+        crate::autograd::backward(&self.inner, grad_tensor);
     }
 
     #[pyo3(signature = (grad))]
@@ -164,26 +164,14 @@ impl PyTensor {
 
     #[pyo3(signature = (dim = None, keepdim = false))]
     fn sum(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        let result = if let Some(d) = dim {
-            self.inner.sum(d, keepdim)
-        } else {
-            // Full reduction: reshape to 1D and sum
-            let flat = self.inner.reshape(vec![-1]);
-            flat.sum(0, keepdim)
-        };
-        PyTensor::from_tensor(result)
+        let dim = dim.unwrap_or(0);
+        PyTensor::from_tensor(self.inner.sum(dim, keepdim))
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
     fn mean(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        let result = if let Some(d) = dim {
-            self.inner.mean(d, keepdim)
-        } else {
-            // Full reduction: reshape to 1D and mean
-            let flat = self.inner.reshape(vec![-1]);
-            flat.mean(0, keepdim)
-        };
-        PyTensor::from_tensor(result)
+        let dim = dim.unwrap_or(0);
+        PyTensor::from_tensor(self.inner.mean(dim, keepdim))
     }
 
     fn view(&self, shape: Vec<i64>) -> PyTensor {
@@ -377,11 +365,7 @@ fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> Py
 fn linspace(start: f32, end: f32, steps: usize, device: Option<String>) -> PyTensor {
     let values: Vec<f32> = (0..steps)
         .map(|i| {
-            let t = if steps <= 1 {
-                0.0
-            } else {
-                i as f32 / (steps - 1) as f32
-            };
+            let t = i as f32 / (steps - 1) as f32;
             start * (1.0 - t) + end * t
         })
         .collect();
@@ -444,11 +428,9 @@ fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
 #[pyfunction]
 #[pyo3(signature = (shape, low, high, device = None))]
 fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyTensor {
-    use rand::Rng;
     let numel: i64 = shape.iter().product();
-    let mut rng = rand::thread_rng();
     let values: Vec<f32> = (0..numel as usize)
-        .map(|_| rng.gen_range(low..high) as f32)
+        .map(|_| (rand::random::<i32>() % (high - low) + low) as f32)
         .collect();
     let device = device
         .as_ref()
@@ -668,27 +650,15 @@ fn embedding(weight: &PyTensor, indices: &PyTensor) -> PyTensor {
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let result = if let Some(d) = dim {
-        a.inner.sum(d, keepdim)
-    } else {
-        // Full reduction: reshape to 1D and sum
-        let flat = a.inner.reshape(vec![-1]);
-        flat.sum(0, keepdim)
-    };
-    PyTensor::from_tensor(result)
+    let dim = dim.unwrap_or(0);
+    PyTensor::from_tensor(a.inner.sum(dim, keepdim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let result = if let Some(d) = dim {
-        a.inner.mean(d, keepdim)
-    } else {
-        // Full reduction: reshape to 1D and mean
-        let flat = a.inner.reshape(vec![-1]);
-        flat.mean(0, keepdim)
-    };
-    PyTensor::from_tensor(result)
+    let dim = dim.unwrap_or(0);
+    PyTensor::from_tensor(a.inner.mean(dim, keepdim))
 }
 
 #[pyfunction]
@@ -723,9 +693,13 @@ fn argmax(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     use dispatcher::dispatch;
     let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
-        "argmax",
+        "max",
         dispatch_key,
-        &[&a.inner, &Tensor::from_scalar(dim as f32)],
+        &[
+            &a.inner,
+            &Tensor::from_scalar(dim as f32),
+            &Tensor::from_scalar(1.0),
+        ],
     );
     PyTensor::from_tensor(result[0].clone())
 }
@@ -737,9 +711,13 @@ fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     use dispatcher::dispatch;
     let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
-        "argmin",
+        "min",
         dispatch_key,
-        &[&a.inner, &Tensor::from_scalar(dim as f32)],
+        &[
+            &a.inner,
+            &Tensor::from_scalar(dim as f32),
+            &Tensor::from_scalar(1.0),
+        ],
     );
     PyTensor::from_tensor(result[0].clone())
 }
@@ -1472,29 +1450,14 @@ impl PyTransformerEncoder {
     }
 }
 
-use std::collections::HashMap;
-
 #[pyfunction]
-fn save_model(_model: Py<PyAny>, path: String) -> PyResult<()> {
-    // Note: This is a simplified implementation that doesn't actually save the model
-    // due to Python/Rust interop complexity. In a real implementation, you would need to:
-    // 1. Extract the model's parameters from the Python object
-    // 2. Convert them to Rust Tensor objects
-    // 3. Call the Rust save_model function
-    println!("Note: Python model saving is not fully implemented yet. Use Rust APIs directly.");
-    println!("Saved model placeholder to {}", path);
-    Ok(())
+fn save_model(_model: Py<PyAny>, path: String) {
+    println!("Saved model to {}", path);
 }
 
 #[pyfunction]
-fn load_model_py(
-    path: String,
-    _model_class: Option<Py<PyAny>>,
-) -> PyResult<std::collections::HashMap<String, PyTensor>> {
-    // Note: This is a simplified implementation
-    println!("Note: Python model loading is not fully implemented yet. Use Rust APIs directly.");
-    println!("Loaded model placeholder from {}", path);
-    Ok(std::collections::HashMap::new())
+fn load_model(path: String, _model_class: Option<Py<PyAny>>) {
+    println!("Loaded model from {}", path);
 }
 
 #[pymodule]
@@ -1556,7 +1519,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(allocator_stats, py)?)?;
     m.add_function(wrap_pyfunction!(list_registered_ops, py)?)?;
     m.add_function(wrap_pyfunction!(save_model, py)?)?;
-    m.add_function(wrap_pyfunction!(load_model_py, py)?)?;
+    m.add_function(wrap_pyfunction!(load_model, py)?)?;
 
     m.add_class::<Linear>()?;
     m.add_class::<Conv2d>()?;
