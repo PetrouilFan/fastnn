@@ -5448,7 +5448,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     // A transposed matrix (from [rows, cols]) has strides [1, rows]
     let a_strides = a.strides();
     let b_strides = b.strides();
-    let a_is_transposed =
+    let _a_is_transposed =
         a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] >= a_shape[a_shape.len() - 2];
     let b_is_transposed =
         b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] >= b_shape[b_shape.len() - 2];
