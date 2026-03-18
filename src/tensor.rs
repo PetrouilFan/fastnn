@@ -510,9 +510,8 @@ impl TensorImpl {
     pub fn data_ptr_f32(&self) -> *const f32 {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr() as *const u8;
-                let ptr = unsafe { ptr.add(self.storage_offset as usize) } as *const f32;
-                ptr
+                let ptr = cpu.data.as_ref().as_ptr();
+                (unsafe { ptr.add(self.storage_offset as usize) }) as *const f32
             }
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
@@ -534,8 +533,7 @@ impl TensorImpl {
                 // We need to get a pointer to the underlying Vec<u8>'s data
                 // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                let ptr = unsafe { ptr.add(self.storage_offset as usize) } as *mut f32;
-                ptr
+                (unsafe { ptr.add(self.storage_offset as usize) }) as *mut f32
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
@@ -1266,8 +1264,7 @@ impl Tensor {
                 // We need to get a pointer to the underlying Vec<u8>'s data
                 // Arc::as_ref() returns &Vec<u8>, then we call as_ptr() on that
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                let ptr = unsafe { ptr.add(inner.storage_offset as usize) } as *mut f32;
-                ptr
+                (unsafe { ptr.add(inner.storage_offset as usize) }) as *mut f32
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
