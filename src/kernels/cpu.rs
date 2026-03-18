@@ -7306,6 +7306,12 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 }
             }
 
+            // If max_logit is -inf (all logits are -inf), loss should be 0 or handled
+            if max_logit.is_infinite() {
+                losses[b] = 0.0;
+                continue;
+            }
+
             let mut sum_exp = 0.0f32;
             i = 0;
             if is_x86_feature_detected!("avx2") {
@@ -7334,6 +7340,13 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             for j in i..num_classes {
                 sum_exp += (logits_data[base_idx + j] - max_logit).exp();
             }
+
+            // Check sum_exp validity
+            if sum_exp.is_nan() || sum_exp.is_infinite() || sum_exp == 0.0 {
+                losses[b] = 0.0;
+                continue;
+            }
+
             let log_sum_exp = sum_exp.ln();
 
             let target_class = targets_data[b] as usize;
@@ -7341,6 +7354,12 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
             // Add max_logit back (subtracted before exp for numerical stability)
             losses[b] = log_sum_exp + max_logit - class_logit;
+
+            // Final check for NaN/Inf
+            if losses[b].is_nan() || losses[b].is_infinite() {
+                losses[b] = 0.0;
+            }
+
             total_loss += losses[b];
         }
 
@@ -7354,10 +7373,23 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 }
             }
 
+            // If max_logit is -inf (all logits are -inf), loss should be 0 or handled
+            if max_logit.is_infinite() {
+                losses[b] = 0.0;
+                continue;
+            }
+
             let mut sum_exp = 0.0f32;
             for c in 0..num_classes {
                 sum_exp += (logits_data[base_idx + c] - max_logit).exp();
             }
+
+            // Check sum_exp validity
+            if sum_exp.is_nan() || sum_exp.is_infinite() || sum_exp == 0.0 {
+                losses[b] = 0.0;
+                continue;
+            }
+
             let log_sum_exp = sum_exp.ln();
 
             let target_class = targets_data[b] as usize;
@@ -7365,6 +7397,12 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
             // Add max_logit back (subtracted before exp for numerical stability)
             losses[b] = log_sum_exp + max_logit - class_logit;
+
+            // Final check for NaN/Inf
+            if losses[b].is_nan() || losses[b].is_infinite() {
+                losses[b] = 0.0;
+            }
+
             total_loss += losses[b];
         }
     }
