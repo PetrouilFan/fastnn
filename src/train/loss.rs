@@ -74,6 +74,13 @@ impl LossFn for CrossEntropyLoss {
             }
 
             let log_sum_exp = sum_exp.ln();
+
+            // Check for NaN or infinity in log_sum_exp
+            if log_sum_exp.is_nan() || log_sum_exp.is_infinite() {
+                losses[b] = 0.0;
+                continue;
+            }
+
             let class_logit = pred_data[base_idx + target_class];
 
             // Check for NaN in class_logit
