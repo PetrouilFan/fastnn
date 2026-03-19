@@ -5556,10 +5556,12 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_valid_for_blas = a.is_contiguous() || a_is_transposed;
     let b_valid_for_blas = b.is_contiguous() || b_is_transposed;
 
+    // Use BLAS for larger matrices (n*k or m*k or m*n product > threshold)
+    // Don't require m >= MIN_BLAS_SIZE - small m with large k,n is still a good BLAS candidate
     let use_blas = batch == 1
-        && m as usize >= MIN_BLAS_SIZE
-        && n as usize >= MIN_BLAS_SIZE
-        && k as usize >= MIN_BLAS_SIZE
+        && (m as usize * n as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
+            || m as usize * k as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
+            || k as usize * n as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE)
         && a_valid_for_blas
         && b_valid_for_blas;
 
