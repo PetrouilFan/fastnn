@@ -259,7 +259,9 @@ impl TensorImpl {
         sizes.insert(dim, 1);
         strides.insert(dim, if dim == ndim { self.numel() } else { 0 });
 
-        TensorImpl {
+        let input_tensor = Tensor::new(self.clone());
+
+        let mut tensor = TensorImpl {
             storage: Arc::clone(&self.storage),
             sizes,
             strides,
@@ -268,8 +270,20 @@ impl TensorImpl {
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
             autograd_meta: None,
+        };
+
+        if self.requires_grad() {
+            let backward = Arc::new(autograd::UnsqueezeBackward::new(input_tensor, dim));
+            let meta = AutogradMeta {
+                grad: None,
+                grad_fn: Some(backward.clone()),
+                requires_grad: true,
+                is_leaf: false,
+            };
+            tensor.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
         }
-        .into()
+
+        tensor.into()
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
