@@ -65,3 +65,14 @@ build/
 benchmark_tests/
 nul
 fastnn/fastnn.pdb
+
+# Debug/benchmark files
+.benchmarks/
+.kilo/
+*.fnn
+results.json
+tests/bench_*.py
+tests/profile_*.py
+tests/test_alignment.py
+tests/test_memory.py
+tests/test_threading.py
