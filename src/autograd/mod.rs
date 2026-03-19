@@ -224,6 +224,44 @@ impl Node for AddBackward {
     }
 }
 
+pub struct UnsqueezeBackward {
+    pub inputs: Vec<Tensor>,
+    pub dim: usize,
+}
+
+impl UnsqueezeBackward {
+    pub fn new(input: Tensor, dim: usize) -> Self {
+        UnsqueezeBackward {
+            inputs: vec![input],
+            dim,
+        }
+    }
+}
+
+impl Node for UnsqueezeBackward {
+    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs[0].clone().unwrap();
+        let grad_squeezed = grad.squeeze(Some(self.dim));
+        vec![Some(grad_squeezed)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &[]
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "UnsqueezeBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        &self.inputs
+    }
+}
+
 #[allow(dead_code)]
 pub struct SubBackward {
     pub inputs: Vec<Tensor>,

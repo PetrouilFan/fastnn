@@ -312,6 +312,87 @@ class PySequential:
                 layer.eval()
 
 
+class BasicBlock:
+    """ResNet BasicBlock with skip connection."""
+
+    def __init__(self, conv1, bn1, relu, conv2, bn2, downsample=None):
+        self.conv1 = conv1
+        self.bn1 = bn1
+        self.relu = relu
+        self.conv2 = conv2
+        self.bn2 = bn2
+        self.downsample = downsample
+
+    def __call__(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out = out + identity
+        out = self.relu(out)
+
+        return out
+
+    def parameters(self):
+        params = []
+        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
+            if hasattr(layer, "parameters"):
+                params.extend(layer.parameters())
+        if self.downsample is not None:
+            if hasattr(self.downsample, "parameters"):
+                params.extend(self.downsample.parameters())
+        return params
+
+    def named_parameters(self):
+        params = []
+        for name, layer in [
+            ("conv1", self.conv1),
+            ("bn1", self.bn1),
+            ("conv2", self.conv2),
+            ("bn2", self.bn2),
+        ]:
+            if hasattr(layer, "named_parameters"):
+                for n, p in layer.named_parameters():
+                    params.append((f"{name}.{n}", p))
+        if self.downsample is not None:
+            if hasattr(self.downsample, "named_parameters"):
+                for n, p in self.downsample.named_parameters():
+                    params.append((f"downsample.{n}", p))
+        return params
+
+    def zero_grad(self):
+        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
+            if hasattr(layer, "zero_grad"):
+                layer.zero_grad()
+        if self.downsample is not None:
+            if hasattr(self.downsample, "zero_grad"):
+                self.downsample.zero_grad()
+
+    def train(self):
+        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
+            if hasattr(layer, "train"):
+                layer.train()
+        if self.downsample is not None:
+            if hasattr(self.downsample, "train"):
+                self.downsample.train()
+
+    def eval(self):
+        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
+            if hasattr(layer, "eval"):
+                layer.eval()
+        if self.downsample is not None:
+            if hasattr(self.downsample, "eval"):
+                self.downsample.eval()
+
+
 Sequential = PySequential
 ModuleList = _core.ModuleList
 SGD = _core.PySGD
