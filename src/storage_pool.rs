@@ -25,23 +25,27 @@ impl StoragePool {
 
                 if let Some(storages) = buffers.get_mut(&key) {
                     if let Some(storage) = storages.pop() {
-                        // Zero the buffer before reuse to preserve `zeros` semantics
-                        // Strategy: Clone the Storage to get mutable access, zero it, return Arc
-                        // This ensures we get a unique copy with zeroed data
-                        let mut storage_clone = (*storage).clone();
-                        match &mut storage_clone {
-                            Storage::Cpu(cpu) => {
-                                // Get mutable access to the Vec<u8> and zero it
-                                let data = Arc::make_mut(&mut cpu.data);
-                                data.fill(0);
+                        // Try to get exclusive ownership via Arc::try_unwrap
+                        // This avoids cloning and keeps the actual buffer alive for reuse
+                        match Arc::try_unwrap(storage) {
+                            Ok(mut owned_storage) => {
+                                match &mut owned_storage {
+                                    Storage::Cpu(cpu) => {
+                                        // Get mutable access to the Vec<u8> and zero it
+                                        let data = Arc::make_mut(&mut cpu.data);
+                                        data.fill(0);
+                                    }
+                                    Storage::Wgpu(_) => {
+                                        // GPU storage - can't zero here without a kernel
+                                    }
+                                }
+                                return Arc::new(owned_storage);
                             }
-                            Storage::Wgpu(_) => {
-                                // GPU storage - can't zero here without a kernel
-                                // Caller (Tensor::zeros) handles GPU case separately
+                            Err(storage) => {
+                                // Arc still shared by someone else, push back and allocate fresh
+                                storages.push(storage);
                             }
                         }
-                        // Return the cloned storage with zeroed data
-                        return Arc::new(storage_clone);
                     }
                 }
 
