@@ -5556,9 +5556,17 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_valid_for_blas = a.is_contiguous() || a_is_transposed;
     let b_valid_for_blas = b.is_contiguous() || b_is_transposed;
 
-    // Use BLAS for larger matrices (n*k or m*k or m*n product > threshold)
-    // Don't require m >= MIN_BLAS_SIZE - small m with large k,n is still a good BLAS candidate
-    let use_blas = batch == 1
+    // Reshape trick: For batched A [batch, m, k] @ 2D B [k, n], flatten to [batch*m, k] @ [k, n]
+    // This enables a single BLAS call instead of looping over batch dimension
+    let can_reshape_trick = batch > 1
+        && b_shape.len() == 2  // B is 2D, not batched
+        && a.is_contiguous()
+        && b_valid_for_blas;
+
+    // Use BLAS for:
+    // 1. Single batch with large enough matrices
+    // 2. Batched operations with 2D weight (reshape trick)
+    let use_blas = (can_reshape_trick || batch == 1)
         && (m as usize * n as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
             || m as usize * k as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
             || k as usize * n as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE)
@@ -5566,20 +5574,41 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         && b_valid_for_blas;
 
     if use_blas {
-        // For BLAS, we can handle transposed matrices by passing the transpose flag
-        let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
-        let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
-        let result = matmul_blas_with_transpose(
-            a_slice,
-            b_slice,
-            m as usize,
-            k as usize,
-            n as usize,
-            a_is_transposed,
-            b_is_transposed,
-        );
-        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, m as usize * n as usize) };
-        out_slice.copy_from_slice(&result);
+        if can_reshape_trick {
+            // Reshape trick: treat [batch, m, k] as [batch*m, k]
+            // Single BLAS call for entire batch
+            let batch_m = batch * m as usize;
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, batch_m * k as usize) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
+            let result = matmul_blas_with_transpose(
+                a_slice,
+                b_slice,
+                batch_m,
+                k as usize,
+                n as usize,
+                a_is_transposed,
+                b_is_transposed,
+            );
+            let out_slice =
+                unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_m * n as usize) };
+            out_slice.copy_from_slice(&result);
+        } else {
+            // Single batch BLAS
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
+            let result = matmul_blas_with_transpose(
+                a_slice,
+                b_slice,
+                m as usize,
+                k as usize,
+                n as usize,
+                a_is_transposed,
+                b_is_transposed,
+            );
+            let out_slice =
+                unsafe { std::slice::from_raw_parts_mut(out_ptr, m as usize * n as usize) };
+            out_slice.copy_from_slice(&result);
+        }
     } else {
         #[cfg(feature = "parallel")]
         {
@@ -7910,59 +7939,182 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x_shape = x.shape();
     let ndim = x_shape.len();
 
-    // BatchNorm always normalizes across the channel dimension (dim=1)
-    // For 2D input: (N, C) -> normalize across C (dim=1)
-    // For 3D input: (N, C, L) -> normalize across C (dim=1)
-    // For 4D input: (N, C, H, W) -> normalize across C (dim=1)
-    let channel_dim = 1;
-
-    // Create shape for broadcasting: [1, C, 1, 1, ...] for any input shape
-    // This allows weight/bias to broadcast correctly to any spatial dimensions
-    let mut broadcast_shape = vec![1; ndim];
-    if ndim > 1 {
-        broadcast_shape[channel_dim] = x_shape[channel_dim];
-    }
-
-    let (mean, std) = if training {
-        // Compute batch statistics across channel dimension
-        let mean = x.mean(channel_dim as i32, true);
-        let var = x
-            .sub(&mean.clone())
-            .mul(&x.sub(&mean.clone()))
-            .mean(channel_dim as i32, true);
-        let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
-        (mean, std)
+    // BatchNorm normalizes across the channel dimension (dim=1)
+    // For 2D: (N, C), For 4D: (N, C, H, W)
+    let num_channels = if ndim > 1 { x_shape[1] } else { 1 };
+    let batch_size = x_shape[0];
+    let spatial_size: i64 = if ndim > 2 {
+        x_shape[2..].iter().product()
     } else {
-        // Use running statistics
-        let mean = running_mean
-            .expect("running_mean required for inference")
-            .clone();
-        let var = running_var
-            .expect("running_var required for inference")
-            .clone();
-
-        // Reshape running stats to broadcast correctly with input
-        let mean = mean.reshape(broadcast_shape.clone());
-        let var = var.reshape(broadcast_shape.clone());
-
-        let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
-        (mean, std)
+        1
     };
+    let total_per_channel = batch_size * spatial_size; // Elements per feature
 
-    let mut normalized = x.sub(&mean).div(&std);
+    // Get weight and bias (default: gamma=1, beta=0)
+    let w_data = weight.map(|w| w.as_f32_slice());
+    let b_data = bias.map(|b| b.as_f32_slice());
 
-    if let Some(w) = weight {
-        // Reshape weight to broadcast correctly
-        let w_reshaped = w.reshape(broadcast_shape.clone());
-        normalized = normalized.mul(&w_reshaped);
+    // Create output tensor with same shape as input
+    let mut output = Tensor::empty(x_shape.clone(), x.dtype(), x.device());
+
+    // Get raw pointers for fast access
+    let x_ptr = x.data_ptr() as *const f32;
+    let x_addr = x_ptr as usize; // Convert to usize for Sync
+    let out_inner = Arc::make_mut(&mut output.inner);
+    let out_storage = Arc::make_mut(&mut out_inner.storage);
+    let Storage::Cpu(out_cpu) = out_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut out_cpu.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+    let out_addr = out_ptr as usize; // Convert to usize for Sync
+
+    if training {
+        // Training mode: compute batch statistics
+        // Parallelize over channels using rayon
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+
+            (0..num_channels as usize).into_par_iter().for_each(|c| {
+                let x_ptr = x_addr as *const f32;
+                let out_ptr = out_addr as *mut f32;
+
+                // Compute mean for this channel
+                let mut sum = 0.0f32;
+                for b in 0..batch_size as usize {
+                    for s in 0..spatial_size as usize {
+                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        sum += unsafe { *x_ptr.add(idx) };
+                    }
+                }
+                let mean = sum / total_per_channel as f32;
+
+                // Compute variance for this channel
+                let mut var_sum = 0.0f32;
+                for b in 0..batch_size as usize {
+                    for s in 0..spatial_size as usize {
+                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        let val = unsafe { *x_ptr.add(idx) };
+                        let diff = val - mean;
+                        var_sum += diff * diff;
+                    }
+                }
+                let var = var_sum / total_per_channel as f32;
+                let inv_std = 1.0 / (var + eps as f32).sqrt();
+
+                // Get gamma and beta for this channel
+                let gamma = w_data.map_or(1.0, |w| w[c]);
+                let beta = b_data.map_or(0.0, |b| b[c]);
+
+                // Normalize, scale, and shift in one pass
+                for b in 0..batch_size as usize {
+                    for s in 0..spatial_size as usize {
+                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        let val = unsafe { *x_ptr.add(idx) };
+                        let normed = (val - mean) * inv_std;
+                        unsafe { *out_ptr.add(idx) = gamma * normed + beta };
+                    }
+                }
+            });
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            for c in 0..num_channels as usize {
+                // Compute mean for this channel
+                let mut sum = 0.0f32;
+                for b in 0..batch_size as usize {
+                    for s in 0..spatial_size as usize {
+                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        sum += unsafe { *x_ptr.add(idx) };
+                    }
+                }
+                let mean = sum / total_per_channel as f32;
+
+                // Compute variance for this channel
+                let mut var_sum = 0.0f32;
+                for b in 0..batch_size as usize {
+                    for s in 0..spatial_size as usize {
+                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        let val = unsafe { *x_ptr.add(idx) };
+                        let diff = val - mean;
+                        var_sum += diff * diff;
+                    }
+                }
+                let var = var_sum / total_per_channel as f32;
+                let inv_std = 1.0 / (var + eps as f32).sqrt();
+
+                // Get gamma and beta for this channel
+                let gamma = w_data.map_or(1.0, |w| w[c]);
+                let beta = b_data.map_or(0.0, |b| b[c]);
+
+                // Normalize, scale, and shift in one pass
+                for b in 0..batch_size as usize {
+                    for s in 0..spatial_size as usize {
+                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        let val = unsafe { *x_ptr.add(idx) };
+                        let normed = (val - mean) * inv_std;
+                        unsafe { *out_ptr.add(idx) = gamma * normed + beta };
+                    }
+                }
+            }
+        }
+    } else {
+        // Inference mode: use running statistics (no computation needed)
+        let run_mean = running_mean.expect("running_mean required for inference");
+        let run_var = running_var.expect("running_var required for inference");
+        let mean_data = run_mean.as_f32_slice();
+        let var_data = run_var.as_f32_slice();
+
+        // Parallelize over channels
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+
+            (0..num_channels as usize).into_par_iter().for_each(|c| {
+                let x_ptr = x_addr as *const f32;
+                let out_ptr = out_addr as *mut f32;
+
+                let mean = mean_data[c];
+                let inv_std = 1.0 / (var_data[c] + eps as f32).sqrt();
+                let gamma = w_data.map_or(1.0, |w| w[c]);
+                let beta = b_data.map_or(0.0, |b| b[c]);
+
+                // Normalize, scale, and shift in one pass
+                for b in 0..batch_size as usize {
+                    for s in 0..spatial_size as usize {
+                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        let val = unsafe { *x_ptr.add(idx) };
+                        let normed = (val - mean) * inv_std;
+                        unsafe { *out_ptr.add(idx) = gamma * normed + beta };
+                    }
+                }
+            });
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            for c in 0..num_channels as usize {
+                let mean = mean_data[c];
+                let inv_std = 1.0 / (var_data[c] + eps as f32).sqrt();
+                let gamma = w_data.map_or(1.0, |w| w[c]);
+                let beta = b_data.map_or(0.0, |b| b[c]);
+
+                // Normalize, scale, and shift in one pass
+                for b in 0..batch_size as usize {
+                    for s in 0..spatial_size as usize {
+                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        let val = unsafe { *x_ptr.add(idx) };
+                        let normed = (val - mean) * inv_std;
+                        unsafe { *out_ptr.add(idx) = gamma * normed + beta };
+                    }
+                }
+            }
+        }
     }
-    if let Some(b) = bias {
-        // Reshape bias to broadcast correctly
-        let b_reshaped = b.reshape(broadcast_shape.clone());
-        normalized = normalized.add(&b_reshaped);
-    }
 
-    vec![normalized]
+    vec![output]
 }
 
 fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
