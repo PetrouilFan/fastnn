@@ -205,58 +205,42 @@ class MaxPool2d:
 
     def __call__(self, x):
         # x shape: (batch, channels, height, width)
+        # Use Rust implementation for performance
         import fastnn._core as _core
 
-        # Get input dimensions
-        batch, channels, height, width = x.shape
+        # For now, only support symmetric kernel_size, stride, padding, dilation
+        # Check if they are tuples and convert to single value if possible
+        if isinstance(self.kernel_size, tuple):
+            if self.kernel_size[0] != self.kernel_size[1]:
+                raise NotImplementedError("Non-square kernel_size not supported yet")
+            kernel_size = self.kernel_size[0]
+        else:
+            kernel_size = self.kernel_size
 
-        # Compute output dimensions (used for shape calculation)
-        _ = (
-            height
-            + 2 * self.padding[0]
-            - self.dilation[0] * (self.kernel_size[0] - 1)
-            - 1
-        ) // self.stride[0] + 1
-        _ = (
-            width
-            + 2 * self.padding[1]
-            - self.dilation[1] * (self.kernel_size[1] - 1)
-            - 1
-        ) // self.stride[1] + 1
+        if isinstance(self.stride, tuple):
+            if self.stride[0] != self.stride[1]:
+                raise NotImplementedError("Non-square stride not supported yet")
+            stride = self.stride[0]
+        else:
+            stride = self.stride
 
-        if self.ceil_mode:
-            _ = (
-                height
-                + 2 * self.padding[0]
-                - self.dilation[0] * (self.kernel_size[0] - 1)
-                + self.stride[0]
-                - 1
-            ) // self.stride[0] + 1
-            _ = (
-                width
-                + 2 * self.padding[1]
-                - self.dilation[1] * (self.kernel_size[1] - 1)
-                + self.stride[1]
-                - 1
-            ) // self.stride[1] + 1
+        if isinstance(self.padding, tuple):
+            if self.padding[0] != self.padding[1]:
+                raise NotImplementedError("Non-square padding not supported yet")
+            padding = self.padding[0]
+        else:
+            padding = self.padding
 
-        # Note: The actual max pooling logic would need to be implemented in Rust
-        # for performance. This Python implementation is a placeholder.
+        if isinstance(self.dilation, tuple):
+            if self.dilation[0] != self.dilation[1]:
+                raise NotImplementedError("Non-square dilation not supported yet")
+            dilation = self.dilation[0]
+        else:
+            dilation = self.dilation
 
-        # For now, return mean pooling as a placeholder
-        # The proper implementation would require implementing im2col/unfold
-        y = _core.mean(x, 3, True)
-        z = _core.mean(y, 2, True)
-
-        # But we need the correct output shape
-        # So we'll resize the mean-pooled output to the correct spatial dimensions
-        # This is a hack but better than returning zeros
-
-        # Use mean pooling as a placeholder
-        y = _core.mean(x, 3, True)  # Mean over width
-        z = _core.mean(y, 2, True)  # Mean over height
-
-        return z
+        # Call the Rust implementation
+        rust_maxpool = _core.MaxPool2d(kernel_size, stride, padding, dilation)
+        return rust_maxpool(x)
 
     def train(self):
         pass

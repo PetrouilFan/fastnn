@@ -344,14 +344,13 @@ output = fnn_model(input_tensor)
 | `Embedding` | ✅ | |
 | `Dropout` | ✅ | |
 | `AdaptiveAvgPool2d` | ✅ | Output size must be (1,1) |
-| `MaxPool2d` | ⚠️ | Placeholder implementation (uses mean pooling) |
-| `BasicBlock` (ResNet) | ⚠️ | Skip connections not supported |
+| `MaxPool2d` | ✅ | Full support (CPU kernel implemented) |
+| `BasicBlock` (ResNet) | ❌ | Skip connections not supported |
 
 ### Limitations
 
-- **MaxPool2d**: Currently uses mean pooling as a placeholder. This affects accuracy for models using MaxPool2d (e.g., ResNet).
 - **Skip Connections**: BasicBlock and other skip connections are not supported. The export skips container layers and only exports individual layers.
-- **Model Accuracy**: Due to the MaxPool2d limitation and missing skip connections, exported models may have different outputs compared to PyTorch.
+- **Model Accuracy**: Due to missing skip connections, exported models may have different outputs compared to PyTorch. This is particularly noticeable in ResNet models where the BasicBlock's `output = conv2(...) + shortcut` operation is missing.
 
 ### Benchmarking
 
