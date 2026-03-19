@@ -666,9 +666,21 @@ impl Clone for TensorImpl {
 impl Drop for TensorImpl {
     fn drop(&mut self) {
         // If we are the last owner of the storage, return it to the pool
-        if Arc::strong_count(&self.storage) == 1 {
+        let refcount = Arc::strong_count(&self.storage);
+        if refcount == 1 {
+            eprintln!(
+                "[tensor_drop] Releasing storage to pool, nbytes={}, dtype={:?}",
+                self.storage.nbytes(),
+                self.dtype
+            );
             let storage = self.storage.clone();
             get_storage_pool().release(storage);
+        } else {
+            eprintln!(
+                "[tensor_drop] Not releasing storage, refcount={}, nbytes={}",
+                refcount,
+                self.storage.nbytes()
+            );
         }
     }
 }
