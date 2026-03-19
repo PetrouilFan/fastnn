@@ -1256,6 +1256,10 @@ impl BatchNorm1d {
         self.inner.eval_mode();
     }
 
+    fn is_training(&self) -> bool {
+        self.inner.is_training()
+    }
+
     fn set_weight(&mut self, weight: PyTensor) {
         self.inner.weight = Some(weight.inner);
     }

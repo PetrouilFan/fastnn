@@ -5650,6 +5650,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     b_stride_1,
                 );
             } else {
+                eprintln!("DEBUG: using single_threaded_matmul (non-parallel path)");
                 single_threaded_matmul(
                     a_ptr,
                     b_ptr,
@@ -5850,208 +5851,17 @@ fn small_matrix_matmul(
         for i in 0..m as usize {
             for j in 0..n as usize {
                 let mut sum = 0.0f32;
-
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("fma") {
-                        unsafe {
-                            let mut acc0 = _mm256_setzero_ps();
-                            let mut acc1 = _mm256_setzero_ps();
-                            let mut kk = 0usize;
-
-                            while kk + 8 <= k as usize {
-                                let a0 = _mm256_loadu_ps(a_ptr.add(
-                                    bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + kk * a_stride_1 as usize,
-                                ));
-                                let a1 = _mm256_loadu_ps(a_ptr.add(
-                                    bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + (kk + 8) * a_stride_1 as usize,
-                                ));
-
-                                let b0 = _mm256_loadu_ps(b_ptr.add(
-                                    bat_b_offset
-                                        + kk * b_stride_0 as usize
-                                        + j * b_stride_1 as usize,
-                                ));
-                                let b1 = _mm256_loadu_ps(b_ptr.add(
-                                    bat_b_offset
-                                        + (kk + 8) * b_stride_0 as usize
-                                        + j * b_stride_1 as usize,
-                                ));
-
-                                acc0 = _mm256_fmadd_ps(a0, b0, acc0);
-                                acc1 = _mm256_fmadd_ps(a1, b1, acc1);
-
-                                kk += 16;
-                            }
-
-                            let acc = _mm256_add_ps(acc0, acc1);
-                            let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                            _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
-                            sum += acc_arr.assume_init().iter().sum::<f32>();
-
-                            while kk < k as usize {
-                                let a_val = *a_ptr.add(
-                                    bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + kk * a_stride_1 as usize,
-                                );
-                                let b_val = *b_ptr.add(
-                                    bat_b_offset
-                                        + kk * b_stride_0 as usize
-                                        + j * b_stride_1 as usize,
-                                );
-                                sum += a_val * b_val;
-                                kk += 1;
-                            }
-                        }
-                    } else {
-                        let mut sum0 = 0.0f32;
-                        let mut sum1 = 0.0f32;
-                        let mut sum2 = 0.0f32;
-                        let mut sum3 = 0.0f32;
-
-                        let mut kk = 0usize;
-                        let k_limit = k as usize;
-
-                        while kk + 4 <= k_limit {
-                            let a0 = unsafe {
-                                *a_ptr.add(
-                                    bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + kk * a_stride_1 as usize,
-                                )
-                            };
-                            let a1 = unsafe {
-                                *a_ptr.add(
-                                    bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + (kk + 1) * a_stride_1 as usize,
-                                )
-                            };
-                            let a2 = unsafe {
-                                *a_ptr.add(
-                                    bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + (kk + 2) * a_stride_1 as usize,
-                                )
-                            };
-                            let a3 = unsafe {
-                                *a_ptr.add(
-                                    bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + (kk + 3) * a_stride_1 as usize,
-                                )
-                            };
-
-                            let b_base = bat_b_offset + j * b_stride_1 as usize;
-                            let b0 = unsafe { *b_ptr.add(b_base + kk * b_stride_0 as usize) };
-                            let b1 = unsafe { *b_ptr.add(b_base + (kk + 1) * b_stride_0 as usize) };
-                            let b2 = unsafe { *b_ptr.add(b_base + (kk + 2) * b_stride_0 as usize) };
-                            let b3 = unsafe { *b_ptr.add(b_base + (kk + 3) * b_stride_0 as usize) };
-
-                            sum0 += a0 * b0;
-                            sum1 += a1 * b1;
-                            sum2 += a2 * b2;
-                            sum3 += a3 * b3;
-                            kk += 4;
-                        }
-
-                        sum = sum0 + sum1 + sum2 + sum3;
-
-                        while kk < k_limit {
-                            let a_val = unsafe {
-                                *a_ptr.add(
-                                    bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + kk * a_stride_1 as usize,
-                                )
-                            };
-                            let b_val = unsafe {
-                                *b_ptr.add(
-                                    bat_b_offset
-                                        + kk * b_stride_0 as usize
-                                        + j * b_stride_1 as usize,
-                                )
-                            };
-                            sum += a_val * b_val;
-                            kk += 1;
-                        }
-                    }
+                for kk in 0..k as usize {
+                    let a_val = unsafe {
+                        *a_ptr
+                            .add(bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize)
+                    };
+                    let b_val = unsafe {
+                        *b_ptr
+                            .add(bat_b_offset + kk * b_stride_0 as usize + j * b_stride_1 as usize)
+                    };
+                    sum += a_val * b_val;
                 }
-
-                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                {
-                    let mut sum0 = 0.0f32;
-                    let mut sum1 = 0.0f32;
-                    let mut sum2 = 0.0f32;
-                    let mut sum3 = 0.0f32;
-
-                    let mut kk = 0usize;
-                    let k_limit = k as usize;
-
-                    while kk + 4 <= k_limit {
-                        let a0 = unsafe {
-                            *a_ptr.add(
-                                bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize,
-                            )
-                        };
-                        let a1 = unsafe {
-                            *a_ptr.add(
-                                bat_a_offset
-                                    + i * a_stride_0 as usize
-                                    + (kk + 1) * a_stride_1 as usize,
-                            )
-                        };
-                        let a2 = unsafe {
-                            *a_ptr.add(
-                                bat_a_offset
-                                    + i * a_stride_0 as usize
-                                    + (kk + 2) * a_stride_1 as usize,
-                            )
-                        };
-                        let a3 = unsafe {
-                            *a_ptr.add(
-                                bat_a_offset
-                                    + i * a_stride_0 as usize
-                                    + (kk + 3) * a_stride_1 as usize,
-                            )
-                        };
-
-                        let b_base = bat_b_offset + j * b_stride_1 as usize;
-                        let b0 = unsafe { *b_ptr.add(b_base + kk * b_stride_0 as usize) };
-                        let b1 = unsafe { *b_ptr.add(b_base + (kk + 1) * b_stride_0 as usize) };
-                        let b2 = unsafe { *b_ptr.add(b_base + (kk + 2) * b_stride_0 as usize) };
-                        let b3 = unsafe { *b_ptr.add(b_base + (kk + 3) * b_stride_0 as usize) };
-
-                        sum0 += a0 * b0;
-                        sum1 += a1 * b1;
-                        sum2 += a2 * b2;
-                        sum3 += a3 * b3;
-                        kk += 4;
-                    }
-
-                    sum = sum0 + sum1 + sum2 + sum3;
-
-                    while kk < k_limit {
-                        let a_val = unsafe {
-                            *a_ptr.add(
-                                bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize,
-                            )
-                        };
-                        let b_val = unsafe {
-                            *b_ptr.add(
-                                bat_b_offset + kk * b_stride_0 as usize + j * b_stride_1 as usize,
-                            )
-                        };
-                        sum += a_val * b_val;
-                        kk += 1;
-                    }
-                }
-
                 let out_idx = bat * m as usize * n as usize + i * n as usize + j;
                 unsafe { *out_ptr.add(out_idx) = sum };
             }
@@ -6075,290 +5885,26 @@ fn single_threaded_matmul(
     b_stride_0: i64,
     b_stride_1: i64,
 ) {
-    const TILE_SIZE: usize = 64;
-
     for bat in 0..batch {
         let bat_a_offset = bat * a_batch_stride as usize;
         let bat_b_offset = bat * b_batch_stride as usize;
 
-        for i_tile in (0..m as usize).step_by(TILE_SIZE) {
-            for j_tile in (0..n as usize).step_by(TILE_SIZE) {
-                for k_tile in (0..k as usize).step_by(TILE_SIZE) {
-                    let i_max = (i_tile + TILE_SIZE).min(m as usize);
-                    let j_max = (j_tile + TILE_SIZE).min(n as usize);
-                    let k_max = (k_tile + TILE_SIZE).min(k as usize);
-
-                    for i in i_tile..i_max {
-                        for j in j_tile..j_max {
-                            let mut sum = 0.0f32;
-
-                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                            {
-                                if is_x86_feature_detected!("fma") {
-                                    unsafe {
-                                        let mut acc0 = _mm256_setzero_ps();
-                                        let mut acc1 = _mm256_setzero_ps();
-                                        let mut kk = k_tile;
-
-                                        while kk + 8 <= k_max {
-                                            let a0 = _mm256_loadu_ps(a_ptr.add(
-                                                bat_a_offset
-                                                    + i * a_stride_0 as usize
-                                                    + kk * a_stride_1 as usize,
-                                            ));
-                                            let a1 = _mm256_loadu_ps(a_ptr.add(
-                                                bat_a_offset
-                                                    + i * a_stride_0 as usize
-                                                    + (kk + 8) * a_stride_1 as usize,
-                                            ));
-
-                                            let b0 = _mm256_loadu_ps(b_ptr.add(
-                                                bat_b_offset
-                                                    + kk * b_stride_0 as usize
-                                                    + j * b_stride_1 as usize,
-                                            ));
-                                            let b1 = _mm256_loadu_ps(b_ptr.add(
-                                                bat_b_offset
-                                                    + (kk + 8) * b_stride_0 as usize
-                                                    + j * b_stride_1 as usize,
-                                            ));
-
-                                            acc0 = _mm256_fmadd_ps(a0, b0, acc0);
-                                            acc1 = _mm256_fmadd_ps(a1, b1, acc1);
-
-                                            #[cfg(feature = "prefetch")]
-                                            {
-                                                _mm_prefetch(
-                                                    b_ptr.add(
-                                                        bat_b_offset
-                                                            + (kk + TILE_SIZE)
-                                                                * b_stride_0 as usize
-                                                            + j * b_stride_1 as usize,
-                                                    )
-                                                        as *const i8,
-                                                    _MM_HINT_T0,
-                                                );
-                                                _mm_prefetch(
-                                                    a_ptr.add(
-                                                        bat_a_offset
-                                                            + i * a_stride_0 as usize
-                                                            + (kk + TILE_SIZE)
-                                                                * a_stride_1 as usize,
-                                                    )
-                                                        as *const i8,
-                                                    _MM_HINT_T0,
-                                                );
-                                            }
-
-                                            kk += 16;
-                                        }
-
-                                        let acc = _mm256_add_ps(acc0, acc1);
-                                        let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                                        _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
-                                        sum += acc_arr.assume_init().iter().sum::<f32>();
-
-                                        while kk < k_max {
-                                            let a_val = *a_ptr.add(
-                                                bat_a_offset
-                                                    + i * a_stride_0 as usize
-                                                    + kk * a_stride_1 as usize,
-                                            );
-                                            let b_val = *b_ptr.add(
-                                                bat_b_offset
-                                                    + kk * b_stride_0 as usize
-                                                    + j * b_stride_1 as usize,
-                                            );
-                                            sum += a_val * b_val;
-                                            kk += 1;
-                                        }
-                                        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                                        {
-                                            for idx in 0..numel {
-                                                unsafe {
-                                                    *out_ptr.add(idx) =
-                                                        *a_ptr.add(idx) / *b_ptr.add(idx);
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    let mut kk = k_tile;
-                                    while kk + 4 <= k_max {
-                                        let a0 = unsafe {
-                                            *a_ptr.add(
-                                                bat_a_offset
-                                                    + i * a_stride_0 as usize
-                                                    + kk * a_stride_1 as usize,
-                                            )
-                                        };
-                                        let a1 = unsafe {
-                                            *a_ptr.add(
-                                                bat_a_offset
-                                                    + i * a_stride_0 as usize
-                                                    + (kk + 1) * a_stride_1 as usize,
-                                            )
-                                        };
-                                        let a2 = unsafe {
-                                            *a_ptr.add(
-                                                bat_a_offset
-                                                    + i * a_stride_0 as usize
-                                                    + (kk + 2) * a_stride_1 as usize,
-                                            )
-                                        };
-                                        let a3 = unsafe {
-                                            *a_ptr.add(
-                                                bat_a_offset
-                                                    + i * a_stride_0 as usize
-                                                    + (kk + 3) * a_stride_1 as usize,
-                                            )
-                                        };
-
-                                        let b0 = unsafe {
-                                            *b_ptr.add(
-                                                bat_b_offset
-                                                    + kk * b_stride_0 as usize
-                                                    + j * b_stride_1 as usize,
-                                            )
-                                        };
-                                        let b1 = unsafe {
-                                            *b_ptr.add(
-                                                bat_b_offset
-                                                    + (kk + 1) * b_stride_0 as usize
-                                                    + j * b_stride_1 as usize,
-                                            )
-                                        };
-                                        let b2 = unsafe {
-                                            *b_ptr.add(
-                                                bat_b_offset
-                                                    + (kk + 2) * b_stride_0 as usize
-                                                    + j * b_stride_1 as usize,
-                                            )
-                                        };
-                                        let b3 = unsafe {
-                                            *b_ptr.add(
-                                                bat_b_offset
-                                                    + (kk + 3) * b_stride_0 as usize
-                                                    + j * b_stride_1 as usize,
-                                            )
-                                        };
-
-                                        sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
-                                        kk += 4;
-                                    }
-
-                                    while kk < k_max {
-                                        let a_val = unsafe {
-                                            *a_ptr.add(
-                                                bat_a_offset
-                                                    + i * a_stride_0 as usize
-                                                    + kk * a_stride_1 as usize,
-                                            )
-                                        };
-                                        let b_val = unsafe {
-                                            *b_ptr.add(
-                                                bat_b_offset
-                                                    + kk * b_stride_0 as usize
-                                                    + j * b_stride_1 as usize,
-                                            )
-                                        };
-                                        sum += a_val * b_val;
-                                        kk += 1;
-                                    }
-                                }
-                            }
-
-                            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                            {
-                                let mut kk = k_tile;
-                                while kk + 4 <= k_max {
-                                    let a0 = unsafe {
-                                        *a_ptr.add(
-                                            bat_a_offset
-                                                + i * a_stride_0 as usize
-                                                + kk * a_stride_1 as usize,
-                                        )
-                                    };
-                                    let a1 = unsafe {
-                                        *a_ptr.add(
-                                            bat_a_offset
-                                                + i * a_stride_0 as usize
-                                                + (kk + 1) * a_stride_1 as usize,
-                                        )
-                                    };
-                                    let a2 = unsafe {
-                                        *a_ptr.add(
-                                            bat_a_offset
-                                                + i * a_stride_0 as usize
-                                                + (kk + 2) * a_stride_1 as usize,
-                                        )
-                                    };
-                                    let a3 = unsafe {
-                                        *a_ptr.add(
-                                            bat_a_offset
-                                                + i * a_stride_0 as usize
-                                                + (kk + 3) * a_stride_1 as usize,
-                                        )
-                                    };
-
-                                    let b0 = unsafe {
-                                        *b_ptr.add(
-                                            bat_b_offset
-                                                + kk * b_stride_0 as usize
-                                                + j * b_stride_1 as usize,
-                                        )
-                                    };
-                                    let b1 = unsafe {
-                                        *b_ptr.add(
-                                            bat_b_offset
-                                                + (kk + 1) * b_stride_0 as usize
-                                                + j * b_stride_1 as usize,
-                                        )
-                                    };
-                                    let b2 = unsafe {
-                                        *b_ptr.add(
-                                            bat_b_offset
-                                                + (kk + 2) * b_stride_0 as usize
-                                                + j * b_stride_1 as usize,
-                                        )
-                                    };
-                                    let b3 = unsafe {
-                                        *b_ptr.add(
-                                            bat_b_offset
-                                                + (kk + 3) * b_stride_0 as usize
-                                                + j * b_stride_1 as usize,
-                                        )
-                                    };
-
-                                    sum += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
-                                    kk += 4;
-                                }
-
-                                while kk < k_max {
-                                    let a_val = unsafe {
-                                        *a_ptr.add(
-                                            bat_a_offset
-                                                + i * a_stride_0 as usize
-                                                + kk * a_stride_1 as usize,
-                                        )
-                                    };
-                                    let b_val = unsafe {
-                                        *b_ptr.add(
-                                            bat_b_offset
-                                                + kk * b_stride_0 as usize
-                                                + j * b_stride_1 as usize,
-                                        )
-                                    };
-                                    sum += a_val * b_val;
-                                    kk += 1;
-                                }
-                            }
-
-                            let out_idx = bat * m as usize * n as usize + i * n as usize + j;
-                            unsafe { *out_ptr.add(out_idx) = sum };
-                        }
-                    }
+        for i in 0..m as usize {
+            for j in 0..n as usize {
+                let mut sum = 0.0f32;
+                for kk in 0..k as usize {
+                    let a_val = unsafe {
+                        *a_ptr
+                            .add(bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize)
+                    };
+                    let b_val = unsafe {
+                        *b_ptr
+                            .add(bat_b_offset + kk * b_stride_0 as usize + j * b_stride_1 as usize)
+                    };
+                    sum += a_val * b_val;
                 }
+                let out_idx = bat * m as usize * n as usize + i * n as usize + j;
+                unsafe { *out_ptr.add(out_idx) = sum };
             }
         }
     }
@@ -7829,10 +7375,19 @@ fn conv2d_1x1(
     let w_data: Vec<f32> =
         unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels).to_vec() };
 
-    let bias_data: Option<Vec<f32>> = bias.map(|b| {
-        let b_ptr = b.data_ptr() as *const f32;
-        unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
-    });
+    let bias_data: Option<Vec<f32>> = if let Some(b) = bias {
+        if b.numel() == 1 {
+            // Scalar bias (e.g., 0.0 for no bias)
+            let bias_val = b.item();
+            Some(vec![bias_val; out_channels])
+        } else {
+            // Vector bias with one value per output channel
+            let b_ptr = b.data_ptr() as *const f32;
+            Some(unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() })
+        }
+    } else {
+        None
+    };
 
     let _n = batch_size * in_height * in_width;
     let _k = in_channels;
@@ -7847,7 +7402,7 @@ fn conv2d_1x1(
                 };
 
                 for oc in 0..out_channels {
-                    let w_row = &w_data[oc * in_channels..];
+                    let w_row = &w_data[oc * in_channels..(oc + 1) * in_channels];
                     let sum = simd_dot_product(x_row, w_row, in_channels);
                     let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
 
@@ -8132,10 +7687,19 @@ fn conv2d_im2col(
     let use_gemm =
         col_rows >= GEMM_MIN_SIZE && out_channels >= GEMM_MIN_SIZE && col_cols >= GEMM_MIN_SIZE;
 
-    let bias_data: Option<Vec<f32>> = bias.map(|b| {
-        let b_ptr = b.data_ptr() as *const f32;
-        unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
-    });
+    let bias_data: Option<Vec<f32>> = if let Some(b) = bias {
+        if b.numel() == 1 {
+            // Scalar bias (e.g., 0.0 for no bias)
+            let bias_val = b.item();
+            Some(vec![bias_val; out_channels])
+        } else {
+            // Vector bias with one value per output channel
+            let b_ptr = b.data_ptr() as *const f32;
+            Some(unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() })
+        }
+    } else {
+        None
+    };
 
     if use_gemm {
         // Transpose weights for GEMM: (out_channels, col_cols) -> (col_cols, out_channels)

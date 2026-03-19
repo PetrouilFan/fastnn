@@ -45,7 +45,11 @@ impl Module for Linear {
         let output = x.matmul(&self.weight);
 
         if let Some(b) = &self.bias {
-            output.add(&b.unsqueeze(0))
+            // Use unsqueeze to add bias with broadcasting
+            // The unsqueeze creates a view with shape [1, out_features]
+            // which broadcasts over the batch dimension
+            let bias_broadcast = b.unsqueeze(0);
+            output.add(&bias_broadcast)
         } else {
             output
         }
