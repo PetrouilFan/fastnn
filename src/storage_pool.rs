@@ -24,9 +24,8 @@ impl StoragePool {
                 let mut buffers = self.buffers.write();
 
                 if let Some(storages) = buffers.get_mut(&key) {
-                    if let Some(storage) = storages.pop() {
-                        // Try to get exclusive ownership via Arc::try_unwrap
-                        // This avoids cloning and keeps the actual buffer alive for reuse
+                    // Pop storage and check if we have exclusive ownership
+                    while let Some(storage) = storages.pop() {
                         match Arc::try_unwrap(storage) {
                             Ok(mut owned_storage) => {
                                 match &mut owned_storage {
@@ -39,18 +38,31 @@ impl StoragePool {
                                         // GPU storage - can't zero here without a kernel
                                     }
                                 }
+                                eprintln!(
+                                    "[storage_pool] Acquired buffer nbytes={} (pool hit)",
+                                    nbytes
+                                );
                                 return Arc::new(owned_storage);
                             }
                             Err(storage) => {
-                                // Arc still shared by someone else, push back and allocate fresh
-                                storages.push(storage);
+                                // Arc still shared by someone else, discard and try next
+                                // Don't push back - it would be a stale reference
+                                eprintln!(
+                                    "[storage_pool] Discarding stale buffer nbytes={}, refcount={}",
+                                    nbytes,
+                                    Arc::strong_count(&storage)
+                                );
+                                // Continue to try next buffer
                             }
                         }
                     }
                 }
 
                 // Pool miss, allocate new
-                // DType is not stored in Storage, so we can use any.
+                eprintln!(
+                    "[storage_pool] Allocated new buffer nbytes={} (pool miss)",
+                    nbytes
+                );
                 Arc::new(Storage::new_cpu(DType::F32, nbytes))
             }
             Device::Wgpu(_) => {
@@ -74,13 +86,25 @@ impl StoragePool {
             Device::Cpu => {
                 let nbytes = storage.nbytes();
                 let key = nbytes;
+                let refcount = Arc::strong_count(&storage);
 
                 let mut buffers = self.buffers.write();
                 let storages = buffers.entry(key).or_default();
 
                 // Limit the pool size to prevent unbounded growth
                 if storages.len() < 64 {
+                    eprintln!(
+                        "[storage_pool] Releasing buffer nbytes={}, refcount={}, pool_size={}",
+                        nbytes,
+                        refcount,
+                        storages.len()
+                    );
                     storages.push(storage);
+                } else {
+                    eprintln!(
+                        "[storage_pool] Pool full, dropping buffer nbytes={}, refcount={}",
+                        nbytes, refcount
+                    );
                 }
                 // Otherwise, drop the storage (Arc count goes to 0, memory freed)
             }
@@ -88,6 +112,12 @@ impl StoragePool {
                 // GPU storage is not pooled, let it drop
             }
         }
+    }
+
+    pub fn stats(&self) -> (usize, usize) {
+        let buffers = self.buffers.read();
+        let total_buffers: usize = buffers.values().map(|v| v.len()).sum();
+        (buffers.len(), total_buffers)
     }
 }
 
