@@ -672,8 +672,6 @@ impl Drop for TensorImpl {
         }
     }
 }
-    }
-}
 
 fn compute_strides(sizes: &[i64]) -> SmallVec<[i64; 8]> {
     let mut strides: SmallVec<[i64; 8]> = smallvec![0; sizes.len()];
