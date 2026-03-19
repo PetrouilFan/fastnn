@@ -5478,7 +5478,15 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     } else {
         // Standard case: B is not transposed, shape [k, n]
         if b_shape[b_shape.len() - 2] as i32 != k {
-            panic!("matmul: {} != {}", b_shape[b_shape.len() - 2], k);
+            panic!(
+                "matmul: A[{}, {}] @ B[{}, {}] - B second-to-last dim {} != k {}",
+                m,
+                k,
+                b_shape[b_shape.len() - 2],
+                b_shape[b_shape.len() - 1],
+                b_shape[b_shape.len() - 2],
+                k
+            );
         }
     }
 
@@ -8231,7 +8239,17 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     } else {
         None
     };
-    let _training = if args.len() > 5 {
+    let running_mean = if args.len() > 3 && args[3].numel() > 0 {
+        Some(args[3])
+    } else {
+        None
+    };
+    let running_var = if args.len() > 4 && args[4].numel() > 0 {
+        Some(args[4])
+    } else {
+        None
+    };
+    let training = if args.len() > 5 {
         args[5].item() != 0.0
     } else {
         false
@@ -8243,23 +8261,58 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
 
     let x_shape = x.shape();
-    let _num_features = x_shape[1];
+    let ndim = x_shape.len();
 
-    let mean = x.mean(0, false).unsqueeze(0);
-    let var = x
-        .sub(&mean.clone())
-        .mul(&x.sub(&mean.clone()))
-        .mean(0, false)
-        .unsqueeze(0);
-    let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
+    // BatchNorm always normalizes across the channel dimension (dim=1)
+    // For 2D input: (N, C) -> normalize across C (dim=1)
+    // For 3D input: (N, C, L) -> normalize across C (dim=1)
+    // For 4D input: (N, C, H, W) -> normalize across C (dim=1)
+    let channel_dim = 1;
+
+    // Create shape for broadcasting: [1, C, 1, 1, ...] for any input shape
+    // This allows weight/bias to broadcast correctly to any spatial dimensions
+    let mut broadcast_shape = vec![1; ndim];
+    if ndim > 1 {
+        broadcast_shape[channel_dim] = x_shape[channel_dim];
+    }
+
+    let (mean, std) = if training {
+        // Compute batch statistics across channel dimension
+        let mean = x.mean(channel_dim as i32, true);
+        let var = x
+            .sub(&mean.clone())
+            .mul(&x.sub(&mean.clone()))
+            .mean(channel_dim as i32, true);
+        let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
+        (mean, std)
+    } else {
+        // Use running statistics
+        let mean = running_mean
+            .expect("running_mean required for inference")
+            .clone();
+        let var = running_var
+            .expect("running_var required for inference")
+            .clone();
+
+        // Reshape running stats to broadcast correctly with input
+        let mean = mean.reshape(broadcast_shape.clone());
+        let var = var.reshape(broadcast_shape.clone());
+
+        let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
+        (mean, std)
+    };
 
     let mut normalized = x.sub(&mean).div(&std);
 
     if let Some(w) = weight {
-        normalized = normalized.mul(&w.unsqueeze(0));
+        // Reshape weight to broadcast correctly
+        let w_reshaped = w.reshape(broadcast_shape.clone());
+        normalized = normalized.mul(&w_reshaped);
     }
     if let Some(b) = bias {
-        normalized = normalized.add(&b.unsqueeze(0));
+        // Reshape bias to broadcast correctly
+        let b_reshaped = b.reshape(broadcast_shape.clone());
+        normalized = normalized.add(&b_reshaped);
     }
 
     vec![normalized]
