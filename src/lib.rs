@@ -1116,6 +1116,54 @@ impl Conv2d {
 }
 
 #[pyclass]
+struct MaxPool2d {
+    inner: nn::pooling::MaxPool2d,
+}
+
+#[pymethods]
+impl MaxPool2d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride=2, padding=1, dilation=1))]
+    fn new(kernel_size: i64, stride: i64, padding: i64, dilation: i64) -> Self {
+        MaxPool2d {
+            inner: nn::pooling::MaxPool2d::new(kernel_size, stride, padding, dilation),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner
+            .parameters()
+            .into_iter()
+            .map(PyTensor::from_tensor)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner
+            .named_parameters()
+            .into_iter()
+            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
+            .collect()
+    }
+
+    fn zero_grad(&self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
 struct LayerNorm {
     inner: nn::norm::LayerNorm,
 }
@@ -1712,6 +1760,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<Linear>()?;
     m.add_class::<Conv2d>()?;
+    m.add_class::<MaxPool2d>()?;
     m.add_class::<LayerNorm>()?;
     m.add_class::<BatchNorm1d>()?;
     m.add_class::<Dropout>()?;
