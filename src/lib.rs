@@ -14,11 +14,13 @@ use autograd::{no_grad_enter, no_grad_exit};
 use dispatcher::list_registered_ops as dispatcher_list_ops;
 use nn::Module;
 use optim::Optimizer;
+use parking_lot::RwLock;
 use pyo3::prelude::*;
+use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
 use pyo3::PyAny;
 use rand::Rng;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
 use tensor::Tensor;
 
@@ -31,16 +33,14 @@ static SEEDED_RNG: OnceLock<Mutex<rand::rngs::StdRng>> = OnceLock::new();
 fn get_default_device() -> Device {
     let guard = DEFAULT_DEVICE
         .get_or_init(|| RwLock::new(Device::Cpu))
-        .read()
-        .unwrap();
+        .read();
     *guard
 }
 
 fn set_default_device_internal(device: Device) {
     let mut guard = DEFAULT_DEVICE
         .get_or_init(|| RwLock::new(Device::Cpu))
-        .write()
-        .unwrap();
+        .write();
     *guard = device;
 }
 
@@ -979,6 +979,28 @@ impl Linear {
         self.inner.weight = self.inner.weight.to_gpu(device_id);
         self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
     }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = weight.inner;
+    }
+
+    fn set_bias(&mut self, bias: Option<PyTensor>) {
+        self.inner.bias = bias.map(|t| t.inner);
+    }
+
+    #[classmethod]
+    fn from_weights(_cls: &Bound<'_, PyType>, weight: PyTensor, bias: Option<PyTensor>) -> Self {
+        let weight_shape = weight.inner.shape();
+        let in_features = weight_shape[0];
+        let out_features = weight_shape[1];
+        let has_bias = bias.is_some();
+        let mut inner = nn::linear::Linear::new(in_features, out_features, has_bias);
+        inner.weight = weight.inner;
+        if let Some(b) = bias {
+            inner.bias = Some(b.inner);
+        }
+        Linear { inner }
+    }
 }
 
 #[pyclass]
@@ -1053,6 +1075,44 @@ impl Conv2d {
         self.inner.weight = self.inner.weight.to_gpu(device_id);
         self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
     }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = weight.inner;
+    }
+
+    fn set_bias(&mut self, bias: Option<PyTensor>) {
+        self.inner.bias = bias.map(|t| t.inner);
+    }
+
+    #[classmethod]
+    fn from_weights(
+        _cls: &Bound<'_, PyType>,
+        weight: PyTensor,
+        bias: Option<PyTensor>,
+        in_channels: i64,
+        out_channels: i64,
+        kernel_size: i64,
+        stride: i64,
+        padding: i64,
+        dilation: i64,
+        groups: i64,
+    ) -> Self {
+        let mut inner = nn::conv::Conv2d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            bias.is_some(),
+        );
+        inner.weight = weight.inner;
+        if let Some(b) = bias {
+            inner.bias = Some(b.inner);
+        }
+        Conv2d { inner }
+    }
 }
 
 #[pyclass]
@@ -1084,6 +1144,28 @@ impl LayerNorm {
 
     fn zero_grad(&self) {
         self.inner.zero_grad();
+    }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = Some(weight.inner);
+    }
+
+    fn set_bias(&mut self, bias: Option<PyTensor>) {
+        self.inner.bias = bias.map(|t| t.inner);
+    }
+
+    #[classmethod]
+    fn from_weights(
+        _cls: &Bound<'_, PyType>,
+        weight: PyTensor,
+        bias: PyTensor,
+        normalized_shape: i64,
+        eps: f64,
+    ) -> Self {
+        let mut inner = nn::norm::LayerNorm::new(normalized_shape, eps);
+        inner.weight = Some(weight.inner);
+        inner.bias = Some(bias.inner);
+        LayerNorm { inner }
     }
 }
 
@@ -1124,6 +1206,41 @@ impl BatchNorm1d {
 
     fn eval(&self) {
         self.inner.eval_mode();
+    }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = Some(weight.inner);
+    }
+
+    fn set_bias(&mut self, bias: Option<PyTensor>) {
+        self.inner.bias = bias.map(|t| t.inner);
+    }
+
+    fn set_running_mean(&mut self, running_mean: PyTensor) {
+        self.inner.running_mean = Arc::new(RwLock::new(running_mean.inner));
+    }
+
+    fn set_running_var(&mut self, running_var: PyTensor) {
+        self.inner.running_var = Arc::new(RwLock::new(running_var.inner));
+    }
+
+    #[classmethod]
+    fn from_weights(
+        _cls: &Bound<'_, PyType>,
+        weight: PyTensor,
+        bias: PyTensor,
+        running_mean: PyTensor,
+        running_var: PyTensor,
+        num_features: i64,
+        eps: f64,
+        momentum: f64,
+    ) -> Self {
+        let mut inner = nn::norm::BatchNorm1d::new(num_features, eps, momentum);
+        inner.weight = Some(weight.inner);
+        inner.bias = Some(bias.inner);
+        inner.running_mean = Arc::new(RwLock::new(running_mean.inner));
+        inner.running_var = Arc::new(RwLock::new(running_var.inner));
+        BatchNorm1d { inner }
     }
 }
 
@@ -1178,6 +1295,22 @@ impl Embedding {
             .into_iter()
             .map(PyTensor::from_tensor)
             .collect()
+    }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = weight.inner;
+    }
+
+    #[classmethod]
+    fn from_weights(
+        _cls: &Bound<'_, PyType>,
+        weight: PyTensor,
+        num_embeddings: i64,
+        embedding_dim: i64,
+    ) -> Self {
+        let mut inner = nn::embedding::Embedding::new(num_embeddings, embedding_dim);
+        inner.weight = weight.inner;
+        Embedding { inner }
     }
 }
 
