@@ -835,6 +835,22 @@ impl Tensor {
                     }
                 }
             }
+            DType::BF16 => {
+                let bf16_ptr = ptr as *mut half::bf16;
+                for i in 0..numel {
+                    unsafe {
+                        *bf16_ptr.add(i) = half::bf16::from_f32(1.0);
+                    }
+                }
+            }
+            DType::F16 => {
+                let f16_ptr = ptr as *mut half::f16;
+                for i in 0..numel {
+                    unsafe {
+                        *f16_ptr.add(i) = half::f16::from_f32(1.0);
+                    }
+                }
+            }
             _ => {}
         }
         t
@@ -875,6 +891,22 @@ impl Tensor {
                         for i in 0..numel {
                             unsafe {
                                 *i32_ptr.add(i) = value as i32;
+                            }
+                        }
+                    }
+                    DType::BF16 => {
+                        let bf16_ptr = ptr as *mut half::bf16;
+                        for i in 0..numel {
+                            unsafe {
+                                *bf16_ptr.add(i) = half::bf16::from_f32(value);
+                            }
+                        }
+                    }
+                    DType::F16 => {
+                        let f16_ptr = ptr as *mut half::f16;
+                        for i in 0..numel {
+                            unsafe {
+                                *f16_ptr.add(i) = half::f16::from_f32(value);
                             }
                         }
                     }
