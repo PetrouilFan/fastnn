@@ -298,6 +298,93 @@ print(fnn.list_registered_ops())
 
 ---
 
+## PyTorch Model Export & Import
+
+fastnn supports exporting PyTorch models to the `.fnn` format for inference. This allows you to leverage the performance of fastnn while using familiar PyTorch model architectures.
+
+### Exporting PyTorch Models
+
+```python
+import torch
+import torchvision.models as models
+from fastnn.export import export_pytorch_model
+
+# Load a pretrained PyTorch model
+model = models.resnet18(pretrained=True)
+model.eval()
+
+# Export to .fnn format
+export_pytorch_model(model, "resnet18.fnn")
+```
+
+### Loading .fnn Models
+
+```python
+from fastnn.export import load_fnn_model
+import fastnn as fnn
+
+# Load the exported model
+fnn_model = load_fnn_model("resnet18.fnn")
+fnn_model.eval()
+
+# Run inference
+input_tensor = fnn.tensor(data, shape)
+output = fnn_model(input_tensor)
+```
+
+### Supported PyTorch Layers
+
+| Layer Type | Status | Notes |
+|------------|--------|-------|
+| `Conv2d` | ✅ | Full support |
+| `BatchNorm1d` / `BatchNorm2d` | ✅ | BatchNorm2d mapped to BatchNorm1d |
+| `Linear` | ✅ | Weight transpose handled automatically |
+| `ReLU`, `GELU`, `SiLU` | ✅ | Activation functions |
+| `LayerNorm` | ✅ | |
+| `Embedding` | ✅ | |
+| `Dropout` | ✅ | |
+| `AdaptiveAvgPool2d` | ✅ | Output size must be (1,1) |
+| `MaxPool2d` | ⚠️ | Placeholder implementation (uses mean pooling) |
+| `BasicBlock` (ResNet) | ⚠️ | Skip connections not supported |
+
+### Limitations
+
+- **MaxPool2d**: Currently uses mean pooling as a placeholder. This affects accuracy for models using MaxPool2d (e.g., ResNet).
+- **Skip Connections**: BasicBlock and other skip connections are not supported. The export skips container layers and only exports individual layers.
+- **Model Accuracy**: Due to the MaxPool2d limitation and missing skip connections, exported models may have different outputs compared to PyTorch.
+
+### Benchmarking
+
+```python
+from fastnn.export import export_pytorch_model, load_fnn_model
+import fastnn as fnn
+import torch
+import time
+
+# Export and load model
+export_pytorch_model(pytorch_model, "model.fnn")
+fnn_model = load_fnn_model("model.fnn")
+
+# Benchmark PyTorch
+start = time.time()
+for _ in range(100):
+    with torch.no_grad():
+        pytorch_output = pytorch_model(input_tensor)
+pytorch_time = time.time() - start
+
+# Benchmark fastnn
+start = time.time()
+for _ in range(100):
+    with fnn.no_grad():
+        fnn_output = fnn_model(input_tensor)
+fnn_time = time.time() - start
+
+print(f"PyTorch: {pytorch_time:.4f}s, fastnn: {fnn_time:.4f}s")
+print(f"Speedup: {pytorch_time / fnn_time:.2f}x")
+```
+
+---
+
 ## Testing & Benchmarking
 
 ```bash
