@@ -54,7 +54,7 @@ model = Transformer(
     dropout_p=DROPOUT_P,
 )
 
-optimizer = fnn.AdamW(model.parameters(), lr=LR, weight_decay=0.01)
+optimizer = fnn.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
 
 
 def compute_accuracy(loader, model):

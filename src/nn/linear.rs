@@ -45,7 +45,7 @@ impl Module for Linear {
         let output = x.matmul(&self.weight);
 
         if let Some(b) = &self.bias {
-            output.add(b)
+            output.add(&b.unsqueeze(0))
         } else {
             output
         }
