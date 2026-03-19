@@ -7940,7 +7940,6 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let ndim = x_shape.len();
 
     // BatchNorm normalizes across the channel dimension (dim=1)
-    // For 2D: (N, C), For 4D: (N, C, H, W)
     let num_channels = if ndim > 1 { x_shape[1] } else { 1 };
     let batch_size = x_shape[0];
     let spatial_size: i64 = if ndim > 2 {
@@ -7969,6 +7968,103 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
     let out_addr = out_ptr as usize; // Convert to usize for Sync
 
+    // Helper function to compute mean/variance using Welford's algorithm
+    // with optional SIMD acceleration
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[inline]
+    unsafe fn compute_stats_simd(
+        x_ptr: *const f32,
+        indices: &[(usize, usize)],
+        n: usize,
+    ) -> (f32, f32) {
+        use std::arch::x86_64::*;
+
+        if is_x86_feature_detected!("avx2") && n >= 8 {
+            // AVX2 SIMD path - process 8 elements at a time
+            let mut sum = _mm256_setzero_ps();
+            let mut sum_sq = _mm256_setzero_ps();
+
+            // Process chunks of 8
+            let chunks = n / 8;
+            for i in 0..chunks {
+                let mut vals = [0.0f32; 8];
+                for j in 0..8 {
+                    let (b, s) = indices[i * 8 + j];
+                    vals[j] = *x_ptr.add(b + s);
+                }
+                let v = _mm256_loadu_ps(vals.as_ptr());
+                sum = _mm256_add_ps(sum, v);
+                sum_sq = _mm256_fmadd_ps(v, v, sum_sq);
+            }
+
+            // Horizontal sum
+            let sum_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+            _mm256_storeu_ps(sum_arr.as_ptr() as *mut f32, sum);
+            let mut total_sum: f32 = sum_arr.assume_init().iter().sum();
+
+            let sum_sq_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+            _mm256_storeu_ps(sum_sq_arr.as_ptr() as *mut f32, sum_sq);
+            let mut total_sum_sq: f32 = sum_sq_arr.assume_init().iter().sum();
+
+            // Handle remainder
+            let _remainder = n % 8;
+            let start = chunks * 8;
+            for i in start..n {
+                let (b, s) = indices[i];
+                let val = *x_ptr.add(b + s);
+                total_sum += val;
+                total_sum_sq += val * val;
+            }
+
+            let mean = total_sum / n as f32;
+            let var = total_sum_sq / n as f32 - mean * mean;
+            (mean, var.max(0.0)) // Ensure non-negative variance
+        } else {
+            // Scalar fallback using Welford's algorithm
+            let mut count = 0.0f32;
+            let mut mean = 0.0f32;
+            let mut m2 = 0.0f32;
+
+            for &(b, s) in indices {
+                let val = *x_ptr.add(b + s);
+                count += 1.0;
+                let delta = val - mean;
+                mean += delta / count;
+                let delta2 = val - mean;
+                m2 += delta * delta2;
+            }
+
+            let var = m2 / count;
+            (mean, var.max(0.0))
+        }
+    }
+
+    // Non-SIMD version
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[inline]
+    unsafe fn compute_stats_simd(
+        x_ptr: *const f32,
+        indices: &[(usize, usize)],
+        n: usize,
+    ) -> (f32, f32) {
+        // Scalar fallback using Welford's algorithm
+        let mut count = 0.0f32;
+        let mut mean = 0.0f32;
+        let mut m2 = 0.0f32;
+
+        for &(b, s) in indices {
+            let val = *x_ptr.add(b + s);
+            count += 1.0;
+            let delta = val - mean;
+            mean += delta / count;
+            let delta2 = val - mean;
+            m2 += delta * delta2;
+        }
+
+        let var = m2 / count;
+        (mean, var.max(0.0))
+    }
+
     if training {
         // Training mode: compute batch statistics
         // Parallelize over channels using rayon
@@ -7980,27 +8076,18 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let x_ptr = x_addr as *const f32;
                 let out_ptr = out_addr as *mut f32;
 
-                // Compute mean for this channel
-                let mut sum = 0.0f32;
+                // Pre-compute indices for this channel
+                let mut indices = Vec::with_capacity(total_per_channel as usize);
                 for b in 0..batch_size as usize {
+                    let base = b * num_channels as usize * spatial_size as usize;
                     for s in 0..spatial_size as usize {
-                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
-                        sum += unsafe { *x_ptr.add(idx) };
+                        indices.push((base + c * spatial_size as usize, s));
                     }
                 }
-                let mean = sum / total_per_channel as f32;
 
-                // Compute variance for this channel
-                let mut var_sum = 0.0f32;
-                for b in 0..batch_size as usize {
-                    for s in 0..spatial_size as usize {
-                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
-                        let val = unsafe { *x_ptr.add(idx) };
-                        let diff = val - mean;
-                        var_sum += diff * diff;
-                    }
-                }
-                let var = var_sum / total_per_channel as f32;
+                // Compute mean and variance using SIMD-accelerated Welford
+                let (mean, var) =
+                    unsafe { compute_stats_simd(x_ptr, &indices, total_per_channel as usize) };
                 let inv_std = 1.0 / (var + eps as f32).sqrt();
 
                 // Get gamma and beta for this channel
@@ -8008,13 +8095,11 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let beta = b_data.map_or(0.0, |b| b[c]);
 
                 // Normalize, scale, and shift in one pass
-                for b in 0..batch_size as usize {
-                    for s in 0..spatial_size as usize {
-                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
-                        let val = unsafe { *x_ptr.add(idx) };
-                        let normed = (val - mean) * inv_std;
-                        unsafe { *out_ptr.add(idx) = gamma * normed + beta };
-                    }
+                for &(base, s) in &indices {
+                    let idx = base + s;
+                    let val = unsafe { *x_ptr.add(idx) };
+                    let normed = (val - mean) * inv_std;
+                    unsafe { *out_ptr.add(idx) = gamma * normed + beta };
                 }
             });
         }
@@ -8022,27 +8107,18 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(not(feature = "parallel"))]
         {
             for c in 0..num_channels as usize {
-                // Compute mean for this channel
-                let mut sum = 0.0f32;
+                // Pre-compute indices for this channel
+                let mut indices = Vec::with_capacity(total_per_channel as usize);
                 for b in 0..batch_size as usize {
+                    let base = b * num_channels as usize * spatial_size as usize;
                     for s in 0..spatial_size as usize {
-                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
-                        sum += unsafe { *x_ptr.add(idx) };
+                        indices.push((base + c * spatial_size as usize, s));
                     }
                 }
-                let mean = sum / total_per_channel as f32;
 
-                // Compute variance for this channel
-                let mut var_sum = 0.0f32;
-                for b in 0..batch_size as usize {
-                    for s in 0..spatial_size as usize {
-                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
-                        let val = unsafe { *x_ptr.add(idx) };
-                        let diff = val - mean;
-                        var_sum += diff * diff;
-                    }
-                }
-                let var = var_sum / total_per_channel as f32;
+                // Compute mean and variance using SIMD-accelerated Welford
+                let (mean, var) =
+                    unsafe { compute_stats_simd(x_ptr, &indices, total_per_channel as usize) };
                 let inv_std = 1.0 / (var + eps as f32).sqrt();
 
                 // Get gamma and beta for this channel
@@ -8050,13 +8126,11 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let beta = b_data.map_or(0.0, |b| b[c]);
 
                 // Normalize, scale, and shift in one pass
-                for b in 0..batch_size as usize {
-                    for s in 0..spatial_size as usize {
-                        let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
-                        let val = unsafe { *x_ptr.add(idx) };
-                        let normed = (val - mean) * inv_std;
-                        unsafe { *out_ptr.add(idx) = gamma * normed + beta };
-                    }
+                for &(base, s) in &indices {
+                    let idx = base + s;
+                    let val = unsafe { *x_ptr.add(idx) };
+                    let normed = (val - mean) * inv_std;
+                    unsafe { *out_ptr.add(idx) = gamma * normed + beta };
                 }
             }
         }
