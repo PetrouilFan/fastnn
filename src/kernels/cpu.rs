@@ -5650,7 +5650,6 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     b_stride_1,
                 );
             } else {
-                eprintln!("DEBUG: using single_threaded_matmul (non-parallel path)");
                 single_threaded_matmul(
                     a_ptr,
                     b_ptr,

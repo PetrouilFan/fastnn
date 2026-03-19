@@ -396,12 +396,10 @@ def export_pytorch_model(
 
             # Check for downsample
             if hasattr(module, "downsample") and module.downsample is not None:
-                print()
                 layer_info["downsample"] = f"{name}.downsample"
                 # Try to store downsample config (it's typically a Sequential)
                 try:
                     downsample_layers = list(module.downsample)  # type: ignore
-                    print()
                     layer_info["downsample_num_layers"] = len(downsample_layers)
                     # Store configurations for downsample sub-layers
                     for i, sub_mod in enumerate(downsample_layers):
@@ -445,7 +443,6 @@ def export_pytorch_model(
                             layer_info[f"downsample_{i}_eps"] = sub_mod.eps
                             layer_info[f"downsample_{i}_momentum"] = sub_mod.momentum
                 except TypeError:
-                    print()
                     pass
 
             # Mark all sub-module names as processed
@@ -940,9 +937,6 @@ def load_fnn_model(path: str) -> Any:
                             weight_arr.flatten().tolist(), list(weight_arr.shape)
                         )
                         layer.set_weight(weight)
-                        print(
-                            f"DEBUG: Loaded weight for {layer_name}, shape: {weight_arr.shape}"
-                        )
                 elif param_name == "bias":
                     bias_arr = tensors.get(f"{layer_name}.bias")
                     if bias_arr is not None:
@@ -1039,7 +1033,6 @@ def load_fnn_model(path: str) -> Any:
                 ):
                     bn1_running_var = tensors.get(f"{layer_name}.bn1.running_var")
                     if bn1_running_var is not None:
-                        print(f"DEBUG: Setting running_var for {layer_name}.bn1")
                         running_var = fnn.tensor(
                             bn1_running_var.flatten().tolist(),
                             list(bn1_running_var.shape),

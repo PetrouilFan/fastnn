@@ -227,13 +227,19 @@ impl Node for AddBackward {
 pub struct UnsqueezeBackward {
     pub inputs: Vec<Tensor>,
     pub dim: usize,
+    pub next_edges: Vec<Edge>,
 }
 
 impl UnsqueezeBackward {
     pub fn new(input: Tensor, dim: usize) -> Self {
+        let mut next_edges = Vec::new();
+        if let Some(grad_fn) = input.grad_fn() {
+            next_edges.push(Edge(grad_fn, 0));
+        }
         UnsqueezeBackward {
             inputs: vec![input],
             dim,
+            next_edges,
         }
     }
 }
@@ -246,7 +252,7 @@ impl Node for UnsqueezeBackward {
     }
 
     fn next_edges(&self) -> &[Edge] {
-        &[]
+        &self.next_edges
     }
 
     fn num_inputs(&self) -> usize {
