@@ -1085,6 +1085,7 @@ impl Conv2d {
     }
 
     #[classmethod]
+    #[allow(clippy::too_many_arguments)]
     fn from_weights(
         _cls: &Bound<'_, PyType>,
         weight: PyTensor,
@@ -1277,6 +1278,7 @@ impl BatchNorm1d {
     }
 
     #[classmethod]
+    #[allow(clippy::too_many_arguments)]
     fn from_weights(
         _cls: &Bound<'_, PyType>,
         weight: PyTensor,
