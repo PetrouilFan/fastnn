@@ -7333,28 +7333,6 @@ fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         )];
     }
 
-    // Use im2col for all 3x3 convolutions
-    // Winograd F(2x2,3x3) was implemented but has too much overhead
-    // The transforms add latency that exceeds the arithmetic savings
-    if kernel_height == 3 && kernel_width == 3 && stride == 1 && dilation == 1 && groups == 1 {
-        return vec![conv2d_im2col(
-            x,
-            w,
-            bias,
-            stride,
-            padding,
-            dilation,
-            out_height,
-            out_width,
-            batch_size,
-            in_channels,
-            out_channels,
-            kernel_height,
-            kernel_width,
-            groups,
-        )];
-    }
-
     vec![conv2d_im2col(
         x,
         w,
@@ -7406,86 +7384,58 @@ fn conv2d_1x1(
     let k = in_channels;
     let m = out_channels;
 
-    // Use BLAS when matrix product is large enough (n*k or n*m or k*m >= threshold)
-    let use_blas = (n * k >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
-        || n * m >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
-        || k * m >= MIN_BLAS_SIZE * MIN_BLAS_SIZE);
+    // Get weight data and bias
+    let w_data = unsafe { std::slice::from_raw_parts(w_ptr, m * k) };
+    let bias_data: Option<&[f32]> = bias.map(|b| {
+        let b_ptr = b.data_ptr() as *const f32;
+        unsafe { std::slice::from_raw_parts(b_ptr, m) }
+    });
 
-    if use_blas {
-        // Reshape input: [batch, in_ch, h, w] -> [n, in_ch] where n = batch*h*w
-        // Use BLAS for [n, in_ch] @ [in_ch, out_channels] = [n, out_channels]
-        let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, n * k) };
+    // For 1x1 conv with input [batch, in_ch, h, w], the data is stored as:
+    // [batch * in_ch * h * w] in row-major order
+    // To compute [n, k] @ [k, m], we need to rearrange to [n, k] format
+    // Input stride is: [in_ch * h * w, h * w, w, 1]
+    // We want: [k, 1] = [in_ch, 1] per spatial position
 
-        // Transpose weights: [out_ch, in_ch] -> [in_ch, out_ch]
-        let w_data = unsafe { std::slice::from_raw_parts(w_ptr, m * k) };
-        let w_t: Vec<f32> = (0..k)
-            .flat_map(|i| (0..m).map(move |j| w_data[j * k + i]))
-            .collect();
+    // Transpose weights: [out_ch, in_ch] -> [in_ch, out_ch]
+    let w_t: Vec<f32> = (0..k)
+        .flat_map(|i| (0..m).map(move |j| w_data[j * k + i]))
+        .collect();
 
-        let result = matmul_blas(x_slice, &w_t, n, k, m);
-
-        // Add bias and reshape output
-        let bias_data: Option<&[f32]> = bias.map(|b| {
-            let b_ptr = b.data_ptr() as *const f32;
-            unsafe { std::slice::from_raw_parts(b_ptr, m) }
-        });
-
-        // Reshape [n, out_ch] -> [batch, out_ch, h, w]
-        for batch in 0..batch_size {
-            for oc in 0..out_channels {
-                let bias_val = bias_data.map_or(0.0, |b| b[oc]);
-                for h in 0..in_height {
-                    for w_idx in 0..in_width {
-                        let n_idx = (batch * in_height + h) * in_width + w_idx;
-                        let out_idx =
-                            ((batch * out_channels + oc) * in_height + h) * in_width + w_idx;
-                        unsafe {
-                            *out_ptr.add(out_idx) = result[n_idx * out_channels + oc] + bias_val
-                        };
-                    }
-                }
+    // Transpose input: [batch, in_ch, h, w] -> [batch * h * w, in_ch]
+    // This is necessary because the data is stored channel-first
+    let spatial_size = in_height * in_width;
+    let mut x_t = vec![0.0f32; n * k];
+    for b in 0..batch_size {
+        for ic in 0..k {
+            for s in 0..spatial_size {
+                let src_idx = (b * k + ic) * spatial_size + s;
+                let dst_idx = b * spatial_size * k + s * k + ic;
+                x_t[dst_idx] = unsafe { *x_ptr.add(src_idx) };
             }
         }
-    } else {
-        // Scalar fallback for small matrices
-        let w_data: Vec<f32> =
-            unsafe { std::slice::from_raw_parts(w_ptr, out_channels * in_channels).to_vec() };
+    }
 
-        let bias_data: Option<Vec<f32>> = if let Some(b) = bias {
-            if b.numel() == 1 {
-                let bias_val = b.item();
-                Some(vec![bias_val; out_channels])
-            } else {
-                let b_ptr = b.data_ptr() as *const f32;
-                Some(unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() })
-            }
-        } else {
-            None
-        };
+    // Use BLAS for [n, k] @ [k, m] = [n, m]
+    let result = matmul_blas(&x_t, &w_t, n, k, m);
 
-        for b in 0..batch_size {
-            for h in 0..in_height {
-                for w_idx in 0..in_width {
-                    let row = (b * in_height + h) * in_width + w_idx;
-                    let x_row = unsafe {
-                        std::slice::from_raw_parts(x_ptr.add(row * in_channels), in_channels)
-                    };
-
-                    for oc in 0..out_channels {
-                        let w_row = &w_data[oc * in_channels..(oc + 1) * in_channels];
-                        let sum = simd_dot_product(x_row, w_row, in_channels);
-                        let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
-
-                        let out_idx = ((b * out_channels + oc) * in_height + h) * in_width + w_idx;
-                        unsafe { *out_ptr.add(out_idx) = sum + bias_val };
-                    }
-                }
+    // Reshape result [n, m] -> [batch, out_ch, h, w] and add bias
+    for b in 0..batch_size {
+        for oc in 0..m {
+            let bias_val = bias_data.map_or(0.0, |b| b[oc]);
+            for s in 0..spatial_size {
+                let src_idx = b * spatial_size * m + s * m + oc;
+                let dst_idx = (b * m + oc) * spatial_size + s;
+                unsafe { *out_ptr.add(dst_idx) = result[src_idx] + bias_val };
             }
         }
     }
 
     output
 }
+
+// Winograd F(2x2, 3x3) is disabled for now due to overhead from transform operations
+// The im2col + BLAS approach is faster for current use cases
 
 fn depthwise_conv2d(
     x: &Tensor,
