@@ -24,8 +24,9 @@ impl StoragePool {
                 let mut buffers = self.buffers.write();
 
                 if let Some(storages) = buffers.get_mut(&key) {
-                    // Pop storage and check if we have exclusive ownership
-                    while let Some(storage) = storages.pop() {
+                    if let Some(storage) = storages.pop() {
+                        // Try to get exclusive ownership via Arc::try_unwrap
+                        // This avoids cloning and keeps the actual buffer alive for reuse
                         match Arc::try_unwrap(storage) {
                             Ok(mut owned_storage) => {
                                 match &mut owned_storage {
@@ -41,15 +42,15 @@ impl StoragePool {
                                 return Arc::new(owned_storage);
                             }
                             Err(storage) => {
-                                // Arc still shared by someone else, discard and try next
-                                // Don't push back - it would be a stale reference
-                                drop(storage);
+                                // Arc still shared by someone else, push back and allocate fresh
+                                storages.push(storage);
                             }
                         }
                     }
                 }
 
                 // Pool miss, allocate new
+                // DType is not stored in Storage, so we can use any.
                 Arc::new(Storage::new_cpu(DType::F32, nbytes))
             }
             Device::Wgpu(_) => {
