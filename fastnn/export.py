@@ -224,7 +224,7 @@ def export_pytorch_model(
             # Get the actual sub-modules from the module
             conv1 = module.conv1
             bn1 = module.bn1
-            relu = module.relu
+            _relu = module.relu  # ReLU is applied inline, not as separate layer
             conv2 = module.conv2
             bn2 = module.bn2
 
@@ -825,7 +825,6 @@ def load_fnn_model(path: str) -> Any:
                         filtered_idx += 1
 
         # Now load parameters for each tensor
-        downsample_keys = [k for k in tensors.keys() if "downsample" in k]
         for tensor_name, arr in tensors.items():
             # tensor_name is like "layer1.0.conv1.weight"
             # Extract the layer prefix (e.g., "layer1.0.conv1")
