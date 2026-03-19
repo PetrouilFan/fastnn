@@ -6,8 +6,9 @@ pub const MIN_BLAS_SIZE: usize = 32;
 #[cfg(not(target_arch = "aarch64"))]
 pub const MIN_BLAS_SIZE: usize = 64;
 
-#[cfg(all(feature = "openblas", not(target_os = "windows")))]
-#[link(name = "openblas")]
+// Try to use system BLAS (cblas) when available
+#[cfg(all(feature = "blas", not(target_os = "windows")))]
+#[link(name = "cblas")]
 extern "C" {
     fn cblas_sgemm(
         layout: i32,
@@ -27,12 +28,12 @@ extern "C" {
     );
 }
 
-#[cfg(all(feature = "openblas", not(target_os = "windows")))]
+#[cfg(all(feature = "blas", not(target_os = "windows")))]
 pub fn matmul_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     matmul_blas_with_transpose(a, b, m, k, n, false, false)
 }
 
-#[cfg(all(feature = "openblas", not(target_os = "windows")))]
+#[cfg(all(feature = "blas", not(target_os = "windows")))]
 pub fn matmul_blas_with_transpose(
     a: &[f32],
     b: &[f32],
@@ -78,12 +79,12 @@ pub fn matmul_blas_with_transpose(
     c
 }
 
-#[cfg(not(all(feature = "openblas", not(target_os = "windows"))))]
+#[cfg(not(all(feature = "blas", not(target_os = "windows"))))]
 pub fn matmul_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     matmul_blas_with_transpose(a, b, m, k, n, false, false)
 }
 
-#[cfg(not(all(feature = "openblas", not(target_os = "windows"))))]
+#[cfg(not(all(feature = "blas", not(target_os = "windows"))))]
 pub fn matmul_blas_with_transpose(
     a: &[f32],
     b: &[f32],
