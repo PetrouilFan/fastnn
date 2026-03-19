@@ -114,6 +114,7 @@ impl StoragePool {
         }
     }
 
+    #[allow(dead_code)]
     pub fn stats(&self) -> (usize, usize) {
         let buffers = self.buffers.read();
         let total_buffers: usize = buffers.values().map(|v| v.len()).sum();
