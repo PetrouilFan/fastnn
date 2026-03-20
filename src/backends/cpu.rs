@@ -2,9 +2,9 @@ use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 
 /// Generic GEMV (matrix × vector) on CPU using packed representation.
-/// Dispatches to SIMD-accelerated kernels when available.
+/// Uses streaming SIMD unpack+FMA (optimal for single vector multiplication).
 pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], output: &mut [f32]) {
-    // Use the SIMD-optimized path (pre-unpack + AVX2 FMA)
+    // Streaming SIMD: unpack word → FMA immediately, no temp buffers
     super::packed_simd::gemv_packed_simd(weights, activation, output);
 }
 
