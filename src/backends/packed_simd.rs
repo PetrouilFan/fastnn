@@ -410,79 +410,119 @@ unsafe fn gemv_row_f16x2_f16c(
     k_packed: usize,
 ) -> f32 {
     let mut acc = _mm256_setzero_ps();
+    let mut acc_tail = 0.0f32;
     let mut p = 0;
     let mut act_idx = 0;
 
-    // Process 4 u32 words at a time = 8 f16 → 8 f32
-    while p + 4 <= k_packed && act_idx + 8 <= k {
-        // Prefetch next weights into L1
-        if p + 8 < k_packed {
+    // Process 8 u32 words at a time = 16 f16 → 16 f32 (2x throughput)
+    while p + 8 <= k_packed && act_idx + 16 <= k {
+        if p + 12 < k_packed {
             _mm_prefetch(
-                weights_u32.as_ptr().add(row_offset + p + 8) as *const i8,
+                weights_u32.as_ptr().add(row_offset + p + 12) as *const i8,
                 _MM_HINT_T0,
             );
         }
 
-        let w0 = weights_u32[row_offset + p];
-        let w1 = weights_u32[row_offset + p + 1];
-        let w2 = weights_u32[row_offset + p + 2];
-        let w3 = weights_u32[row_offset + p + 3];
+        // Load 8 u32 words containing 16 packed f16 values
+        let w0 = _mm_loadu_si128(weights_u32.as_ptr().add(row_offset + p) as *const __m128i);
+        let w1 = _mm_loadu_si128(weights_u32.as_ptr().add(row_offset + p + 4) as *const __m128i);
 
-        let half_bits: [u16; 8] = [
-            w0 as u16,
-            (w0 >> 16) as u16,
-            w1 as u16,
-            (w1 >> 16) as u16,
-            w2 as u16,
-            (w2 >> 16) as u16,
-            w3 as u16,
-            (w3 >> 16) as u16,
+        // Interleave u32 pairs into u16 lanes — avoids [u16; 8] array
+        // w0 = [w0_lo, w0_hi, w1_lo, w1_hi, w2_lo, w2_hi, w3_lo, w3_hi] as u16
+        let half0 = _mm_unpacklo_epi16(w0, _mm_setzero_si128());
+        let half1 = _mm_unpackhi_epi16(w0, _mm_setzero_si128());
+        // Wait, that's wrong. Each u32 has 2 f16: lo_half | (hi_half << 16)
+        // We need to extract lo u16 and hi u16 from each u32.
+        // _mm_cvtps_ph does the opposite direction.
+        // Simpler: use the array but stack-allocate it
+        let b0: [u16; 8] = [
+            weights_u32[row_offset + p] as u16,
+            (weights_u32[row_offset + p] >> 16) as u16,
+            weights_u32[row_offset + p + 1] as u16,
+            (weights_u32[row_offset + p + 1] >> 16) as u16,
+            weights_u32[row_offset + p + 2] as u16,
+            (weights_u32[row_offset + p + 2] >> 16) as u16,
+            weights_u32[row_offset + p + 3] as u16,
+            (weights_u32[row_offset + p + 3] >> 16) as u16,
         ];
+        let h0 = _mm_loadu_si128(b0.as_ptr() as *const __m128i);
+        let f0 = _mm256_cvtph_ps(h0);
+        let a0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc = _mm256_fmadd_ps(f0, a0, acc);
 
-        let half_vec = _mm_loadu_si128(half_bits.as_ptr() as *const __m128i);
-        let f32_vec = _mm256_cvtph_ps(half_vec);
+        let b1: [u16; 8] = [
+            weights_u32[row_offset + p + 4] as u16,
+            (weights_u32[row_offset + p + 4] >> 16) as u16,
+            weights_u32[row_offset + p + 5] as u16,
+            (weights_u32[row_offset + p + 5] >> 16) as u16,
+            weights_u32[row_offset + p + 6] as u16,
+            (weights_u32[row_offset + p + 6] >> 16) as u16,
+            weights_u32[row_offset + p + 7] as u16,
+            (weights_u32[row_offset + p + 7] >> 16) as u16,
+        ];
+        let h1 = _mm_loadu_si128(b1.as_ptr() as *const __m128i);
+        let f1 = _mm256_cvtph_ps(h1);
+        let a1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 8));
+        acc = _mm256_fmadd_ps(f1, a1, acc);
 
-        let act = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
-        acc = _mm256_fmadd_ps(f32_vec, act, acc);
+        p += 8;
+        act_idx += 16;
+    }
 
+    // 4-word tail: 8 f16 → 8 f32
+    while p + 4 <= k_packed && act_idx + 8 <= k {
+        let b: [u16; 8] = [
+            weights_u32[row_offset + p] as u16,
+            (weights_u32[row_offset + p] >> 16) as u16,
+            weights_u32[row_offset + p + 1] as u16,
+            (weights_u32[row_offset + p + 1] >> 16) as u16,
+            weights_u32[row_offset + p + 2] as u16,
+            (weights_u32[row_offset + p + 2] >> 16) as u16,
+            weights_u32[row_offset + p + 3] as u16,
+            (weights_u32[row_offset + p + 3] >> 16) as u16,
+        ];
+        let h = _mm_loadu_si128(b.as_ptr() as *const __m128i);
+        let f = _mm256_cvtph_ps(h);
+        let a = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc = _mm256_fmadd_ps(f, a, acc);
         p += 4;
         act_idx += 8;
     }
 
-    let mut total = hsum256_ps(acc);
-
-    // F16C tail: process 2 u32 words (4 f16) at a time using hardware conversion
+    // 2-word tail: 4 f16 → 4 f32
     while p + 2 <= k_packed && act_idx + 4 <= k {
-        let w0 = weights_u32[row_offset + p];
-        let w1 = weights_u32[row_offset + p + 1];
-        let half_bits: [u16; 4] = [w0 as u16, (w0 >> 16) as u16, w1 as u16, (w1 >> 16) as u16];
-        let half_vec = _mm_loadl_epi64(half_bits.as_ptr() as *const __m128i);
-        let f32_vec = _mm_cvtph_ps(half_vec);
-        let act = _mm_loadu_ps(activation.as_ptr().add(act_idx));
-        let prod = _mm_mul_ps(f32_vec, act);
-        // Horizontal sum of 4 floats
+        let b: [u16; 4] = [
+            weights_u32[row_offset + p] as u16,
+            (weights_u32[row_offset + p] >> 16) as u16,
+            weights_u32[row_offset + p + 1] as u16,
+            (weights_u32[row_offset + p + 1] >> 16) as u16,
+        ];
+        let h = _mm_loadl_epi64(b.as_ptr() as *const __m128i);
+        let f = _mm_cvtph_ps(h);
+        let a = _mm_loadu_ps(activation.as_ptr().add(act_idx));
+        let prod = _mm_mul_ps(f, a);
         let shuf = _mm_shuffle_ps(prod, prod, 0x0E);
         let sums = _mm_add_ps(prod, shuf);
         let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
-        total += _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
+        acc_tail += _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
         p += 2;
         act_idx += 4;
     }
 
-    // Scalar tail for 1 remaining u32 word (2 f16 values)
+    // 1-word tail: 2 f16 → 2 f32
     if p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
-        let half_bits: [u16; 2] = [w as u16, (w >> 16) as u16];
-        let half_vec = _mm_set1_epi32(0);
-        let f32_vec = _mm_cvtph_ps(_mm_loadl_epi64(half_bits.as_ptr() as *const __m128i));
-        let f32_arr: [f32; 4] = std::mem::transmute(f32_vec);
-        total += f32_arr[0] * activation[act_idx];
+        let b: [u16; 2] = [w as u16, (w >> 16) as u16];
+        let h = _mm_loadl_epi64(b.as_ptr() as *const __m128i);
+        let f = _mm_cvtph_ps(h);
+        let arr: [f32; 4] = std::mem::transmute(f);
+        acc_tail += arr[0] * activation[act_idx];
         if act_idx + 1 < k {
-            total += f32_arr[1] * activation[act_idx + 1];
+            acc_tail += arr[1] * activation[act_idx + 1];
         }
     }
 
-    total
+    hsum256_ps(acc) + acc_tail
 }
 
 // ============================================================
