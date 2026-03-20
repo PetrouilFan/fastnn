@@ -2,7 +2,7 @@
 
 **fastnn** is a high-performance, production-grade neural network framework built from scratch in Rust with seamless Python bindings. It delivers hardware-accelerated CPU and GPU compute through a familiar PyTorch-like API, without the overhead of mainstream deep learning stacks.
 
-> **Version:** v0.5.0 — Stability and Performance Fixes
+> **Version:** v0.6.0 — Native Multi-Precision Support
 
 [![CI](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml/badge.svg)](https://github.com/PetrouilFan/fastnn/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -25,6 +25,7 @@ fastnn is designed for researchers and engineers who need both the ergonomics of
 
 ## Features
 
+- **Native Packed Precision** — Train and infer at 4-bit, 8-bit, 16-bit, and 32-bit precision with no post-training quantization. SWAR and SIMD-accelerated GEMV/ReLU operating directly on packed u32 words. U4x8 achieves **61 GFLOP/s** on CPU (7.4× faster than PyTorch f32) with **8× memory savings**.
 - **Vectorized CPU Kernels** — Hand-optimized SIMD kernels targeting AVX2, AVX512, and ARM NEON, with runtime dispatch to the best available instruction set. Includes Cephes-style fast approximations for transcendental functions (`exp`, `log`).
 - **GPU Acceleration** — Cross-platform GPU compute via [wgpu](https://wgpu.rs) (WebGPU). Vectorized `vec4` shaders for elementwise ops and tiled matrix multiplication with shared memory.
 - **Multi-threading** — Automatic parallelism across CPU cores using [rayon](https://github.com/rayon-rs/rayon), with cache-aware chunking for memory-bound and compute-bound workloads.
@@ -52,11 +53,53 @@ Benchmarks measured against equivalent PyTorch CPU operations on medium-to-large
 
 ---
 
+## Packed Precision Performance
+
+Native low-bit training and inference — no post-training quantization. Weights are stored packed in u32 words, with SIMD/SWAR kernels operating directly on the packed representation.
+
+### GEMV (Matrix × Vector) at 4096×4096 — 8 threads
+
+| Implementation | Time | GFLOP/s | vs PyTorch f32 | Memory |
+|---------------|------|---------|----------------|--------|
+| PyTorch f32 (MKL BLAS) | 4.04ms | 8.3 | 1.0× | 64 MB |
+| PyTorch int8 (dynamic) | 4.39ms | 7.6 | 0.9× | 64 MB |
+| **fastnn F16x2** | **1.80ms** | **18.6** | **2.2×** | **32 MB** |
+| **fastnn U8x4** | **0.76ms** | **44.4** | **5.3×** | **16 MB** |
+| **fastnn U4x8** | **0.55ms** | **61.1** | **7.4×** | **8 MB** |
+
+> Measured on AMD Ryzen 7 3700X. All benchmarks use multi-threaded execution (8 cores).
+
+### Key Properties
+
+| Type | Bits/Value | Values/u32 | Memory vs f32 | Use Case |
+|------|-----------|------------|---------------|----------|
+| `F32x1` | 32 | 1 | 1× | Baseline / master weights |
+| `F16x2` | 16 | 2 | 2× | Inference with moderate precision |
+| `U8x4` | 8 | 4 | 4× | Balanced speed/memory |
+| `U4x8` | 4 | 8 | **8×** | Maximum compression |
+
+### How It Works
+
+1. **Packed Storage** — N values packed into a single u32 word (e.g., 8 × 4-bit integers per u32)
+2. **SWAR Operations** — Element-wise ops (ReLU, add, max) operate on raw u32 words using bit masking — no unpacking needed
+3. **SIMD GEMV** — Type-dispatched AVX2/F16C kernels with prefetch, branchless sign-extend, and 2× instruction-level parallelism
+4. **Training** — f32 master weights kept for optimizer; packed representation used for forward/backward passes
+
+### ReLU Performance (SWAR — no unpacking)
+
+| Elements | F32x1 | F16x2 | U8x4 | U4x8 |
+|----------|-------|-------|------|------|
+| 262,144 | 0.17ms | 0.23ms | 0.16ms | **0.09ms** |
+
+SWAR ReLU uses IEEE 754 sign-bit masking — processes 8 u32 words (up to 64 values) at once via AVX2.
+
+---
+
 ## Project Structure
 
 ```
 fastnn/
-├── Cargo.toml                  # Rust dependencies (PyO3, rayon, wgpu, ...)
+├── Cargo.toml                  # Rust dependencies (PyO3, rayon, wgpu, half, ...)
 ├── pyproject.toml              # Python package configuration (maturin)
 ├── Makefile                    # Common dev tasks (install, build, test, bench)
 ├── src/
@@ -72,7 +115,22 @@ fastnn/
 │   ├── nn/                     # Neural network layers, activations, attention
 │   ├── optim/                  # SGD, Adam, AdamW optimizers
 │   ├── train/                  # Trainer, callbacks, metrics, loss functions
-│   └── io/                     # Model serialization (safetensors), DLPack
+│   ├── io/                     # Model serialization (safetensors), DLPack
+│   ├── dtypes/                 # Packed precision types (U4x8, U8x4, F16x2, F32x1)
+│   │   ├── mod.rs              # PackedWord trait definition
+│   │   ├── u4x8.rs             # 4-bit signed (8 values per u32)
+│   │   ├── u8x4.rs             # 8-bit signed (4 values per u32)
+│   │   ├── f16x2.rs            # IEEE 754 half (2 values per u32)
+│   │   └── f32x1.rs            # IEEE 754 single (1 value per u32)
+│   ├── swar/                   # SWAR operations (add, sub, relu, max on raw u32)
+│   ├── packed_tensor.rs        # PackedTensor<T> with scale/zero dequantization
+│   ├── packed_layer.rs         # PackedLinear<T> with auto backend selection
+│   ├── packed_train.rs         # MasterWeightOptimizer for f32 master weights
+│   └── backends/
+│       ├── cpu.rs              # CPU GEMV/GEMM dispatch
+│       ├── packed_simd.rs      # SIMD-accelerated GEMV (AVX2, F16C, AVX512)
+│       ├── packed_blas.rs      # BLIS-style tiled micro-kernel
+│       └── wgpu/               # WebGPU shader generation per packed type
 ├── fastnn/                     # Python package
 │   ├── __init__.py             # Public API surface
 │   ├── nn.py                   # Sequential, ModuleList
@@ -80,7 +138,10 @@ fastnn/
 │   ├── models/                 # Pre-built models: MLP, Transformer
 │   ├── data.py                 # Dataset, TensorDataset, DataLoader
 │   └── callbacks.py            # Training callbacks
+├── benches/
+│   └── packed_bench.rs         # Packed precision GEMV/ReLU benchmarks
 └── tests/
+    ├── packed_integration.rs   # End-to-end packed network tests
     ├── bench/                  # Benchmarks vs PyTorch (CPU & GPU)
     └── *.py                    # Unit and integration tests
 ```
@@ -248,6 +309,32 @@ print(fnn.allocator_stats())
 print(fnn.list_registered_ops())
 ```
 
+### Packed Precision (Rust API)
+
+```rust
+use fastnn::{U4x8, U8x4, PackedTensor, PackedLinear, Linear4, MasterWeightOptimizer};
+
+// Create a 4-bit packed linear layer (512 → 2048, 8× memory savings)
+let layer: Linear4 = PackedLinear::new(512, 2048, true);
+
+// Forward pass — weights unpacked + AVX2 FMA automatically
+let input = vec![1.0f32; 512];
+let output = layer.forward(&input);
+
+// Training with f32 master weights
+let mut opt = MasterWeightOptimizer::<U8x4>::new(
+    master_weights, 0.001, (0.9, 0.999), 1e-8, 0.01,
+);
+// Optimizer step returns repacked tensor
+let packed_weights = opt.step(&gradients);
+
+// Batched inference (unpack weights once, process N inputs)
+fastnn::backends::cpu::gemm_cpu(&weights, &batch_inputs, &mut batch_outputs);
+
+// SWAR ReLU — operates directly on packed u32 words, no unpacking
+fastnn::backends::cpu::relu_cpu(&mut packed_tensor);
+```
+
 ---
 
 ## API Reference
@@ -387,7 +474,16 @@ print(f"Speedup: {pytorch_time / fnn_time:.2f}x")
 ## Testing & Benchmarking
 
 ```bash
-# Run unit and integration tests
+# Run Rust unit + integration tests (63 tests including packed precision)
+cargo test
+
+# Run packed precision benchmark
+cargo run --release --bin packed_bench
+
+# Head-to-head PyTorch comparison
+python bench_compare.py
+
+# Run Python unit and integration tests
 pytest
 
 # Run benchmarks only
@@ -422,7 +518,7 @@ Cargo feature flags:
 
 | Feature       | Description                                      |
 |---------------|--------------------------------------------------|
-| `simd`        | Enable SIMD kernels (AVX2, AVX512, NEON)         |
+| `simd`        | Enable SIMD kernels (AVX2, AVX512, NEON, F16C)  |
 | `parallel`    | Enable Rayon multi-threaded parallelism          |
 | `simd-avx512` | Enable AVX-512 kernels (requires AVX512-capable CPU) |
 | `openblas`    | Link against OpenBLAS for large matmul           |
