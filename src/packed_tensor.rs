@@ -1,13 +1,35 @@
 use crate::dtypes::PackedWord;
 
+/// Cache-line aligned Vec for SIMD-friendly memory access.
+/// All PackedTensor data is 64-byte aligned to avoid cache-line splits.
+fn aligned_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let align = 64; // cache line
+    let size = len * std::mem::size_of::<T>();
+    let layout = std::alloc::Layout::from_size_align(size + align, align).unwrap();
+    unsafe {
+        let ptr = std::alloc::alloc(layout) as *mut T;
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        // Zero-initialize
+        std::ptr::write_bytes(ptr as *mut u8, 0, size);
+        Vec::from_raw_parts(ptr, len, len)
+    }
+}
+
 /// A tensor whose values are packed into u32 words using a PackedWord type.
 ///
 /// For U4x8: 8 values per u32 (8x memory savings vs f32)
 /// For U8x4: 4 values per u32 (4x memory savings vs f32)
 /// For F16x2: 2 values per u32 (2x memory savings vs f32)
 /// For F32x1: 1 value per u32 (baseline, no packing)
+///
+/// Data is 64-byte (cache-line) aligned for optimal SIMD loads.
 pub struct PackedTensor<T: PackedWord> {
-    /// Packed storage — each element is a u32 containing ITEMS logical values
+    /// Packed storage — cache-line aligned, each element is a u32 containing ITEMS values
     data: Vec<T>,
     /// Logical shape in element counts (not word counts)
     shape: Vec<usize>,
@@ -19,12 +41,17 @@ pub struct PackedTensor<T: PackedWord> {
 
 impl<T: PackedWord> PackedTensor<T> {
     /// Create a zero-initialized packed tensor with the given logical shape.
-    /// The last dimension must be divisible by T::ITEMS.
+    /// Data is 64-byte aligned for SIMD loads.
     pub fn zeros(shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
         let packed_len = (numel + T::ITEMS - 1) / T::ITEMS;
+        let mut data = aligned_vec(packed_len);
+        // aligned_vec already zeroes, but ensure bytemuck zeroed state
+        for d in data.iter_mut() {
+            *d = T::zeroed();
+        }
         PackedTensor {
-            data: vec![T::zeroed(); packed_len],
+            data,
             shape: shape.to_vec(),
             scale: 1.0,
             zero: 0.0,
@@ -45,7 +72,7 @@ impl<T: PackedWord> PackedTensor<T> {
         );
 
         let packed_len = (numel + T::ITEMS - 1) / T::ITEMS;
-        let mut packed = Vec::with_capacity(packed_len);
+        let mut packed = aligned_vec(packed_len);
 
         for chunk_idx in 0..packed_len {
             let mut arr = T::Array::default();
@@ -53,7 +80,6 @@ impl<T: PackedWord> PackedTensor<T> {
             for i in 0..T::ITEMS {
                 let elem_idx = chunk_idx * T::ITEMS + i;
                 if elem_idx < numel {
-                    // Dequantize formula inverted: quantized = (real - zero) / scale
                     arr_ref[i] = if scale != 1.0 || zero != 0.0 {
                         (data[elem_idx] - zero) / scale
                     } else {
@@ -61,7 +87,7 @@ impl<T: PackedWord> PackedTensor<T> {
                     };
                 }
             }
-            packed.push(T::pack_from_f32(arr));
+            packed[chunk_idx] = T::pack_from_f32(arr);
         }
 
         PackedTensor {
