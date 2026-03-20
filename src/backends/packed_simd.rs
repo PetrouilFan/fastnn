@@ -247,72 +247,21 @@ unsafe fn gemv_row_u4x8_avx2(
     while p < k_packed && act_idx + 8 <= k {
         let w = weights_u32[row_offset + p];
 
-        // Extract 8 nibbles from u32 into individual bytes
-        // Even nibbles: bits 0,3→byte0, bits 8,11→byte1, etc.
-        // Odd nibbles: bits 4,7→byte4, bits 12,15→byte5, etc.
+        // Branchless nibble extraction: interleave even/odd nibbles into bytes
+        // Even nibbles (0,2,4,6) → bytes 0-3, odd nibbles (1,3,5,7) → bytes 4-7
         let even = w & 0x0F0F0F0F;
         let odd = (w >> 4) & 0x0F0F0F0F;
-        // Pack: [nib0, nib2, nib4, nib6, nib1, nib3, nib5, nib7]
-        // Actually simpler: extract all 8 nibbles to 8 bytes
-        let nibbles: [u8; 8] = [
-            (w & 0xF) as u8,
-            ((w >> 4) & 0xF) as u8,
-            ((w >> 8) & 0xF) as u8,
-            ((w >> 12) & 0xF) as u8,
-            ((w >> 16) & 0xF) as u8,
-            ((w >> 20) & 0xF) as u8,
-            ((w >> 24) & 0xF) as u8,
-            ((w >> 28) & 0xF) as u8,
-        ];
+        let interleaved = even | (odd << 4);
 
-        // Sign-extend 4-bit to i8 (bit 3 is sign)
-        let signed: [i8; 8] = [
-            if nibbles[0] & 0x8 != 0 {
-                (nibbles[0] | 0xF0) as i8
-            } else {
-                nibbles[0] as i8
-            },
-            if nibbles[1] & 0x8 != 0 {
-                (nibbles[1] | 0xF0) as i8
-            } else {
-                nibbles[1] as i8
-            },
-            if nibbles[2] & 0x8 != 0 {
-                (nibbles[2] | 0xF0) as i8
-            } else {
-                nibbles[2] as i8
-            },
-            if nibbles[3] & 0x8 != 0 {
-                (nibbles[3] | 0xF0) as i8
-            } else {
-                nibbles[3] as i8
-            },
-            if nibbles[4] & 0x8 != 0 {
-                (nibbles[4] | 0xF0) as i8
-            } else {
-                nibbles[4] as i8
-            },
-            if nibbles[5] & 0x8 != 0 {
-                (nibbles[5] | 0xF0) as i8
-            } else {
-                nibbles[5] as i8
-            },
-            if nibbles[6] & 0x8 != 0 {
-                (nibbles[6] | 0xF0) as i8
-            } else {
-                nibbles[6] as i8
-            },
-            if nibbles[7] & 0x8 != 0 {
-                (nibbles[7] | 0xF0) as i8
-            } else {
-                nibbles[7] as i8
-            },
-        ];
+        // Load as __m128i and sign-extend nibbles → i8 (branchless via SIMD subtract)
+        let nibbles = _mm_set1_epi32(interleaved as i32);
+        // Subtract 0x10 from bytes where bit 3 was set: i8 = u8 - ((u8 >> 3) & 0x10)
+        let sign_ext = _mm_and_si128(_mm_srli_epi16(nibbles, 3), _mm_set1_epi8(0x10));
+        let i8_vals = _mm_sub_epi8(nibbles, sign_ext);
 
-        // Widen i8 → i32 → f32 using AVX2
-        let i8x8 = _mm_loadl_epi64(signed.as_ptr() as *const __m128i);
-        let i32x4_lo = _mm_cvtepi8_epi32(i8x8);
-        let i32x4_hi = _mm_cvtepi8_epi32(_mm_srli_si128(i8x8, 4));
+        // Widen i8 → i32 → f32
+        let i32x4_lo = _mm_cvtepi8_epi32(i8_vals);
+        let i32x4_hi = _mm_cvtepi8_epi32(_mm_srli_si128(i8_vals, 4));
         let f32x4_lo = _mm_cvtepi32_ps(i32x4_lo);
         let f32x4_hi = _mm_cvtepi32_ps(i32x4_hi);
         let weight_f32 = _mm256_insertf128_ps(_mm256_castps128_ps256(f32x4_lo), f32x4_hi, 1);
