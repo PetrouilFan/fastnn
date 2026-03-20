@@ -1,23 +1,16 @@
 use crate::dtypes::PackedWord;
 
-/// Cache-line aligned Vec for SIMD-friendly memory access.
-/// All PackedTensor data is 64-byte aligned to avoid cache-line splits.
-fn aligned_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
+/// Create a zero-initialized Vec<T>.
+fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
     if len == 0 {
         return Vec::new();
     }
-    let align = 64; // cache line
-    let size = len * std::mem::size_of::<T>();
-    let layout = std::alloc::Layout::from_size_align(size + align, align).unwrap();
+    let mut v = Vec::with_capacity(len);
     unsafe {
-        let ptr = std::alloc::alloc(layout) as *mut T;
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-        // Zero-initialize
-        std::ptr::write_bytes(ptr as *mut u8, 0, size);
-        Vec::from_raw_parts(ptr, len, len)
+        std::ptr::write_bytes(v.as_mut_ptr() as *mut u8, 0, len * std::mem::size_of::<T>());
+        v.set_len(len);
     }
+    v
 }
 
 /// A tensor whose values are packed into u32 words using a PackedWord type.
@@ -26,10 +19,8 @@ fn aligned_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
 /// For U8x4: 4 values per u32 (4x memory savings vs f32)
 /// For F16x2: 2 values per u32 (2x memory savings vs f32)
 /// For F32x1: 1 value per u32 (baseline, no packing)
-///
-/// Data is 64-byte (cache-line) aligned for optimal SIMD loads.
 pub struct PackedTensor<T: PackedWord> {
-    /// Packed storage — cache-line aligned, each element is a u32 containing ITEMS values
+    /// Packed storage
     data: Vec<T>,
     /// Logical shape in element counts (not word counts)
     shape: Vec<usize>,
@@ -41,12 +32,10 @@ pub struct PackedTensor<T: PackedWord> {
 
 impl<T: PackedWord> PackedTensor<T> {
     /// Create a zero-initialized packed tensor with the given logical shape.
-    /// Data is 64-byte aligned for SIMD loads.
     pub fn zeros(shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
         let packed_len = (numel + T::ITEMS - 1) / T::ITEMS;
-        let mut data = aligned_vec(packed_len);
-        // aligned_vec already zeroes, but ensure bytemuck zeroed state
+        let mut data = zeroed_vec(packed_len);
         for d in data.iter_mut() {
             *d = T::zeroed();
         }
@@ -72,7 +61,7 @@ impl<T: PackedWord> PackedTensor<T> {
         );
 
         let packed_len = (numel + T::ITEMS - 1) / T::ITEMS;
-        let mut packed = aligned_vec(packed_len);
+        let mut packed = zeroed_vec(packed_len);
 
         for chunk_idx in 0..packed_len {
             let mut arr = T::Array::default();

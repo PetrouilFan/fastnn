@@ -99,7 +99,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
 
     // Apply scale and zero
     for o in output.iter_mut() {
-        *o = *o * scale - zero;
+        *o = *o * scale + zero;
     }
 }
 
@@ -305,7 +305,7 @@ pub fn gemv_u8x4_tiled(
     }
 
     for o in output.iter_mut() {
-        *o = *o * scale - zero;
+        *o = *o * scale + zero;
     }
 }
 
@@ -382,7 +382,7 @@ pub fn gemv_f16x2_tiled(
     }
 
     for o in output.iter_mut() {
-        *o = *o * scale - zero;
+        *o = *o * scale + zero;
     }
 }
 
@@ -468,7 +468,7 @@ pub fn gemv_u4x8_tiled(
     }
 
     for o in output.iter_mut() {
-        *o = *o * scale - zero;
+        *o = *o * scale + zero;
     }
 }
 
