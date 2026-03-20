@@ -106,6 +106,63 @@ impl WgpuContext {
         }
     }
 
+    /// Create a WgpuContext from an existing device and queue.
+    pub fn from_device(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("packed gemv layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        WgpuContext {
+            device,
+            queue,
+            pipelines: HashMap::new(),
+            bind_group_layout,
+        }
+    }
+
     /// Get or create a compute pipeline for the given PackedWord type.
     pub fn get_or_build_pipeline<T: PackedWord>(&mut self) {
         let key = std::any::type_name::<T>().to_string();
@@ -196,7 +253,11 @@ impl WgpuContext {
 /// Initialize the global wgpu context (lazy).
 pub fn ensure_wgpu_context() {
     WGPU_CONTEXT.get_or_init(|| {
-        let ctx = pollster::block_on(WgpuContext::init());
+        // Use the GpuContext's device to ensure all buffers share the same device
+        let gpu_ctx = crate::kernels::gpu::get_context(0);
+        let device = gpu_ctx.device().clone();
+        let queue = gpu_ctx.queue().clone();
+        let ctx = WgpuContext::from_device(device, queue);
         Arc::new(Mutex::new(ctx))
     });
 }
@@ -357,6 +418,12 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         let bind_group = bg_guard.as_ref().unwrap();
 
         let workgroup_count = (m + 63) / 64;
+
+        // Get persistent staging buffer for readback
+        let output_size = m as usize * std::mem::size_of::<f32>();
+        let staging = ctx.ensure_staging_buffer_gpu_to_cpu(output_size);
+
+        // Single encoder: compute + copy-to-staging
         let mut encoder = ctx.device().create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("gemv_encoder") }
         );
@@ -370,11 +437,25 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
             pass.dispatch_workgroups(workgroup_count, 1, 1);
         }
 
+        // Copy output to staging in the same encoder
+        encoder.copy_buffer_to_buffer(&output_buf, 0, &staging, 0, output_size as u64);
+
+        // Single submission for both compute + copy
         ctx.queue().submit(std::iter::once(encoder.finish()));
 
-        // Read back via GpuContext staging buffer
-        let output_size = m as usize * std::mem::size_of::<f32>();
-        ctx.read_buffer_from_arc(&output_buf, output_size)
+        // Map and read staging buffer
+        let slice = staging.slice(..output_size as u64);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        ctx.device().poll(wgpu::Maintain::Wait);
+        receiver.recv().unwrap().expect("Failed to map staging buffer");
+        let data = slice.get_mapped_range();
+        let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        result
     })
 }
 
