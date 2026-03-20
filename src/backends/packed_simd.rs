@@ -103,7 +103,7 @@ fn gemv_u8x4_dispatch(
                         *out = unsafe {
                             gemv_row_u8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed)
                         } * scale
-                            - zero;
+                            + zero;
                     }
                 });
         }
@@ -113,7 +113,7 @@ fn gemv_u8x4_dispatch(
                 output[row] = unsafe {
                     gemv_row_u8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed)
                 } * scale
-                    - zero;
+                    + zero;
             }
         }
     } else {
@@ -213,6 +213,7 @@ fn gemv_u4x8_dispatch(
     let weights_u32 = weights.as_u32();
 
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        // Pre-allocate per-thread buffer (avoids per-row heap allocation)
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -222,22 +223,38 @@ fn gemv_u4x8_dispatch(
                 .enumerate()
                 .for_each(|(chunk_idx, out_chunk)| {
                     let start_row = chunk_idx * rows_per_chunk;
+                    let mut buf = vec![0.0f32; k_packed * 8];
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
                         *out = unsafe {
-                            gemv_row_u4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed)
+                            gemv_row_u4x8_avx2(
+                                weights_u32,
+                                activation,
+                                row * k_packed,
+                                k,
+                                k_packed,
+                                &mut buf,
+                            )
                         } * scale
-                            - zero;
+                            + zero;
                     }
                 });
         }
         #[cfg(not(feature = "parallel"))]
         {
+            let mut buf = vec![0.0f32; k_packed * 8];
             for row in 0..m {
                 output[row] = unsafe {
-                    gemv_row_u4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed)
+                    gemv_row_u4x8_avx2(
+                        weights_u32,
+                        activation,
+                        row * k_packed,
+                        k,
+                        k_packed,
+                        &mut buf,
+                    )
                 } * scale
-                    - zero;
+                    + zero;
             }
         }
     } else {
@@ -254,10 +271,10 @@ unsafe fn gemv_row_u4x8_avx2(
     row_offset: usize,
     k: usize,
     k_packed: usize,
+    buf: &mut [f32],
 ) -> f32 {
-    // Unpack nibbles to f32 buffer, then SIMD FMA.
+    // Unpack nibbles to pre-allocated buffer, then SIMD FMA.
     // AVX2 has no nibble-level instructions, so scalar unpack is correct.
-    let mut buf = vec![0.0f32; k_packed * 8];
     for p in 0..k_packed {
         let w = weights_u32[row_offset + p];
         let base = p * 8;
@@ -323,7 +340,7 @@ fn gemv_f16x2_dispatch(
                                 k_packed,
                             )
                         } * scale
-                            - zero;
+                            + zero;
                     }
                 });
         }
@@ -333,7 +350,7 @@ fn gemv_f16x2_dispatch(
                 output[row] = unsafe {
                     gemv_row_f16x2_f16c(weights_u32, activation, row * k_packed, k, k_packed)
                 } * scale
-                    - zero;
+                    + zero;
             }
         }
     } else {
@@ -546,7 +563,7 @@ fn gemv_packed_inner<T: PackedWord>(
                     let row = start_row + local_row;
                     *out = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf)
                         * scale
-                        - zero;
+                        + zero;
                 }
             });
     }
@@ -557,7 +574,7 @@ fn gemv_packed_inner<T: PackedWord>(
         for row in 0.._m {
             output[row] = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf)
                 * scale
-                - zero;
+                + zero;
         }
     }
 }
@@ -670,7 +687,7 @@ fn fma_f32_slice(a: &[f32], b: &[f32]) -> f32 {
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
-        if is_x86_feature_detected!("fma") {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { fma_f32_avx2(a, b) };
         }
     }
