@@ -316,6 +316,29 @@ impl GpuContext {
         }
     }
 
+    /// Write bytes to an existing GPU buffer via a staging buffer.
+    pub fn write_bytes_to_buffer(&self, data: &[u8], dest: &wgpu::Buffer) {
+        let size = data.len();
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("write_staging"),
+            size: size as u64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
+        });
+        {
+            let mut range = staging.slice(..).get_mapped_range_mut();
+            range.copy_from_slice(data);
+        }
+        staging.unmap();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("write_copy"),
+            });
+        encoder.copy_buffer_to_buffer(&staging, 0, dest, 0, size as u64);
+        self.queue.submit(Some(encoder.finish()));
+    }
+
     pub fn create_buffer(&self, size: usize, _label: &str) -> GpuBuffer {
         let buffer = self.acquire_buffer(size);
 
