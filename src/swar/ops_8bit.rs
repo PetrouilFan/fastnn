@@ -56,8 +56,10 @@ pub fn swar_relu_s8x4(v: u32) -> u32 {
 }
 
 /// SWAR ReLU backward for 8-bit: passes gradient only where pre_relu > 0.
+/// Blocks gradient at zero (matching scalar fallback convention).
 #[inline]
 pub fn swar_relu_backward_u8x4(grad: u32, pre_relu: u32) -> u32 {
+    // Block negative values (sign bit set in each byte)
     let sign_bits = pre_relu & U8_SIGN;
     let neg_mask = sign_bits
         | (sign_bits >> 1)
@@ -67,7 +69,19 @@ pub fn swar_relu_backward_u8x4(grad: u32, pre_relu: u32) -> u32 {
         | (sign_bits >> 5)
         | (sign_bits >> 6)
         | (sign_bits >> 7);
-    grad & !neg_mask
+    // Detect non-zero bytes: OR all bits of each byte together
+    // If byte is non-zero, at least one bit is set → byte becomes 0xFF
+    // If byte is zero, all bits clear → byte stays 0x00
+    let not_zero = pre_relu
+        | (pre_relu >> 1)
+        | (pre_relu >> 2)
+        | (pre_relu >> 3)
+        | (pre_relu >> 4)
+        | (pre_relu >> 5)
+        | (pre_relu >> 6)
+        | (pre_relu >> 7);
+    // Block: negate to get mask where bytes should be zeroed
+    grad & not_zero & !neg_mask
 }
 
 #[cfg(test)]

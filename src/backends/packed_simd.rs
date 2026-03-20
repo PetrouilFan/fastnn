@@ -745,6 +745,11 @@ pub fn gemm_packed_batched<T: PackedWord>(
     let scale = weights.scale();
     let zero = weights.zero();
 
+    // Validate output vector lengths (parallel path uses unsafe raw pointers)
+    for o in outputs.iter() {
+        assert!(o.len() >= m, "output vector length {} < m={}", o.len(), m);
+    }
+
     // Process each weight row once, compute dot products with all N inputs
     #[cfg(feature = "parallel")]
     {

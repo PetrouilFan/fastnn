@@ -25,15 +25,20 @@ pub fn swar_relu_f16x2(v: u32) -> u32 {
     v & !clear_mask
 }
 
-/// SWAR ReLU backward for F16x2 — blocks gradient where sign bit is set.
+/// SWAR ReLU backward for F16x2 — blocks gradient where pre_relu ≤ 0.
 #[inline]
 pub fn swar_relu_backward_f16x2(grad: u32, pre_relu: u32) -> u32 {
     let sign_lo = (pre_relu >> 15) & 1;
     let sign_hi = pre_relu >> 31;
     let mask_lo = 0u32.wrapping_sub(sign_lo);
     let mask_hi = 0u32.wrapping_sub(sign_hi);
-    let clear_mask = (mask_lo & 0xFFFF) | (mask_hi << 16);
-    grad & !clear_mask
+    let neg_mask = (mask_lo & 0xFFFF) | (mask_hi << 16);
+    // Also block zero values (f16 zero = all bits clear)
+    let lo_nonzero = pre_relu & 0xFFFF;
+    let hi_nonzero = pre_relu >> 16;
+    let zero_mask_lo = if lo_nonzero == 0 { 0xFFFF } else { 0 };
+    let zero_mask_hi = if hi_nonzero == 0 { 0xFFFF0000 } else { 0 };
+    grad & !(neg_mask | zero_mask_lo | zero_mask_hi)
 }
 
 /// SWAR element-wise max for two F16x2 words (treating bits as unsigned 16-bit).
