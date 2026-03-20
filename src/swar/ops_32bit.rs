@@ -12,10 +12,14 @@ pub fn swar_relu_f32x1(v: u32) -> u32 {
 }
 
 /// SWAR ReLU backward for F32x1 — passes gradient only where pre_relu > 0.
+/// Blocks gradient at zero (matching scalar fallback convention).
 #[inline]
 pub fn swar_relu_backward_f32x1(grad: u32, pre_relu: u32) -> u32 {
+    // Block if sign bit set (negative) or all bits zero
     let sign = pre_relu >> 31;
-    let clear = sign.wrapping_neg();
+    let is_zero = if pre_relu == 0 { 1u32 } else { 0 };
+    let block = sign | is_zero;
+    let clear = 0u32.wrapping_sub(block);
     grad & !clear
 }
 

@@ -88,11 +88,18 @@ pub fn swar_max_u4x8(a: u32, b: u32) -> u32 {
 }
 
 /// SWAR ReLU backward for 4-bit: passes gradient only where pre_relu > 0.
+/// Blocks gradient at zero (matching scalar fallback convention).
 #[inline]
 pub fn swar_relu_backward_u4x8(grad: u32, pre_relu: u32) -> u32 {
     let sign_bits = pre_relu & U4_SIGN;
+    // Spread sign bit to fill nibble
     let neg_mask = sign_bits | (sign_bits >> 1) | (sign_bits >> 2) | (sign_bits >> 3);
-    grad & !neg_mask
+    // Also block zero values (all nibble bits clear)
+    let is_zero = !pre_relu & 0x0F0F_0F0F;
+    let zero_mask = is_zero & (is_zero >> 1) & (is_zero >> 2) & (is_zero >> 3);
+    // Spread zero detection to fill nibble
+    let zero_spread = zero_mask | (zero_mask << 1) | (zero_mask << 2) | (zero_mask << 3);
+    grad & !(neg_mask | zero_spread)
 }
 
 #[cfg(test)]
