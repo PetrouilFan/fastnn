@@ -117,7 +117,7 @@ fn main() {
         println!("\n  numel={}", numel);
 
         let f32_ms = bench_relu::<F32x1>(&data, &shape, iters);
-        let f32_bytes = ((numel + 0) / 1) * 4;
+        let f32_bytes = numel * 4;
         println!(
             "  {:<10} {:>10.4} {:>10.0} {:>12} {:>10}",
             "F32x1",
@@ -128,7 +128,7 @@ fn main() {
         );
 
         let f16_ms = bench_relu::<F16x2>(&data, &shape, iters);
-        let f16_bytes = ((numel + 1) / 2) * 4;
+        let f16_bytes = numel.div_ceil(2) * 4;
         println!(
             "  {:<10} {:>10.4} {:>10.0} {:>12} {:>9.1}x",
             "F16x2",
@@ -139,7 +139,7 @@ fn main() {
         );
 
         let u8_ms = bench_relu::<U8x4>(&data, &shape, iters);
-        let u8_bytes = ((numel + 3) / 4) * 4;
+        let u8_bytes = numel.div_ceil(4) * 4;
         println!(
             "  {:<10} {:>10.4} {:>10.0} {:>12} {:>9.1}x",
             "U8x4",
@@ -150,7 +150,7 @@ fn main() {
         );
 
         let u4_ms = bench_relu::<U4x8>(&data, &shape, iters);
-        let u4_bytes = ((numel + 7) / 8) * 4;
+        let u4_bytes = numel.div_ceil(8) * 4;
         println!(
             "  {:<10} {:>10.4} {:>10.0} {:>12} {:>9.1}x",
             "U4x8",
