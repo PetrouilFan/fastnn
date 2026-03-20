@@ -6,11 +6,17 @@
 /// Equivalent to max(0, x) but operates on raw u32 bits.
 #[inline]
 pub fn swar_relu_f32x1(v: u32) -> u32 {
-    // IEEE 754 sign bit is bit 31
-    // If sign bit is set (negative), zero the value
-    let sign = v >> 31; // 1 if negative, 0 if positive
-    let mask = sign.wrapping_neg(); // 0xFFFFFFFF if neg, 0x00000000 if pos
+    let sign = v >> 31;
+    let mask = sign.wrapping_neg();
     v & !mask
+}
+
+/// SWAR ReLU backward for F32x1 — passes gradient only where pre_relu > 0.
+#[inline]
+pub fn swar_relu_backward_f32x1(grad: u32, pre_relu: u32) -> u32 {
+    let sign = pre_relu >> 31;
+    let clear = sign.wrapping_neg();
+    grad & !clear
 }
 
 #[cfg(test)]
@@ -38,8 +44,16 @@ mod tests {
     #[test]
     fn test_swar_relu_f32x1_neg_zero() {
         let v = (-0.0f32).to_bits();
-        // -0.0 has sign bit set, so it gets zeroed
-        // This is fine for ReLU: -0.0 == 0.0 mathematically
         assert_eq!(swar_relu_f32x1(v), 0);
+    }
+
+    #[test]
+    fn test_swar_relu_backward_f32x1() {
+        let pos = 1.0f32.to_bits();
+        let neg = (-1.0f32).to_bits();
+        let grad = 0xFFFF_FFFFu32;
+
+        assert_eq!(swar_relu_backward_f32x1(grad, pos), grad); // positive, pass
+        assert_eq!(swar_relu_backward_f32x1(grad, neg), 0); // negative, block
     }
 }

@@ -150,7 +150,7 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
         }
         (32, true) => {
             for (g, p) in grad_raw.iter_mut().zip(pre_raw.iter()) {
-                *g = crate::swar::ops_16bit::swar_relu_backward_f32x1(*g, *p);
+                *g = crate::swar::ops_32bit::swar_relu_backward_f32x1(*g, *p);
             }
         }
         _ => {
