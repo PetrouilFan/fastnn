@@ -1,6 +1,9 @@
 use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use std::arch::x86_64::*;
+
 /// Generic GEMV (matrix × vector) on CPU using packed representation.
 /// Uses streaming SIMD unpack+FMA (optimal for single vector multiplication).
 pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], output: &mut [f32]) {
@@ -9,29 +12,15 @@ pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], ou
 }
 
 /// Generic GEMM (matrix × matrix) as a batch of GEMV calls on CPU.
+/// Uses batched kernel that unpacks each weight row once for all inputs.
 pub fn gemm_cpu<T: PackedWord>(
     weights: &PackedTensor<T>,
     batch_inputs: &[Vec<f32>],
     outputs: &mut [Vec<f32>],
 ) {
     assert_eq!(batch_inputs.len(), outputs.len());
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        batch_inputs
-            .par_iter()
-            .zip(outputs.par_iter_mut())
-            .for_each(|(input, output)| {
-                gemv_cpu(weights, input, output);
-            });
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for (input, output) in batch_inputs.iter().zip(outputs.iter_mut()) {
-            gemv_cpu(weights, input, output);
-        }
-    }
+    // Use batched GEMM: unpack weights once, process all inputs
+    super::packed_simd::gemm_packed_batched(weights, batch_inputs, outputs);
 }
 
 /// Element-wise ReLU on a packed tensor using SWAR for ALL types.
@@ -45,6 +34,13 @@ pub fn relu_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>) {
     // ALL types now use SWAR — no unpack-repack needed
     match (T::BIT_WIDTH, T::IS_FLOAT) {
         (4, false) => {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && raw.len() >= 8 {
+                    unsafe { relu_swar_simd_u32(raw, 0x0F0F0F0F, 0x88888888); }
+                    return;
+                }
+            }
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
@@ -60,6 +56,13 @@ pub fn relu_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>) {
             }
         }
         (8, false) => {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && raw.len() >= 8 {
+                    unsafe { relu_swar_simd_u32(raw, 0x00FF00FF, 0x80808080); }
+                    return;
+                }
+            }
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
@@ -75,7 +78,13 @@ pub fn relu_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>) {
             }
         }
         (16, true) => {
-            // F16x2: SWAR ReLU using IEEE 754 sign bits — ~10x faster than before
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && raw.len() >= 8 {
+                    unsafe { relu_swar_simd_u32(raw, 0x0000FFFF, 0x80008000); }
+                    return;
+                }
+            }
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
@@ -92,7 +101,13 @@ pub fn relu_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>) {
         }
         (32, true) => {
             // F32x1: SWAR ReLU using IEEE 754 sign bit
-            // For small tensors, scalar f32::max is faster due to simpler instruction
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && raw.len() >= 8 {
+                    unsafe { relu_swar_simd_f32(raw); }
+                    return;
+                }
+            }
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
@@ -168,6 +183,97 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
         }
     }
 }
+
+// ============================================================
+// SIMD SWAR ReLU — process 8 u32 words at once via AVX2
+// ============================================================
+
+/// SIMD SWAR ReLU for integer types (4-bit, 8-bit, 16-bit).
+/// Processes 8 u32 words at once using AVX2, spreading sign bits
+/// to fill each lane and ANDing with complement.
+///
+/// `data_mask`: mask for data bits (0x0F0F0F0F for 4-bit, etc.)
+/// `sign_mask`: mask for sign bits (0x88888888 for 4-bit, etc.)
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn relu_swar_simd_u32(raw: &mut [u32], _data_mask: u32, sign_mask: u32) {
+    let len = raw.len();
+    let mut i = 0;
+
+    // Process 8 u32 words at a time (256 bits = 1 AVX2 register)
+    let mask_vec = _mm256_set1_epi32(sign_mask as i32);
+    let ptr = raw.as_mut_ptr();
+
+    while i + 8 <= len {
+        // Load 8 u32 words
+        let v = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
+
+        // Extract sign bits
+        let signs = _mm256_and_si256(v, mask_vec);
+
+        // Spread sign bits to fill entire lanes (unrolled — _mm256_srli_epi32 needs const)
+        let mut spread = signs;
+        spread = _mm256_or_si256(spread, _mm256_srli_epi32(spread, 1));
+        spread = _mm256_or_si256(spread, _mm256_srli_epi32(spread, 2));
+        spread = _mm256_or_si256(spread, _mm256_srli_epi32(spread, 4));
+        spread = _mm256_or_si256(spread, _mm256_srli_epi32(spread, 8));
+        spread = _mm256_or_si256(spread, _mm256_srli_epi32(spread, 16));
+
+        // Zero out negative lanes
+        let result = _mm256_andnot_si256(spread, v);
+        _mm256_storeu_si256(ptr.add(i) as *mut __m256i, result);
+
+        i += 8;
+    }
+
+    // Scalar tail
+    if sign_mask == 0x88888888 {
+        while i < len {
+            raw[i] = crate::swar::ops_4bit::swar_relu_s4x8(raw[i]);
+            i += 1;
+        }
+    } else if sign_mask == 0x80808080 {
+        while i < len {
+            raw[i] = crate::swar::ops_8bit::swar_relu_s8x4(raw[i]);
+            i += 1;
+        }
+    } else {
+        while i < len {
+            raw[i] = crate::swar::ops_16bit::swar_relu_f16x2(raw[i]);
+            i += 1;
+        }
+    }
+}
+
+/// SIMD SWAR ReLU for F32x1 — sign bit is bit 31.
+/// Processes 8 f32 values at once using AVX2 _mm256_max_ps.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn relu_swar_simd_f32(raw: &mut [u32]) {
+    let len = raw.len();
+    let mut i = 0;
+    let zero = _mm256_setzero_ps();
+    let ptr = raw.as_mut_ptr() as *mut f32;
+
+    while i + 8 <= len {
+        let v = _mm256_loadu_ps(ptr.add(i));
+        let result = _mm256_max_ps(v, zero);
+        _mm256_storeu_ps(ptr.add(i), result);
+        i += 8;
+    }
+
+    while i < len {
+        let v = f32::from_bits(raw[i]);
+        if v < 0.0 {
+            raw[i] = 0;
+        }
+        i += 1;
+    }
+}
+
+// ============================================================
+// Tests
+// ============================================================
 
 #[cfg(test)]
 mod tests {
