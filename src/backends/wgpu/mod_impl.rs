@@ -344,7 +344,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         let unpacked = unpack_word(weights[row * params.k_packed + k]);
         {dot_logic}
     }}
-    output[row] = acc * params.scale - params.zero;
+    output[row] = acc * params.scale + params.zero;
 }}
 "#,
         items = T::ITEMS,
