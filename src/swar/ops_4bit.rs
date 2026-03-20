@@ -91,15 +91,30 @@ pub fn swar_max_u4x8(a: u32, b: u32) -> u32 {
 /// Blocks gradient at zero (matching scalar fallback convention).
 #[inline]
 pub fn swar_relu_backward_u4x8(grad: u32, pre_relu: u32) -> u32 {
+    // Block negative values (sign bit set)
     let sign_bits = pre_relu & U4_SIGN;
-    // Spread sign bit to fill nibble
     let neg_mask = sign_bits | (sign_bits >> 1) | (sign_bits >> 2) | (sign_bits >> 3);
-    // Also block zero values (all nibble bits clear)
-    let is_zero = !pre_relu & 0x0F0F_0F0F;
-    let zero_mask = is_zero & (is_zero >> 1) & (is_zero >> 2) & (is_zero >> 3);
-    // Spread zero detection to fill nibble
-    let zero_spread = zero_mask | (zero_mask << 1) | (zero_mask << 2) | (zero_mask << 3);
-    grad & !(neg_mask | zero_spread)
+
+    // Detect zero: collapse nibble bits into bit 0, isolate, spread to fill nibble
+    let pre_even = pre_relu & U4_EVEN;
+    let nz_even_raw = pre_even | (pre_even >> 1) | (pre_even >> 2) | (pre_even >> 3);
+    let nz_even_bit0 = nz_even_raw & 0x0101_0101; // isolate bit 0 per byte
+    let nz_even_spread =
+        nz_even_bit0 | (nz_even_bit0 << 1) | (nz_even_bit0 << 2) | (nz_even_bit0 << 3);
+    let zero_even = !nz_even_spread & U4_EVEN;
+
+    let pre_odd_shifted = (pre_relu >> 4) & U4_EVEN;
+    let nz_odd_raw =
+        pre_odd_shifted | (pre_odd_shifted >> 1) | (pre_odd_shifted >> 2) | (pre_odd_shifted >> 3);
+    let nz_odd_bit0 = nz_odd_raw & 0x0101_0101;
+    let nz_odd_spread = nz_odd_bit0 | (nz_odd_bit0 << 1) | (nz_odd_bit0 << 2) | (nz_odd_bit0 << 3);
+    let zero_odd = ((!nz_odd_spread) & U4_EVEN) << 4;
+
+    // Spread zero detection to fill nibbles
+    let zero_even_spread = zero_even | (zero_even << 1) | (zero_even << 2) | (zero_even << 3);
+    let zero_odd_spread = zero_odd | (zero_odd >> 1) | (zero_odd >> 2) | (zero_odd >> 3);
+
+    grad & !(neg_mask | zero_even_spread | zero_odd_spread)
 }
 
 #[cfg(test)]
