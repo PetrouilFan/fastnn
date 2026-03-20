@@ -40,6 +40,10 @@ pub struct PackedLinear<T: PackedWord> {
     pub out_features: usize,
     /// Cached GPU buffer for weights — None until first GPU forward call
     pub gpu_weight_buf: Arc<Mutex<Option<GpuBuffer>>>,
+    /// Cached GPU buffer for output — None until first GPU forward call
+    pub gpu_output_buf: Arc<Mutex<Option<GpuBuffer>>>,
+    /// Cached GPU buffer for uniform params — None until first GPU forward call
+    pub gpu_params_buf: Arc<Mutex<Option<GpuBuffer>>>,
 }
 
 impl<T: PackedWord> PackedLinear<T> {
@@ -72,6 +76,8 @@ impl<T: PackedWord> PackedLinear<T> {
             in_features,
             out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
+            gpu_output_buf: Arc::new(Mutex::new(None)),
+            gpu_params_buf: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -89,6 +95,8 @@ impl<T: PackedWord> PackedLinear<T> {
             in_features,
             out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
+            gpu_output_buf: Arc::new(Mutex::new(None)),
+            gpu_params_buf: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -108,11 +116,13 @@ impl<T: PackedWord> PackedLinear<T> {
     pub fn forward_wgpu(&self, input: &[f32]) -> Vec<f32> {
         use crate::backends::wgpu::gemv_wgpu_persistent;
         let ctx = get_context(0);
-        let weight_buf = self.ensure_gpu_weight_buf(&ctx);
+        let (weight_buf, output_buf, params_buf) = self.ensure_gpu_bufs(&ctx);
 
         let mut output = gemv_wgpu_persistent::<T>(
             &ctx,
             weight_buf,
+            output_buf,
+            params_buf,
             input,
             self.out_features as u32,
             self.weight.packed_len() as u32,
@@ -137,14 +147,59 @@ impl<T: PackedWord> PackedLinear<T> {
         }
     }
 
-    /// Ensure the GPU weight buffer is created and cached.
-    fn ensure_gpu_weight_buf(&self, ctx: &GpuContext) -> Arc<wgpu::Buffer> {
-        let mut guard = self.gpu_weight_buf.lock().unwrap();
-        if guard.is_none() {
-            let buf = ctx.create_gpu_buffer_from_bytes(self.weight.as_bytes(), "packed_weight");
-            *guard = Some(buf);
+    /// Ensure GPU weight buffer is created and cached. Returns (weight_buf, output_buf, params_buf).
+    fn ensure_gpu_bufs(
+        &self,
+        ctx: &GpuContext,
+    ) -> (Arc<wgpu::Buffer>, Arc<wgpu::Buffer>, Arc<wgpu::Buffer>) {
+        {
+            let mut guard = self.gpu_weight_buf.lock().unwrap();
+            if guard.is_none() {
+                let buf = ctx.create_gpu_buffer_from_bytes(self.weight.as_bytes(), "packed_weight");
+                *guard = Some(buf);
+            }
         }
-        guard.as_ref().unwrap().buffer.clone()
+        {
+            let mut guard = self.gpu_output_buf.lock().unwrap();
+            if guard.is_none() {
+                let buf =
+                    ctx.create_buffer(self.out_features * std::mem::size_of::<f32>(), "output");
+                *guard = Some(buf);
+            }
+        }
+        {
+            let mut guard = self.gpu_params_buf.lock().unwrap();
+            if guard.is_none() {
+                // GemvParams: scale (f32) + zero (f32) + k_packed (u32) + m (u32) = 16 bytes
+                let buf = ctx.create_buffer(16, "gemv_params");
+                *guard = Some(buf);
+            }
+        }
+        let weight = self
+            .gpu_weight_buf
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .buffer
+            .clone();
+        let output = self
+            .gpu_output_buf
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .buffer
+            .clone();
+        let params = self
+            .gpu_params_buf
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .buffer
+            .clone();
+        (weight, output, params)
     }
 
     /// Repack the master weights into the packed representation.
@@ -160,6 +215,7 @@ impl<T: PackedWord> PackedLinear<T> {
             );
             // Invalidate GPU cache because weights changed
             *self.gpu_weight_buf.lock().unwrap() = None;
+            *self.gpu_params_buf.lock().unwrap() = None;
         }
     }
 
@@ -196,6 +252,8 @@ impl<T: PackedWord> Clone for PackedLinear<T> {
             in_features: self.in_features,
             out_features: self.out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
+            gpu_output_buf: Arc::new(Mutex::new(None)),
+            gpu_params_buf: Arc::new(Mutex::new(None)),
         }
     }
 }
