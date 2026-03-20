@@ -51,7 +51,8 @@ pub fn swar_max_u16x2(a: u32, b: u32) -> u32 {
     let diff_lo = a_lo.wrapping_add(U16_LO).wrapping_sub(b_lo);
     let borrow_lo = (diff_lo >> 16) & 1;
     let mask_lo = 0u32.wrapping_sub(borrow_lo);
-    let result_lo = (a_lo & !mask_lo) | (b_lo & mask_lo);
+    // borrow_lo = 1 when a > b → mask = 0xFFFF → select a
+    let result_lo = (a_lo & mask_lo) | (b_lo & !mask_lo);
 
     // High halves
     let a_hi = a & U16_HI;

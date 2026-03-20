@@ -69,10 +69,8 @@ pub fn swar_relu_backward_u8x4(grad: u32, pre_relu: u32) -> u32 {
         | (sign_bits >> 5)
         | (sign_bits >> 6)
         | (sign_bits >> 7);
-    // Detect non-zero bytes: OR all bits of each byte together
-    // If byte is non-zero, at least one bit is set → byte becomes 0xFF
-    // If byte is zero, all bits clear → byte stays 0x00
-    let not_zero = pre_relu
+    // Detect non-zero bytes: collapse all bits into bit 0 per byte
+    let nz = pre_relu
         | (pre_relu >> 1)
         | (pre_relu >> 2)
         | (pre_relu >> 3)
@@ -80,7 +78,18 @@ pub fn swar_relu_backward_u8x4(grad: u32, pre_relu: u32) -> u32 {
         | (pre_relu >> 5)
         | (pre_relu >> 6)
         | (pre_relu >> 7);
-    // Block: negate to get mask where bytes should be zeroed
+    // Isolate bit 0 per byte: 0x01 if non-zero, 0x00 if zero
+    let nz_bit0 = nz & 0x0101_0101;
+    // Spread bit 0 to fill entire byte: 0x01 → 0xFF, 0x00 → 0x00
+    let not_zero = nz_bit0
+        | (nz_bit0 << 1)
+        | (nz_bit0 << 2)
+        | (nz_bit0 << 3)
+        | (nz_bit0 << 4)
+        | (nz_bit0 << 5)
+        | (nz_bit0 << 6)
+        | (nz_bit0 << 7);
+    // Mask: only let gradient through where not negative and not zero
     grad & not_zero & !neg_mask
 }
 
