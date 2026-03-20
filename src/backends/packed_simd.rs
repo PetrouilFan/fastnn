@@ -74,6 +74,7 @@ pub fn gemv_packed_simd<T: PackedWord>(
 // ============================================================
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[allow(unused_variables)]
 fn gemv_u8x4_dispatch(
     weights: &PackedTensor<crate::dtypes::U8x4>,
     activation: &[f32],
@@ -197,6 +198,7 @@ unsafe fn gemv_row_u8x4_avx2(
 // ============================================================
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[allow(unused_variables)]
 fn gemv_u4x8_dispatch(
     weights: &PackedTensor<crate::dtypes::U4x8>,
     activation: &[f32],
@@ -352,6 +354,7 @@ unsafe fn gemv_row_u4x8_avx2(
 // ============================================================
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[allow(unused_variables)]
 fn gemv_f16x2_dispatch(
     weights: &PackedTensor<crate::dtypes::F16x2>,
     activation: &[f32],
@@ -520,6 +523,7 @@ unsafe fn gemv_row_f16x2_f16c(
 // F32x1: direct f32 loads (no unpack needed)
 // ============================================================
 
+#[allow(unused_variables)]
 fn gemv_f32x1_dispatch(
     weights: &PackedTensor<crate::dtypes::F32x1>,
     activation: &[f32],

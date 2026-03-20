@@ -479,6 +479,7 @@ pub fn gemv_u4x8_tiled(
 /// AVX512 micro-kernel: MR=4 rows, 16-wide FMA.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
+#[allow(dead_code)]
 #[inline]
 unsafe fn micro_kernel_avx512(
     row_bufs: &[[f32; KC]; MR],
