@@ -313,6 +313,66 @@ pub fn gemv_wgpu<T: PackedWord>(
     })
 }
 
+/// GPU GEMV with persistent weight buffer — avoids re-uploading weights every call.
+pub fn gemv_wgpu_persistent<T: PackedWord>(
+    ctx: &crate::kernels::gpu::GpuContext,
+    weight_buf: std::sync::Arc<wgpu::Buffer>,
+    activation: &[f32],
+    m: u32,
+    kpacked: u32,
+    scale: f32,
+    zero: f32,
+) -> Vec<f32> {
+    with_wgpu_context(|wctx| {
+        wctx.get_or_build_pipeline::<T>();
+        let pipeline = wctx.pipelines.get(&std::any::type_name::<T>().to_string()).unwrap();
+
+        // Upload activations (small: K * 4 bytes)
+        let act_bytes: &[u8] = bytemuck::cast_slice(activation);
+        let act_buffer = ctx.create_gpu_buffer_from_bytes(act_bytes, "activations");
+
+        // Output buffer
+        let output_size = m as usize * std::mem::size_of::<f32>();
+        let output_buffer = ctx.create_buffer(output_size, "output");
+
+        // Uniform params
+        let params = GemvParams { scale, zero, k_packed: kpacked, m };
+        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
+        let params_buffer = ctx.create_gpu_buffer_from_bytes(params_bytes, "params");
+
+        // Create bind group using the pre-cached weight buffer
+        let bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gemv_persistent_bindgroup"),
+            layout: &wctx.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: weight_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: act_buffer.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: output_buffer.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: params_buffer.buffer.as_entire_binding() },
+            ],
+        });
+
+        let workgroup_count = (m + 63) / 64;
+        let mut encoder = ctx.device().create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("gemv_encoder") }
+        );
+
+        {
+            let mut pass = encoder.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("gemv_pass"), timestamp_writes: None }
+            );
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroup_count, 1, 1);
+        }
+
+        ctx.queue().submit(std::iter::once(encoder.finish()));
+
+        // Read back via GpuContext staging buffer
+        ctx.read_buffer_from_arc(&output_buffer.buffer, output_size)
+    })
+}
+
 /// Build the WGSL shader source for a given PackedWord type.
 fn build_shader_source<T: PackedWord>() -> String {
     format!(

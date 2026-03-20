@@ -111,6 +111,16 @@ impl GpuContext {
         }
     }
 
+    /// Get a reference to the device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// Get a reference to the queue.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
     /// Calculate bucket index for size-bucketed pooling
     /// Uses power-of-2 bucketing with 256-byte alignment
     fn get_bucket_index(size: usize) -> u32 {
@@ -268,6 +278,7 @@ impl GpuContext {
         }
     }
 
+    /// Create GPU buffer from raw bytes.
     pub fn create_gpu_buffer_from_bytes(&self, data: &[u8], label: &str) -> GpuBuffer {
         let size = data.len();
         let buffer = self.acquire_buffer(size);
