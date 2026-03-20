@@ -20,6 +20,8 @@ pub struct MasterWeightOptimizer<T: PackedWord> {
     pub weight_decay: f32,
     /// How often to recalibrate scale (in optimizer steps)
     pub scale_update_freq: usize,
+    /// Cached quantization scale (recomputed periodically)
+    current_scale: f32,
     _dtype: PhantomData<T>,
 }
 
@@ -27,6 +29,7 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
     /// Create a new optimizer for the given master weights.
     pub fn new(master: Vec<f32>, lr: f32, betas: (f32, f32), eps: f32, weight_decay: f32) -> Self {
         let n = master.len();
+        let current_scale = PackedTensor::<T>::compute_scale(&master);
         MasterWeightOptimizer {
             lr,
             master: master.clone(),
@@ -38,6 +41,7 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
             eps,
             weight_decay,
             scale_update_freq: 100,
+            current_scale,
             _dtype: PhantomData,
         }
     }
@@ -73,10 +77,11 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
         // Recalibrate scale periodically
         let should_recalibrate = (self.step as usize).is_multiple_of(self.scale_update_freq);
         let scale = if should_recalibrate || T::IS_FLOAT {
-            PackedTensor::<T>::compute_scale(&self.master)
+            let s = PackedTensor::<T>::compute_scale(&self.master);
+            self.current_scale = s;
+            s
         } else {
-            // Use existing scale to avoid frequent repacking overhead
-            PackedTensor::<T>::compute_scale(&self.master)
+            self.current_scale
         };
 
         // Repack master weights into packed tensor
