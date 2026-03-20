@@ -10,6 +10,21 @@ mod storage_pool;
 mod tensor;
 mod train;
 
+// Native packed precision modules
+pub mod dtypes;
+pub mod swar;
+pub mod packed_tensor;
+pub mod backends;
+pub mod packed_layer;
+pub mod packed_train;
+
+// Re-export packed precision public API
+pub use dtypes::{PackedWord, U4x8, U8x4, F16x2, F32x1};
+pub use packed_tensor::PackedTensor;
+pub use packed_layer::{PackedLinear, Linear4, Linear8, Linear16, Linear32};
+pub use packed_layer::{use_cpu, use_wgpu, is_wgpu};
+pub use packed_train::MasterWeightOptimizer;
+
 use autograd::{no_grad_enter, no_grad_exit};
 use dispatcher::list_registered_ops as dispatcher_list_ops;
 use nn::Module;
