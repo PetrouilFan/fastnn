@@ -131,6 +131,14 @@ unsafe fn gemv_row_u8x4_avx2(
 
     // Process 8 int8 values at a time (2 u32 words = 8 bytes)
     while p + 1 < k_packed && act_idx + 8 <= k {
+        // Prefetch next iteration's weights into L1
+        if p + 4 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 4) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
         let w0 = weights_u32[row_offset + p];
         let w1 = weights_u32[row_offset + p + 1];
 
@@ -244,38 +252,75 @@ unsafe fn gemv_row_u4x8_avx2(
     let mut p = 0;
     let mut act_idx = 0;
 
-    while p < k_packed && act_idx + 8 <= k {
-        let w = weights_u32[row_offset + p];
+    // Process 2 u32 words (16 nibbles) per iteration for 2x throughput
+    while p + 1 < k_packed && act_idx + 16 <= k {
+        // Prefetch next iteration's weights into L1
+        if p + 4 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 4) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
 
-        // Branchless nibble extraction: interleave even/odd nibbles into bytes
-        // Even nibbles (0,2,4,6) → bytes 0-3, odd nibbles (1,3,5,7) → bytes 4-7
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
+
+        // Word 0: branchless SIMD sign-extend
+        let even0 = w0 & 0x0F0F0F0F;
+        let odd0 = (w0 >> 4) & 0x0F0F0F0F;
+        let inter0 = even0 | (odd0 << 4);
+        let nib0 = _mm_set1_epi32(inter0 as i32);
+        let sign0 = _mm_and_si128(_mm_srli_epi16(nib0, 3), _mm_set1_epi8(0x10));
+        let i8_0 = _mm_sub_epi8(nib0, sign0);
+
+        // Word 1: same pipeline, executes in parallel (ILP)
+        let even1 = w1 & 0x0F0F0F0F;
+        let odd1 = (w1 >> 4) & 0x0F0F0F0F;
+        let inter1 = even1 | (odd1 << 4);
+        let nib1 = _mm_set1_epi32(inter1 as i32);
+        let sign1 = _mm_and_si128(_mm_srli_epi16(nib1, 3), _mm_set1_epi8(0x10));
+        let i8_1 = _mm_sub_epi8(nib1, sign1);
+
+        // Widen i8 → i32 → f32 for both words
+        let f32_0_lo = _mm_cvtepi32_ps(_mm_cvtepi8_epi32(i8_0));
+        let f32_0_hi = _mm_cvtepi32_ps(_mm_cvtepi8_epi32(_mm_srli_si128(i8_0, 4)));
+        let w_f32_0 = _mm256_insertf128_ps(_mm256_castps128_ps256(f32_0_lo), f32_0_hi, 1);
+
+        let f32_1_lo = _mm_cvtepi32_ps(_mm_cvtepi8_epi32(i8_1));
+        let f32_1_hi = _mm_cvtepi32_ps(_mm_cvtepi8_epi32(_mm_srli_si128(i8_1, 4)));
+        let w_f32_1 = _mm256_insertf128_ps(_mm256_castps128_ps256(f32_1_lo), f32_1_hi, 1);
+
+        // FMA both words with their activation slices
+        let act0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        let act1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 8));
+        acc = _mm256_fmadd_ps(w_f32_0, act0, acc);
+        acc = _mm256_fmadd_ps(w_f32_1, act1, acc);
+
+        p += 2;
+        act_idx += 16;
+    }
+
+    // Single-word tail (process 8 nibbles)
+    if p < k_packed && act_idx + 8 <= k {
+        let w = weights_u32[row_offset + p];
         let even = w & 0x0F0F0F0F;
         let odd = (w >> 4) & 0x0F0F0F0F;
-        let interleaved = even | (odd << 4);
-
-        // Load as __m128i and sign-extend nibbles → i8 (branchless via SIMD subtract)
-        let nibbles = _mm_set1_epi32(interleaved as i32);
-        // Subtract 0x10 from bytes where bit 3 was set: i8 = u8 - ((u8 >> 3) & 0x10)
-        let sign_ext = _mm_and_si128(_mm_srli_epi16(nibbles, 3), _mm_set1_epi8(0x10));
-        let i8_vals = _mm_sub_epi8(nibbles, sign_ext);
-
-        // Widen i8 → i32 → f32
-        let i32x4_lo = _mm_cvtepi8_epi32(i8_vals);
-        let i32x4_hi = _mm_cvtepi8_epi32(_mm_srli_si128(i8_vals, 4));
-        let f32x4_lo = _mm_cvtepi32_ps(i32x4_lo);
-        let f32x4_hi = _mm_cvtepi32_ps(i32x4_hi);
-        let weight_f32 = _mm256_insertf128_ps(_mm256_castps128_ps256(f32x4_lo), f32x4_hi, 1);
-
+        let inter = even | (odd << 4);
+        let nib = _mm_set1_epi32(inter as i32);
+        let sign = _mm_and_si128(_mm_srli_epi16(nib, 3), _mm_set1_epi8(0x10));
+        let i8v = _mm_sub_epi8(nib, sign);
+        let f32_lo = _mm_cvtepi32_ps(_mm_cvtepi8_epi32(i8v));
+        let f32_hi = _mm_cvtepi32_ps(_mm_cvtepi8_epi32(_mm_srli_si128(i8v, 4)));
+        let w_f32 = _mm256_insertf128_ps(_mm256_castps128_ps256(f32_lo), f32_hi, 1);
         let act = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
-        acc = _mm256_fmadd_ps(weight_f32, act, acc);
-
+        acc = _mm256_fmadd_ps(w_f32, act, acc);
         p += 1;
         act_idx += 8;
     }
 
     let mut total = hsum256_ps(acc);
 
-    // Scalar tail for remaining activations
+    // Scalar tail
     while p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
         for j in 0..8 {
@@ -370,6 +415,14 @@ unsafe fn gemv_row_f16x2_f16c(
 
     // Process 4 u32 words at a time = 8 f16 → 8 f32
     while p + 4 <= k_packed && act_idx + 8 <= k {
+        // Prefetch next weights into L1
+        if p + 8 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 8) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
         let w0 = weights_u32[row_offset + p];
         let w1 = weights_u32[row_offset + p + 1];
         let w2 = weights_u32[row_offset + p + 2];
@@ -398,17 +451,35 @@ unsafe fn gemv_row_f16x2_f16c(
 
     let mut total = hsum256_ps(acc);
 
-    // Scalar tail
-    while p < k_packed && act_idx < k {
+    // F16C tail: process 2 u32 words (4 f16) at a time using hardware conversion
+    while p + 2 <= k_packed && act_idx + 4 <= k {
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
+        let half_bits: [u16; 4] = [w0 as u16, (w0 >> 16) as u16, w1 as u16, (w1 >> 16) as u16];
+        let half_vec = _mm_loadl_epi64(half_bits.as_ptr() as *const __m128i);
+        let f32_vec = _mm_cvtph_ps(half_vec);
+        let act = _mm_loadu_ps(activation.as_ptr().add(act_idx));
+        let prod = _mm_mul_ps(f32_vec, act);
+        // Horizontal sum of 4 floats
+        let shuf = _mm_shuffle_ps(prod, prod, 0x0E);
+        let sums = _mm_add_ps(prod, shuf);
+        let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
+        total += _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
+        p += 2;
+        act_idx += 4;
+    }
+
+    // Scalar tail for 1 remaining u32 word (2 f16 values)
+    if p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
-        let lo = half::f16::from_bits(w as u16).to_f32();
-        let hi = half::f16::from_bits((w >> 16) as u16).to_f32();
-        total += lo * activation[act_idx];
+        let half_bits: [u16; 2] = [w as u16, (w >> 16) as u16];
+        let half_vec = _mm_set1_epi32(0);
+        let f32_vec = _mm_cvtph_ps(_mm_loadl_epi64(half_bits.as_ptr() as *const __m128i));
+        let f32_arr: [f32; 4] = std::mem::transmute(f32_vec);
+        total += f32_arr[0] * activation[act_idx];
         if act_idx + 1 < k {
-            total += hi * activation[act_idx + 1];
+            total += f32_arr[1] * activation[act_idx + 1];
         }
-        p += 1;
-        act_idx += 2;
     }
 
     total
