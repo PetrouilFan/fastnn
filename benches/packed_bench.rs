@@ -26,9 +26,17 @@ fn bench_gemv<T: PackedWord>(m: usize, k: usize, iters: usize) -> (f64, usize) {
 }
 
 fn bench_relu<T: PackedWord>(data: &[f32], shape: &[usize], iters: usize) -> f64 {
+    // Create tensor OUTSIDE the timing loop
+    let mut tensor = PackedTensor::<T>::from_f32_auto(data, shape);
+
+    // Warmup
+    for _ in 0..5 {
+        fastnn::backends::cpu::relu_cpu(&mut tensor);
+        tensor = PackedTensor::<T>::from_f32_auto(data, shape); // reset
+    }
+
     let start = Instant::now();
     for _ in 0..iters {
-        let mut tensor = PackedTensor::<T>::from_f32_auto(data, shape);
         fastnn::backends::cpu::relu_cpu(&mut tensor);
     }
     let elapsed = start.elapsed();

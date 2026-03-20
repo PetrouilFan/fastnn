@@ -36,31 +36,6 @@ pub fn swar_relu_backward_f16x2(grad: u32, pre_relu: u32) -> u32 {
     grad & !clear_mask
 }
 
-/// SWAR ReLU backward for F32x1 — single f32 per u32.
-#[inline]
-pub fn swar_relu_backward_f32x1(grad: u32, pre_relu: u32) -> u32 {
-    let sign = pre_relu >> 31;
-    let clear = 0u32.wrapping_sub(sign);
-    grad & !clear
-}
-
-/// SWAR ReLU for F16x2 — alternative implementation using arithmetic shift.
-/// Slightly different approach that may be faster on some microarchitectures.
-#[inline]
-pub fn swar_relu_f16x2_alt(v: u32) -> u32 {
-    // Test sign bit of each half: arithmetic right shift by 15 replicates sign
-    // If sign bit is 1: (v >> 15) = 0xFFFF for lo, we need to zero it
-    // Strategy: sign_extend each half, then AND with complement of sign spread
-
-    // Lo half: shift sign to bit 0, broadcast to all bits
-    let neg_lo = ((v as i32) << 16) >> 31; // sign bit of lo, sign-extended to 32 bits = 0xFFFFFFFF or 0x00000000
-    let neg_hi = (v as i32) >> 31; // sign bit of hi, sign-extended
-
-    // Build clear mask: lo half from neg_lo, hi half from neg_hi
-    let clear = (neg_lo as u32 & 0xFFFF) | (neg_hi as u32 & 0xFFFF0000);
-    v & !clear
-}
-
 /// SWAR element-wise max for two F16x2 words (treating bits as unsigned 16-bit).
 /// This is approximate — proper F16 max requires unpacking.
 #[inline]
@@ -148,15 +123,5 @@ mod tests {
 
         assert_eq!(result_lo, 0xFFFF); // positive, gradient passes
         assert_eq!(result_hi, 0x0000); // negative, gradient blocked
-    }
-
-    #[test]
-    fn test_swar_relu_backward_f32x1() {
-        let pos = 1.0f32.to_bits();
-        let neg = (-1.0f32).to_bits();
-        let grad = 0xFFFF_FFFFu32;
-
-        assert_eq!(swar_relu_backward_f32x1(grad, pos), grad); // positive, pass
-        assert_eq!(swar_relu_backward_f32x1(grad, neg), 0); // negative, block
     }
 }
