@@ -186,8 +186,12 @@ impl<T: PackedWord> PackedLinear<T> {
         {
             let mut guard = self.gpu_params_buf.lock().unwrap();
             if guard.is_none() {
-                // GemvParams: scale (f32) + zero (f32) + k_packed (u32) + m (u32) = 16 bytes
-                let buf = ctx.create_buffer(16, "gemv_params");
+                // GemvParams is bound as uniform — needs UNIFORM | COPY_DST usage
+                let buf = ctx.create_buffer_with_usage(
+                    16,
+                    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    "gemv_params",
+                );
                 *guard = Some(buf);
             }
         }
