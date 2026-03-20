@@ -71,7 +71,7 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
         }
 
         // Recalibrate scale periodically
-        let should_recalibrate = self.step as usize % self.scale_update_freq == 0;
+        let should_recalibrate = (self.step as usize).is_multiple_of(self.scale_update_freq);
         let scale = if should_recalibrate || T::IS_FLOAT {
             PackedTensor::<T>::compute_scale(&self.master)
         } else {
