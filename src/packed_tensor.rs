@@ -34,7 +34,7 @@ impl<T: PackedWord> PackedTensor<T> {
     /// Create a zero-initialized packed tensor with the given logical shape.
     pub fn zeros(shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
-        let packed_len = (numel + T::ITEMS - 1) / T::ITEMS;
+        let packed_len = numel.div_ceil(T::ITEMS);
         let mut data = zeroed_vec(packed_len);
         for d in data.iter_mut() {
             *d = T::zeroed();
@@ -60,7 +60,7 @@ impl<T: PackedWord> PackedTensor<T> {
             numel
         );
 
-        let packed_len = (numel + T::ITEMS - 1) / T::ITEMS;
+        let packed_len = numel.div_ceil(T::ITEMS);
         let mut packed = zeroed_vec(packed_len);
 
         for chunk_idx in 0..packed_len {

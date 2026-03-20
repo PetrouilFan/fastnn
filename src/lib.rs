@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 mod autograd;
 mod dispatcher;
 mod io;

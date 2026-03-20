@@ -49,7 +49,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + T::ITEMS - 1) / T::ITEMS;
+    let k_packed = k.div_ceil(T::ITEMS);
     let scale = weights.scale();
     let zero = weights.zero();
 
@@ -222,7 +222,7 @@ pub fn gemv_u8x4_tiled(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + 3) / 4;
+    let k_packed = k.div_ceil(4);
     let scale = weights.scale();
     let zero = weights.zero();
     let weights_u32 = weights.as_u32();
@@ -319,7 +319,7 @@ pub fn gemv_f16x2_tiled(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + 1) / 2;
+    let k_packed = k.div_ceil(2);
     let scale = weights.scale();
     let zero = weights.zero();
     let weights_u32 = weights.as_u32();
@@ -396,7 +396,7 @@ pub fn gemv_u4x8_tiled(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + 7) / 8;
+    let k_packed = k.div_ceil(8);
     let scale = weights.scale();
     let zero = weights.zero();
     let weights_u32 = weights.as_u32();
@@ -481,6 +481,7 @@ pub fn gemv_u4x8_tiled(
 #[target_feature(enable = "avx512f")]
 #[allow(dead_code)]
 #[inline]
+#[allow(clippy::too_many_arguments)]
 unsafe fn micro_kernel_avx512(
     row_bufs: &[[f32; KC]; MR],
     activation: &[f32],
@@ -561,6 +562,7 @@ use std::arch::aarch64::*;
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 #[target_feature(enable = "neon")]
 #[inline]
+#[allow(clippy::too_many_arguments)]
 unsafe fn micro_kernel_neon(
     row_bufs: &[[f32; KC]; MR],
     activation: &[f32],
