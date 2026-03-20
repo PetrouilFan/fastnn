@@ -715,6 +715,87 @@ unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 }
 
 // ============================================================
+// Batched GEMM — unpack once, process N input vectors
+// ============================================================
+
+/// Batched GEMM for packed types: weights [M×K] × batch_inputs [N×K] → outputs [N×M].
+/// Unpacks each weight row once, then processes all N input vectors against it.
+/// This is the key optimization for inference — weights stay hot in L1 across the batch.
+pub fn gemm_packed_batched<T: PackedWord>(
+    weights: &PackedTensor<T>,
+    batch_inputs: &[Vec<f32>],
+    outputs: &mut [Vec<f32>],
+) {
+    let n = batch_inputs.len();
+    assert_eq!(n, outputs.len());
+    let shape = weights.shape();
+    let m = shape[0];
+    let k = shape[1];
+    let k_packed = (k + T::ITEMS - 1) / T::ITEMS;
+    let scale = weights.scale();
+    let zero = weights.zero();
+
+    // Process each weight row once, compute dot products with all N inputs
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        // Store as usize for Send+Sync safety (each row writes to distinct positions)
+        let out_addrs: Vec<usize> = outputs
+            .iter_mut()
+            .map(|o| o.as_mut_ptr() as usize)
+            .collect();
+
+        (0..m).into_par_iter().for_each(|row| {
+            // Unpack this row once
+            let mut unpack_buf = vec![0.0f32; k];
+            let row_offset = row * k_packed;
+            for p in 0..k_packed {
+                let word = weights.as_packed()[row_offset + p];
+                let unpacked = word.unpack_to_f32();
+                let base = p * T::ITEMS;
+                for j in 0..T::ITEMS {
+                    let idx = base + j;
+                    if idx < k {
+                        unpack_buf[idx] = unpacked.as_ref()[j];
+                    }
+                }
+            }
+
+            // Dot product with all N input vectors — write via raw pointer
+            for (bi, input) in batch_inputs.iter().enumerate() {
+                let acc = fma_f32_slice(&unpack_buf, input);
+                unsafe {
+                    *((out_addrs[bi] as *mut f32).add(row)) = acc * scale - zero;
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut unpack_buf = vec![0.0f32; k];
+        for row in 0..m {
+            let row_offset = row * k_packed;
+            for p in 0..k_packed {
+                let word = weights.as_packed()[row_offset + p];
+                let unpacked = word.unpack_to_f32();
+                let base = p * T::ITEMS;
+                for j in 0..T::ITEMS {
+                    let idx = base + j;
+                    if idx < k {
+                        unpack_buf[idx] = unpacked.as_ref()[j];
+                    }
+                }
+            }
+            for (bi, input) in batch_inputs.iter().enumerate() {
+                let acc = fma_f32_slice(&unpack_buf, input);
+                outputs[bi][row] = acc * scale - zero;
+            }
+        }
+    }
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
