@@ -58,7 +58,7 @@ pub fn gemv_packed_simd<T: PackedWord>(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + T::ITEMS - 1) / T::ITEMS;
+    let k_packed = k.div_ceil(T::ITEMS);
     let scale = weights.scale();
     let zero = weights.zero();
 
@@ -83,7 +83,7 @@ fn gemv_u8x4_dispatch(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + 3) / 4;
+    let k_packed = k.div_ceil(4);
     let scale = weights.scale();
     let zero = weights.zero();
     let weights_u32 = weights.as_u32();
@@ -92,7 +92,7 @@ fn gemv_u8x4_dispatch(
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let rows_per_chunk = (65536 / (k_packed * 4)).max(1).min(64);
+            let rows_per_chunk = (65536 / (k_packed * 4)).clamp(1, 64);
             output
                 .par_chunks_mut(rows_per_chunk)
                 .enumerate()
@@ -207,7 +207,7 @@ fn gemv_u4x8_dispatch(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + 7) / 8;
+    let k_packed = k.div_ceil(8);
     let scale = weights.scale();
     let zero = weights.zero();
     let weights_u32 = weights.as_u32();
@@ -216,7 +216,7 @@ fn gemv_u4x8_dispatch(
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let rows_per_chunk = (65536 / (k_packed * 4)).max(1).min(64);
+            let rows_per_chunk = (65536 / (k_packed * 4)).clamp(1, 64);
             output
                 .par_chunks_mut(rows_per_chunk)
                 .enumerate()
@@ -297,7 +297,7 @@ fn gemv_f16x2_dispatch(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + 1) / 2;
+    let k_packed = k.div_ceil(2);
     let scale = weights.scale();
     let zero = weights.zero();
     let weights_u32 = weights.as_u32();
@@ -306,7 +306,7 @@ fn gemv_f16x2_dispatch(
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let rows_per_chunk = (65536 / (k_packed * 4)).max(1).min(64);
+            let rows_per_chunk = (65536 / (k_packed * 4)).clamp(1, 64);
             output
                 .par_chunks_mut(rows_per_chunk)
                 .enumerate()
@@ -506,7 +506,7 @@ fn gemv_generic_fallback<T: PackedWord>(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + T::ITEMS - 1) / T::ITEMS;
+    let k_packed = k.div_ceil(T::ITEMS);
     let scale = weights.scale();
     let zero = weights.zero();
 
@@ -521,6 +521,7 @@ fn gemv_generic_fallback<T: PackedWord>(
 // Generic GEMV implementation (scalar unpack + AVX2 FMA)
 // ============================================================
 
+#[allow(clippy::too_many_arguments)]
 fn gemv_packed_inner<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
@@ -534,7 +535,7 @@ fn gemv_packed_inner<T: PackedWord>(
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        let rows_per_chunk = (65536 / (k_packed * 4)).max(1).min(64);
+        let rows_per_chunk = (65536 / (k_packed * 4)).clamp(1, 64);
         output
             .par_chunks_mut(rows_per_chunk)
             .enumerate()
@@ -561,6 +562,7 @@ fn gemv_packed_inner<T: PackedWord>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gemv_packed_blocked<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
@@ -586,7 +588,7 @@ fn gemv_packed_blocked<T: PackedWord>(
         for row in 0..m {
             let row_offset = row * k_packed;
             let packed_start = k_offset / items;
-            let packed_end = (k_end + items - 1) / items;
+            let packed_end = k_end.div_ceil(items);
             let unpack_len = (packed_end - packed_start) * items;
 
             if unpack_len <= unpack_buf.len() {
@@ -739,7 +741,7 @@ pub fn gemm_packed_batched<T: PackedWord>(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let k_packed = (k + T::ITEMS - 1) / T::ITEMS;
+    let k_packed = k.div_ceil(T::ITEMS);
     let scale = weights.scale();
     let zero = weights.zero();
 

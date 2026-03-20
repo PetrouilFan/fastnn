@@ -231,7 +231,7 @@ pub fn gemv_wgpu<T: PackedWord>(
     assert!(shape.len() >= 2);
     let m = shape[0] as u32;
     let k = shape[1];
-    let k_packed = ((k + T::ITEMS - 1) / T::ITEMS) as u32;
+    let k_packed = k.div_ceil(T::ITEMS) as u32;
 
     with_wgpu_context(|ctx| {
         ctx.get_or_build_pipeline::<T>();
@@ -287,7 +287,7 @@ pub fn gemv_wgpu<T: PackedWord>(
         });
 
         // Dispatch
-        let workgroup_count = (m + 63) / 64;
+        let workgroup_count = m.div_ceil(64);
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
