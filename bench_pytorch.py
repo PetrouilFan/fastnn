@@ -6,7 +6,7 @@ Measures torch.nn.Linear forward pass (matrix × vector + bias).
 import torch
 import torch.nn as nn
 import time
-import sys
+import subprocess
 
 
 def bench_fn(fn, warmup=10, iters=200):
@@ -37,7 +37,9 @@ def bench_linear(m, k, dtype_str="float32", iters=200):
     linear = nn.Linear(k, m, bias=False).to(dtype)
     x = torch.randn(k, dtype=dtype)
 
-    fn = lambda: linear(x)
+    def fn():
+        return linear(x)
+
     ms = bench_fn(fn, warmup=10, iters=iters)
     gflops = (2 * m * k) / (ms / 1000) / 1e9
     return ms, gflops
@@ -51,7 +53,9 @@ def bench_int8_dynamic(m, k, iters=200):
     )
     x = torch.randn(k)
 
-    fn = lambda: qlinear(x)
+    def fn():
+        return qlinear(x)
+
     ms = bench_fn(fn, warmup=10, iters=iters)
     gflops = (2 * m * k) / (ms / 1000) / 1e9
     return ms, gflops
@@ -68,7 +72,10 @@ def bench_int8_static(m, k, iters=200):
     # We simulate: dequantize to f32 and do f32 matmul
     # This is what happens internally for dynamic quantization
     weight_f = weight.to(torch.float32)
-    fn = lambda: torch.mv(weight_f, x)
+
+    def fn():
+        return torch.mv(weight_f, x)
+
     ms = bench_fn(fn, warmup=10, iters=iters)
     gflops = (2 * m * k) / (ms / 1000) / 1e9
     return ms, gflops
@@ -79,20 +86,15 @@ def main():
     n_threads = torch.get_num_threads()
 
     print(f"PyTorch {torch.__version__}, threads={n_threads}")
-    print(
-        f"CPU: {torch.utils.data.cpp_extension.CPU_HOME if hasattr(torch.utils.data, 'cpp_extension') else 'N/A'}"
-    )
 
     # Get CPU info
-    import subprocess
-
     try:
         cpu_info = subprocess.run(["lscpu"], capture_output=True, text=True)
         for line in cpu_info.stdout.split("\n"):
             if "Model name" in line:
                 print(f"CPU: {line.strip()}")
                 break
-    except:
+    except (subprocess.SubprocessError, FileNotFoundError):
         pass
 
     print()
