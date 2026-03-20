@@ -316,9 +316,11 @@ pub fn gemv_wgpu<T: PackedWord>(
 /// GPU GEMV with persistent weight buffer — avoids re-uploading weights every call.
 pub fn gemv_wgpu_persistent<T: PackedWord>(
     ctx: &crate::kernels::gpu::GpuContext,
+    bind_group_cache: &std::sync::Arc<std::sync::Mutex<Option<wgpu::BindGroup>>>,
     weight_buf: std::sync::Arc<wgpu::Buffer>,
     output_buf: std::sync::Arc<wgpu::Buffer>,
     params_buf: std::sync::Arc<wgpu::Buffer>,
+    activation_buf: std::sync::Arc<wgpu::Buffer>,
     activation: &[f32],
     m: u32,
     kpacked: u32,
@@ -329,26 +331,30 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         wctx.get_or_build_pipeline::<T>();
         let pipeline = wctx.pipelines.get(&std::any::type_name::<T>().to_string()).unwrap();
 
-        // Upload activations (small: K * 4 bytes)
+        // Write activation data into the cached activation buffer
         let act_bytes: &[u8] = bytemuck::cast_slice(activation);
-        let act_buffer = ctx.create_gpu_buffer_from_bytes(act_bytes, "activations");
+        ctx.write_bytes_to_buffer(act_bytes, &activation_buf);
 
         // Write params to the cached params buffer
         let params = GemvParams { scale, zero, k_packed: kpacked, m };
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
         ctx.write_bytes_to_buffer(params_bytes, &params_buf);
 
-        // Create bind group using pre-cached weight, output, and params buffers
-        let bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gemv_persistent_bindgroup"),
-            layout: &wctx.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: weight_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: act_buffer.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: output_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
-            ],
-        });
+        // Get or create cached bind group
+        let mut bg_guard = bind_group_cache.lock().unwrap();
+        if bg_guard.is_none() {
+            *bg_guard = Some(ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gemv_persistent_bindgroup"),
+                layout: &wctx.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: weight_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: activation_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: output_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
+                ],
+            }));
+        }
+        let bind_group = bg_guard.as_ref().unwrap();
 
         let workgroup_count = (m + 63) / 64;
         let mut encoder = ctx.device().create_command_encoder(
@@ -360,7 +366,7 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
                 &wgpu::ComputePassDescriptor { label: Some("gemv_pass"), timestamp_writes: None }
             );
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(workgroup_count, 1, 1);
         }
 
