@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::backends::cpu;
 use crate::dtypes::PackedWord;
+use crate::kernels::gpu::{get_context, GpuBuffer, GpuContext};
 use crate::packed_tensor::PackedTensor;
 
 /// Global backend selector
@@ -36,6 +38,8 @@ pub struct PackedLinear<T: PackedWord> {
     pub master_weight: Option<Vec<f32>>,
     pub in_features: usize,
     pub out_features: usize,
+    /// Cached GPU buffer for weights — None until first GPU forward call
+    pub gpu_weight_buf: Arc<Mutex<Option<GpuBuffer>>>,
 }
 
 impl<T: PackedWord> PackedLinear<T> {
@@ -67,6 +71,7 @@ impl<T: PackedWord> PackedLinear<T> {
             master_weight: Some(master),
             in_features,
             out_features,
+            gpu_weight_buf: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -83,6 +88,7 @@ impl<T: PackedWord> PackedLinear<T> {
             master_weight: None,
             in_features,
             out_features,
+            gpu_weight_buf: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -100,10 +106,23 @@ impl<T: PackedWord> PackedLinear<T> {
 
     /// Forward pass on GPU (requires wgpu context).
     pub fn forward_wgpu(&self, input: &[f32]) -> Vec<f32> {
-        let mut output = crate::backends::wgpu::gemv_wgpu(&self.weight, input);
+        use crate::backends::wgpu::gemv_wgpu_persistent;
+        let ctx = get_context(0);
+        let weight_buf = self.ensure_gpu_weight_buf(&ctx);
+
+        let mut output = gemv_wgpu_persistent::<T>(
+            &ctx,
+            weight_buf,
+            input,
+            self.out_features as u32,
+            self.weight.packed_len() as u32,
+            self.weight.scale(),
+            self.weight.zero(),
+        );
+
         if let Some(ref bias) = self.bias {
             for (o, b) in output.iter_mut().zip(bias.iter()) {
-                *o += *b;
+                *o += b;
             }
         }
         output
@@ -118,6 +137,16 @@ impl<T: PackedWord> PackedLinear<T> {
         }
     }
 
+    /// Ensure the GPU weight buffer is created and cached.
+    fn ensure_gpu_weight_buf(&self, ctx: &GpuContext) -> Arc<wgpu::Buffer> {
+        let mut guard = self.gpu_weight_buf.lock().unwrap();
+        if guard.is_none() {
+            let buf = ctx.create_gpu_buffer_from_bytes(self.weight.as_bytes(), "packed_weight");
+            *guard = Some(buf);
+        }
+        guard.as_ref().unwrap().buffer.clone()
+    }
+
     /// Repack the master weights into the packed representation.
     /// Call this before each forward pass during training.
     pub fn repack(&mut self) {
@@ -129,6 +158,8 @@ impl<T: PackedWord> PackedLinear<T> {
                 scale,
                 0.0,
             );
+            // Invalidate GPU cache because weights changed
+            *self.gpu_weight_buf.lock().unwrap() = None;
         }
     }
 
@@ -164,6 +195,7 @@ impl<T: PackedWord> Clone for PackedLinear<T> {
             master_weight: self.master_weight.clone(),
             in_features: self.in_features,
             out_features: self.out_features,
+            gpu_weight_buf: Arc::new(Mutex::new(None)),
         }
     }
 }
