@@ -1,0 +1,37 @@
+// WGSL shader template for packed precision GEMV.
+// Placeholders are replaced at runtime with precision-specific code:
+//   {{ITEMS_PER_WORD}}  - const u32 value
+//   {{UNPACK_RETURN}}   - WGSL return type (mat2x4<f32>, vec4<f32>, etc.)
+//   {{UNPACK_BODY}}     - unpacking logic from PackedWord::wgsl_unpack_body()
+//   {{DOT_LOGIC}}       - accumulation logic from PackedWord::wgsl_dot_logic()
+
+@group(0) @binding(0) var<storage, read>       weights:     array<u32>;
+@group(0) @binding(1) var<storage, read>       activations: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output:      array<f32>;
+
+struct Params {
+    scale: f32,
+    zero: f32,
+    k_packed: u32,
+    m: u32,
+}
+@group(0) @binding(3) var<uniform> params: Params;
+
+const ITEMS: u32 = {{ITEMS_PER_WORD}}u;
+
+fn unpack_word(packed: u32) -> {{UNPACK_RETURN}} {
+    {{UNPACK_BODY}}
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let row = gid.x;
+    if (row >= params.m) { return; }
+
+    var acc: f32 = 0.0;
+    for (var k: u32 = 0u; k < params.k_packed; k = k + 1u) {
+        let unpacked = unpack_word(weights[row * params.k_packed + k]);
+        {{DOT_LOGIC}}
+    }
+    output[row] = acc * params.scale + params.zero;
+}
