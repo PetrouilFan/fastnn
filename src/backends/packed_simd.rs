@@ -47,6 +47,11 @@ pub fn gemv_packed_simd<T: PackedWord>(
                 unsafe { &*(weights as *const _ as *const _) };
             return gemv_u4x8_dispatch(w, activation, output);
         }
+        if tid == std::any::TypeId::of::<crate::dtypes::F32x1>() {
+            let w: &PackedTensor<crate::dtypes::F32x1> =
+                unsafe { &*(weights as *const _ as *const _) };
+            return gemv_f32x1_dispatch(w, activation, output);
+        }
     }
 
     // Generic fallback for F32x1 and non-x86 targets
@@ -402,6 +407,28 @@ fn gemv_f16x2_dispatch(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma,f16c")]
 #[inline]
+unsafe fn u32x4_to_f32x8_f16c(w0: u32, w1: u32, w2: u32, w3: u32) -> __m256 {
+    // Each u32 has 2 f16: lo_half at bits 0-15, hi_half at bits 16-31
+    // _mm_set_epi32(w3, w2, w1, w0) lays out as:
+    //   u16 lane 0: w0 & 0xFFFF (lo)
+    //   u16 lane 1: w0 >> 16    (hi)
+    //   u16 lane 2: w1 & 0xFFFF (lo)
+    //   ...etc — exactly what _mm256_cvtph_ps expects
+    let half_bits = _mm_set_epi32(w3 as i32, w2 as i32, w1 as i32, w0 as i32);
+    _mm256_cvtph_ps(half_bits)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma,f16c")]
+#[inline]
+unsafe fn u32x2_to_f32x4_f16c(w0: u32, w1: u32) -> __m128 {
+    let half_bits = _mm_set_epi32(0, 0, w1 as i32, w0 as i32);
+    _mm_cvtph_ps(half_bits)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma,f16c")]
+#[inline]
 unsafe fn gemv_row_f16x2_f16c(
     weights_u32: &[u32],
     activation: &[f32],
@@ -409,61 +436,37 @@ unsafe fn gemv_row_f16x2_f16c(
     k: usize,
     k_packed: usize,
 ) -> f32 {
-    let mut acc = _mm256_setzero_ps();
-    let mut acc_tail = 0.0f32;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
     let mut p = 0;
     let mut act_idx = 0;
 
-    // Process 8 u32 words at a time = 16 f16 → 16 f32 (2x throughput)
+    // Process 8 u32 words (16 f16) per iteration — 2x throughput with ILP
     while p + 8 <= k_packed && act_idx + 16 <= k {
-        if p + 12 < k_packed {
+        if p + 16 < k_packed {
             _mm_prefetch(
-                weights_u32.as_ptr().add(row_offset + p + 12) as *const i8,
+                weights_u32.as_ptr().add(row_offset + p + 16) as *const i8,
                 _MM_HINT_T0,
             );
         }
 
-        // Load 8 u32 words containing 16 packed f16 values
-        let w0 = _mm_loadu_si128(weights_u32.as_ptr().add(row_offset + p) as *const __m128i);
-        let w1 = _mm_loadu_si128(weights_u32.as_ptr().add(row_offset + p + 4) as *const __m128i);
-
-        // Interleave u32 pairs into u16 lanes — avoids [u16; 8] array
-        // w0 = [w0_lo, w0_hi, w1_lo, w1_hi, w2_lo, w2_hi, w3_lo, w3_hi] as u16
-        let half0 = _mm_unpacklo_epi16(w0, _mm_setzero_si128());
-        let half1 = _mm_unpackhi_epi16(w0, _mm_setzero_si128());
-        // Wait, that's wrong. Each u32 has 2 f16: lo_half | (hi_half << 16)
-        // We need to extract lo u16 and hi u16 from each u32.
-        // _mm_cvtps_ph does the opposite direction.
-        // Simpler: use the array but stack-allocate it
-        let b0: [u16; 8] = [
-            weights_u32[row_offset + p] as u16,
-            (weights_u32[row_offset + p] >> 16) as u16,
-            weights_u32[row_offset + p + 1] as u16,
-            (weights_u32[row_offset + p + 1] >> 16) as u16,
-            weights_u32[row_offset + p + 2] as u16,
-            (weights_u32[row_offset + p + 2] >> 16) as u16,
-            weights_u32[row_offset + p + 3] as u16,
-            (weights_u32[row_offset + p + 3] >> 16) as u16,
-        ];
-        let h0 = _mm_loadu_si128(b0.as_ptr() as *const __m128i);
-        let f0 = _mm256_cvtph_ps(h0);
+        let f0 = u32x4_to_f32x8_f16c(
+            weights_u32[row_offset + p],
+            weights_u32[row_offset + p + 1],
+            weights_u32[row_offset + p + 2],
+            weights_u32[row_offset + p + 3],
+        );
         let a0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
-        acc = _mm256_fmadd_ps(f0, a0, acc);
+        acc0 = _mm256_fmadd_ps(f0, a0, acc0);
 
-        let b1: [u16; 8] = [
-            weights_u32[row_offset + p + 4] as u16,
-            (weights_u32[row_offset + p + 4] >> 16) as u16,
-            weights_u32[row_offset + p + 5] as u16,
-            (weights_u32[row_offset + p + 5] >> 16) as u16,
-            weights_u32[row_offset + p + 6] as u16,
-            (weights_u32[row_offset + p + 6] >> 16) as u16,
-            weights_u32[row_offset + p + 7] as u16,
-            (weights_u32[row_offset + p + 7] >> 16) as u16,
-        ];
-        let h1 = _mm_loadu_si128(b1.as_ptr() as *const __m128i);
-        let f1 = _mm256_cvtph_ps(h1);
+        let f1 = u32x4_to_f32x8_f16c(
+            weights_u32[row_offset + p + 4],
+            weights_u32[row_offset + p + 5],
+            weights_u32[row_offset + p + 6],
+            weights_u32[row_offset + p + 7],
+        );
         let a1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 8));
-        acc = _mm256_fmadd_ps(f1, a1, acc);
+        acc1 = _mm256_fmadd_ps(f1, a1, acc1);
 
         p += 8;
         act_idx += 16;
@@ -471,40 +474,30 @@ unsafe fn gemv_row_f16x2_f16c(
 
     // 4-word tail: 8 f16 → 8 f32
     while p + 4 <= k_packed && act_idx + 8 <= k {
-        let b: [u16; 8] = [
-            weights_u32[row_offset + p] as u16,
-            (weights_u32[row_offset + p] >> 16) as u16,
-            weights_u32[row_offset + p + 1] as u16,
-            (weights_u32[row_offset + p + 1] >> 16) as u16,
-            weights_u32[row_offset + p + 2] as u16,
-            (weights_u32[row_offset + p + 2] >> 16) as u16,
-            weights_u32[row_offset + p + 3] as u16,
-            (weights_u32[row_offset + p + 3] >> 16) as u16,
-        ];
-        let h = _mm_loadu_si128(b.as_ptr() as *const __m128i);
-        let f = _mm256_cvtph_ps(h);
+        let f = u32x4_to_f32x8_f16c(
+            weights_u32[row_offset + p],
+            weights_u32[row_offset + p + 1],
+            weights_u32[row_offset + p + 2],
+            weights_u32[row_offset + p + 3],
+        );
         let a = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
-        acc = _mm256_fmadd_ps(f, a, acc);
+        acc0 = _mm256_fmadd_ps(f, a, acc0);
         p += 4;
         act_idx += 8;
     }
 
+    acc0 = _mm256_add_ps(acc0, acc1);
+    let mut total = hsum256_ps(acc0);
+
     // 2-word tail: 4 f16 → 4 f32
-    while p + 2 <= k_packed && act_idx + 4 <= k {
-        let b: [u16; 4] = [
-            weights_u32[row_offset + p] as u16,
-            (weights_u32[row_offset + p] >> 16) as u16,
-            weights_u32[row_offset + p + 1] as u16,
-            (weights_u32[row_offset + p + 1] >> 16) as u16,
-        ];
-        let h = _mm_loadl_epi64(b.as_ptr() as *const __m128i);
-        let f = _mm_cvtph_ps(h);
+    if p + 2 <= k_packed && act_idx + 4 <= k {
+        let f = u32x2_to_f32x4_f16c(weights_u32[row_offset + p], weights_u32[row_offset + p + 1]);
         let a = _mm_loadu_ps(activation.as_ptr().add(act_idx));
         let prod = _mm_mul_ps(f, a);
         let shuf = _mm_shuffle_ps(prod, prod, 0x0E);
         let sums = _mm_add_ps(prod, shuf);
         let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
-        acc_tail += _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
+        total += _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
         p += 2;
         act_idx += 4;
     }
@@ -512,21 +505,58 @@ unsafe fn gemv_row_f16x2_f16c(
     // 1-word tail: 2 f16 → 2 f32
     if p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
-        let b: [u16; 2] = [w as u16, (w >> 16) as u16];
-        let h = _mm_loadl_epi64(b.as_ptr() as *const __m128i);
-        let f = _mm_cvtph_ps(h);
+        let f = u32x2_to_f32x4_f16c(w, 0);
         let arr: [f32; 4] = std::mem::transmute(f);
-        acc_tail += arr[0] * activation[act_idx];
+        total += arr[0] * activation[act_idx];
         if act_idx + 1 < k {
-            acc_tail += arr[1] * activation[act_idx + 1];
+            total += arr[1] * activation[act_idx + 1];
         }
     }
 
-    hsum256_ps(acc) + acc_tail
+    total
 }
 
 // ============================================================
-// Generic fallback (used by F32x1 and non-SIMD targets)
+// F32x1: direct f32 loads (no unpack needed)
+// ============================================================
+
+fn gemv_f32x1_dispatch(
+    weights: &PackedTensor<crate::dtypes::F32x1>,
+    activation: &[f32],
+    output: &mut [f32],
+) {
+    let shape = weights.shape();
+    let m = shape[0];
+    let k = shape[1];
+    let scale = weights.scale();
+    let zero = weights.zero();
+    // F32x1: u32 IS f32, reinterpret directly
+    let weights_f32: &[f32] = unsafe {
+        std::slice::from_raw_parts(
+            weights.as_u32().as_ptr() as *const f32,
+            weights.packed_len(),
+        )
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        output.par_iter_mut().enumerate().for_each(|(row, out)| {
+            let row_data = &weights_f32[row * k..(row + 1) * k];
+            *out = fma_f32_slice(row_data, activation) * scale - zero;
+        });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for row in 0..m {
+            let row_data = &weights_f32[row * k..(row + 1) * k];
+            output[row] = fma_f32_slice(row_data, activation) * scale - zero;
+        }
+    }
+}
+
+// ============================================================
+// Generic fallback (used by non-SIMD targets)
 // ============================================================
 
 /// Generic GEMV fallback using scalar unpack + SIMD FMA.
