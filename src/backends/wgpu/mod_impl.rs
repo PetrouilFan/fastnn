@@ -317,6 +317,8 @@ pub fn gemv_wgpu<T: PackedWord>(
 pub fn gemv_wgpu_persistent<T: PackedWord>(
     ctx: &crate::kernels::gpu::GpuContext,
     weight_buf: std::sync::Arc<wgpu::Buffer>,
+    output_buf: std::sync::Arc<wgpu::Buffer>,
+    params_buf: std::sync::Arc<wgpu::Buffer>,
     activation: &[f32],
     m: u32,
     kpacked: u32,
@@ -331,24 +333,20 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         let act_bytes: &[u8] = bytemuck::cast_slice(activation);
         let act_buffer = ctx.create_gpu_buffer_from_bytes(act_bytes, "activations");
 
-        // Output buffer
-        let output_size = m as usize * std::mem::size_of::<f32>();
-        let output_buffer = ctx.create_buffer(output_size, "output");
-
-        // Uniform params
+        // Write params to the cached params buffer
         let params = GemvParams { scale, zero, k_packed: kpacked, m };
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
-        let params_buffer = ctx.create_gpu_buffer_from_bytes(params_bytes, "params");
+        ctx.write_bytes_to_buffer(params_bytes, &params_buf);
 
-        // Create bind group using the pre-cached weight buffer
+        // Create bind group using pre-cached weight, output, and params buffers
         let bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gemv_persistent_bindgroup"),
             layout: &wctx.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: weight_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: act_buffer.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: output_buffer.buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: params_buffer.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: output_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
             ],
         });
 
@@ -369,7 +367,8 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         ctx.queue().submit(std::iter::once(encoder.finish()));
 
         // Read back via GpuContext staging buffer
-        ctx.read_buffer_from_arc(&output_buffer.buffer, output_size)
+        let output_size = m as usize * std::mem::size_of::<f32>();
+        ctx.read_buffer_from_arc(&output_buf, output_size)
     })
 }
 
