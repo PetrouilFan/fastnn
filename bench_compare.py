@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import time
 import subprocess
-import os
+import os  # noqa: F401
 
 
 def bench_fn(fn, warmup=20, iters=500):
@@ -31,7 +31,10 @@ def bench_fn(fn, warmup=20, iters=500):
 def bench_linear(m, k, dtype=torch.float32, iters=500):
     linear = nn.Linear(k, m, bias=False).to(dtype)
     x = torch.randn(k, dtype=dtype)
-    fn = lambda: linear(x)
+
+    def fn():
+        return linear(x)
+
     ms = bench_fn(fn, warmup=20, iters=iters)
     gflops = (2 * m * k) / (ms / 1000) / 1e9
     return ms, gflops
@@ -43,7 +46,10 @@ def bench_int8_dynamic(m, k, iters=500):
         linear, {nn.Linear}, dtype=torch.qint8
     )
     x = torch.randn(k)
-    fn = lambda: qlinear(x)
+
+    def fn():
+        return qlinear(x)
+
     ms = bench_fn(fn, warmup=20, iters=iters)
     gflops = (2 * m * k) / (ms / 1000) / 1e9
     return ms, gflops
@@ -51,11 +57,12 @@ def bench_int8_dynamic(m, k, iters=500):
 
 def run_fastnn_bench():
     """Run the Rust benchmark and parse output."""
+    bench_dir = os.path.dirname(os.path.abspath(__file__))
     result = subprocess.run(
         ["cargo", "run", "--release", "--bin", "packed_bench"],
         capture_output=True,
         text=True,
-        cwd="/home/petrouil/Projects/github/fastnn",
+        cwd=bench_dir,
         timeout=300,
     )
     return result.stdout
@@ -65,17 +72,15 @@ def main():
     n_threads = torch.get_num_threads()
     print(f"PyTorch {torch.__version__}, threads={n_threads}")
 
-    import subprocess as sp
-
     try:
-        cpu = sp.run(["lscpu"], capture_output=True, text=True)
+        cpu = subprocess.run(["lscpu"], capture_output=True, text=True)
         for line in cpu.stdout.split("\n"):
             if "Model name" in line:
                 print(f"CPU: {line.split(':')[1].strip()}")
                 break
             if "CPU(s):" in line and "NUMA" not in line:
                 print(f"Cores: {line.split(':')[1].strip()}")
-    except:
+    except (subprocess.SubprocessError, FileNotFoundError):
         pass
 
     sizes = [(256, 256), (512, 512), (1024, 1024), (4096, 4096)]
