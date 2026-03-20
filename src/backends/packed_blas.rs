@@ -50,8 +50,6 @@ pub fn gemv_packed_tiled<T: PackedWord>(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
-    let scale = weights.scale();
-    let zero = weights.zero();
 
     // Zero outputs
     for o in output.iter_mut() {
@@ -97,9 +95,9 @@ pub fn gemv_packed_tiled<T: PackedWord>(
         k_offset += KC;
     }
 
-    // Apply scale and zero
-    for o in output.iter_mut() {
-        *o = *o * scale + zero;
+    // Apply per-row scale and zero
+    for row in 0..m {
+        output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
     }
 }
 
@@ -122,7 +120,7 @@ fn micro_kernel<T: PackedWord>(
 
     // Unpack MR rows of weights into contiguous buffers
     let k_block = k_end - k_start;
-    let mut row_bufs = [[0.0f32; KC]; MR];
+    let mut row_bufs = Box::new([[0.0f32; KC]; MR]);
 
     for r in 0..MR {
         let row = start_row + r;
@@ -223,8 +221,6 @@ pub fn gemv_u8x4_tiled(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(4);
-    let scale = weights.scale();
-    let zero = weights.zero();
     let weights_u32 = weights.as_u32();
 
     for o in output.iter_mut() {
@@ -239,7 +235,7 @@ pub fn gemv_u8x4_tiled(
         let mut row = 0;
         while row + MR <= m {
             // Unpack MR rows of int8→f32
-            let mut row_bufs = [[0.0f32; KC]; MR];
+            let mut row_bufs = Box::new([[0.0f32; KC]; MR]);
             for r in 0..MR {
                 let row_idx = row + r;
                 let row_off = row_idx * k_packed;
@@ -304,8 +300,8 @@ pub fn gemv_u8x4_tiled(
         k_offset += KC;
     }
 
-    for o in output.iter_mut() {
-        *o = *o * scale + zero;
+    for row in 0..m {
+        output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
     }
 }
 
@@ -320,8 +316,6 @@ pub fn gemv_f16x2_tiled(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(2);
-    let scale = weights.scale();
-    let zero = weights.zero();
     let weights_u32 = weights.as_u32();
 
     for o in output.iter_mut() {
@@ -335,7 +329,7 @@ pub fn gemv_f16x2_tiled(
 
             let mut row = 0;
             while row + MR <= m {
-                let mut row_bufs = [[0.0f32; KC]; MR];
+                let mut row_bufs = Box::new([[0.0f32; KC]; MR]);
                 for r in 0..MR {
                     let row_idx = row + r;
                     let row_off = row_idx * k_packed;
@@ -381,8 +375,8 @@ pub fn gemv_f16x2_tiled(
         return;
     }
 
-    for o in output.iter_mut() {
-        *o = *o * scale + zero;
+    for row in 0..m {
+        output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
     }
 }
 
@@ -397,8 +391,6 @@ pub fn gemv_u4x8_tiled(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(8);
-    let scale = weights.scale();
-    let zero = weights.zero();
     let weights_u32 = weights.as_u32();
 
     for o in output.iter_mut() {
@@ -412,7 +404,7 @@ pub fn gemv_u4x8_tiled(
 
             let mut row = 0;
             while row + MR <= m {
-                let mut row_bufs = [[0.0f32; KC]; MR];
+                let mut row_bufs = Box::new([[0.0f32; KC]; MR]);
                 for r in 0..MR {
                     let row_idx = row + r;
                     let row_off = row_idx * k_packed;
@@ -467,8 +459,8 @@ pub fn gemv_u4x8_tiled(
         return;
     }
 
-    for o in output.iter_mut() {
-        *o = *o * scale + zero;
+    for row in 0..m {
+        output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
     }
 }
 
