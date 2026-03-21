@@ -375,6 +375,7 @@ pub fn gemv_wgpu<T: PackedWord>(
 }
 
 /// GPU GEMV with persistent weight buffer — avoids re-uploading weights every call.
+#[allow(clippy::too_many_arguments)]
 pub fn gemv_wgpu_persistent<T: PackedWord>(
     ctx: &crate::kernels::gpu::GpuContext,
     bind_group_cache: &std::sync::Arc<std::sync::Mutex<Option<wgpu::BindGroup>>>,
@@ -390,7 +391,7 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
 ) -> Vec<f32> {
     with_wgpu_context(|wctx| {
         wctx.get_or_build_pipeline::<T>();
-        let pipeline = wctx.pipelines.get(&std::any::type_name::<T>().to_string()).unwrap();
+        let pipeline = wctx.pipelines.get(std::any::type_name::<T>()).unwrap();
 
         // Write activation data into the cached activation buffer
         let act_bytes: &[u8] = bytemuck::cast_slice(activation);
@@ -417,7 +418,7 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         }
         let bind_group = bg_guard.as_ref().unwrap();
 
-        let workgroup_count = (m + 63) / 64;
+        let workgroup_count = m.div_ceil(64);
 
         // Get persistent staging buffer for readback
         let output_size = m as usize * std::mem::size_of::<f32>();
