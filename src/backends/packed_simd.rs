@@ -59,13 +59,11 @@ pub fn gemv_packed_simd<T: PackedWord>(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
-    let scale = weights.scale();
-    let zero = weights.zero();
 
     if k <= K_BLOCK_SIZE {
-        gemv_packed_inner::<T>(weights, activation, output, scale, zero, m, k, k_packed);
+        gemv_packed_inner::<T>(weights, activation, output, m, k, k_packed);
     } else {
-        gemv_packed_blocked::<T>(weights, activation, output, scale, zero, m, k, k_packed);
+        gemv_packed_blocked::<T>(weights, activation, output, m, k, k_packed);
     }
 }
 
@@ -84,8 +82,6 @@ fn gemv_u8x4_dispatch(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(4);
-    let scale = weights.scale();
-    let zero = weights.zero();
     let weights_u32 = weights.as_u32();
 
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
@@ -100,24 +96,35 @@ fn gemv_u8x4_dispatch(
                     let start_row = chunk_idx * rows_per_chunk;
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
-                        *out = unsafe {
+                        let dot = unsafe {
                             gemv_row_u8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed)
-                        } * scale
-                            + zero;
+                        };
+                        *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
                     }
                 });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for row in 0..m {
-                output[row] = unsafe {
+                let dot = unsafe {
                     gemv_row_u8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed)
-                } * scale
-                    + zero;
+                };
+                output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
             }
         }
     } else {
-        gemv_generic_fallback(weights, activation, output);
+        // Scalar fallback
+        for row in 0..m {
+            let mut acc = 0.0f32;
+            for p in 0..k_packed {
+                let w = weights_u32[row * k_packed + p];
+                let bytes = w.to_le_bytes();
+                for j in 0..4.min(k - p * 4) {
+                    acc += (bytes[j] as i8) as f32 * activation[p * 4 + j];
+                }
+            }
+            output[row] = acc * weights.scale_for_row(row) + weights.zero_for_row(row);
+        }
     }
 }
 
@@ -208,12 +215,9 @@ fn gemv_u4x8_dispatch(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(8);
-    let scale = weights.scale();
-    let zero = weights.zero();
     let weights_u32 = weights.as_u32();
 
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        // Pre-allocate per-thread buffer (avoids per-row heap allocation)
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -226,7 +230,7 @@ fn gemv_u4x8_dispatch(
                     let mut buf = vec![0.0f32; k_packed * 8];
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
-                        *out = unsafe {
+                        let dot = unsafe {
                             gemv_row_u4x8_avx2(
                                 weights_u32,
                                 activation,
@@ -235,8 +239,8 @@ fn gemv_u4x8_dispatch(
                                 k_packed,
                                 &mut buf,
                             )
-                        } * scale
-                            + zero;
+                        };
+                        *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
                     }
                 });
         }
@@ -244,7 +248,7 @@ fn gemv_u4x8_dispatch(
         {
             let mut buf = vec![0.0f32; k_packed * 8];
             for row in 0..m {
-                output[row] = unsafe {
+                let dot = unsafe {
                     gemv_row_u4x8_avx2(
                         weights_u32,
                         activation,
@@ -253,8 +257,8 @@ fn gemv_u4x8_dispatch(
                         k_packed,
                         &mut buf,
                     )
-                } * scale
-                    + zero;
+                };
+                output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
             }
         }
     } else {
@@ -315,8 +319,6 @@ fn gemv_f16x2_dispatch(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(2);
-    let scale = weights.scale();
-    let zero = weights.zero();
     let weights_u32 = weights.as_u32();
 
     if is_x86_feature_detected!("f16c") {
@@ -331,7 +333,7 @@ fn gemv_f16x2_dispatch(
                     let start_row = chunk_idx * rows_per_chunk;
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
-                        *out = unsafe {
+                        let dot = unsafe {
                             gemv_row_f16x2_f16c(
                                 weights_u32,
                                 activation,
@@ -339,18 +341,18 @@ fn gemv_f16x2_dispatch(
                                 k,
                                 k_packed,
                             )
-                        } * scale
-                            + zero;
+                        };
+                        *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
                     }
                 });
         }
         #[cfg(not(feature = "parallel"))]
         {
             for row in 0..m {
-                output[row] = unsafe {
+                let dot = unsafe {
                     gemv_row_f16x2_f16c(weights_u32, activation, row * k_packed, k, k_packed)
-                } * scale
-                    + zero;
+                };
+                output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
             }
         }
     } else {
@@ -483,8 +485,6 @@ fn gemv_f32x1_dispatch(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    let scale = weights.scale();
-    let zero = weights.zero();
     // F32x1: u32 IS f32, reinterpret directly
     let weights_f32: &[f32] = unsafe {
         std::slice::from_raw_parts(
@@ -497,7 +497,8 @@ fn gemv_f32x1_dispatch(
         use rayon::prelude::*;
         output.par_iter_mut().enumerate().for_each(|(row, out)| {
             let row_data = &weights_f32[row * k..(row + 1) * k];
-            *out = fma_f32_slice(row_data, activation) * scale + zero;
+            let dot = fma_f32_slice(row_data, activation);
+            *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         });
     }
 
@@ -505,7 +506,8 @@ fn gemv_f32x1_dispatch(
     {
         for row in 0..m {
             let row_data = &weights_f32[row * k..(row + 1) * k];
-            output[row] = fma_f32_slice(row_data, activation) * scale + zero;
+            let dot = fma_f32_slice(row_data, activation);
+            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
     }
 }
@@ -524,13 +526,11 @@ fn gemv_generic_fallback<T: PackedWord>(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
-    let scale = weights.scale();
-    let zero = weights.zero();
 
     if k <= K_BLOCK_SIZE {
-        gemv_packed_inner::<T>(weights, activation, output, scale, zero, m, k, k_packed);
+        gemv_packed_inner::<T>(weights, activation, output, m, k, k_packed);
     } else {
-        gemv_packed_blocked::<T>(weights, activation, output, scale, zero, m, k, k_packed);
+        gemv_packed_blocked::<T>(weights, activation, output, m, k, k_packed);
     }
 }
 
@@ -543,8 +543,6 @@ fn gemv_packed_inner<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
     output: &mut [f32],
-    scale: f32,
-    zero: f32,
     _m: usize,
     k: usize,
     k_packed: usize,
@@ -561,9 +559,8 @@ fn gemv_packed_inner<T: PackedWord>(
                 let mut unpack_buf = vec![0.0f32; k_packed * T::ITEMS];
                 for (local_row, out) in out_chunk.iter_mut().enumerate() {
                     let row = start_row + local_row;
-                    *out = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf)
-                        * scale
-                        + zero;
+                    let dot = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf);
+                    *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
                 }
             });
     }
@@ -572,9 +569,8 @@ fn gemv_packed_inner<T: PackedWord>(
     {
         let mut unpack_buf = vec![0.0f32; k_packed * T::ITEMS];
         for row in 0.._m {
-            output[row] = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf)
-                * scale
-                + zero;
+            let dot = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf);
+            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
     }
 }
@@ -584,8 +580,6 @@ fn gemv_packed_blocked<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
     output: &mut [f32],
-    scale: f32,
-    zero: f32,
     m: usize,
     k: usize,
     k_packed: usize,
@@ -630,8 +624,8 @@ fn gemv_packed_blocked<T: PackedWord>(
         k_offset += K_BLOCK_SIZE;
     }
 
-    for o in output.iter_mut() {
-        *o = *o * scale + zero;
+    for row in 0..m {
+        output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
     }
 }
 
@@ -759,33 +753,33 @@ pub fn gemm_packed_batched<T: PackedWord>(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
-    let scale = weights.scale();
-    let zero = weights.zero();
 
     // Validate output vector lengths (parallel path uses unsafe raw pointers)
     for o in outputs.iter() {
         assert!(o.len() >= m, "output vector length {} < m={}", o.len(), m);
     }
 
-    // Process each weight row once, compute dot products with all N inputs
+    // Process each weight row once, compute dot products with all N inputs.
+    // Uses per-row scale/zero for correct per-channel quantization.
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        // Store as usize for Send+Sync safety (each row writes to distinct positions)
         let out_addrs: Vec<usize> = outputs
             .iter_mut()
             .map(|o| o.as_mut_ptr() as usize)
             .collect();
+        let k_items = T::ITEMS;
 
         (0..m).into_par_iter().for_each(|row| {
-            // Unpack this row once
+            let scale = weights.scale_for_row(row);
+            let zero = weights.zero_for_row(row);
             let mut unpack_buf = vec![0.0f32; k];
             let row_offset = row * k_packed;
             for p in 0..k_packed {
                 let word = weights.as_packed()[row_offset + p];
                 let unpacked = word.unpack_to_f32();
-                let base = p * T::ITEMS;
-                for j in 0..T::ITEMS {
+                let base = p * k_items;
+                for j in 0..k_items {
                     let idx = base + j;
                     if idx < k {
                         unpack_buf[idx] = unpacked.as_ref()[j];
@@ -793,7 +787,6 @@ pub fn gemm_packed_batched<T: PackedWord>(
                 }
             }
 
-            // Dot product with all N input vectors — write via raw pointer
             for (bi, input) in batch_inputs.iter().enumerate() {
                 let acc = fma_f32_slice(&unpack_buf, input);
                 unsafe {
@@ -807,6 +800,8 @@ pub fn gemm_packed_batched<T: PackedWord>(
     {
         let mut unpack_buf = vec![0.0f32; k];
         for row in 0..m {
+            let scale = weights.scale_for_row(row);
+            let zero = weights.zero_for_row(row);
             let row_offset = row * k_packed;
             for p in 0..k_packed {
                 let word = weights.as_packed()[row_offset + p];

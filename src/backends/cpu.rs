@@ -4,11 +4,20 @@ use crate::packed_tensor::PackedTensor;
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
 
+/// Threshold K above which tiled BLAS kernels are used.
+/// Below this, per-row SIMD streaming is faster (no temp buffer copy).
+const TILED_K_THRESHOLD: usize = 4096;
+
 /// Generic GEMV (matrix × vector) on CPU using packed representation.
-/// Uses streaming SIMD unpack+FMA (optimal for single vector multiplication).
 pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], output: &mut [f32]) {
-    // Streaming SIMD: unpack word → FMA immediately, no temp buffers
-    super::packed_simd::gemv_packed_simd(weights, activation, output);
+    let k = weights.shape()[1];
+    if k > TILED_K_THRESHOLD {
+        // Use cache-blocked tiled kernel for large K
+        super::packed_blas::gemv_packed_tiled(weights, activation, output);
+    } else {
+        // Use streaming SIMD per-row kernel for small/medium K
+        super::packed_simd::gemv_packed_simd(weights, activation, output);
+    }
 }
 
 /// Generic GEMM (matrix × matrix) as a batch of GEMV calls on CPU.
