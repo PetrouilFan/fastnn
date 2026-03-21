@@ -114,8 +114,6 @@ fn gemv_u8x4_dispatch(
         }
     } else {
         // Scalar fallback
-        let scale = weights.scale();
-        let zero = weights.zero();
         for row in 0..m {
             let mut acc = 0.0f32;
             for p in 0..k_packed {
@@ -125,7 +123,7 @@ fn gemv_u8x4_dispatch(
                     acc += (bytes[j] as i8) as f32 * activation[p * 4 + j];
                 }
             }
-            output[row] = acc * scale + zero;
+            output[row] = acc * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
     }
 }
