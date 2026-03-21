@@ -5769,78 +5769,122 @@ fn parallel_matmul(
     let m_usize = m as usize;
     let n_usize = n as usize;
     let k_usize = k as usize;
-
-    // Parallelize at the row level (batch * m rows)
     let total_rows = batch * m_usize;
 
+    let abs = a_batch_stride as usize;
+    let as0 = a_stride_0 as usize;
+    let as1 = a_stride_1 as usize;
+    let bbs = b_batch_stride as usize;
+    let bs0 = b_stride_0 as usize;
+    let bs1 = b_stride_1 as usize;
+
+    // Parallelize at the row level (batch * m rows).
+    // Each row calls blocked_row_matmul which tiles K and N for cache efficiency.
     (0..total_rows).into_par_iter().for_each(|row_idx| {
-        let bat = row_idx / m_usize;
-        let i = row_idx % m_usize;
+        blocked_row_matmul(
+            a_usize as *const f32,
+            b_usize as *const f32,
+            out_usize as *mut f32,
+            row_idx,
+            m_usize,
+            n_usize,
+            k_usize,
+            abs,
+            as0,
+            as1,
+            bbs,
+            bs0,
+            bs1,
+        );
+    });
+}
 
-        let bat_a_offset = bat * a_batch_stride as usize;
-        let bat_b_offset = bat * b_batch_stride as usize;
+/// Cache-blocked scalar matmul for one batch: C = A @ B.
+/// Tiles the K dimension so that a TILE_K × TILE_N block of B stays in L1 cache
+/// while TILE_M rows of A stream through it.
+///
+/// Cache math (TILE_M=4, TILE_N=4, TILE_K=64):
+///   B tile: 64 × 4 × 4 bytes = 1 KB (fits in single L1 set)
+///   A tile: 4 × 64 × 4 bytes = 1 KB
+///   C tile: 4 × 4 × 4 bytes  = 64 bytes
+///   Total working set ≈ 2 KB ≪ 32 KB L1 cache.
+#[inline]
+fn blocked_row_matmul(
+    a_ptr: *const f32,
+    b_ptr: *const f32,
+    out_ptr: *mut f32,
+    row: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    a_batch_stride: usize,
+    a_stride_0: usize,
+    a_stride_1: usize,
+    b_batch_stride: usize,
+    b_stride_0: usize,
+    b_stride_1: usize,
+) {
+    const TILE_K: usize = 64;
+    const TILE_N: usize = 4;
 
-        for j in 0..n_usize {
-            let mut sum = 0.0f32;
-            let mut kk = 0;
+    let bat = row / m;
+    let i = row % m;
+    let a_off = bat * a_batch_stride + i * a_stride_0;
+    let b_off = bat * b_batch_stride;
 
-            // TODO: A correct SIMD path for this loop should either use AVX2 gather
-            // instructions (_mm256_i32gather_ps) to load non-contiguous B column
-            // elements, or reorder the loop so that j is outer and k is inner with
-            // A pre-loaded once per row, then B accessed along its contiguous (row)
-            // dimension. The previous SIMD block loaded B with _mm256_loadu_ps which
-            // assumed contiguous elements — but for row-major B (stride_0=n,
-            // stride_1=1) the needed column elements B[kk..kk+7, j] are n floats
-            // apart and cannot be loaded with a plain unaligned load. Additionally,
-            // the old code checked is_x86_feature_detected!("fma") but then used
-            // _mm256_mul_ps + _mm256_add_ps instead of _mm256_fmadd_ps.
+    // Clear output row
+    for j in 0..n {
+        unsafe {
+            *out_ptr.add(row * n + j) = 0.0;
+        }
+    }
 
-            while kk + 4 <= k_usize {
-                unsafe {
-                    let a_base = bat_a_offset + i * a_stride_0 as usize;
-                    let a_val =
-                        *((a_usize + (a_base + kk * a_stride_1 as usize) * 4) as *const f32);
-                    let a_val1 =
-                        *((a_usize + (a_base + (kk + 1) * a_stride_1 as usize) * 4) as *const f32);
-                    let a_val2 =
-                        *((a_usize + (a_base + (kk + 2) * a_stride_1 as usize) * 4) as *const f32);
-                    let a_val3 =
-                        *((a_usize + (a_base + (kk + 3) * a_stride_1 as usize) * 4) as *const f32);
+    // Tile over K, then over N
+    let mut ko = 0;
+    while ko < k {
+        let kend = if ko + TILE_K < k { ko + TILE_K } else { k };
 
-                    let b_base = bat_b_offset + j * b_stride_1 as usize;
-                    let b_val =
-                        *((b_usize + (b_base + kk * b_stride_0 as usize) * 4) as *const f32);
-                    let b_val1 =
-                        *((b_usize + (b_base + (kk + 1) * b_stride_0 as usize) * 4) as *const f32);
-                    let b_val2 =
-                        *((b_usize + (b_base + (kk + 2) * b_stride_0 as usize) * 4) as *const f32);
-                    let b_val3 =
-                        *((b_usize + (b_base + (kk + 3) * b_stride_0 as usize) * 4) as *const f32);
+        let mut jo = 0;
+        while jo + TILE_N <= n {
+            let mut acc = [0.0f32; TILE_N];
 
-                    sum += a_val * b_val + a_val1 * b_val1 + a_val2 * b_val2 + a_val3 * b_val3;
-                }
-                kk += 4;
-            }
-
-            while kk < k_usize {
-                unsafe {
-                    let a_val = *((a_usize
-                        + (bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize) * 4)
-                        as *const f32);
-                    let b_val = *((b_usize
-                        + (bat_b_offset + kk * b_stride_0 as usize + j * b_stride_1 as usize) * 4)
-                        as *const f32);
-                    sum += a_val * b_val;
+            let mut kk = ko;
+            while kk < kend {
+                let av = unsafe { *a_ptr.add(a_off + kk * a_stride_1) };
+                for t in 0..TILE_N {
+                    acc[t] +=
+                        av * unsafe { *b_ptr.add(b_off + kk * b_stride_0 + (jo + t) * b_stride_1) };
                 }
                 kk += 1;
             }
 
-            unsafe {
-                let out_idx = bat * m_usize * n_usize + i * n_usize + j;
-                *((out_usize + out_idx * 4) as *mut f32) = sum;
-            };
+            for t in 0..TILE_N {
+                unsafe {
+                    let p = out_ptr.add(row * n + jo + t);
+                    *p += acc[t];
+                }
+            }
+            jo += TILE_N;
         }
-    });
+
+        // Tail: remaining columns
+        while jo < n {
+            let mut sum = 0.0f32;
+            for kk in ko..kend {
+                sum += unsafe {
+                    *a_ptr.add(a_off + kk * a_stride_1)
+                        * b_ptr.add(b_off + kk * b_stride_0 + jo * b_stride_1).read()
+                };
+            }
+            unsafe {
+                let p = out_ptr.add(row * n + jo);
+                *p += sum;
+            }
+            jo += 1;
+        }
+
+        ko += TILE_K;
+    }
 }
 
 #[inline]
@@ -5859,28 +5903,27 @@ fn small_matrix_matmul(
     b_stride_0: i64,
     b_stride_1: i64,
 ) {
-    for bat in 0..batch {
-        let bat_a_offset = bat * a_batch_stride as usize;
-        let bat_b_offset = bat * b_batch_stride as usize;
+    let m_usize = m as usize;
+    let n_usize = n as usize;
+    let k_usize = k as usize;
+    let total_rows = batch * m_usize;
 
-        for i in 0..m as usize {
-            for j in 0..n as usize {
-                let mut sum = 0.0f32;
-                for kk in 0..k as usize {
-                    let a_val = unsafe {
-                        *a_ptr
-                            .add(bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize)
-                    };
-                    let b_val = unsafe {
-                        *b_ptr
-                            .add(bat_b_offset + kk * b_stride_0 as usize + j * b_stride_1 as usize)
-                    };
-                    sum += a_val * b_val;
-                }
-                let out_idx = bat * m as usize * n as usize + i * n as usize + j;
-                unsafe { *out_ptr.add(out_idx) = sum };
-            }
-        }
+    for row in 0..total_rows {
+        blocked_row_matmul(
+            a_ptr,
+            b_ptr,
+            out_ptr,
+            row,
+            m_usize,
+            n_usize,
+            k_usize,
+            a_batch_stride as usize,
+            a_stride_0 as usize,
+            a_stride_1 as usize,
+            b_batch_stride as usize,
+            b_stride_0 as usize,
+            b_stride_1 as usize,
+        );
     }
 }
 
@@ -5900,28 +5943,27 @@ fn single_threaded_matmul(
     b_stride_0: i64,
     b_stride_1: i64,
 ) {
-    for bat in 0..batch {
-        let bat_a_offset = bat * a_batch_stride as usize;
-        let bat_b_offset = bat * b_batch_stride as usize;
+    let m_usize = m as usize;
+    let n_usize = n as usize;
+    let k_usize = k as usize;
+    let total_rows = batch * m_usize;
 
-        for i in 0..m as usize {
-            for j in 0..n as usize {
-                let mut sum = 0.0f32;
-                for kk in 0..k as usize {
-                    let a_val = unsafe {
-                        *a_ptr
-                            .add(bat_a_offset + i * a_stride_0 as usize + kk * a_stride_1 as usize)
-                    };
-                    let b_val = unsafe {
-                        *b_ptr
-                            .add(bat_b_offset + kk * b_stride_0 as usize + j * b_stride_1 as usize)
-                    };
-                    sum += a_val * b_val;
-                }
-                let out_idx = bat * m as usize * n as usize + i * n as usize + j;
-                unsafe { *out_ptr.add(out_idx) = sum };
-            }
-        }
+    for row in 0..total_rows {
+        blocked_row_matmul(
+            a_ptr,
+            b_ptr,
+            out_ptr,
+            row,
+            m_usize,
+            n_usize,
+            k_usize,
+            a_batch_stride as usize,
+            a_stride_0 as usize,
+            a_stride_1 as usize,
+            b_batch_stride as usize,
+            b_stride_0 as usize,
+            b_stride_1 as usize,
+        );
     }
 }
 
@@ -9976,6 +10018,289 @@ mod tests {
                     (got - exp).abs() < 1e-3,
                     "stride_dilation b={} ic={} oc={} {}x{} k={} s={} p={} idx={}: got={}, expected={}",
                     batch, in_ch, out_ch, h, w, kernel, stride, pad, idx, got, exp
+                );
+            }
+        }
+    }
+
+    /// Reference scalar matmul with explicit strides, for testing blocked_matmul.
+    fn reference_matmul_strided(
+        a: &[f32],
+        b: &[f32],
+        batch: usize,
+        m: usize,
+        n: usize,
+        k: usize,
+        a_batch_stride: usize,
+        a_s0: usize,
+        a_s1: usize,
+        b_batch_stride: usize,
+        b_s0: usize,
+        b_s1: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; batch * m * n];
+        for bat in 0..batch {
+            let a_base = bat * a_batch_stride;
+            let b_base = bat * b_batch_stride;
+            for i in 0..m {
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for kk in 0..k {
+                        sum += a[a_base + i * a_s0 + kk * a_s1] * b[b_base + kk * b_s0 + j * b_s1];
+                    }
+                    out[bat * m * n + i * n + j] = sum;
+                }
+            }
+        }
+        out
+    }
+
+    fn verify_blocked_matmul(
+        a: &[f32],
+        b: &[f32],
+        batch: usize,
+        m: usize,
+        n: usize,
+        k: usize,
+        a_bs: usize,
+        a_s0: usize,
+        a_s1: usize,
+        b_bs: usize,
+        b_s0: usize,
+        b_s1: usize,
+        tag: &str,
+    ) {
+        let mut out = vec![0.0f32; batch * m * n];
+        let total_rows = batch * m;
+        for row in 0..total_rows {
+            blocked_row_matmul(
+                a.as_ptr(),
+                b.as_ptr(),
+                out.as_mut_ptr(),
+                row,
+                m,
+                n,
+                k,
+                a_bs,
+                a_s0,
+                a_s1,
+                b_bs,
+                b_s0,
+                b_s1,
+            );
+        }
+        let expected =
+            reference_matmul_strided(a, b, batch, m, n, k, a_bs, a_s0, a_s1, b_bs, b_s0, b_s1);
+        for (idx, (got, exp)) in out.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-3,
+                "{} idx={}: got={}, expected={}",
+                tag,
+                idx,
+                got,
+                exp
+            );
+        }
+    }
+
+    #[test]
+    fn test_blocked_matmul_square() {
+        for &(m, n, k) in &[(64usize, 64, 64), (128, 128, 128)] {
+            let a: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.001).sin()).collect();
+            let b: Vec<f32> = (0..k * n).map(|i| ((i as f32) * 0.001).cos()).collect();
+            verify_blocked_matmul(
+                &a,
+                &b,
+                1,
+                m,
+                n,
+                k,
+                m * k,
+                k,
+                1,
+                k * n,
+                n,
+                1,
+                &format!("square {}x{}x{}", m, n, k),
+            );
+        }
+    }
+
+    #[test]
+    fn test_blocked_matmul_non_square() {
+        // Non-multiples of tile sizes (TILE_M=1, TILE_N=4, TILE_K=64)
+        let (m, n, k) = (37usize, 64, 128);
+        let a: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.001).sin()).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| ((i as f32) * 0.001).cos()).collect();
+        verify_blocked_matmul(
+            &a,
+            &b,
+            1,
+            m,
+            n,
+            k,
+            m * k,
+            k,
+            1,
+            k * n,
+            n,
+            1,
+            &format!("non_square {}x{}x{}", m, n, k),
+        );
+
+        // Also test n not multiple of TILE_N
+        let (m, n, k) = (16, 7, 32);
+        let a: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.001).sin()).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| ((i as f32) * 0.001).cos()).collect();
+        verify_blocked_matmul(
+            &a,
+            &b,
+            1,
+            m,
+            n,
+            k,
+            m * k,
+            k,
+            1,
+            k * n,
+            n,
+            1,
+            &format!("non_square {}x{}x{}", m, n, k),
+        );
+    }
+
+    #[test]
+    fn test_blocked_matmul_small() {
+        for &(m, n, k) in &[
+            (4usize, 4, 4),
+            (8, 8, 8),
+            (3, 5, 7),
+            (1, 1, 1),
+            (16, 16, 16),
+        ] {
+            let a: Vec<f32> = (0..m * k).map(|i| ((i as f32 + 1.0) * 0.1).sin()).collect();
+            let b: Vec<f32> = (0..k * n).map(|i| ((i as f32 + 1.0) * 0.1).cos()).collect();
+            verify_blocked_matmul(
+                &a,
+                &b,
+                1,
+                m,
+                n,
+                k,
+                m * k,
+                k,
+                1,
+                k * n,
+                n,
+                1,
+                &format!("small {}x{}x{}", m, n, k),
+            );
+        }
+    }
+
+    #[test]
+    fn test_blocked_matmul_batched() {
+        let (batch, m, n, k) = (4usize, 16, 16, 16);
+        let a: Vec<f32> = (0..batch * m * k)
+            .map(|i| ((i as f32) * 0.01).sin())
+            .collect();
+        let b: Vec<f32> = (0..batch * k * n)
+            .map(|i| ((i as f32) * 0.01).cos())
+            .collect();
+        verify_blocked_matmul(
+            &a,
+            &b,
+            batch,
+            m,
+            n,
+            k,
+            m * k,
+            k,
+            1,
+            k * n,
+            n,
+            1,
+            &format!("batched {}x{}x{}x{}", batch, m, n, k),
+        );
+    }
+
+    /// Benchmark: naive triple loop vs blocked scalar matmul for sizes below BLAS threshold.
+    #[test]
+    fn bench_scalar_matmul() {
+        use std::time::Instant;
+
+        fn naive_matmul_row(a: &[f32], b: &[f32], out: &mut [f32], m: usize, n: usize, k: usize) {
+            for i in 0..m {
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for kk in 0..k {
+                        sum += a[i * k + kk] * b[kk * n + j];
+                    }
+                    out[i * n + j] = sum;
+                }
+            }
+        }
+
+        fn blocked_matmul_row(a: &[f32], b: &[f32], out: &mut [f32], m: usize, n: usize, k: usize) {
+            for row in 0..m {
+                blocked_row_matmul(
+                    a.as_ptr(),
+                    b.as_ptr(),
+                    out.as_mut_ptr(),
+                    row,
+                    m,
+                    n,
+                    k,
+                    m * k,
+                    k,
+                    1,
+                    k * n,
+                    n,
+                    1,
+                );
+            }
+        }
+
+        for &(m, n, k) in &[(32usize, 32, 32), (48, 48, 48), (64, 64, 64)] {
+            let a: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.001).sin()).collect();
+            let b: Vec<f32> = (0..k * n).map(|i| (i as f32 * 0.001).cos()).collect();
+            let mut out_naive = vec![0.0f32; m * n];
+            let mut out_blocked = vec![0.0f32; m * n];
+            let iters = 100;
+
+            // Warmup
+            for _ in 0..3 {
+                naive_matmul_row(&a, &b, &mut out_naive, m, n, k);
+                blocked_matmul_row(&a, &b, &mut out_blocked, m, n, k);
+            }
+
+            let start = Instant::now();
+            for _ in 0..iters {
+                naive_matmul_row(&a, &b, &mut out_naive, m, n, k);
+            }
+            let naive_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            let start = Instant::now();
+            for _ in 0..iters {
+                blocked_matmul_row(&a, &b, &mut out_blocked, m, n, k);
+            }
+            let blocked_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            let gflops = |ms: f64| (2.0 * m as f64 * n as f64 * k as f64) / (ms / 1000.0) / 1e9;
+
+            println!(
+                "matmul {}x{}x{}: naive={:.3}ms ({:.2} GFLOP/s), blocked={:.3}ms ({:.2} GFLOP/s), speedup={:.2}x",
+                m, n, k, naive_ms, gflops(naive_ms), blocked_ms, gflops(blocked_ms), naive_ms / blocked_ms
+            );
+
+            // Verify correctness
+            for (idx, (got, exp)) in out_blocked.iter().zip(out_naive.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-3,
+                    "bench blocked vs naive mismatch at idx={}: got={}, expected={}",
+                    idx,
+                    got,
+                    exp
                 );
             }
         }
