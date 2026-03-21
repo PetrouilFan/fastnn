@@ -57,7 +57,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
     }
 
     // Allocate micro-kernel buffer once (outside K and M loops)
-    let mut row_bufs: MicroKernelBuf = [[0.0f32; KC]; MR];
+    let mut row_bufs: MicroKernelBuf = Box::new([[0.0f32; KC]; MR]);
 
     // Process K in cache blocks
     let mut k_offset = 0;
@@ -111,7 +111,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
 
 /// Generic micro-kernel: unpack weights, then call type-specific FMA.
 /// Micro-kernel buffer passed by caller to avoid allocation in inner loop.
-type MicroKernelBuf = [[f32; KC]; MR];
+type MicroKernelBuf = Box<[[f32; KC]; MR]>;
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
@@ -237,7 +237,7 @@ pub fn gemv_u8x4_tiled(
     }
 
     // Allocate buffer once (outside loops)
-    let mut row_bufs: [[f32; KC]; MR] = [[0.0f32; KC]; MR];
+    let mut row_bufs: Box<[[f32; KC]; MR]> = Box::new([[0.0f32; KC]; MR]);
 
     let mut k_offset = 0;
     while k_offset < k {
@@ -335,7 +335,7 @@ pub fn gemv_f16x2_tiled(
     }
 
     if is_x86_feature_detected!("f16c") {
-        let mut row_bufs: [[f32; KC]; MR] = [[0.0f32; KC]; MR];
+        let mut row_bufs: Box<[[f32; KC]; MR]> = Box::new([[0.0f32; KC]; MR]);
         let mut k_offset = 0;
         while k_offset < k {
             let k_end = (k_offset + KC).min(k);
@@ -411,7 +411,7 @@ pub fn gemv_u4x8_tiled(
     }
 
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        let mut row_bufs: [[f32; KC]; MR] = [[0.0f32; KC]; MR];
+        let mut row_bufs: Box<[[f32; KC]; MR]> = Box::new([[0.0f32; KC]; MR]);
         let mut k_offset = 0;
         while k_offset < k {
             let k_end = (k_offset + KC).min(k);
