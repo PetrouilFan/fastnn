@@ -5799,15 +5799,21 @@ fn parallel_matmul(
     });
 }
 
-/// Cache-blocked scalar matmul for one batch: C = A @ B.
-/// Tiles the K dimension so that a TILE_K × TILE_N block of B stays in L1 cache
-/// while TILE_M rows of A stream through it.
+/// Cache-blocked scalar matmul for one row of output: C[row, :] += A[row, :] @ B.
+/// Tiles the K dimension so that a TILE_K × TILE_N block of B stays in L1 cache.
 ///
-/// Cache math (TILE_M=4, TILE_N=4, TILE_K=64):
-///   B tile: 64 × 4 × 4 bytes = 1 KB (fits in single L1 set)
-///   A tile: 4 × 64 × 4 bytes = 1 KB
-///   C tile: 4 × 4 × 4 bytes  = 64 bytes
-///   Total working set ≈ 2 KB ≪ 32 KB L1 cache.
+/// When strides are contiguous (a_stride_1 == 1, b_stride_1 == 1) and the
+/// target supports AVX2, uses an 8-wide SIMD inner loop that broadcasts
+/// A[i, kk] and FMADDs with the contiguous B[kk, j..j+8] row slice.
+///
+/// Cache math (scalar TILE_N=4):
+///   B tile: 64 × 4 × 4 bytes = 1 KB
+///   A tile: 1 × 64 × 4 bytes = 256 bytes
+///   Total working set ≪ 32 KB L1 cache.
+///
+/// SIMD cache math (TILE_N_SIMD=8):
+///   B tile: 64 × 8 × 4 bytes = 2 KB
+///   Still well within L1.
 #[inline]
 fn blocked_row_matmul(
     a_ptr: *const f32,
@@ -5831,15 +5837,91 @@ fn blocked_row_matmul(
     let i = row % m;
     let a_off = bat * a_batch_stride + i * a_stride_0;
     let b_off = bat * b_batch_stride;
+    let out_off = row * n;
 
     // Clear output row
     for j in 0..n {
         unsafe {
-            *out_ptr.add(row * n + j) = 0.0;
+            *out_ptr.add(out_off + j) = 0.0;
         }
     }
 
-    // Tile over K, then over N
+    // AVX2 SIMD fast path: 8-wide FMADD when A and B have contiguous columns.
+    // For fixed (i, kk): C[i, j..j+8] += A[i, kk] * B[kk, j..j+8]
+    // B[kk, j..j+8] is 8 contiguous floats — a correct plain load.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if a_stride_1 == 1 && b_stride_1 == 1 && n >= 8 {
+        use std::arch::x86_64::*;
+
+        const TILE_N_SIMD: usize = 8;
+        let mut ko = 0;
+        while ko < k {
+            let kend = if ko + TILE_K < k { ko + TILE_K } else { k };
+
+            // SIMD tiles: 8 columns at a time
+            let mut jo = 0;
+            while jo + TILE_N_SIMD <= n {
+                unsafe {
+                    let mut acc = _mm256_setzero_ps();
+
+                    let mut kk = ko;
+                    while kk + 4 <= kend {
+                        // Unroll 4 k-steps for ILP
+                        let a0 = _mm256_set1_ps(*a_ptr.add(a_off + kk * a_stride_1));
+                        let b0 = _mm256_loadu_ps(b_ptr.add(b_off + kk * b_stride_0 + jo));
+                        acc = _mm256_fmadd_ps(a0, b0, acc);
+
+                        let a1 = _mm256_set1_ps(*a_ptr.add(a_off + (kk + 1) * a_stride_1));
+                        let b1 = _mm256_loadu_ps(b_ptr.add(b_off + (kk + 1) * b_stride_0 + jo));
+                        acc = _mm256_fmadd_ps(a1, b1, acc);
+
+                        let a2 = _mm256_set1_ps(*a_ptr.add(a_off + (kk + 2) * a_stride_1));
+                        let b2 = _mm256_loadu_ps(b_ptr.add(b_off + (kk + 2) * b_stride_0 + jo));
+                        acc = _mm256_fmadd_ps(a2, b2, acc);
+
+                        let a3 = _mm256_set1_ps(*a_ptr.add(a_off + (kk + 3) * a_stride_1));
+                        let b3 = _mm256_loadu_ps(b_ptr.add(b_off + (kk + 3) * b_stride_0 + jo));
+                        acc = _mm256_fmadd_ps(a3, b3, acc);
+
+                        kk += 4;
+                    }
+                    // Scalar tail for remaining kk
+                    while kk < kend {
+                        let av = _mm256_set1_ps(*a_ptr.add(a_off + kk * a_stride_1));
+                        let bv = _mm256_loadu_ps(b_ptr.add(b_off + kk * b_stride_0 + jo));
+                        acc = _mm256_fmadd_ps(av, bv, acc);
+                        kk += 1;
+                    }
+
+                    // Accumulate into output (add to existing, not overwrite)
+                    let out_v = _mm256_loadu_ps(out_ptr.add(out_off + jo));
+                    _mm256_storeu_ps(out_ptr.add(out_off + jo), _mm256_add_ps(out_v, acc));
+                }
+                jo += TILE_N_SIMD;
+            }
+
+            // Scalar tail for remaining columns (< 8)
+            while jo < n {
+                let mut sum = 0.0f32;
+                for kk in ko..kend {
+                    sum += unsafe {
+                        *a_ptr.add(a_off + kk * a_stride_1)
+                            * b_ptr.add(b_off + kk * b_stride_0 + jo).read()
+                    };
+                }
+                unsafe {
+                    let p = out_ptr.add(out_off + jo);
+                    *p += sum;
+                }
+                jo += 1;
+            }
+
+            ko += TILE_K;
+        }
+        return;
+    }
+
+    // Scalar blocked path (handles non-contiguous strides and small n)
     let mut ko = 0;
     while ko < k {
         let kend = if ko + TILE_K < k { ko + TILE_K } else { k };
@@ -5860,7 +5942,7 @@ fn blocked_row_matmul(
 
             for t in 0..TILE_N {
                 unsafe {
-                    let p = out_ptr.add(row * n + jo + t);
+                    let p = out_ptr.add(out_off + jo + t);
                     *p += acc[t];
                 }
             }
@@ -5877,7 +5959,7 @@ fn blocked_row_matmul(
                 };
             }
             unsafe {
-                let p = out_ptr.add(row * n + jo);
+                let p = out_ptr.add(out_off + jo);
                 *p += sum;
             }
             jo += 1;
@@ -10303,6 +10385,93 @@ mod tests {
                     exp
                 );
             }
+        }
+    }
+
+    /// Test SIMD path (contiguous a_stride_1 == 1, b_stride_1 == 1).
+    #[test]
+    fn test_blocked_matmul_simd_contiguous() {
+        for &(m, n, k) in &[(64usize, 64, 64), (32, 32, 32), (16, 72, 32), (1, 64, 128)] {
+            let a: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.001).sin()).collect();
+            let b: Vec<f32> = (0..k * n).map(|i| ((i as f32) * 0.001).cos()).collect();
+            verify_blocked_matmul(
+                &a,
+                &b,
+                1,
+                m,
+                n,
+                k,
+                m * k,
+                k,
+                1,
+                k * n,
+                n,
+                1,
+                &format!("simd_contiguous {}x{}x{}", m, n, k),
+            );
+        }
+    }
+
+    /// Test non-contiguous B (b_stride_1 != 1) falls through to scalar path correctly.
+    #[test]
+    fn test_blocked_matmul_simd_noncontiguous() {
+        let (m, n, k) = (64usize, 64, 64);
+        // Create B with stride_1 = 2 (every other column, rest are padding)
+        let b_stride_1 = 2usize;
+        let b_data_size = k * n * b_stride_1;
+        let a: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.001).sin()).collect();
+        let b: Vec<f32> = (0..b_data_size)
+            .map(|i| {
+                if i % b_stride_1 == 0 {
+                    ((i as f32) * 0.001).cos()
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        // Reference: B is stored with stride_1 = 2, logical n = 64
+        let mut out = vec![0.0f32; m * n];
+        let total_rows = m;
+        for row in 0..total_rows {
+            blocked_row_matmul(
+                a.as_ptr(),
+                b.as_ptr(),
+                out.as_mut_ptr(),
+                row,
+                m,
+                n,
+                k,
+                m * k,
+                k,
+                1,
+                k * n * b_stride_1,
+                n * b_stride_1,
+                b_stride_1,
+            );
+        }
+        // Verify against reference scalar matmul with same strides
+        let expected = reference_matmul_strided(
+            &a,
+            &b,
+            1,
+            m,
+            n,
+            k,
+            m * k,
+            k,
+            1,
+            k * n * b_stride_1,
+            n * b_stride_1,
+            b_stride_1,
+        );
+        for (idx, (got, exp)) in out.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-3,
+                "noncontiguous idx={}: got={}, expected={}",
+                idx,
+                got,
+                exp
+            );
         }
     }
 }
