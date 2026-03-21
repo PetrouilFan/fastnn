@@ -7391,6 +7391,17 @@ pub fn cross_entropy_backward_f32(
                     sum_exp += (*((logits_usize + (base + j) * 4) as *const f32) - max_val).exp();
                 }
             }
+
+            // Guard against degenerate inputs (all logits = -inf → sum_exp = 0)
+            if sum_exp == 0.0 || !sum_exp.is_finite() {
+                for j in 0..nc {
+                    unsafe {
+                        *((grad_usize + (base + j) * 4) as *mut f32) = 0.0;
+                    }
+                }
+                return;
+            }
+
             let inv_sum = scale / sum_exp;
 
             // Write gradient: softmax - one_hot, scaled
@@ -7420,6 +7431,14 @@ pub fn cross_entropy_backward_f32(
             for j in 0..num_classes {
                 sum_exp += (logits_data[base + j] - max_val).exp();
             }
+
+            if sum_exp == 0.0 || !sum_exp.is_finite() {
+                for j in 0..num_classes {
+                    grad_logits_data[base + j] = 0.0;
+                }
+                continue;
+            }
+
             let inv_sum = scale / sum_exp;
 
             for j in 0..num_classes {
