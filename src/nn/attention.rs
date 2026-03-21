@@ -20,6 +20,10 @@ pub struct MultiHeadAttention {
 
 impl MultiHeadAttention {
     pub fn new(d_model: i64, num_heads: i64, dropout_p: f32) -> Self {
+        Self::new_fused(d_model, num_heads, dropout_p)
+    }
+
+    pub fn new_unfused(d_model: i64, num_heads: i64, dropout_p: f32) -> Self {
         assert!(
             d_model % num_heads == 0,
             "d_model must be divisible by num_heads"
@@ -155,13 +159,11 @@ impl MultiHeadAttention {
         let context = attn_weights.matmul(&v);
 
         // 6. Reshape back to [batch, seq_len, d_model]
-        // Only make contiguous right before output projection
-        let context = context.permute(vec![0, 2, 1, 3]);
-        let context = if context.is_contiguous() {
-            context
-        } else {
-            context.contiguous()
-        };
+        // Fused permute+reshape to avoid separate intermediate
+        let context = context.reshape_permute(
+            vec![batch, self.num_heads, seq_len, self.head_dim],
+            vec![0, 2, 1, 3],
+        );
         let context = context.reshape(vec![batch, seq_len, self.d_model]);
 
         // 7. Output projection

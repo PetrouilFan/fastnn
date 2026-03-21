@@ -84,7 +84,41 @@ fn gemv_u8x4_dispatch(
     let k_packed = k.div_ceil(4);
     let weights_u32 = weights.as_u32();
 
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+    if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let rows_per_chunk = (65536 / (k_packed * 4)).clamp(1, 64);
+            output
+                .par_chunks_mut(rows_per_chunk)
+                .enumerate()
+                .for_each(|(chunk_idx, out_chunk)| {
+                    let start_row = chunk_idx * rows_per_chunk;
+                    for (local_row, out) in out_chunk.iter_mut().enumerate() {
+                        let row = start_row + local_row;
+                        let dot = unsafe {
+                            gemv_row_u8x4_avx512(
+                                weights_u32,
+                                activation,
+                                row * k_packed,
+                                k,
+                                k_packed,
+                            )
+                        };
+                        *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+                    }
+                });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for row in 0..m {
+                let dot = unsafe {
+                    gemv_row_u8x4_avx512(weights_u32, activation, row * k_packed, k, k_packed)
+                };
+                output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            }
+        }
+    } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -200,6 +234,79 @@ unsafe fn gemv_row_u8x4_avx2(
     total
 }
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512bw")]
+#[inline]
+unsafe fn gemv_row_u8x4_avx512(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+) -> f32 {
+    let mut acc0 = _mm512_setzero_ps();
+    let mut p = 0;
+    let mut act_idx = 0;
+
+    // Process 4 u32 words at a time (16 int8 → 16 f32) using AVX512BW for byte ops
+    while p + 4 <= k_packed && act_idx + 16 <= k {
+        if p + 8 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 8) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
+        let w2 = weights_u32[row_offset + p + 2];
+        let w3 = weights_u32[row_offset + p + 3];
+
+        // Pack 16 bytes from 4 u32 words into a 128-bit register
+        let bytes = _mm_set_epi32(w3 as i32, w2 as i32, w1 as i32, w0 as i32);
+        // Widen signed int8 → int32, then convert to f32
+        let i32x16 = _mm512_cvtepi8_epi32(bytes);
+        let weight_f32 = _mm512_cvtepi32_ps(i32x16);
+
+        let act = _mm512_loadu_ps(activation.as_ptr().add(act_idx));
+        acc0 = _mm512_fmadd_ps(weight_f32, act, acc0);
+
+        p += 4;
+        act_idx += 16;
+    }
+
+    let mut total = _mm512_reduce_add_ps(acc0);
+
+    // 2-word tail: 8 int8 → 8 f32 (scalar)
+    while p + 2 <= k_packed && act_idx + 8 <= k {
+        for word_off in 0..2 {
+            let w = weights_u32[row_offset + p + word_off];
+            let bytes = w.to_le_bytes();
+            for j in 0..4 {
+                total += (bytes[j] as i8) as f32 * activation[act_idx + word_off * 4 + j];
+            }
+        }
+        p += 2;
+        act_idx += 8;
+    }
+
+    // Scalar tail for remaining packed words
+    while p < k_packed && act_idx < k {
+        let w = weights_u32[row_offset + p];
+        let bytes = w.to_le_bytes();
+        for j in 0..4 {
+            let idx = act_idx + j;
+            if idx < k {
+                total += (bytes[j] as i8) as f32 * activation[idx];
+            }
+        }
+        p += 1;
+        act_idx += 4;
+    }
+
+    total
+}
+
 // ============================================================
 // U4x8: AVX2 nibble extraction → int32 → f32 → FMA
 // ============================================================
@@ -217,7 +324,7 @@ fn gemv_u4x8_dispatch(
     let k_packed = k.div_ceil(8);
     let weights_u32 = weights.as_u32();
 
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+    if is_x86_feature_detected!("avx512f") {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -227,17 +334,15 @@ fn gemv_u4x8_dispatch(
                 .enumerate()
                 .for_each(|(chunk_idx, out_chunk)| {
                     let start_row = chunk_idx * rows_per_chunk;
-                    let mut buf = vec![0.0f32; k_packed * 8];
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
                         let dot = unsafe {
-                            gemv_row_u4x8_avx2(
+                            gemv_row_u4x8_avx512(
                                 weights_u32,
                                 activation,
                                 row * k_packed,
                                 k,
                                 k_packed,
-                                &mut buf,
                             )
                         };
                         *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
@@ -246,17 +351,37 @@ fn gemv_u4x8_dispatch(
         }
         #[cfg(not(feature = "parallel"))]
         {
-            let mut buf = vec![0.0f32; k_packed * 8];
             for row in 0..m {
                 let dot = unsafe {
-                    gemv_row_u4x8_avx2(
-                        weights_u32,
-                        activation,
-                        row * k_packed,
-                        k,
-                        k_packed,
-                        &mut buf,
-                    )
+                    gemv_row_u4x8_avx512(weights_u32, activation, row * k_packed, k, k_packed)
+                };
+                output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            }
+        }
+    } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let rows_per_chunk = (65536 / (k_packed * 4)).clamp(1, 64);
+            output
+                .par_chunks_mut(rows_per_chunk)
+                .enumerate()
+                .for_each(|(chunk_idx, out_chunk)| {
+                    let start_row = chunk_idx * rows_per_chunk;
+                    for (local_row, out) in out_chunk.iter_mut().enumerate() {
+                        let row = start_row + local_row;
+                        let dot = unsafe {
+                            gemv_row_u4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed)
+                        };
+                        *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+                    }
+                });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for row in 0..m {
+                let dot = unsafe {
+                    gemv_row_u4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed)
                 };
                 output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
             }
@@ -275,33 +400,210 @@ unsafe fn gemv_row_u4x8_avx2(
     row_offset: usize,
     k: usize,
     k_packed: usize,
-    buf: &mut [f32],
 ) -> f32 {
-    // Unpack nibbles to pre-allocated buffer, then SIMD FMA.
-    // AVX2 has no nibble-level instructions, so scalar unpack is correct.
-    for p in 0..k_packed {
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut p = 0;
+    let mut act_idx = 0;
+    let mask_lo = _mm256_set1_epi32(0xF);
+    let sign_bit = _mm256_set1_epi32(0x8);
+
+    // Process 2 u32 words (16 nibbles) per iteration with dual accumulators
+    while p + 2 <= k_packed && act_idx + 16 <= k {
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
+
+        // Extract low nibbles (bits 0,4,8,12,16,20,24,28) from both words
+        let shift0 = _mm256_set_epi32(28, 24, 20, 16, 12, 8, 4, 0);
+        let w0v = _mm256_set1_epi32(w0 as i32);
+        let w1v = _mm256_set1_epi32(w1 as i32);
+
+        let nib_lo0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift0), mask_lo);
+        let nib_lo1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift0), mask_lo);
+
+        // Sign-extend: if bit 3 set, OR with 0xFFFFFFF0
+        let neg_lo0 =
+            _mm256_cmpgt_epi32(_mm256_and_si256(nib_lo0, sign_bit), _mm256_setzero_si256());
+        let signed_lo0 =
+            _mm256_or_si256(nib_lo0, _mm256_and_si256(neg_lo0, _mm256_set1_epi32(-16)));
+        let neg_lo1 =
+            _mm256_cmpgt_epi32(_mm256_and_si256(nib_lo1, sign_bit), _mm256_setzero_si256());
+        let signed_lo1 =
+            _mm256_or_si256(nib_lo1, _mm256_and_si256(neg_lo1, _mm256_set1_epi32(-16)));
+
+        let fl0 = _mm256_cvtepi32_ps(signed_lo0);
+        let fl1 = _mm256_cvtepi32_ps(signed_lo1);
+
+        let al0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc0 = _mm256_fmadd_ps(fl0, al0, acc0);
+
+        let al1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 8));
+        acc1 = _mm256_fmadd_ps(fl1, al1, acc1);
+
+        // Extract high nibbles (bits 2,6,10,14,18,22,26,30)
+        let shift_hi0 = _mm256_set_epi32(30, 26, 22, 18, 14, 10, 6, 2);
+        let nib_hi0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift_hi0), mask_lo);
+        let nib_hi1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift_hi0), mask_lo);
+
+        let neg_hi0 =
+            _mm256_cmpgt_epi32(_mm256_and_si256(nib_hi0, sign_bit), _mm256_setzero_si256());
+        let signed_hi0 =
+            _mm256_or_si256(nib_hi0, _mm256_and_si256(neg_hi0, _mm256_set1_epi32(-16)));
+        let neg_hi1 =
+            _mm256_cmpgt_epi32(_mm256_and_si256(nib_hi1, sign_bit), _mm256_setzero_si256());
+        let signed_hi1 =
+            _mm256_or_si256(nib_hi1, _mm256_and_si256(neg_hi1, _mm256_set1_epi32(-16)));
+
+        let fh0 = _mm256_cvtepi32_ps(signed_hi0);
+        let fh1 = _mm256_cvtepi32_ps(signed_hi1);
+
+        let ah0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 4));
+        acc0 = _mm256_fmadd_ps(fh0, ah0, acc0);
+
+        let ah1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 12));
+        acc1 = _mm256_fmadd_ps(fh1, ah1, acc1);
+
+        p += 2;
+        act_idx += 16;
+    }
+
+    acc0 = _mm256_add_ps(acc0, acc1);
+    let mut total = hsum256_ps(acc0);
+
+    // Scalar tail for remaining packed words
+    while p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
-        let base = p * 8;
         for j in 0..8 {
-            if base + j < k {
+            let idx = act_idx + j;
+            if idx < k {
                 let nibble = (w >> (j * 4)) & 0xF;
                 let signed = if nibble & 0x8 != 0 {
                     (nibble | 0xFFFFFFF0) as i32
                 } else {
                     nibble as i32
                 };
-                buf[base + j] = signed as f32;
+                total += signed as f32 * activation[idx];
             }
         }
+        p += 1;
+        act_idx += 8;
     }
-    // Prefetch next row's weights
-    if row_offset + k_packed < weights_u32.len() {
-        _mm_prefetch(
-            weights_u32.as_ptr().add(row_offset + k_packed) as *const i8,
-            _MM_HINT_T0,
+
+    total
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn gemv_row_u4x8_avx512(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+) -> f32 {
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut p = 0;
+    let mut act_idx = 0;
+    let mask_lo = _mm256_set1_epi32(0xF);
+    let sign_bit = _mm256_set1_epi32(0x8);
+
+    // Process 2 u32 words (16 nibbles) per iteration with dual accumulators
+    while p + 2 <= k_packed && act_idx + 16 <= k {
+        if p + 4 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 4) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
+        let w0v = _mm256_set1_epi32(w0 as i32);
+        let w1v = _mm256_set1_epi32(w1 as i32);
+
+        // Low nibbles (bits 0,4,8,12,16,20,24,28)
+        let shift_lo = _mm256_set_epi32(28, 24, 20, 16, 12, 8, 4, 0);
+        let nib_lo0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift_lo), mask_lo);
+        let nib_lo1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift_lo), mask_lo);
+
+        let signed_lo0 = _mm256_or_si256(
+            nib_lo0,
+            _mm256_and_si256(
+                _mm256_cmpgt_epi32(_mm256_and_si256(nib_lo0, sign_bit), _mm256_setzero_si256()),
+                _mm256_set1_epi32(-16),
+            ),
         );
+        let signed_lo1 = _mm256_or_si256(
+            nib_lo1,
+            _mm256_and_si256(
+                _mm256_cmpgt_epi32(_mm256_and_si256(nib_lo1, sign_bit), _mm256_setzero_si256()),
+                _mm256_set1_epi32(-16),
+            ),
+        );
+
+        let fl0 = _mm512_cvtepi32_ps(_mm512_castsi256_si512(signed_lo0));
+        let fl1 = _mm512_cvtepi32_ps(_mm512_castsi256_si512(signed_lo1));
+        let al0 = _mm512_loadu_ps(activation.as_ptr().add(act_idx));
+        acc0 = _mm512_fmadd_ps(fl0, al0, acc0);
+        let al1 = _mm512_loadu_ps(activation.as_ptr().add(act_idx + 8));
+        acc1 = _mm512_fmadd_ps(fl1, al1, acc1);
+
+        // High nibbles (bits 2,6,10,14,18,22,26,30)
+        let shift_hi = _mm256_set_epi32(30, 26, 22, 18, 14, 10, 6, 2);
+        let nib_hi0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift_hi), mask_lo);
+        let nib_hi1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift_hi), mask_lo);
+
+        let signed_hi0 = _mm256_or_si256(
+            nib_hi0,
+            _mm256_and_si256(
+                _mm256_cmpgt_epi32(_mm256_and_si256(nib_hi0, sign_bit), _mm256_setzero_si256()),
+                _mm256_set1_epi32(-16),
+            ),
+        );
+        let signed_hi1 = _mm256_or_si256(
+            nib_hi1,
+            _mm256_and_si256(
+                _mm256_cmpgt_epi32(_mm256_and_si256(nib_hi1, sign_bit), _mm256_setzero_si256()),
+                _mm256_set1_epi32(-16),
+            ),
+        );
+
+        let fh0 = _mm512_cvtepi32_ps(_mm512_castsi256_si512(signed_hi0));
+        let fh1 = _mm512_cvtepi32_ps(_mm512_castsi256_si512(signed_hi1));
+        let ah0 = _mm512_loadu_ps(activation.as_ptr().add(act_idx + 4));
+        acc0 = _mm512_fmadd_ps(fh0, ah0, acc0);
+        let ah1 = _mm512_loadu_ps(activation.as_ptr().add(act_idx + 12));
+        acc1 = _mm512_fmadd_ps(fh1, ah1, acc1);
+
+        p += 2;
+        act_idx += 16;
     }
-    fma_f32_slice(&buf[..k], activation)
+
+    let combined = _mm512_add_ps(acc0, acc1);
+    let mut total = _mm512_reduce_add_ps(combined);
+
+    // Scalar tail for remaining packed words
+    while p < k_packed && act_idx < k {
+        let w = weights_u32[row_offset + p];
+        for j in 0..8 {
+            let idx = act_idx + j;
+            if idx < k {
+                let nibble = (w >> (j * 4)) & 0xF;
+                let signed = if nibble & 0x8 != 0 {
+                    (nibble | 0xFFFFFFF0) as i32
+                } else {
+                    nibble as i32
+                };
+                total += signed as f32 * activation[idx];
+            }
+        }
+        p += 1;
+        act_idx += 8;
+    }
+
+    total
 }
 
 // ============================================================
@@ -556,7 +858,9 @@ fn gemv_packed_inner<T: PackedWord>(
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
                 let start_row = chunk_idx * rows_per_chunk;
-                let mut unpack_buf = vec![0.0f32; k_packed * T::ITEMS];
+                // Pre-allocate buffer without zeroing - all read elements are written first
+                let mut unpack_buf = Vec::with_capacity(k_packed * T::ITEMS);
+                unsafe { unpack_buf.set_len(k_packed * T::ITEMS) };
                 for (local_row, out) in out_chunk.iter_mut().enumerate() {
                     let row = start_row + local_row;
                     let dot = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf);
@@ -567,7 +871,9 @@ fn gemv_packed_inner<T: PackedWord>(
 
     #[cfg(not(feature = "parallel"))]
     {
-        let mut unpack_buf = vec![0.0f32; k_packed * T::ITEMS];
+        // Pre-allocate buffer without zeroing - all read elements are written first
+        let mut unpack_buf = Vec::with_capacity(k_packed * T::ITEMS);
+        unsafe { unpack_buf.set_len(k_packed * T::ITEMS) };
         for row in 0.._m {
             let dot = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf);
             output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
@@ -681,6 +987,9 @@ fn fma_f32_slice(a: &[f32], b: &[f32]) -> f32 {
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
+        if is_x86_feature_detected!("avx512f") {
+            return unsafe { fma_f32_avx512(a, b) };
+        }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { fma_f32_avx2(a, b) };
         }
@@ -726,6 +1035,43 @@ unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 
     let combined = _mm256_add_ps(acc0, acc1);
     let mut total = hsum256_ps(combined);
+
+    while i < len {
+        total += a[i] * b[i];
+        i += 1;
+    }
+
+    total
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn fma_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len();
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut i = 0;
+
+    while i + 32 <= len {
+        let a0 = _mm512_loadu_ps(a.as_ptr().add(i));
+        let b0 = _mm512_loadu_ps(b.as_ptr().add(i));
+        acc0 = _mm512_fmadd_ps(a0, b0, acc0);
+        let a1 = _mm512_loadu_ps(a.as_ptr().add(i + 16));
+        let b1 = _mm512_loadu_ps(b.as_ptr().add(i + 16));
+        acc1 = _mm512_fmadd_ps(a1, b1, acc1);
+        i += 32;
+    }
+
+    while i + 16 <= len {
+        let a0 = _mm512_loadu_ps(a.as_ptr().add(i));
+        let b0 = _mm512_loadu_ps(b.as_ptr().add(i));
+        acc0 = _mm512_fmadd_ps(a0, b0, acc0);
+        i += 16;
+    }
+
+    let combined = _mm512_add_ps(acc0, acc1);
+    let mut total = _mm512_reduce_add_ps(combined);
 
     while i < len {
         total += a[i] * b[i];
