@@ -56,6 +56,9 @@ pub fn gemv_packed_tiled<T: PackedWord>(
         *o = 0.0;
     }
 
+    // Allocate micro-kernel buffer once (outside K and M loops)
+    let mut row_bufs: MicroKernelBuf = [[0.0f32; KC]; MR];
+
     // Process K in cache blocks
     let mut k_offset = 0;
     while k_offset < k {
@@ -73,6 +76,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
                 k_offset,
                 k_end,
                 k_packed,
+                &mut row_bufs,
             );
             row += MR;
         }
@@ -106,7 +110,11 @@ pub fn gemv_packed_tiled<T: PackedWord>(
 // ============================================================
 
 /// Generic micro-kernel: unpack weights, then call type-specific FMA.
+/// Micro-kernel buffer passed by caller to avoid allocation in inner loop.
+type MicroKernelBuf = [[f32; KC]; MR];
+
 #[inline]
+
 fn micro_kernel<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
@@ -115,14 +123,15 @@ fn micro_kernel<T: PackedWord>(
     k_start: usize,
     k_end: usize,
     k_packed: usize,
+    row_bufs: &mut MicroKernelBuf,
 ) {
     debug_assert_eq!(output.len(), MR);
 
     // Unpack MR rows of weights into contiguous buffers
     let k_block = k_end - k_start;
-    let mut row_bufs = Box::new([[0.0f32; KC]; MR]);
 
     for r in 0..MR {
+        row_bufs[r].fill(0.0);
         let row = start_row + r;
         let row_offset = row * k_packed;
         for kk in k_start..k_end {
@@ -139,7 +148,7 @@ fn micro_kernel<T: PackedWord>(
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             unsafe {
-                micro_kernel_avx2(&row_bufs, activation, output, k_block);
+                micro_kernel_avx2(row_bufs, activation, output, k_block);
             }
             return;
         }
@@ -227,6 +236,9 @@ pub fn gemv_u8x4_tiled(
         *o = 0.0;
     }
 
+    // Allocate buffer once (outside loops)
+    let mut row_bufs: [[f32; KC]; MR] = [[0.0f32; KC]; MR];
+
     let mut k_offset = 0;
     while k_offset < k {
         let k_end = (k_offset + KC).min(k);
@@ -235,8 +247,8 @@ pub fn gemv_u8x4_tiled(
         let mut row = 0;
         while row + MR <= m {
             // Unpack MR rows of int8→f32
-            let mut row_bufs = Box::new([[0.0f32; KC]; MR]);
             for r in 0..MR {
+                row_bufs[r].fill(0.0);
                 let row_idx = row + r;
                 let row_off = row_idx * k_packed;
                 for kk in k_offset..k_end {
@@ -323,14 +335,15 @@ pub fn gemv_f16x2_tiled(
     }
 
     if is_x86_feature_detected!("f16c") {
+        let mut row_bufs: [[f32; KC]; MR] = [[0.0f32; KC]; MR];
         let mut k_offset = 0;
         while k_offset < k {
             let k_end = (k_offset + KC).min(k);
 
             let mut row = 0;
             while row + MR <= m {
-                let mut row_bufs = Box::new([[0.0f32; KC]; MR]);
                 for r in 0..MR {
+                    row_bufs[r].fill(0.0);
                     let row_idx = row + r;
                     let row_off = row_idx * k_packed;
                     for kk in k_offset..k_end {
@@ -398,14 +411,15 @@ pub fn gemv_u4x8_tiled(
     }
 
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        let mut row_bufs: [[f32; KC]; MR] = [[0.0f32; KC]; MR];
         let mut k_offset = 0;
         while k_offset < k {
             let k_end = (k_offset + KC).min(k);
 
             let mut row = 0;
             while row + MR <= m {
-                let mut row_bufs = Box::new([[0.0f32; KC]; MR]);
                 for r in 0..MR {
+                    row_bufs[r].fill(0.0);
                     let row_idx = row + r;
                     let row_off = row_idx * k_packed;
                     for kk in k_offset..k_end {
