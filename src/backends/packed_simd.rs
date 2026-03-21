@@ -755,33 +755,33 @@ pub fn gemm_packed_batched<T: PackedWord>(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
-    let scale = weights.scale();
-    let zero = weights.zero();
 
     // Validate output vector lengths (parallel path uses unsafe raw pointers)
     for o in outputs.iter() {
         assert!(o.len() >= m, "output vector length {} < m={}", o.len(), m);
     }
 
-    // Process each weight row once, compute dot products with all N inputs
+    // Process each weight row once, compute dot products with all N inputs.
+    // Uses per-row scale/zero for correct per-channel quantization.
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        // Store as usize for Send+Sync safety (each row writes to distinct positions)
         let out_addrs: Vec<usize> = outputs
             .iter_mut()
             .map(|o| o.as_mut_ptr() as usize)
             .collect();
+        let k_items = T::ITEMS;
 
         (0..m).into_par_iter().for_each(|row| {
-            // Unpack this row once
+            let scale = weights.scale_for_row(row);
+            let zero = weights.zero_for_row(row);
             let mut unpack_buf = vec![0.0f32; k];
             let row_offset = row * k_packed;
             for p in 0..k_packed {
                 let word = weights.as_packed()[row_offset + p];
                 let unpacked = word.unpack_to_f32();
-                let base = p * T::ITEMS;
-                for j in 0..T::ITEMS {
+                let base = p * k_items;
+                for j in 0..k_items {
                     let idx = base + j;
                     if idx < k {
                         unpack_buf[idx] = unpacked.as_ref()[j];
@@ -789,7 +789,6 @@ pub fn gemm_packed_batched<T: PackedWord>(
                 }
             }
 
-            // Dot product with all N input vectors — write via raw pointer
             for (bi, input) in batch_inputs.iter().enumerate() {
                 let acc = fma_f32_slice(&unpack_buf, input);
                 unsafe {
@@ -803,6 +802,8 @@ pub fn gemm_packed_batched<T: PackedWord>(
     {
         let mut unpack_buf = vec![0.0f32; k];
         for row in 0..m {
+            let scale = weights.scale_for_row(row);
+            let zero = weights.zero_for_row(row);
             let row_offset = row * k_packed;
             for p in 0..k_packed {
                 let word = weights.as_packed()[row_offset + p];
