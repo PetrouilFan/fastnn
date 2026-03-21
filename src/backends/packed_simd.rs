@@ -689,6 +689,9 @@ fn fma_f32_slice(a: &[f32], b: &[f32]) -> f32 {
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
+        if is_x86_feature_detected!("avx512f") {
+            return unsafe { fma_f32_avx512(a, b) };
+        }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { fma_f32_avx2(a, b) };
         }
@@ -734,6 +737,43 @@ unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 
     let combined = _mm256_add_ps(acc0, acc1);
     let mut total = hsum256_ps(combined);
+
+    while i < len {
+        total += a[i] * b[i];
+        i += 1;
+    }
+
+    total
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn fma_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len();
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut i = 0;
+
+    while i + 32 <= len {
+        let a0 = _mm512_loadu_ps(a.as_ptr().add(i));
+        let b0 = _mm512_loadu_ps(b.as_ptr().add(i));
+        acc0 = _mm512_fmadd_ps(a0, b0, acc0);
+        let a1 = _mm512_loadu_ps(a.as_ptr().add(i + 16));
+        let b1 = _mm512_loadu_ps(b.as_ptr().add(i + 16));
+        acc1 = _mm512_fmadd_ps(a1, b1, acc1);
+        i += 32;
+    }
+
+    while i + 16 <= len {
+        let a0 = _mm512_loadu_ps(a.as_ptr().add(i));
+        let b0 = _mm512_loadu_ps(b.as_ptr().add(i));
+        acc0 = _mm512_fmadd_ps(a0, b0, acc0);
+        i += 16;
+    }
+
+    let combined = _mm512_add_ps(acc0, acc1);
+    let mut total = _mm512_reduce_add_ps(combined);
 
     while i < len {
         total += a[i] * b[i];
