@@ -84,7 +84,41 @@ fn gemv_u8x4_dispatch(
     let k_packed = k.div_ceil(4);
     let weights_u32 = weights.as_u32();
 
-    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+    if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let rows_per_chunk = (65536 / (k_packed * 4)).clamp(1, 64);
+            output
+                .par_chunks_mut(rows_per_chunk)
+                .enumerate()
+                .for_each(|(chunk_idx, out_chunk)| {
+                    let start_row = chunk_idx * rows_per_chunk;
+                    for (local_row, out) in out_chunk.iter_mut().enumerate() {
+                        let row = start_row + local_row;
+                        let dot = unsafe {
+                            gemv_row_u8x4_avx512(
+                                weights_u32,
+                                activation,
+                                row * k_packed,
+                                k,
+                                k_packed,
+                            )
+                        };
+                        *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+                    }
+                });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for row in 0..m {
+                let dot = unsafe {
+                    gemv_row_u8x4_avx512(weights_u32, activation, row * k_packed, k, k_packed)
+                };
+                output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            }
+        }
+    } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -184,6 +218,79 @@ unsafe fn gemv_row_u8x4_avx2(
     let mut total = hsum256_ps(acc);
 
     // Scalar tail for remaining packed words (1 at a time = 4 values)
+    while p < k_packed && act_idx < k {
+        let w = weights_u32[row_offset + p];
+        let bytes = w.to_le_bytes();
+        for j in 0..4 {
+            let idx = act_idx + j;
+            if idx < k {
+                total += (bytes[j] as i8) as f32 * activation[idx];
+            }
+        }
+        p += 1;
+        act_idx += 4;
+    }
+
+    total
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512bw")]
+#[inline]
+unsafe fn gemv_row_u8x4_avx512(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+) -> f32 {
+    let mut acc0 = _mm512_setzero_ps();
+    let mut p = 0;
+    let mut act_idx = 0;
+
+    // Process 4 u32 words at a time (16 int8 → 16 f32) using AVX512BW for byte ops
+    while p + 4 <= k_packed && act_idx + 16 <= k {
+        if p + 8 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 8) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
+        let w2 = weights_u32[row_offset + p + 2];
+        let w3 = weights_u32[row_offset + p + 3];
+
+        // Pack 16 bytes from 4 u32 words into a 128-bit register
+        let bytes = _mm_set_epi32(w3 as i32, w2 as i32, w1 as i32, w0 as i32);
+        // Widen signed int8 → int32, then convert to f32
+        let i32x16 = _mm512_cvtepi8_epi32(bytes);
+        let weight_f32 = _mm512_cvtepi32_ps(i32x16);
+
+        let act = _mm512_loadu_ps(activation.as_ptr().add(act_idx));
+        acc0 = _mm512_fmadd_ps(weight_f32, act, acc0);
+
+        p += 4;
+        act_idx += 16;
+    }
+
+    let mut total = _mm512_reduce_add_ps(acc0);
+
+    // 2-word tail: 8 int8 → 8 f32 (scalar)
+    while p + 2 <= k_packed && act_idx + 8 <= k {
+        for word_off in 0..2 {
+            let w = weights_u32[row_offset + p + word_off];
+            let bytes = w.to_le_bytes();
+            for j in 0..4 {
+                total += (bytes[j] as i8) as f32 * activation[act_idx + word_off * 4 + j];
+            }
+        }
+        p += 2;
+        act_idx += 8;
+    }
+
+    // Scalar tail for remaining packed words
     while p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
         let bytes = w.to_le_bytes();
