@@ -231,6 +231,20 @@ unsafe fn fast_log_avx512(x: __m512) -> __m512 {
     _mm512_insertf32x8(result_lo, result_hi, 1)
 }
 
+/// Horizontal sum of __m256 — used by softmax and other AVX2 kernels.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn hsum256_ps(v: __m256) -> f32 {
+    let hi128 = _mm256_extractf128_ps(v, 1);
+    let lo128 = _mm256_castps256_ps128(v);
+    let sum128 = _mm_add_ps(lo128, hi128);
+    let shuf = _mm_shuffle_ps(sum128, sum128, 0x0E);
+    let sums = _mm_add_ps(sum128, shuf);
+    let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
+    _mm_cvtss_f32(_mm_add_ss(sums, shuf2))
+}
+
 // Parallel SIMD kernels - AVX2 version
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -7025,7 +7039,7 @@ fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let dim_size = x_shape[dim] as usize;
 
-    if dim == ndim - 1 && x.is_contiguous() && dim_size > 32 {
+    if dim == ndim - 1 && x.is_contiguous() {
         return vec![softmax_last_dim_simd(x, dim_size)];
     }
 
@@ -7081,6 +7095,16 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                                 max_vec = _mm256_max_ps(max_vec, vec);
                                 i += 8;
                             }
+                            // Also handle 4-wide tail for small dims
+                            if i + 4 <= dim_size {
+                                let vec128 = _mm_loadu_ps(x_row.as_ptr().add(i));
+                                let hi = _mm256_extractf128_ps(max_vec, 1);
+                                let lo = _mm256_castps256_ps128(max_vec);
+                                let merged_lo = _mm_max_ps(lo, vec128);
+                                max_vec =
+                                    _mm256_insertf128_ps(_mm256_castps128_ps256(merged_lo), hi, 1);
+                                i += 4;
+                            }
                             let mut max_arr = [0.0f32; 8];
                             _mm256_storeu_ps(max_arr.as_mut_ptr(), max_vec);
                             for j in 0..8 {
@@ -7104,16 +7128,74 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                     }
                 }
 
+                // Vectorized exp and sum for small dims
                 let mut sum_exp = 0.0f32;
 
-                for j in 0..dim_size {
-                    sum_exp += (x_row[j] - max_val).exp();
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        unsafe {
+                            let max_vec = _mm256_set1_ps(max_val);
+                            let mut sum_vec = _mm256_setzero_ps();
+                            let mut j = 0;
+                            while j + 8 <= dim_size {
+                                let x_vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
+                                let shifted = _mm256_sub_ps(x_vec, max_vec);
+                                let exp_vec = fast_exp_avx2(shifted);
+                                sum_vec = _mm256_add_ps(sum_vec, exp_vec);
+                                j += 8;
+                            }
+                            sum_exp = hsum256_ps(sum_vec);
+                            for j2 in j..dim_size {
+                                sum_exp += (x_row[j2] - max_val).exp();
+                            }
+                        }
+                    } else {
+                        for j in 0..dim_size {
+                            sum_exp += (x_row[j] - max_val).exp();
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for j in 0..dim_size {
+                        sum_exp += (x_row[j] - max_val).exp();
+                    }
                 }
 
                 let inv_sum = 1.0 / sum_exp;
 
-                for j in 0..dim_size {
-                    out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                // Vectorized exp and multiply for output
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        unsafe {
+                            let max_vec = _mm256_set1_ps(max_val);
+                            let inv_vec = _mm256_set1_ps(inv_sum);
+                            let mut j = 0;
+                            while j + 8 <= dim_size {
+                                let x_vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
+                                let shifted = _mm256_sub_ps(x_vec, max_vec);
+                                let exp_vec = fast_exp_avx2(shifted);
+                                let result = _mm256_mul_ps(exp_vec, inv_vec);
+                                _mm256_storeu_ps(out_row.as_mut_ptr().add(j), result);
+                                j += 8;
+                            }
+                            for j2 in j..dim_size {
+                                out_row[j2] = (x_row[j2] - max_val).exp() * inv_sum;
+                            }
+                        }
+                    } else {
+                        for j in 0..dim_size {
+                            out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for j in 0..dim_size {
+                        out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                    }
                 }
             });
     }
@@ -7130,18 +7212,106 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
             let out_row = &mut out_slice[row_start..row_start + dim_size];
 
             let mut max_val = f32::MIN;
-            for j in 0..dim_size {
-                max_val = max_val.max(x_row[j]);
+
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let mut max_vec = _mm256_set1_ps(f32::MIN);
+                        let mut j = 0;
+                        while j + 8 <= dim_size {
+                            let vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
+                            max_vec = _mm256_max_ps(max_vec, vec);
+                            j += 8;
+                        }
+                        let mut max_arr = [0.0f32; 8];
+                        _mm256_storeu_ps(max_arr.as_mut_ptr(), max_vec);
+                        for k in 0..8 {
+                            max_val = max_val.max(max_arr[k]);
+                        }
+                        for k in j..dim_size {
+                            max_val = max_val.max(x_row[k]);
+                        }
+                    }
+                } else {
+                    for j in 0..dim_size {
+                        max_val = max_val.max(x_row[j]);
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for j in 0..dim_size {
+                    max_val = max_val.max(x_row[j]);
+                }
             }
 
             let mut sum_exp = 0.0f32;
-            for j in 0..dim_size {
-                sum_exp += (x_row[j] - max_val).exp();
+
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let max_vec = _mm256_set1_ps(max_val);
+                        let mut sum_vec = _mm256_setzero_ps();
+                        let mut j = 0;
+                        while j + 8 <= dim_size {
+                            let x_vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
+                            let shifted = _mm256_sub_ps(x_vec, max_vec);
+                            let exp_vec = fast_exp_avx2(shifted);
+                            sum_vec = _mm256_add_ps(sum_vec, exp_vec);
+                            j += 8;
+                        }
+                        sum_exp = hsum256_ps(sum_vec);
+                        for j2 in j..dim_size {
+                            sum_exp += (x_row[j2] - max_val).exp();
+                        }
+                    }
+                } else {
+                    for j in 0..dim_size {
+                        sum_exp += (x_row[j] - max_val).exp();
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for j in 0..dim_size {
+                    sum_exp += (x_row[j] - max_val).exp();
+                }
             }
 
             let inv_sum = 1.0 / sum_exp;
-            for j in 0..dim_size {
-                out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        let max_vec = _mm256_set1_ps(max_val);
+                        let inv_vec = _mm256_set1_ps(inv_sum);
+                        let mut j = 0;
+                        while j + 8 <= dim_size {
+                            let x_vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
+                            let shifted = _mm256_sub_ps(x_vec, max_vec);
+                            let exp_vec = fast_exp_avx2(shifted);
+                            let result = _mm256_mul_ps(exp_vec, inv_vec);
+                            _mm256_storeu_ps(out_row.as_mut_ptr().add(j), result);
+                            j += 8;
+                        }
+                        for j2 in j..dim_size {
+                            out_row[j2] = (x_row[j2] - max_val).exp() * inv_sum;
+                        }
+                    }
+                } else {
+                    for j in 0..dim_size {
+                        out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for j in 0..dim_size {
+                    out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                }
             }
         }
     }
