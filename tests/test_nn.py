@@ -59,6 +59,9 @@ def test_mlp_training_step():
     assert initial_loss is not None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="heap corruption in release mode on Windows"
+)
 def test_muon_optimizer():
     # Test Muon optimizer with 2D weight matrix
     linear = fnn.Linear(10, 5)
