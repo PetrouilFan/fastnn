@@ -114,7 +114,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
 type MicroKernelBuf = [[f32; KC]; MR];
 
 #[inline]
-
+#[allow(clippy::too_many_arguments)]
 fn micro_kernel<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
