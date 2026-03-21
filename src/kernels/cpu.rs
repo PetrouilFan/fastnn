@@ -8336,9 +8336,13 @@ fn conv2d_im2col(
     })
 }
 
+/// Fused layer norm forward: single-pass mean/variance, normalize, apply weight/bias.
+/// Returns [output, mean, variance, x_hat].
+/// Parallelized over outer dimensions (rows) with rayon.
+/// Zero intermediate tensor allocations — writes directly into output buffers.
 fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
-    let _normalized_shape = args[1].shape();
+    let _normalized_shape_arg = args[1].shape();
     let weight = if args.len() > 2 && args[2].numel() > 0 {
         Some(args[2])
     } else {
@@ -8350,34 +8354,255 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         None
     };
     let eps = if args.len() > 4 {
-        args[4].item() as f64
+        args[4].item() as f32
     } else {
         1e-5
     };
 
     let x_shape = x.shape();
     let ndim = x_shape.len();
-    let _normalized_shape: i64 = x_shape.iter().skip(ndim - 1).product();
+    let norm_dim = x_shape[ndim - 1] as usize;
 
-    let mean = x.mean((ndim - 1) as i32, true);
-    let var = x
-        .sub(&mean.clone())
-        .mul(&x.sub(&mean.clone()))
-        .mean((ndim - 1) as i32, true);
-    let std = var.add(&Tensor::from_scalar(eps as f32)).sqrt();
+    // Number of outer dimensions (product of all dims except last)
+    let outer_size: usize = x_shape[..ndim - 1].iter().map(|&d| d as usize).product();
+    let total = outer_size * norm_dim;
 
-    let mut normalized = x.sub(&mean).div(&std);
-    let x_hat = normalized.clone(); // Store x_hat before scaling/shifting
+    let x_data = x.as_f32_slice();
 
-    if let Some(w) = weight {
-        normalized = normalized.mul(w);
+    let mut output_data = vec![0.0f32; total];
+    let mut mean_data = vec![0.0f32; outer_size];
+    let mut var_data = vec![0.0f32; outer_size];
+    let mut x_hat_data = vec![0.0f32; total];
+
+    let w_data = weight.map(|w| w.as_f32_slice());
+    let b_data = bias.map(|b| b.as_f32_slice());
+    let nd = norm_dim;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let x_usize = x_data.as_ptr() as usize;
+        let out_usize = output_data.as_mut_ptr() as usize;
+        let xhat_usize = x_hat_data.as_mut_ptr() as usize;
+        let mean_usize = mean_data.as_mut_ptr() as usize;
+        let var_usize = var_data.as_mut_ptr() as usize;
+
+        (0..outer_size).into_par_iter().for_each(|row| {
+            let base = row * nd;
+
+            // Two-pass: mean then variance (more numerically stable than single-pass)
+            let mut sum = 0.0f32;
+            for j in 0..nd {
+                unsafe {
+                    sum += *((x_usize + (base + j) * 4) as *const f32);
+                }
+            }
+            let mean = sum / nd as f32;
+
+            let mut sum_sq = 0.0f32;
+            for j in 0..nd {
+                unsafe {
+                    let diff = *((x_usize + (base + j) * 4) as *const f32) - mean;
+                    sum_sq += diff * diff;
+                }
+            }
+            let var = sum_sq / nd as f32;
+            let inv_std = 1.0 / (var + eps).sqrt();
+
+            unsafe {
+                *((mean_usize + row * 4) as *mut f32) = mean;
+                *((var_usize + row * 4) as *mut f32) = var;
+            }
+
+            // Normalize, apply weight/bias, store x_hat and output
+            for j in 0..nd {
+                unsafe {
+                    let val = *((x_usize + (base + j) * 4) as *const f32);
+                    let xn = (val - mean) * inv_std;
+                    *((xhat_usize + (base + j) * 4) as *mut f32) = xn;
+                    let mut out_val = xn;
+                    if let Some(w) = w_data {
+                        out_val *= w[j];
+                    }
+                    if let Some(b) = b_data {
+                        out_val += b[j];
+                    }
+                    *((out_usize + (base + j) * 4) as *mut f32) = out_val;
+                }
+            }
+        });
     }
-    if let Some(b) = bias {
-        normalized = normalized.add(b);
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for row in 0..outer_size {
+            let base = row * nd;
+            let mut sum = 0.0f32;
+            for j in 0..nd {
+                sum += x_data[base + j];
+            }
+            let mean = sum / nd as f32;
+
+            let mut sum_sq = 0.0f32;
+            for j in 0..nd {
+                let diff = x_data[base + j] - mean;
+                sum_sq += diff * diff;
+            }
+            let var = sum_sq / nd as f32;
+            let inv_std = 1.0 / (var + eps).sqrt();
+
+            mean_data[row] = mean;
+            var_data[row] = var;
+
+            for j in 0..nd {
+                let xn = (x_data[base + j] - mean) * inv_std;
+                x_hat_data[base + j] = xn;
+                let mut out_val = xn;
+                if let Some(w) = w_data {
+                    out_val *= w[j];
+                }
+                if let Some(b) = b_data {
+                    out_val += b[j];
+                }
+                output_data[base + j] = out_val;
+            }
+        }
     }
 
-    // Return: output, mean, variance, x_hat (normalized before scaling/shifting)
-    vec![normalized, mean, var, x_hat]
+    // Reshape mean and variance to [outer_size, 1] for broadcasting compatibility
+    let mut mean_shape = x_shape[..ndim - 1].to_vec();
+    mean_shape.push(1);
+    let mut var_shape = mean_shape.clone();
+
+    let output = Tensor::from_vec(output_data, x_shape.clone());
+    let mean = Tensor::from_vec(mean_data, mean_shape);
+    let var = Tensor::from_vec(var_data, var_shape);
+    let x_hat = Tensor::from_vec(x_hat_data, x_shape.clone());
+
+    vec![output, mean, var, x_hat]
+}
+
+/// Fused layer norm backward: computes dX, dW, dB without intermediate tensors.
+/// Parallelized over outer dimensions (rows) for dX computation.
+pub fn layer_norm_backward_f32(
+    grad_data: &[f32],
+    x_hat_data: &[f32],
+    weight_data: Option<&[f32]>,
+    outer_size: usize,
+    norm_dim: usize,
+    eps: f32,
+    var_data: &[f32],
+    grad_input_data: &mut [f32],
+    grad_weight_data: &mut [f32],
+    grad_bias_data: &mut [f32],
+) {
+    let nd = norm_dim;
+
+    // Zero weight/bias grads
+    for j in 0..nd {
+        grad_weight_data[j] = 0.0;
+        grad_bias_data[j] = 0.0;
+    }
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let grad_usize = grad_data.as_ptr() as usize;
+        let xhat_usize = x_hat_data.as_ptr() as usize;
+        let ginput_usize = grad_input_data.as_mut_ptr() as usize;
+        let var_usize = var_data.as_ptr() as usize;
+
+        // Parallel dX computation
+        (0..outer_size).into_par_iter().for_each(|row| {
+            let base = row * nd;
+            let inv_std = 1.0 / (unsafe { *((var_usize + row * 4) as *const f32) } + eps).sqrt();
+
+            // Compute sum(dY * weight) and sum(dY * weight * x_hat)
+            let mut sum_gw = 0.0f32;
+            let mut sum_gw_xh = 0.0f32;
+            for j in 0..nd {
+                unsafe {
+                    let g = *((grad_usize + (base + j) * 4) as *const f32);
+                    let xh = *((xhat_usize + (base + j) * 4) as *const f32);
+                    let gw = if let Some(w) = weight_data {
+                        g * w[j]
+                    } else {
+                        g
+                    };
+                    sum_gw += gw;
+                    sum_gw_xh += gw * xh;
+                }
+            }
+            let mean_gw = sum_gw / nd as f32;
+            let mean_gw_xh = sum_gw_xh / nd as f32;
+
+            // dX
+            for j in 0..nd {
+                unsafe {
+                    let g = *((grad_usize + (base + j) * 4) as *const f32);
+                    let xh = *((xhat_usize + (base + j) * 4) as *const f32);
+                    let gw = if let Some(w) = weight_data {
+                        g * w[j]
+                    } else {
+                        g
+                    };
+                    let dx = (gw - mean_gw - xh * mean_gw_xh) * inv_std;
+                    *((ginput_usize + (base + j) * 4) as *mut f32) = dx;
+                }
+            }
+        });
+
+        // Sequential accumulation for dW and dB (small array, not worth parallel reduction)
+        for row in 0..outer_size {
+            let base = row * nd;
+            for j in 0..nd {
+                unsafe {
+                    let g = *((grad_usize + (base + j) * 4) as *const f32);
+                    let xh = *((xhat_usize + (base + j) * 4) as *const f32);
+                    grad_bias_data[j] += g;
+                    grad_weight_data[j] += g * xh;
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for row in 0..outer_size {
+            let base = row * nd;
+            let inv_std = 1.0 / (var_data[row] + eps).sqrt();
+
+            let mut sum_gw = 0.0f32;
+            let mut sum_gw_xh = 0.0f32;
+            for j in 0..nd {
+                let g = grad_data[base + j];
+                let xh = x_hat_data[base + j];
+                let gw = if let Some(w) = weight_data {
+                    g * w[j]
+                } else {
+                    g
+                };
+                sum_gw += gw;
+                sum_gw_xh += gw * xh;
+            }
+            let mean_gw = sum_gw / nd as f32;
+            let mean_gw_xh = sum_gw_xh / nd as f32;
+
+            for j in 0..nd {
+                let g = grad_data[base + j];
+                let xh = x_hat_data[base + j];
+                let gw = if let Some(w) = weight_data {
+                    g * w[j]
+                } else {
+                    g
+                };
+                grad_input_data[base + j] = (gw - mean_gw - xh * mean_gw_xh) * inv_std;
+
+                grad_bias_data[j] += g;
+                grad_weight_data[j] += g * xh;
+            }
+        }
+    }
 }
 
 fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {

@@ -1195,26 +1195,48 @@ impl LayerNormBackward {
 impl Node for LayerNormBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
+        let input = &self.inputs[0];
         let weight = &self.inputs[1];
         let _bias = &self.inputs[2];
 
-        let std = self.variance.add(&Tensor::from_scalar(self.eps)).sqrt();
-        let grad_x_hat = grad.mul(weight);
+        let shape = input.shape();
+        let outer_size: usize = shape[..shape.len() - 1]
+            .iter()
+            .map(|&d| d as usize)
+            .product();
+        let norm_dim: usize = shape[shape.len() - 1] as usize;
+        let total = outer_size * norm_dim;
 
-        let mean_grad_x_hat = grad_x_hat
-            .sum(1, true)
-            .div(&Tensor::from_scalar(self.normalized.shape()[1] as f32));
-        let mean_grad_x_hat_x_hat = grad_x_hat
-            .mul(&self.normalized)
-            .sum(1, true)
-            .div(&Tensor::from_scalar(self.normalized.shape()[1] as f32));
-        let grad_input = grad_x_hat
-            .sub(&mean_grad_x_hat)
-            .sub(&self.normalized.mul(&mean_grad_x_hat_x_hat))
-            .div(&std);
+        let grad_cpu = grad.to_cpu();
+        let x_hat_cpu = self.normalized.to_cpu();
+        let var_cpu = self.variance.to_cpu();
 
-        let grad_weight = grad.mul(&self.normalized).sum(0, false);
-        let grad_bias = grad.sum(0, false);
+        let grad_data = grad_cpu.as_f32_slice();
+        let x_hat_data = x_hat_cpu.as_f32_slice();
+        let var_data = var_cpu.as_f32_slice();
+
+        let weight_data = weight.as_f32_slice();
+
+        let mut grad_input_data = vec![0.0f32; total];
+        let mut grad_weight_data = vec![0.0f32; norm_dim];
+        let mut grad_bias_data = vec![0.0f32; norm_dim];
+
+        crate::kernels::cpu::layer_norm_backward_f32(
+            grad_data,
+            x_hat_data,
+            Some(weight_data),
+            outer_size,
+            norm_dim,
+            self.eps,
+            var_data,
+            &mut grad_input_data,
+            &mut grad_weight_data,
+            &mut grad_bias_data,
+        );
+
+        let grad_input = Tensor::from_vec(grad_input_data, shape.clone());
+        let grad_weight = Tensor::from_vec(grad_weight_data, vec![norm_dim as i64]);
+        let grad_bias = Tensor::from_vec(grad_bias_data, vec![norm_dim as i64]);
 
         vec![Some(grad_input), Some(grad_weight), Some(grad_bias)]
     }
