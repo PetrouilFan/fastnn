@@ -106,6 +106,63 @@ impl WgpuContext {
         }
     }
 
+    /// Create a WgpuContext from an existing device and queue.
+    pub fn from_device(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("packed gemv layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        WgpuContext {
+            device,
+            queue,
+            pipelines: HashMap::new(),
+            bind_group_layout,
+        }
+    }
+
     /// Get or create a compute pipeline for the given PackedWord type.
     pub fn get_or_build_pipeline<T: PackedWord>(&mut self) {
         let key = std::any::type_name::<T>().to_string();
@@ -196,7 +253,11 @@ impl WgpuContext {
 /// Initialize the global wgpu context (lazy).
 pub fn ensure_wgpu_context() {
     WGPU_CONTEXT.get_or_init(|| {
-        let ctx = pollster::block_on(WgpuContext::init());
+        // Use the GpuContext's device to ensure all buffers share the same device
+        let gpu_ctx = crate::kernels::gpu::get_context(0);
+        let device = gpu_ctx.device().clone();
+        let queue = gpu_ctx.queue().clone();
+        let ctx = WgpuContext::from_device(device, queue);
         Arc::new(Mutex::new(ctx))
     });
 }
@@ -227,6 +288,16 @@ pub fn gemv_wgpu<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
 ) -> Vec<f32> {
+    // Per-row quantized tensors require per-row scale/zero which the GPU shader
+    // does not support. Fall back to CPU tiled path for per-channel quantization.
+    if weights.is_per_channel() {
+        let shape = weights.shape();
+        let m = shape[0];
+        let mut output = vec![0.0f32; m];
+        crate::backends::packed_blas::gemv_packed_tiled(weights, activation, &mut output);
+        return output;
+    }
+
     let shape = weights.shape();
     assert!(shape.len() >= 2);
     let m = shape[0] as u32;
@@ -310,6 +381,92 @@ pub fn gemv_wgpu<T: PackedWord>(
         let raw = ctx.read_buffer(&output_buffer, output_size);
         let f32_data: &[f32] = bytemuck::cast_slice(&raw);
         f32_data.to_vec()
+    })
+}
+
+/// GPU GEMV with persistent weight buffer — avoids re-uploading weights every call.
+#[allow(clippy::too_many_arguments)]
+pub fn gemv_wgpu_persistent<T: PackedWord>(
+    ctx: &crate::kernels::gpu::GpuContext,
+    bind_group_cache: &std::sync::Arc<std::sync::Mutex<Option<wgpu::BindGroup>>>,
+    weight_buf: std::sync::Arc<wgpu::Buffer>,
+    output_buf: std::sync::Arc<wgpu::Buffer>,
+    params_buf: std::sync::Arc<wgpu::Buffer>,
+    activation_buf: std::sync::Arc<wgpu::Buffer>,
+    activation: &[f32],
+    m: u32,
+    kpacked: u32,
+    scale: f32,
+    zero: f32,
+) -> Vec<f32> {
+    with_wgpu_context(|wctx| {
+        wctx.get_or_build_pipeline::<T>();
+        let pipeline = wctx.pipelines.get(std::any::type_name::<T>()).unwrap();
+
+        // Write activation data into the cached activation buffer
+        let act_bytes: &[u8] = bytemuck::cast_slice(activation);
+        ctx.write_bytes_to_buffer(act_bytes, &activation_buf);
+
+        // Write params to the cached params buffer
+        let params = GemvParams { scale, zero, k_packed: kpacked, m };
+        let params_bytes: &[u8] = bytemuck::bytes_of(&params);
+        ctx.write_bytes_to_buffer(params_bytes, &params_buf);
+
+        // Get or create cached bind group
+        let mut bg_guard = bind_group_cache.lock().unwrap();
+        if bg_guard.is_none() {
+            *bg_guard = Some(ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gemv_persistent_bindgroup"),
+                layout: &wctx.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: weight_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: activation_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: output_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
+                ],
+            }));
+        }
+        let bind_group = bg_guard.as_ref().unwrap();
+
+        let workgroup_count = m.div_ceil(64);
+
+        // Get persistent staging buffer for readback
+        let output_size = m as usize * std::mem::size_of::<f32>();
+        let staging = ctx.ensure_staging_buffer_gpu_to_cpu(output_size);
+
+        // Single encoder: compute + copy-to-staging
+        let mut encoder = ctx.device().create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("gemv_encoder") }
+        );
+
+        {
+            let mut pass = encoder.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("gemv_pass"), timestamp_writes: None }
+            );
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(workgroup_count, 1, 1);
+        }
+
+        // Copy output to staging in the same encoder
+        encoder.copy_buffer_to_buffer(&output_buf, 0, &staging, 0, output_size as u64);
+
+        // Single submission for both compute + copy
+        ctx.queue().submit(std::iter::once(encoder.finish()));
+
+        // Map and read staging buffer
+        let slice = staging.slice(..output_size as u64);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        ctx.device().poll(wgpu::Maintain::Wait);
+        receiver.recv().unwrap().expect("Failed to map staging buffer");
+        let data = slice.get_mapped_range();
+        let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        result
     })
 }
 

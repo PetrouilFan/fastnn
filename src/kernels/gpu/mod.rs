@@ -111,6 +111,16 @@ impl GpuContext {
         }
     }
 
+    /// Get a reference to the device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// Get a reference to the queue.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
     /// Calculate bucket index for size-bucketed pooling
     /// Uses power-of-2 bucketing with 256-byte alignment
     fn get_bucket_index(size: usize) -> u32 {
@@ -189,7 +199,7 @@ impl GpuContext {
     }
 
     /// Get staging buffer for GPU to CPU transfers
-    fn ensure_staging_buffer_gpu_to_cpu(&self, size: usize) -> wgpu::Buffer {
+    pub fn ensure_staging_buffer_gpu_to_cpu(&self, size: usize) -> wgpu::Buffer {
         let mut staging_guard = self.staging_buffer_gpu_to_cpu.write();
 
         if let Some(buffer) = &*staging_guard {
@@ -268,6 +278,7 @@ impl GpuContext {
         }
     }
 
+    /// Create GPU buffer from raw bytes.
     pub fn create_gpu_buffer_from_bytes(&self, data: &[u8], label: &str) -> GpuBuffer {
         let size = data.len();
         let buffer = self.acquire_buffer(size);
@@ -305,14 +316,64 @@ impl GpuContext {
         }
     }
 
-    pub fn create_buffer(&self, size: usize, _label: &str) -> GpuBuffer {
-        let buffer = self.acquire_buffer(size);
+    /// Write bytes to an existing GPU buffer.
+    pub fn write_bytes_to_buffer(&self, data: &[u8], dest: &wgpu::Buffer) {
+        self.queue.write_buffer(dest, 0, data);
+    }
 
+    pub fn create_buffer(&self, size: usize, _label: &str) -> GpuBuffer {
+        self.create_buffer_with_usage(
+            size,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            _label,
+        )
+    }
+
+    /// Create a buffer with specific usage flags.
+    pub fn create_buffer_with_usage(
+        &self,
+        size: usize,
+        usage: wgpu::BufferUsages,
+        _label: &str,
+    ) -> GpuBuffer {
+        let aligned_size = size.next_power_of_two();
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pooled_buffer"),
+            size: aligned_size as u64,
+            usage,
+            mapped_at_creation: false,
+        });
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
         GpuBuffer {
             id,
             buffer: Arc::new(buffer),
             size,
+            device_id: self.device_id,
+        }
+    }
+
+    /// Create a uniform buffer from pod data.
+    pub fn create_uniform_buffer_from_pod<T: bytemuck::Pod>(
+        &self,
+        data: &T,
+        label: &str,
+    ) -> GpuBuffer {
+        use wgpu::util::DeviceExt;
+        let bytes = bytemuck::bytes_of(data);
+        let buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytes,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
+        GpuBuffer {
+            id,
+            buffer: Arc::new(buffer),
+            size: bytes.len(),
             device_id: self.device_id,
         }
     }
