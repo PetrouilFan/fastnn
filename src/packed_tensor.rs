@@ -24,10 +24,12 @@ pub struct PackedTensor<T: PackedWord> {
     data: Vec<T>,
     /// Logical shape in element counts (not word counts)
     shape: Vec<usize>,
-    /// Global scale factor for dequantization: real = packed * scale + zero
-    scale: f32,
-    /// Zero point for dequantization
-    zero: f32,
+    /// Scale factors for dequantization: real = packed * scale + zero.
+    /// Length 1 = global scale, length M = per-row scale (for 2D tensors).
+    scales: Vec<f32>,
+    /// Zero points for dequantization.
+    /// Length 1 = global zero, length M = per-row zero.
+    zeros: Vec<f32>,
 }
 
 impl<T: PackedWord> PackedTensor<T> {
@@ -42,8 +44,8 @@ impl<T: PackedWord> PackedTensor<T> {
         PackedTensor {
             data,
             shape: shape.to_vec(),
-            scale: 1.0,
-            zero: 0.0,
+            scales: vec![1.0],
+            zeros: vec![0.0],
         }
     }
 
@@ -82,23 +84,42 @@ impl<T: PackedWord> PackedTensor<T> {
         PackedTensor {
             data: packed,
             shape: shape.to_vec(),
-            scale,
-            zero,
+            scales: vec![scale],
+            zeros: vec![zero],
         }
     }
 
     /// Unpack all values to a Vec<f32>, applying scale and zero correction.
     pub fn to_f32_vec(&self) -> Vec<f32> {
         let numel = self.numel();
+        let k = if self.shape.len() >= 2 {
+            self.shape[1]
+        } else {
+            numel
+        };
+        let items = T::ITEMS;
         let mut result = Vec::with_capacity(numel);
+        let is_per_row = self.scales.len() > 1;
+
         for (i, word) in self.data.iter().enumerate() {
             let unpacked = word.unpack_to_f32();
             let arr = unpacked.as_ref();
-            for j in 0..T::ITEMS {
-                let elem_idx = i * T::ITEMS + j;
+            for j in 0..items {
+                let elem_idx = i * items + j;
                 if elem_idx < numel {
-                    let val = if self.scale != 1.0 || self.zero != 0.0 {
-                        arr[j] * self.scale + self.zero
+                    let row = elem_idx / k;
+                    let s = if is_per_row {
+                        self.scales[row]
+                    } else {
+                        self.scales[0]
+                    };
+                    let z = if is_per_row {
+                        self.zeros[row]
+                    } else {
+                        self.zeros[0]
+                    };
+                    let val = if s != 1.0 || z != 0.0 {
+                        arr[j] * s + z
                     } else {
                         arr[j]
                     };
@@ -127,16 +148,42 @@ impl<T: PackedWord> PackedTensor<T> {
         &self.shape
     }
 
-    /// Get the scale factor.
+    /// Get the scale factor (first element for per-row, or global).
     #[inline]
     pub fn scale(&self) -> f32 {
-        self.scale
+        self.scales[0]
     }
 
-    /// Get the zero point.
+    /// Get the zero point (first element for per-row, or global).
     #[inline]
     pub fn zero(&self) -> f32 {
-        self.zero
+        self.zeros[0]
+    }
+
+    /// Get scale for a specific row (per-row quantization).
+    #[inline]
+    pub fn scale_for_row(&self, row: usize) -> f32 {
+        if self.scales.len() == 1 {
+            self.scales[0]
+        } else {
+            self.scales[row]
+        }
+    }
+
+    /// Get zero for a specific row (per-row quantization).
+    #[inline]
+    pub fn zero_for_row(&self, row: usize) -> f32 {
+        if self.zeros.len() == 1 {
+            self.zeros[0]
+        } else {
+            self.zeros[row]
+        }
+    }
+
+    /// Whether this tensor uses per-row quantization.
+    #[inline]
+    pub fn is_per_channel(&self) -> bool {
+        self.scales.len() > 1
     }
 
     /// Get a single element as f32.
@@ -146,8 +193,16 @@ impl<T: PackedWord> PackedTensor<T> {
         let elem_idx = idx % T::ITEMS;
         let unpacked = self.data[word_idx].unpack_to_f32();
         let val = unpacked.as_ref()[elem_idx];
-        if self.scale != 1.0 || self.zero != 0.0 {
-            val * self.scale + self.zero
+        let k = if self.shape.len() >= 2 {
+            self.shape[1]
+        } else {
+            self.numel()
+        };
+        let row = idx / k;
+        let s = self.scale_for_row(row);
+        let z = self.zero_for_row(row);
+        if s != 1.0 || z != 0.0 {
+            val * s + z
         } else {
             val
         }
@@ -159,8 +214,16 @@ impl<T: PackedWord> PackedTensor<T> {
         let word_idx = idx / T::ITEMS;
         let elem_idx = idx % T::ITEMS;
         let mut arr = self.data[word_idx].unpack_to_f32();
-        let quantized = if self.scale != 1.0 || self.zero != 0.0 {
-            (val - self.zero) / self.scale
+        let k = if self.shape.len() >= 2 {
+            self.shape[1]
+        } else {
+            self.numel()
+        };
+        let row = idx / k;
+        let s = self.scale_for_row(row);
+        let z = self.zero_for_row(row);
+        let quantized = if s != 1.0 || z != 0.0 {
+            (val - z) / s
         } else {
             val
         };
@@ -215,6 +278,75 @@ impl<T: PackedWord> PackedTensor<T> {
         let scale = Self::compute_scale(data);
         Self::from_f32_slice(data, shape, scale, 0.0)
     }
+
+    /// Compute per-row scale factors for a 2D tensor.
+    /// Each row gets its own scale = max_abs_in_row / max_val.
+    pub fn compute_scales_per_channel(data: &[f32], shape: &[usize]) -> Vec<f32> {
+        if T::IS_FLOAT {
+            return vec![1.0];
+        }
+        assert!(shape.len() >= 2, "Per-channel requires 2D+ shape");
+        let m = shape[0];
+        let k = shape[1];
+        let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
+        let mut scales = Vec::with_capacity(m);
+        for row in 0..m {
+            let start = row * k;
+            let end = start + k;
+            let max_abs = data[start..end]
+                .iter()
+                .map(|v| v.abs())
+                .fold(0.0f32, f32::max);
+            scales.push(if max_abs == 0.0 {
+                1.0
+            } else {
+                max_abs / max_val
+            });
+        }
+        scales
+    }
+
+    /// Create from f32 slice with per-row quantization (better accuracy for heterogeneous distributions).
+    pub fn from_f32_per_channel(data: &[f32], shape: &[usize]) -> Self {
+        let numel: usize = shape.iter().product();
+        assert_eq!(data.len(), numel);
+
+        let scales = Self::compute_scales_per_channel(data, shape);
+        let m = if shape.len() >= 2 { shape[0] } else { 1 };
+        let k = if shape.len() >= 2 { shape[1] } else { numel };
+
+        let packed_len = numel.div_ceil(T::ITEMS);
+        let mut packed = zeroed_vec(packed_len);
+
+        for chunk_idx in 0..packed_len {
+            let mut arr = T::Array::default();
+            let arr_ref = arr.as_mut();
+            for i in 0..T::ITEMS {
+                let elem_idx = chunk_idx * T::ITEMS + i;
+                if elem_idx < numel {
+                    let row = elem_idx / k;
+                    let s = if scales.len() == 1 {
+                        scales[0]
+                    } else {
+                        scales[row]
+                    };
+                    arr_ref[i] = if s != 1.0 {
+                        data[elem_idx] / s
+                    } else {
+                        data[elem_idx]
+                    };
+                }
+            }
+            packed[chunk_idx] = T::pack_from_f32(arr);
+        }
+
+        PackedTensor {
+            data: packed,
+            shape: shape.to_vec(),
+            scales,
+            zeros: vec![0.0; m],
+        }
+    }
 }
 
 impl<T: PackedWord> Clone for PackedTensor<T> {
@@ -222,8 +354,8 @@ impl<T: PackedWord> Clone for PackedTensor<T> {
         PackedTensor {
             data: self.data.clone(),
             shape: self.shape.clone(),
-            scale: self.scale,
-            zero: self.zero,
+            scales: self.scales.clone(),
+            zeros: self.zeros.clone(),
         }
     }
 }
@@ -233,8 +365,8 @@ impl<T: PackedWord> std::fmt::Debug for PackedTensor<T> {
         f.debug_struct("PackedTensor")
             .field("shape", &self.shape)
             .field("packed_len", &self.data.len())
-            .field("scale", &self.scale)
-            .field("zero", &self.zero)
+            .field("scales", &self.scales)
+            .field("zeros", &self.zeros)
             .finish()
     }
 }

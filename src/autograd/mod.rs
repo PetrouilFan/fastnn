@@ -1195,26 +1195,48 @@ impl LayerNormBackward {
 impl Node for LayerNormBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
+        let input = &self.inputs[0];
         let weight = &self.inputs[1];
         let _bias = &self.inputs[2];
 
-        let std = self.variance.add(&Tensor::from_scalar(self.eps)).sqrt();
-        let grad_x_hat = grad.mul(weight);
+        let shape = input.shape();
+        let outer_size: usize = shape[..shape.len() - 1]
+            .iter()
+            .map(|&d| d as usize)
+            .product();
+        let norm_dim: usize = shape[shape.len() - 1] as usize;
+        let total = outer_size * norm_dim;
 
-        let mean_grad_x_hat = grad_x_hat
-            .sum(1, true)
-            .div(&Tensor::from_scalar(self.normalized.shape()[1] as f32));
-        let mean_grad_x_hat_x_hat = grad_x_hat
-            .mul(&self.normalized)
-            .sum(1, true)
-            .div(&Tensor::from_scalar(self.normalized.shape()[1] as f32));
-        let grad_input = grad_x_hat
-            .sub(&mean_grad_x_hat)
-            .sub(&self.normalized.mul(&mean_grad_x_hat_x_hat))
-            .div(&std);
+        let grad_cpu = grad.to_cpu();
+        let x_hat_cpu = self.normalized.to_cpu();
+        let var_cpu = self.variance.to_cpu();
 
-        let grad_weight = grad.mul(&self.normalized).sum(0, false);
-        let grad_bias = grad.sum(0, false);
+        let grad_data = grad_cpu.as_f32_slice();
+        let x_hat_data = x_hat_cpu.as_f32_slice();
+        let var_data = var_cpu.as_f32_slice();
+
+        let weight_data = weight.as_f32_slice();
+
+        let mut grad_input_data = vec![0.0f32; total];
+        let mut grad_weight_data = vec![0.0f32; norm_dim];
+        let mut grad_bias_data = vec![0.0f32; norm_dim];
+
+        crate::kernels::cpu::layer_norm_backward_f32(
+            grad_data,
+            x_hat_data,
+            Some(weight_data),
+            outer_size,
+            norm_dim,
+            self.eps,
+            var_data,
+            &mut grad_input_data,
+            &mut grad_weight_data,
+            &mut grad_bias_data,
+        );
+
+        let grad_input = Tensor::from_vec(grad_input_data, shape.clone());
+        let grad_weight = Tensor::from_vec(grad_weight_data, vec![norm_dim as i64]);
+        let grad_bias = Tensor::from_vec(grad_bias_data, vec![norm_dim as i64]);
 
         vec![Some(grad_input), Some(grad_weight), Some(grad_bias)]
     }
@@ -1295,14 +1317,14 @@ impl CrossEntropyBackward {
 
 impl Node for CrossEntropyBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let _grad = grad_outputs[0].clone().unwrap();
+        let grad_output_tensor = grad_outputs[0].clone().unwrap();
+        let grad_out = grad_output_tensor.item();
 
         let logits = &self.logits;
         let targets = &self.targets;
         let batch_size = logits.shape()[0] as usize;
         let num_classes = logits.shape()[1] as usize;
 
-        // Move GPU tensors to CPU for computation
         let logits_cpu = logits.to_cpu();
         let targets_cpu = targets.to_cpu();
 
@@ -1311,51 +1333,21 @@ impl Node for CrossEntropyBackward {
 
         let mut grad_logits_data = vec![0.0f32; batch_size * num_classes];
 
-        for (b, target_val) in targets_data.iter().take(batch_size).enumerate() {
-            let target_class = *target_val as usize;
-            let base_idx = b * num_classes;
-
-            let mut max_logit = f32::MIN;
-            for c in 0..num_classes {
-                let val = logits_data[base_idx + c];
-                if val > max_logit {
-                    max_logit = val;
-                }
-            }
-
-            let mut sum_exp = 0.0f32;
-            for c in 0..num_classes {
-                sum_exp += (logits_data[base_idx + c] - max_logit).exp();
-            }
-
-            let target_prob = (logits_data[base_idx + target_class] - max_logit).exp() / sum_exp;
-
-            grad_logits_data[base_idx + target_class] = target_prob - 1.0;
-
-            for c in 0..num_classes {
-                if c != target_class {
-                    let prob = (logits_data[base_idx + c] - max_logit).exp() / sum_exp;
-                    grad_logits_data[base_idx + c] = prob;
-                }
-            }
-        }
-
-        let scale = if self.reduction == "mean" {
-            1.0 / batch_size as f32
-        } else {
-            1.0
-        };
-
-        for v in &mut grad_logits_data {
-            *v *= scale;
-        }
+        crate::kernels::cpu::cross_entropy_backward_f32(
+            logits_data,
+            targets_data,
+            grad_out,
+            batch_size,
+            num_classes,
+            &self.reduction,
+            &mut grad_logits_data,
+        );
 
         let grad_logits = Tensor::from_vec(
             grad_logits_data,
             vec![batch_size as i64, num_classes as i64],
         );
 
-        // Move gradient back to original device if logits was on GPU
         let grad_logits = match logits.device() {
             crate::storage::Device::Wgpu(device_id) => grad_logits.to_gpu(device_id),
             _ => grad_logits,
