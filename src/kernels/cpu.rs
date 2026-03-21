@@ -7237,141 +7237,96 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let batch_size = logits.shape()[0] as usize;
     let num_classes = logits.shape()[1] as usize;
 
-    let mut total_loss = 0.0f32;
+    // Fused log-sum-exp forward pass, parallelized over batch rows.
+    // For each row i:
+    //   max_val = max(logits[i])
+    //   sum_exp = sum(exp(logits[i][j] - max_val))
+    //   loss[i] = -(logits[i][target[i]] - max_val - ln(sum_exp))
     let mut losses = vec![0.0f32; batch_size];
 
-    for b in 0..batch_size {
-        let base_idx = b * num_classes;
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let logits_usize = logits_data.as_ptr() as usize;
+        let targets_usize = targets_data.as_ptr() as usize;
+        let losses_usize = losses.as_mut_ptr() as usize;
+        let nc = num_classes;
 
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        {
-            use std::arch::x86_64::*;
-            let mut max_logit = f32::NEG_INFINITY;
-            let mut i = 0;
+        (0..batch_size).into_par_iter().for_each(|b| {
+            let base = b * nc;
+            let mut max_val = f32::NEG_INFINITY;
+            let mut j = 0;
 
-            if is_x86_feature_detected!("avx2") {
+            // Find max with 4-unroll
+            while j + 4 <= nc {
                 unsafe {
-                    let ptr = logits_data.as_ptr().add(base_idx);
-                    let mut max_vec = _mm256_set1_ps(f32::NEG_INFINITY);
-                    for _ in 0..(num_classes / 8) {
-                        let vec = _mm256_loadu_ps(ptr.add(i));
-                        max_vec = _mm256_max_ps(max_vec, vec);
-                        i += 8;
-                    }
-                    let mut max_arr = [0.0f32; 8];
-                    _mm256_storeu_ps(max_arr.as_mut_ptr(), max_vec);
-                    for j in 0..8 {
-                        if max_arr[j] > max_logit {
-                            max_logit = max_arr[j];
-                        }
-                    }
+                    let v0 = *((logits_usize + (base + j) * 4) as *const f32);
+                    let v1 = *((logits_usize + (base + j + 1) * 4) as *const f32);
+                    let v2 = *((logits_usize + (base + j + 2) * 4) as *const f32);
+                    let v3 = *((logits_usize + (base + j + 3) * 4) as *const f32);
+                    max_val = max_val.max(v0).max(v1).max(v2).max(v3);
                 }
+                j += 4;
             }
-            for j in i..num_classes {
-                let val = logits_data[base_idx + j];
-                if val > max_logit {
-                    max_logit = val;
+            while j < nc {
+                unsafe {
+                    max_val = max_val.max(*((logits_usize + (base + j) * 4) as *const f32));
                 }
+                j += 1;
             }
 
-            // If max_logit is -inf (all logits are -inf), loss should be 0 or handled
-            if max_logit.is_infinite() {
-                losses[b] = 0.0;
-                continue;
+            // sum_exp with 4-unroll
+            let mut sum_exp = 0.0f32;
+            j = 0;
+            while j + 4 <= nc {
+                unsafe {
+                    sum_exp += (*((logits_usize + (base + j) * 4) as *const f32) - max_val).exp();
+                    sum_exp +=
+                        (*((logits_usize + (base + j + 1) * 4) as *const f32) - max_val).exp();
+                    sum_exp +=
+                        (*((logits_usize + (base + j + 2) * 4) as *const f32) - max_val).exp();
+                    sum_exp +=
+                        (*((logits_usize + (base + j + 3) * 4) as *const f32) - max_val).exp();
+                }
+                j += 4;
+            }
+            while j < nc {
+                unsafe {
+                    sum_exp += (*((logits_usize + (base + j) * 4) as *const f32) - max_val).exp();
+                }
+                j += 1;
+            }
+
+            let target_class = unsafe { *((targets_usize + b * 4) as *const f32) } as usize;
+            let log_sum_exp = sum_exp.ln();
+            let class_logit =
+                unsafe { *((logits_usize + (base + target_class) * 4) as *const f32) };
+            let loss = log_sum_exp + max_val - class_logit;
+            unsafe {
+                *((losses_usize + b * 4) as *mut f32) = if loss.is_finite() { loss } else { 0.0 };
+            }
+        });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for b in 0..batch_size {
+            let base = b * num_classes;
+            let mut max_val = f32::NEG_INFINITY;
+            for j in 0..num_classes {
+                max_val = max_val.max(logits_data[base + j]);
             }
 
             let mut sum_exp = 0.0f32;
-            i = 0;
-            if is_x86_feature_detected!("avx2") {
-                unsafe {
-                    let ptr = logits_data.as_ptr().add(base_idx);
-                    let mut sum_vec = _mm256_setzero_ps();
-                    for _ in 0..(num_classes / 8) {
-                        let vec = _mm256_loadu_ps(ptr.add(i));
-                        let diff = _mm256_sub_ps(vec, _mm256_set1_ps(max_logit));
-                        let x = std::slice::from_raw_parts(&diff as *const _ as *const f32, 8);
-                        let mut exp_res = [0.0f32; 8];
-                        for k in 0..8 {
-                            exp_res[k] = x[k].exp();
-                        }
-                        let exp_vec = _mm256_loadu_ps(exp_res.as_ptr());
-                        sum_vec = _mm256_add_ps(sum_vec, exp_vec);
-                        i += 8;
-                    }
-                    let mut sum_arr = [0.0f32; 8];
-                    _mm256_storeu_ps(sum_arr.as_mut_ptr(), sum_vec);
-                    for j in 0..8 {
-                        sum_exp += sum_arr[j];
-                    }
-                }
+            for j in 0..num_classes {
+                sum_exp += (logits_data[base + j] - max_val).exp();
             }
-            for j in i..num_classes {
-                sum_exp += (logits_data[base_idx + j] - max_logit).exp();
-            }
-
-            // Check sum_exp validity
-            if sum_exp.is_nan() || sum_exp.is_infinite() || sum_exp == 0.0 {
-                losses[b] = 0.0;
-                continue;
-            }
-
-            let log_sum_exp = sum_exp.ln();
 
             let target_class = targets_data[b] as usize;
-            let class_logit = logits_data[base_idx + target_class];
-
-            // Add max_logit back (subtracted before exp for numerical stability)
-            losses[b] = log_sum_exp + max_logit - class_logit;
-
-            // Final check for NaN/Inf
-            if losses[b].is_nan() || losses[b].is_infinite() {
-                losses[b] = 0.0;
-            }
-
-            total_loss += losses[b];
-        }
-
-        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-        {
-            let mut max_logit = f32::NEG_INFINITY;
-            for c in 0..num_classes {
-                let val = logits_data[base_idx + c];
-                if val > max_logit {
-                    max_logit = val;
-                }
-            }
-
-            // If max_logit is -inf (all logits are -inf), loss should be 0 or handled
-            if max_logit.is_infinite() {
-                losses[b] = 0.0;
-                continue;
-            }
-
-            let mut sum_exp = 0.0f32;
-            for c in 0..num_classes {
-                sum_exp += (logits_data[base_idx + c] - max_logit).exp();
-            }
-
-            // Check sum_exp validity
-            if sum_exp.is_nan() || sum_exp.is_infinite() || sum_exp == 0.0 {
-                losses[b] = 0.0;
-                continue;
-            }
-
             let log_sum_exp = sum_exp.ln();
-
-            let target_class = targets_data[b] as usize;
-            let class_logit = logits_data[base_idx + target_class];
-
-            // Add max_logit back (subtracted before exp for numerical stability)
-            losses[b] = log_sum_exp + max_logit - class_logit;
-
-            // Final check for NaN/Inf
-            if losses[b].is_nan() || losses[b].is_infinite() {
-                losses[b] = 0.0;
-            }
-
-            total_loss += losses[b];
+            let class_logit = logits_data[base + target_class];
+            let loss = log_sum_exp + max_val - class_logit;
+            losses[b] = if loss.is_finite() { loss } else { 0.0 };
         }
     }
 
@@ -7380,8 +7335,99 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let output = Tensor::from_vec(losses, vec![batch_size as i64]);
             vec![output]
         }
-        "mean" => vec![Tensor::from_scalar(total_loss / batch_size as f32)],
-        "sum" | _ => vec![Tensor::from_scalar(total_loss)],
+        "mean" => {
+            let total_loss: f32 = losses.iter().sum();
+            vec![Tensor::from_scalar(total_loss / batch_size as f32)]
+        }
+        "sum" | _ => {
+            let total_loss: f32 = losses.iter().sum();
+            vec![Tensor::from_scalar(total_loss)]
+        }
+    }
+}
+
+/// Cross-entropy backward: computes grad_logits = softmax(logits) - one_hot(target),
+/// scaled by grad_output / batch_size for mean reduction.
+/// Writes directly into a pre-allocated output buffer, parallelized over batch rows.
+pub fn cross_entropy_backward_f32(
+    logits_data: &[f32],
+    targets_data: &[f32],
+    grad_out: f32,
+    batch_size: usize,
+    num_classes: usize,
+    reduction: &str,
+    grad_logits_data: &mut [f32],
+) {
+    let scale = if reduction == "mean" {
+        grad_out / batch_size as f32
+    } else {
+        grad_out
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let logits_usize = logits_data.as_ptr() as usize;
+        let targets_usize = targets_data.as_ptr() as usize;
+        let grad_usize = grad_logits_data.as_mut_ptr() as usize;
+        let nc = num_classes;
+
+        (0..batch_size).into_par_iter().for_each(|b| {
+            let base = b * nc;
+            let target_class = unsafe { *((targets_usize + b * 4) as *const f32) } as usize;
+
+            // Find max
+            let mut max_val = f32::NEG_INFINITY;
+            for j in 0..nc {
+                unsafe {
+                    max_val = max_val.max(*((logits_usize + (base + j) * 4) as *const f32));
+                }
+            }
+
+            // Compute sum_exp
+            let mut sum_exp = 0.0f32;
+            for j in 0..nc {
+                unsafe {
+                    sum_exp += (*((logits_usize + (base + j) * 4) as *const f32) - max_val).exp();
+                }
+            }
+            let inv_sum = scale / sum_exp;
+
+            // Write gradient: softmax - one_hot, scaled
+            for j in 0..nc {
+                unsafe {
+                    let p = (logits_usize + (base + j) * 4) as *const f32;
+                    let grad = (*p - max_val).exp() * inv_sum
+                        - if j == target_class { scale } else { 0.0 };
+                    *((grad_usize + (base + j) * 4) as *mut f32) = grad;
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for b in 0..batch_size {
+            let base = b * num_classes;
+            let target_class = targets_data[b] as usize;
+
+            let mut max_val = f32::NEG_INFINITY;
+            for j in 0..num_classes {
+                max_val = max_val.max(logits_data[base + j]);
+            }
+
+            let mut sum_exp = 0.0f32;
+            for j in 0..num_classes {
+                sum_exp += (logits_data[base + j] - max_val).exp();
+            }
+            let inv_sum = scale / sum_exp;
+
+            for j in 0..num_classes {
+                let grad = (logits_data[base + j] - max_val).exp() * inv_sum
+                    - if j == target_class { scale } else { 0.0 };
+                grad_logits_data[base + j] = grad;
+            }
+        }
     }
 }
 
