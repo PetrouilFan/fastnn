@@ -227,7 +227,9 @@ fn gemv_u4x8_dispatch(
                 .enumerate()
                 .for_each(|(chunk_idx, out_chunk)| {
                     let start_row = chunk_idx * rows_per_chunk;
-                    let mut buf = vec![0.0f32; k_packed * 8];
+                    // Pre-allocate buffer without zeroing - all read elements are written first
+                    let mut buf = Vec::with_capacity(k_packed * 8);
+                    unsafe { buf.set_len(k_packed * 8) };
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
                         let dot = unsafe {
@@ -246,7 +248,9 @@ fn gemv_u4x8_dispatch(
         }
         #[cfg(not(feature = "parallel"))]
         {
-            let mut buf = vec![0.0f32; k_packed * 8];
+            // Pre-allocate buffer without zeroing - all read elements are written first
+            let mut buf = Vec::with_capacity(k_packed * 8);
+            unsafe { buf.set_len(k_packed * 8) };
             for row in 0..m {
                 let dot = unsafe {
                     gemv_row_u4x8_avx2(
@@ -556,7 +560,9 @@ fn gemv_packed_inner<T: PackedWord>(
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
                 let start_row = chunk_idx * rows_per_chunk;
-                let mut unpack_buf = vec![0.0f32; k_packed * T::ITEMS];
+                // Pre-allocate buffer without zeroing - all read elements are written first
+                let mut unpack_buf = Vec::with_capacity(k_packed * T::ITEMS);
+                unsafe { unpack_buf.set_len(k_packed * T::ITEMS) };
                 for (local_row, out) in out_chunk.iter_mut().enumerate() {
                     let row = start_row + local_row;
                     let dot = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf);
@@ -567,7 +573,9 @@ fn gemv_packed_inner<T: PackedWord>(
 
     #[cfg(not(feature = "parallel"))]
     {
-        let mut unpack_buf = vec![0.0f32; k_packed * T::ITEMS];
+        // Pre-allocate buffer without zeroing - all read elements are written first
+        let mut unpack_buf = Vec::with_capacity(k_packed * T::ITEMS);
+        unsafe { unpack_buf.set_len(k_packed * T::ITEMS) };
         for row in 0.._m {
             let dot = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf);
             output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
