@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 // Safe because conv2d forward is called synchronously per thread; rayon
 // parallelism inside operates on slices extracted BEFORE the parallel section.
 thread_local! {
-    static CONV_SCRATCH: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::new());
+    static CONV_SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -8233,7 +8233,7 @@ fn conv2d_im2col(
 
             matmul_blas_with_transpose_into(
                 col_slice,
-                &w_data,
+                w_data,
                 gemm_out,
                 col_rows,
                 col_cols,
@@ -8353,11 +8353,7 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     } else {
         None
     };
-    let eps = if args.len() > 4 {
-        args[4].item() as f32
-    } else {
-        1e-5
-    };
+    let eps = if args.len() > 4 { args[4].item() } else { 1e-5 };
 
     let x_shape = x.shape();
     let ndim = x_shape.len();
@@ -8472,7 +8468,7 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     // Reshape mean and variance to [outer_size, 1] for broadcasting compatibility
     let mut mean_shape = x_shape[..ndim - 1].to_vec();
     mean_shape.push(1);
-    let mut var_shape = mean_shape.clone();
+    let var_shape = mean_shape.clone();
 
     let output = Tensor::from_vec(output_data, x_shape.clone());
     let mean = Tensor::from_vec(mean_data, mean_shape);
