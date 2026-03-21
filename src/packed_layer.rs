@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::backends::cpu;
 use crate::dtypes::PackedWord;
+use crate::kernels::gpu::{get_context, GpuBuffer, GpuContext};
 use crate::packed_tensor::PackedTensor;
 
 /// Global backend selector
@@ -36,6 +38,16 @@ pub struct PackedLinear<T: PackedWord> {
     pub master_weight: Option<Vec<f32>>,
     pub in_features: usize,
     pub out_features: usize,
+    /// Cached GPU buffer for weights — None until first GPU forward call
+    pub gpu_weight_buf: Arc<Mutex<Option<GpuBuffer>>>,
+    /// Cached GPU buffer for output — None until first GPU forward call
+    pub gpu_output_buf: Arc<Mutex<Option<GpuBuffer>>>,
+    /// Cached GPU buffer for uniform params — None until first GPU forward call
+    pub gpu_params_buf: Arc<Mutex<Option<GpuBuffer>>>,
+    /// Cached GPU buffer for activations — None until first GPU forward call
+    pub gpu_activation_buf: Arc<Mutex<Option<GpuBuffer>>>,
+    /// Cached GPU bind group — None until first GPU forward call
+    pub gpu_bind_group: Arc<Mutex<Option<wgpu::BindGroup>>>,
 }
 
 impl<T: PackedWord> PackedLinear<T> {
@@ -67,6 +79,11 @@ impl<T: PackedWord> PackedLinear<T> {
             master_weight: Some(master),
             in_features,
             out_features,
+            gpu_weight_buf: Arc::new(Mutex::new(None)),
+            gpu_output_buf: Arc::new(Mutex::new(None)),
+            gpu_params_buf: Arc::new(Mutex::new(None)),
+            gpu_activation_buf: Arc::new(Mutex::new(None)),
+            gpu_bind_group: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -83,6 +100,11 @@ impl<T: PackedWord> PackedLinear<T> {
             master_weight: None,
             in_features,
             out_features,
+            gpu_weight_buf: Arc::new(Mutex::new(None)),
+            gpu_output_buf: Arc::new(Mutex::new(None)),
+            gpu_params_buf: Arc::new(Mutex::new(None)),
+            gpu_activation_buf: Arc::new(Mutex::new(None)),
+            gpu_bind_group: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -100,10 +122,27 @@ impl<T: PackedWord> PackedLinear<T> {
 
     /// Forward pass on GPU (requires wgpu context).
     pub fn forward_wgpu(&self, input: &[f32]) -> Vec<f32> {
-        let mut output = crate::backends::wgpu::gemv_wgpu(&self.weight, input);
+        use crate::backends::wgpu::gemv_wgpu_persistent;
+        let ctx = get_context(0);
+        let (weight_buf, output_buf, params_buf, activation_buf) = self.ensure_gpu_bufs(&ctx);
+
+        let mut output = gemv_wgpu_persistent::<T>(
+            &ctx,
+            &self.gpu_bind_group,
+            weight_buf,
+            output_buf,
+            params_buf,
+            activation_buf,
+            input,
+            self.out_features as u32,
+            self.weight.packed_len() as u32,
+            self.weight.scale(),
+            self.weight.zero(),
+        );
+
         if let Some(ref bias) = self.bias {
             for (o, b) in output.iter_mut().zip(bias.iter()) {
-                *o += *b;
+                *o += b;
             }
         }
         output
@@ -118,6 +157,87 @@ impl<T: PackedWord> PackedLinear<T> {
         }
     }
 
+    /// Ensure GPU buffers are created and cached.
+    /// Returns (weight_buf, output_buf, params_buf, activation_buf).
+    fn ensure_gpu_bufs(
+        &self,
+        ctx: &GpuContext,
+    ) -> (
+        Arc<wgpu::Buffer>,
+        Arc<wgpu::Buffer>,
+        Arc<wgpu::Buffer>,
+        Arc<wgpu::Buffer>,
+    ) {
+        {
+            let mut guard = self.gpu_weight_buf.lock().unwrap();
+            if guard.is_none() {
+                let buf = ctx.create_gpu_buffer_from_bytes(self.weight.as_bytes(), "packed_weight");
+                *guard = Some(buf);
+            }
+        }
+        {
+            let mut guard = self.gpu_output_buf.lock().unwrap();
+            if guard.is_none() {
+                let buf =
+                    ctx.create_buffer(self.out_features * std::mem::size_of::<f32>(), "output");
+                *guard = Some(buf);
+            }
+        }
+        {
+            let mut guard = self.gpu_params_buf.lock().unwrap();
+            if guard.is_none() {
+                // GemvParams is bound as uniform — needs UNIFORM | COPY_DST usage
+                let buf = ctx.create_buffer_with_usage(
+                    16,
+                    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    "gemv_params",
+                );
+                *guard = Some(buf);
+            }
+        }
+        {
+            let mut guard = self.gpu_activation_buf.lock().unwrap();
+            if guard.is_none() {
+                let buf =
+                    ctx.create_buffer(self.in_features * std::mem::size_of::<f32>(), "activations");
+                *guard = Some(buf);
+            }
+        }
+        let weight = self
+            .gpu_weight_buf
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .buffer
+            .clone();
+        let output = self
+            .gpu_output_buf
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .buffer
+            .clone();
+        let params = self
+            .gpu_params_buf
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .buffer
+            .clone();
+        let activation = self
+            .gpu_activation_buf
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .buffer
+            .clone();
+        (weight, output, params, activation)
+    }
+
     /// Repack the master weights into the packed representation.
     /// Call this before each forward pass during training.
     pub fn repack(&mut self) {
@@ -129,6 +249,11 @@ impl<T: PackedWord> PackedLinear<T> {
                 scale,
                 0.0,
             );
+            // Invalidate GPU cache because weights changed
+            *self.gpu_weight_buf.lock().unwrap() = None;
+            *self.gpu_params_buf.lock().unwrap() = None;
+            *self.gpu_activation_buf.lock().unwrap() = None;
+            *self.gpu_bind_group.lock().unwrap() = None;
         }
     }
 
@@ -164,6 +289,11 @@ impl<T: PackedWord> Clone for PackedLinear<T> {
             master_weight: self.master_weight.clone(),
             in_features: self.in_features,
             out_features: self.out_features,
+            gpu_weight_buf: Arc::new(Mutex::new(None)),
+            gpu_output_buf: Arc::new(Mutex::new(None)),
+            gpu_params_buf: Arc::new(Mutex::new(None)),
+            gpu_activation_buf: Arc::new(Mutex::new(None)),
+            gpu_bind_group: Arc::new(Mutex::new(None)),
         }
     }
 }

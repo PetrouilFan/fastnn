@@ -53,3 +53,7 @@ panic = "abort"
 [[bin]]
 name = "packed_bench"
 path = "benches/packed_bench.rs"
+
+[[bin]]
+name = "wgpu_bench"
+path = "benches/wgpu_bench.rs"
