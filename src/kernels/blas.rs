@@ -44,7 +44,26 @@ pub fn matmul_blas_with_transpose(
     trans_b: bool,
 ) -> Vec<f32> {
     let mut c = vec![0.0f32; m * n];
+    matmul_blas_with_transpose_into(a, b, &mut c, m, k, n, trans_a, trans_b);
+    c
+}
 
+#[cfg(all(feature = "blas", not(target_os = "windows")))]
+pub fn matmul_blas_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: usize) {
+    matmul_blas_with_transpose_into(a, b, out, m, k, n, false, false)
+}
+
+#[cfg(all(feature = "blas", not(target_os = "windows")))]
+pub fn matmul_blas_with_transpose_into(
+    a: &[f32],
+    b: &[f32],
+    out: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    trans_a: bool,
+    trans_b: bool,
+) {
     // CBLAS transpose flags: 111 = NoTrans, 112 = Trans
     let transa = if trans_a { 112 } else { 111 };
     let transb = if trans_b { 112 } else { 111 };
@@ -71,12 +90,10 @@ pub fn matmul_blas_with_transpose(
             b.as_ptr(),
             ldb,
             0.0,
-            c.as_mut_ptr(),
+            out.as_mut_ptr(),
             n as i32,
         );
     }
-
-    c
 }
 
 #[cfg(not(all(feature = "blas", not(target_os = "windows"))))]
@@ -94,9 +111,28 @@ pub fn matmul_blas_with_transpose(
     trans_a: bool,
     trans_b: bool,
 ) -> Vec<f32> {
-    use matrixmultiply::sgemm;
-
     let mut c = vec![0.0f32; m * n];
+    matmul_blas_with_transpose_into(a, b, &mut c, m, k, n, trans_a, trans_b);
+    c
+}
+
+#[cfg(not(all(feature = "blas", not(target_os = "windows"))))]
+pub fn matmul_blas_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: usize) {
+    matmul_blas_with_transpose_into(a, b, out, m, k, n, false, false)
+}
+
+#[cfg(not(all(feature = "blas", not(target_os = "windows"))))]
+pub fn matmul_blas_with_transpose_into(
+    a: &[f32],
+    b: &[f32],
+    out: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    trans_a: bool,
+    trans_b: bool,
+) {
+    use matrixmultiply::sgemm;
 
     // matrixmultiply expects row-major order
     // For C = A @ B with A[m×k], B[k×n], C[m×n]
@@ -129,11 +165,9 @@ pub fn matmul_blas_with_transpose(
             ldb,
             1isize,
             0.0f32,
-            c.as_mut_ptr(),
+            out.as_mut_ptr(),
             ldc,
             1isize,
         );
     }
-
-    c
 }

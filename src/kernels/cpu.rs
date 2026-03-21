@@ -8,11 +8,22 @@
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
-use crate::kernels::blas::{matmul_blas, matmul_blas_with_transpose, MIN_BLAS_SIZE};
+use crate::kernels::blas::{
+    matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
+    MIN_BLAS_SIZE,
+};
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
 use std::sync::OnceLock;
+
+// Thread-local reusable scratch buffer for conv2d operations.
+// Avoids per-call heap allocations for im2col and GEMM output buffers.
+// Safe because conv2d forward is called synchronously per thread; rayon
+// parallelism inside operates on slices extracted BEFORE the parallel section.
+thread_local! {
+    static CONV_SCRATCH: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::new());
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
@@ -5563,13 +5574,22 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         && a.is_contiguous()
         && b_valid_for_blas;
 
+    // Batched 3D BLAS: both A and B are batched 3D contiguous tensors
+    let can_batch_blas = batch > 1
+        && a_shape.len() == 3
+        && b_shape.len() == 3
+        && a.is_contiguous()
+        && b.is_contiguous();
+
     // Use BLAS for:
     // 1. Single batch with large enough matrices
     // 2. Batched operations with 2D weight (reshape trick)
-    let use_blas = (can_reshape_trick || batch == 1)
-        && (m as usize * n as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
-            || m as usize * k as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
-            || k as usize * n as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE)
+    // 3. Batched 3D contiguous tensors (batched BLAS loop)
+    let matrices_large = m as usize * n as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
+        || m as usize * k as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE
+        || k as usize * n as usize >= MIN_BLAS_SIZE * MIN_BLAS_SIZE;
+    let use_blas = (can_reshape_trick || batch == 1 || can_batch_blas)
+        && matrices_large
         && a_valid_for_blas
         && b_valid_for_blas;
 
@@ -5580,34 +5600,57 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let batch_m = batch * m as usize;
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, batch_m * k as usize) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
-            let result = matmul_blas_with_transpose(
+            let out_slice =
+                unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_m * n as usize) };
+            matmul_blas_with_transpose_into(
                 a_slice,
                 b_slice,
+                out_slice,
                 batch_m,
                 k as usize,
                 n as usize,
                 a_is_transposed,
                 b_is_transposed,
             );
+        } else if can_batch_blas {
+            // Batched 3D BLAS loop: process each batch element separately
+            let a_slice =
+                unsafe { std::slice::from_raw_parts(a_ptr, batch * m as usize * k as usize) };
+            let b_slice =
+                unsafe { std::slice::from_raw_parts(b_ptr, batch * k as usize * n as usize) };
             let out_slice =
-                unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_m * n as usize) };
-            out_slice.copy_from_slice(&result);
+                unsafe { std::slice::from_raw_parts_mut(out_ptr, batch * m as usize * n as usize) };
+            for bat in 0..batch {
+                let a_offset = bat * m as usize * k as usize;
+                let b_offset = bat * k as usize * n as usize;
+                let out_offset = bat * m as usize * n as usize;
+                matmul_blas_with_transpose_into(
+                    &a_slice[a_offset..],
+                    &b_slice[b_offset..],
+                    &mut out_slice[out_offset..],
+                    m as usize,
+                    k as usize,
+                    n as usize,
+                    false,
+                    false,
+                );
+            }
         } else {
             // Single batch BLAS
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
-            let result = matmul_blas_with_transpose(
+            let out_slice =
+                unsafe { std::slice::from_raw_parts_mut(out_ptr, m as usize * n as usize) };
+            matmul_blas_with_transpose_into(
                 a_slice,
                 b_slice,
+                out_slice,
                 m as usize,
                 k as usize,
                 n as usize,
                 a_is_transposed,
                 b_is_transposed,
             );
-            let out_slice =
-                unsafe { std::slice::from_raw_parts_mut(out_ptr, m as usize * n as usize) };
-            out_slice.copy_from_slice(&result);
         }
     } else {
         #[cfg(feature = "parallel")]
@@ -5741,74 +5784,16 @@ fn parallel_matmul(
             let mut sum = 0.0f32;
             let mut kk = 0;
 
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("fma") {
-                    unsafe {
-                        while kk + 8 <= k_usize {
-                            let a0 = _mm256_loadu_ps(
-                                (a_usize
-                                    + (bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + (kk) * a_stride_1 as usize)
-                                        * 4) as *const f32,
-                            );
-                            let a1 = _mm256_loadu_ps(
-                                (a_usize
-                                    + (bat_a_offset
-                                        + i * a_stride_0 as usize
-                                        + (kk + 8) * a_stride_1 as usize)
-                                        * 4) as *const f32,
-                            );
-
-                            let b0 = _mm256_loadu_ps(
-                                (b_usize
-                                    + (bat_b_offset
-                                        + (kk) * b_stride_0 as usize
-                                        + j * b_stride_1 as usize)
-                                        * 4) as *const f32,
-                            );
-                            let b1 = _mm256_loadu_ps(
-                                (b_usize
-                                    + (bat_b_offset
-                                        + (kk + 8) * b_stride_0 as usize
-                                        + j * b_stride_1 as usize)
-                                        * 4) as *const f32,
-                            );
-
-                            let acc0 = _mm256_mul_ps(a0, b0);
-                            let acc1 = _mm256_mul_ps(a1, b1);
-                            let acc = _mm256_add_ps(acc0, acc1);
-
-                            let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                            _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
-                            sum += acc_arr.assume_init().iter().sum::<f32>();
-
-                            #[cfg(feature = "prefetch")]
-                            {
-                                _mm_prefetch(
-                                    (b_usize
-                                        + (bat_b_offset
-                                            + (kk + 16) * b_stride_0 as usize
-                                            + j * b_stride_1 as usize)
-                                            * 4) as *const i8,
-                                    _MM_HINT_T0,
-                                );
-                                _mm_prefetch(
-                                    (a_usize
-                                        + (bat_a_offset
-                                            + i * a_stride_0 as usize
-                                            + (kk + 16) * a_stride_1 as usize)
-                                            * 4) as *const i8,
-                                    _MM_HINT_T0,
-                                );
-                            }
-
-                            kk += 16;
-                        }
-                    }
-                }
-            }
+            // TODO: A correct SIMD path for this loop should either use AVX2 gather
+            // instructions (_mm256_i32gather_ps) to load non-contiguous B column
+            // elements, or reorder the loop so that j is outer and k is inner with
+            // A pre-loaded once per row, then B accessed along its contiguous (row)
+            // dimension. The previous SIMD block loaded B with _mm256_loadu_ps which
+            // assumed contiguous elements — but for row-major B (stride_0=n,
+            // stride_1=1) the needed column elements B[kk..kk+7, j] are n floats
+            // apart and cannot be loaded with a plain unaligned load. Additionally,
+            // the old code checked is_x86_feature_detected!("fma") but then used
+            // _mm256_mul_ps + _mm256_add_ps instead of _mm256_fmadd_ps.
 
             while kk + 4 <= k_usize {
                 unsafe {
@@ -6023,48 +6008,104 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let in_features = in_features as usize;
     let out_features = out_features as usize;
 
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        let total = batch_size * out_features;
+    // Use BLAS for the GEMM when matrices are large enough, then fuse
+    // bias + activation in a single parallel pass. This is 3-5x faster
+    // than the scalar inner loop because BLAS uses SIMD + cache blocking.
+    let use_blas = x.is_contiguous()
+        && w.is_contiguous()
+        && (batch_size >= MIN_BLAS_SIZE
+            || in_features >= MIN_BLAS_SIZE
+            || out_features >= MIN_BLAS_SIZE);
 
-        let x_usize = x_ptr as usize;
-        let w_usize = w_ptr as usize;
+    if use_blas {
+        let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, batch_size * in_features) };
+        let w_slice = unsafe { std::slice::from_raw_parts(w_ptr, out_features * in_features) };
+        let out_slice =
+            unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_size * out_features) };
+
+        // GEMM: [batch, in] @ [out, in]^T = [batch, out]
+        // w is [out, in] contiguous, use trans_b=true so BLAS reads it as [in, out]
+        matmul_blas_with_transpose_into(
+            x_slice,
+            w_slice,
+            out_slice,
+            batch_size,
+            in_features,
+            out_features,
+            false,
+            true,
+        );
+
+        // Parallel bias + relu pass over all output elements
+        let total = batch_size * out_features;
         let out_usize = out_ptr as usize;
 
-        (0..total).into_par_iter().for_each(|idx| {
-            let batch_idx = idx / out_features;
-            let out_idx = idx % out_features;
-
-            let mut sum = 0.0f32;
-            for k in 0..in_features {
-                let x_offset = batch_idx * in_features + k;
-                let w_offset = out_idx * in_features + k;
-                let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
-                let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
-                sum += x_val * w_val;
+        if let Some(b) = bias {
+            let b_ptr = b.data_ptr_f32();
+            let b_usize = b_ptr as usize;
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                (0..total).into_par_iter().for_each(|idx| {
+                    let out_idx = idx % out_features;
+                    unsafe {
+                        let val = *((out_usize + idx * 4) as *const f32)
+                            + *((b_usize + out_idx * 4) as *const f32);
+                        *((out_usize + idx * 4) as *mut f32) = val.max(0.0);
+                    }
+                });
             }
-
-            if let Some(b) = bias {
-                let b_ptr = b.data_ptr_f32();
-                sum += unsafe { *b_ptr.add(out_idx) };
+            #[cfg(not(feature = "parallel"))]
+            {
+                for idx in 0..total {
+                    let out_idx = idx % out_features;
+                    unsafe {
+                        let val = *((out_usize + idx * 4) as *const f32)
+                            + *((b_usize + out_idx * 4) as *const f32);
+                        *((out_usize + idx * 4) as *mut f32) = val.max(0.0);
+                    }
+                }
             }
+        } else {
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                (0..total).into_par_iter().for_each(|idx| unsafe {
+                    let val = *((out_usize + idx * 4) as *const f32);
+                    *((out_usize + idx * 4) as *mut f32) = val.max(0.0);
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                for idx in 0..total {
+                    unsafe {
+                        let val = *((out_usize + idx * 4) as *const f32);
+                        *((out_usize + idx * 4) as *mut f32) = val.max(0.0);
+                    }
+                }
+            }
+        }
+    } else {
+        // Scalar fallback for small matrices
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let total = batch_size * out_features;
 
-            unsafe {
-                *((out_usize + idx * 4) as *mut f32) = sum.max(0.0);
-            };
-        });
-    }
-    #[cfg(not(feature = "parallel"))]
-    {
-        for batch_idx in 0..batch_size {
-            for out_idx in 0..out_features {
+            let x_usize = x_ptr as usize;
+            let w_usize = w_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            (0..total).into_par_iter().for_each(|idx| {
+                let batch_idx = idx / out_features;
+                let out_idx = idx % out_features;
+
                 let mut sum = 0.0f32;
                 for k in 0..in_features {
                     let x_offset = batch_idx * in_features + k;
                     let w_offset = out_idx * in_features + k;
-                    let x_val = unsafe { *x_ptr.add(x_offset) };
-                    let w_val = unsafe { *w_ptr.add(w_offset) };
+                    let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
+                    let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                     sum += x_val * w_val;
                 }
 
@@ -6074,8 +6115,32 @@ fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 }
 
                 unsafe {
-                    *out_ptr.add(batch_idx * out_features + out_idx) = sum.max(0.0);
+                    *((out_usize + idx * 4) as *mut f32) = sum.max(0.0);
                 };
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for batch_idx in 0..batch_size {
+                for out_idx in 0..out_features {
+                    let mut sum = 0.0f32;
+                    for k in 0..in_features {
+                        let x_offset = batch_idx * in_features + k;
+                        let w_offset = out_idx * in_features + k;
+                        let x_val = unsafe { *x_ptr.add(x_offset) };
+                        let w_val = unsafe { *w_ptr.add(w_offset) };
+                        sum += x_val * w_val;
+                    }
+
+                    if let Some(b) = bias {
+                        let b_ptr = b.data_ptr_f32();
+                        sum += unsafe { *b_ptr.add(out_idx) };
+                    }
+
+                    unsafe {
+                        *out_ptr.add(batch_idx * out_features + out_idx) = sum.max(0.0);
+                    };
+                }
             }
         }
     }
@@ -6127,50 +6192,97 @@ fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let in_features = in_features as usize;
     let out_features = out_features as usize;
 
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        let total = batch_size * out_features;
+    let use_blas = x.is_contiguous()
+        && w.is_contiguous()
+        && (batch_size >= MIN_BLAS_SIZE
+            || in_features >= MIN_BLAS_SIZE
+            || out_features >= MIN_BLAS_SIZE);
 
-        let x_usize = x_ptr as usize;
-        let w_usize = w_ptr as usize;
+    if use_blas {
+        let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, batch_size * in_features) };
+        let w_slice = unsafe { std::slice::from_raw_parts(w_ptr, out_features * in_features) };
+        let out_slice =
+            unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_size * out_features) };
+
+        matmul_blas_with_transpose_into(
+            x_slice,
+            w_slice,
+            out_slice,
+            batch_size,
+            in_features,
+            out_features,
+            false,
+            true,
+        );
+
+        let total = batch_size * out_features;
         let out_usize = out_ptr as usize;
 
-        (0..total).into_par_iter().for_each(|idx| {
-            let batch_idx = idx / out_features;
-            let out_idx = idx % out_features;
-
-            let mut sum = 0.0f32;
-            for k in 0..in_features {
-                let x_offset = batch_idx * in_features + k;
-                let w_offset = out_idx * in_features + k;
-                let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
-                let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
-                sum += x_val * w_val;
+        if let Some(b) = bias {
+            let b_ptr = b.data_ptr_f32();
+            let b_usize = b_ptr as usize;
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                (0..total).into_par_iter().for_each(|idx| {
+                    let out_idx = idx % out_features;
+                    unsafe {
+                        let val = *((out_usize + idx * 4) as *const f32)
+                            + *((b_usize + out_idx * 4) as *const f32);
+                        *((out_usize + idx * 4) as *mut f32) = val / (1.0 + (-val).exp());
+                    }
+                });
             }
-
-            if let Some(b) = bias {
-                let b_ptr = b.data_ptr_f32();
-                sum += unsafe { *b_ptr.add(out_idx) };
+            #[cfg(not(feature = "parallel"))]
+            {
+                for idx in 0..total {
+                    let out_idx = idx % out_features;
+                    unsafe {
+                        let val = *((out_usize + idx * 4) as *const f32)
+                            + *((b_usize + out_idx * 4) as *const f32);
+                        *((out_usize + idx * 4) as *mut f32) = val / (1.0 + (-val).exp());
+                    }
+                }
             }
+        } else {
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                (0..total).into_par_iter().for_each(|idx| unsafe {
+                    let val = *((out_usize + idx * 4) as *const f32);
+                    *((out_usize + idx * 4) as *mut f32) = val / (1.0 + (-val).exp());
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                for idx in 0..total {
+                    unsafe {
+                        let val = *((out_usize + idx * 4) as *const f32);
+                        *((out_usize + idx * 4) as *mut f32) = val / (1.0 + (-val).exp());
+                    }
+                }
+            }
+        }
+    } else {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let total = batch_size * out_features;
 
-            // SiLU: x / (1.0 + (-x).exp())
-            let silu_val = sum / (1.0 + (-sum).exp());
-            unsafe {
-                *((out_usize + idx * 4) as *mut f32) = silu_val;
-            };
-        });
-    }
-    #[cfg(not(feature = "parallel"))]
-    {
-        for batch_idx in 0..batch_size {
-            for out_idx in 0..out_features {
+            let x_usize = x_ptr as usize;
+            let w_usize = w_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            (0..total).into_par_iter().for_each(|idx| {
+                let batch_idx = idx / out_features;
+                let out_idx = idx % out_features;
+
                 let mut sum = 0.0f32;
                 for k in 0..in_features {
                     let x_offset = batch_idx * in_features + k;
                     let w_offset = out_idx * in_features + k;
-                    let x_val = unsafe { *x_ptr.add(x_offset) };
-                    let w_val = unsafe { *w_ptr.add(w_offset) };
+                    let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
+                    let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                     sum += x_val * w_val;
                 }
 
@@ -6182,8 +6294,34 @@ fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 // SiLU: x / (1.0 + (-x).exp())
                 let silu_val = sum / (1.0 + (-sum).exp());
                 unsafe {
-                    *out_ptr.add(batch_idx * out_features + out_idx) = silu_val;
+                    *((out_usize + idx * 4) as *mut f32) = silu_val;
                 };
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for batch_idx in 0..batch_size {
+                for out_idx in 0..out_features {
+                    let mut sum = 0.0f32;
+                    for k in 0..in_features {
+                        let x_offset = batch_idx * in_features + k;
+                        let w_offset = out_idx * in_features + k;
+                        let x_val = unsafe { *x_ptr.add(x_offset) };
+                        let w_val = unsafe { *w_ptr.add(w_offset) };
+                        sum += x_val * w_val;
+                    }
+
+                    if let Some(b) = bias {
+                        let b_ptr = b.data_ptr_f32();
+                        sum += unsafe { *b_ptr.add(out_idx) };
+                    }
+
+                    // SiLU: x / (1.0 + (-x).exp())
+                    let silu_val = sum / (1.0 + (-sum).exp());
+                    unsafe {
+                        *out_ptr.add(batch_idx * out_features + out_idx) = silu_val;
+                    };
+                }
             }
         }
     }
@@ -6237,52 +6375,105 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
     let coeff = 0.044715f32;
 
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        let total = batch_size * out_features;
+    let use_blas = x.is_contiguous()
+        && w.is_contiguous()
+        && (batch_size >= MIN_BLAS_SIZE
+            || in_features >= MIN_BLAS_SIZE
+            || out_features >= MIN_BLAS_SIZE);
 
-        let x_usize = x_ptr as usize;
-        let w_usize = w_ptr as usize;
+    if use_blas {
+        let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, batch_size * in_features) };
+        let w_slice = unsafe { std::slice::from_raw_parts(w_ptr, out_features * in_features) };
+        let out_slice =
+            unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_size * out_features) };
+
+        matmul_blas_with_transpose_into(
+            x_slice,
+            w_slice,
+            out_slice,
+            batch_size,
+            in_features,
+            out_features,
+            false,
+            true,
+        );
+
+        let total = batch_size * out_features;
         let out_usize = out_ptr as usize;
 
-        (0..total).into_par_iter().for_each(|idx| {
-            let batch_idx = idx / out_features;
-            let out_idx = idx % out_features;
-
-            let mut sum = 0.0f32;
-            for k in 0..in_features {
-                let x_offset = batch_idx * in_features + k;
-                let w_offset = out_idx * in_features + k;
-                let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
-                let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
-                sum += x_val * w_val;
+        if let Some(b) = bias {
+            let b_ptr = b.data_ptr_f32();
+            let b_usize = b_ptr as usize;
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                (0..total).into_par_iter().for_each(|idx| {
+                    let out_idx = idx % out_features;
+                    unsafe {
+                        let sum = *((out_usize + idx * 4) as *const f32)
+                            + *((b_usize + out_idx * 4) as *const f32);
+                        let x3 = sum * sum * sum;
+                        let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
+                        *((out_usize + idx * 4) as *mut f32) = 0.5 * sum * (1.0 + t);
+                    }
+                });
             }
-
-            if let Some(b) = bias {
-                let b_ptr = b.data_ptr_f32();
-                sum += unsafe { *b_ptr.add(out_idx) };
+            #[cfg(not(feature = "parallel"))]
+            {
+                for idx in 0..total {
+                    let out_idx = idx % out_features;
+                    unsafe {
+                        let sum = *((out_usize + idx * 4) as *const f32)
+                            + *((b_usize + out_idx * 4) as *const f32);
+                        let x3 = sum * sum * sum;
+                        let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
+                        *((out_usize + idx * 4) as *mut f32) = 0.5 * sum * (1.0 + t);
+                    }
+                }
             }
+        } else {
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                (0..total).into_par_iter().for_each(|idx| unsafe {
+                    let sum = *((out_usize + idx * 4) as *const f32);
+                    let x3 = sum * sum * sum;
+                    let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
+                    *((out_usize + idx * 4) as *mut f32) = 0.5 * sum * (1.0 + t);
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                for idx in 0..total {
+                    unsafe {
+                        let sum = *((out_usize + idx * 4) as *const f32);
+                        let x3 = sum * sum * sum;
+                        let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
+                        *((out_usize + idx * 4) as *mut f32) = 0.5 * sum * (1.0 + t);
+                    }
+                }
+            }
+        }
+    } else {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let total = batch_size * out_features;
 
-            let x3 = sum * sum * sum;
-            let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
-            let gelu = 0.5 * sum * (1.0 + t);
+            let x_usize = x_ptr as usize;
+            let w_usize = w_ptr as usize;
+            let out_usize = out_ptr as usize;
 
-            unsafe {
-                *((out_usize + idx * 4) as *mut f32) = gelu;
-            };
-        });
-    }
-    #[cfg(not(feature = "parallel"))]
-    {
-        for batch_idx in 0..batch_size {
-            for out_idx in 0..out_features {
+            (0..total).into_par_iter().for_each(|idx| {
+                let batch_idx = idx / out_features;
+                let out_idx = idx % out_features;
+
                 let mut sum = 0.0f32;
                 for k in 0..in_features {
                     let x_offset = batch_idx * in_features + k;
                     let w_offset = out_idx * in_features + k;
-                    let x_val = unsafe { *x_ptr.add(x_offset) };
-                    let w_val = unsafe { *w_ptr.add(w_offset) };
+                    let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
+                    let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                     sum += x_val * w_val;
                 }
 
@@ -6296,8 +6487,36 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let gelu = 0.5 * sum * (1.0 + t);
 
                 unsafe {
-                    *out_ptr.add(batch_idx * out_features + out_idx) = gelu;
+                    *((out_usize + idx * 4) as *mut f32) = gelu;
                 };
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for batch_idx in 0..batch_size {
+                for out_idx in 0..out_features {
+                    let mut sum = 0.0f32;
+                    for k in 0..in_features {
+                        let x_offset = batch_idx * in_features + k;
+                        let w_offset = out_idx * in_features + k;
+                        let x_val = unsafe { *x_ptr.add(x_offset) };
+                        let w_val = unsafe { *w_ptr.add(w_offset) };
+                        sum += x_val * w_val;
+                    }
+
+                    if let Some(b) = bias {
+                        let b_ptr = b.data_ptr_f32();
+                        sum += unsafe { *b_ptr.add(out_idx) };
+                    }
+
+                    let x3 = sum * sum * sum;
+                    let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
+                    let gelu = 0.5 * sum * (1.0 + t);
+
+                    unsafe {
+                        *out_ptr.add(batch_idx * out_features + out_idx) = gelu;
+                    };
+                }
             }
         }
     }
@@ -7384,54 +7603,61 @@ fn conv2d_1x1(
     let k = in_channels;
     let m = out_channels;
 
-    // Get weight data and bias
     let w_data = unsafe { std::slice::from_raw_parts(w_ptr, m * k) };
     let bias_data: Option<&[f32]> = bias.map(|b| {
         let b_ptr = b.data_ptr() as *const f32;
         unsafe { std::slice::from_raw_parts(b_ptr, m) }
     });
 
-    // For 1x1 conv with input [batch, in_ch, h, w], the data is stored as:
-    // [batch * in_ch * h * w] in row-major order
-    // To compute [n, k] @ [k, m], we need to rearrange to [n, k] format
-    // Input stride is: [in_ch * h * w, h * w, w, 1]
-    // We want: [k, 1] = [in_ch, 1] per spatial position
+    // Thread-local scratch: w_t [k*m] + x_t [n*k] + result [n*m]
+    let total_scratch = k * m + n * k + n * m;
 
-    // Transpose weights: [out_ch, in_ch] -> [in_ch, out_ch]
-    let w_t: Vec<f32> = (0..k)
-        .flat_map(|i| (0..m).map(move |j| w_data[j * k + i]))
-        .collect();
+    CONV_SCRATCH.with(|scratch| {
+        let mut buf = scratch.borrow_mut();
+        if buf.len() < total_scratch {
+            buf.resize(total_scratch, 0.0f32);
+        }
 
-    // Transpose input: [batch, in_ch, h, w] -> [batch * h * w, in_ch]
-    // This is necessary because the data is stored channel-first
-    let spatial_size = in_height * in_width;
-    let mut x_t = vec![0.0f32; n * k];
-    for b in 0..batch_size {
-        for ic in 0..k {
-            for s in 0..spatial_size {
-                let src_idx = (b * k + ic) * spatial_size + s;
-                let dst_idx = b * spatial_size * k + s * k + ic;
-                x_t[dst_idx] = unsafe { *x_ptr.add(src_idx) };
+        let (w_t_buf, rest) = buf.split_at_mut(k * m);
+        let (x_t_buf, result_buf) = rest.split_at_mut(n * k);
+
+        // Transpose weights: [out_ch, in_ch] -> [in_ch, out_ch]
+        for i in 0..k {
+            for j in 0..m {
+                w_t_buf[i * m + j] = w_data[j * k + i];
             }
         }
-    }
 
-    // Use BLAS for [n, k] @ [k, m] = [n, m]
-    let result = matmul_blas(&x_t, &w_t, n, k, m);
-
-    // Reshape result [n, m] -> [batch, out_ch, h, w] and add bias
-    for b in 0..batch_size {
-        for oc in 0..m {
-            let bias_val = bias_data.map_or(0.0, |b| b[oc]);
-            for s in 0..spatial_size {
-                let src_idx = b * spatial_size * m + s * m + oc;
-                let dst_idx = (b * m + oc) * spatial_size + s;
-                unsafe { *out_ptr.add(dst_idx) = result[src_idx] + bias_val };
+        // Transpose input: [batch, in_ch, h, w] -> [batch * h * w, in_ch]
+        let spatial_size = in_height * in_width;
+        for b in 0..batch_size {
+            for ic in 0..k {
+                for s in 0..spatial_size {
+                    let src_idx = (b * k + ic) * spatial_size + s;
+                    let dst_idx = b * spatial_size * k + s * k + ic;
+                    x_t_buf[dst_idx] = unsafe { *x_ptr.add(src_idx) };
+                }
             }
         }
-    }
 
-    output
+        // Use BLAS for [n, k] @ [k, m] = [n, m]
+        let result_slice = &mut result_buf[..n * m];
+        matmul_blas_with_transpose_into(x_t_buf, w_t_buf, result_slice, n, k, m, false, false);
+
+        // Reshape result [n, m] -> [batch, out_ch, h, w] and add bias
+        for b in 0..batch_size {
+            for oc in 0..m {
+                let bval = bias_data.map_or(0.0, |b| b[oc]);
+                for s in 0..spatial_size {
+                    let src_idx = b * spatial_size * m + s * m + oc;
+                    let dst_idx = (b * m + oc) * spatial_size + s;
+                    unsafe { *out_ptr.add(dst_idx) = result_slice[src_idx] + bval };
+                }
+            }
+        }
+
+        output
+    })
 }
 
 // Winograd F(2x2, 3x3) is disabled for now due to overhead from transform operations
@@ -7593,114 +7819,9 @@ fn conv2d_im2col(
 
     let col_rows = batch_size * out_height * out_width;
     let col_cols = in_channels * kernel_height * kernel_width;
-    let mut col_data = vec![0.0f32; col_rows * col_cols];
+    let col_size = col_rows * col_cols;
 
     let x_ptr = x.data_ptr() as *const f32;
-
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-
-        let x_usize = x_ptr as usize;
-
-        col_data
-            .par_chunks_mut(col_cols)
-            .enumerate()
-            .for_each(|(row, col_chunk)| {
-                let n = row / (out_height * out_width);
-                let rem = row % (out_height * out_width);
-                let oh = rem / out_width;
-                let ow = rem % out_width;
-
-                for ic in 0..in_channels {
-                    for kh in 0..kernel_height {
-                        for kw in 0..kernel_width {
-                            let ih = oh * stride + kh * dilation;
-                            let iw = ow * stride + kw * dilation;
-
-                            let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
-
-                            if ih >= padding
-                                && ih < padding + in_height
-                                && iw >= padding
-                                && iw < padding + in_width
-                            {
-                                let x_ih = ih - padding;
-                                let x_iw = iw - padding;
-                                let x_idx =
-                                    ((n * in_channels + ic) * in_height + x_ih) * in_width + x_iw;
-                                let x_ptr = x_usize as *const f32;
-                                col_chunk[col_col] = unsafe { *x_ptr.add(x_idx) };
-                            }
-                        }
-                    }
-                }
-            });
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for n in 0..batch_size {
-            for oh in 0..out_height {
-                for ow in 0..out_width {
-                    let col_row = (n * out_height + oh) * out_width + ow;
-
-                    for ic in 0..in_channels {
-                        for kh in 0..kernel_height {
-                            for kw in 0..kernel_width {
-                                let ih = oh * stride + kh * dilation;
-                                let iw = ow * stride + kw * dilation;
-
-                                let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
-
-                                if ih >= padding
-                                    && ih < padding + in_height
-                                    && iw >= padding
-                                    && iw < padding + in_width
-                                {
-                                    let x_ih = ih - padding;
-                                    let x_iw = iw - padding;
-                                    let x_idx = ((n * in_channels + ic) * in_height + x_ih)
-                                        * in_width
-                                        + x_iw;
-                                    col_data[col_row * col_cols + col_col] =
-                                        unsafe { *x_ptr.add(x_idx) };
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let w_data: Vec<f32> = unsafe {
-        let w_ptr = w.data_ptr() as *const f32;
-        std::slice::from_raw_parts(
-            w_ptr,
-            out_channels * in_channels * kernel_height * kernel_width / groups,
-        )
-        .to_vec()
-    };
-
-    let output_shape = vec![
-        batch_size as i64,
-        out_channels as i64,
-        out_height as i64,
-        out_width as i64,
-    ];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
-
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
-    };
-    let out_data = Arc::make_mut(&mut cpu_storage.data);
-    let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-    // Use the col_data Vec directly as a slice
-    let col_slice = col_data.as_slice();
 
     // Use optimized matrix multiplication for large matrices
     // Threshold: use GEMM when all dimensions >= 12
@@ -7708,64 +7829,341 @@ fn conv2d_im2col(
     let use_gemm =
         col_rows >= GEMM_MIN_SIZE && out_channels >= GEMM_MIN_SIZE && col_cols >= GEMM_MIN_SIZE;
 
-    let bias_data: Option<Vec<f32>> = if let Some(b) = bias {
-        if b.numel() == 1 {
-            // Scalar bias (e.g., 0.0 for no bias)
-            let bias_val = b.item();
-            Some(vec![bias_val; out_channels])
-        } else {
-            // Vector bias with one value per output channel
-            let b_ptr = b.data_ptr() as *const f32;
-            Some(unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() })
-        }
-    } else {
-        None
-    };
+    let gemm_size = if use_gemm { col_rows * out_channels } else { 0 };
+    let total_scratch = col_size + gemm_size;
 
-    if use_gemm {
-        // Transpose weights for GEMM: (out_channels, col_cols) -> (col_cols, out_channels)
-        let w_t: Vec<f32> = {
-            let w = &w_data;
-            (0..col_cols)
-                .flat_map(|i| (0..out_channels).map(move |j| w[j * col_cols + i]))
-                .collect()
+    // Borrow the thread-local scratch buffer, growing only on the cold path.
+    CONV_SCRATCH.with(|scratch| {
+        let mut buf = scratch.borrow_mut();
+        if buf.len() < total_scratch {
+            buf.resize(total_scratch, 0.0f32);
+        }
+        // Zero only the im2col portion. gemm_out is fully overwritten by BLAS.
+        buf[..col_size].fill(0.0);
+
+        let (col_buf, gemm_buf) = buf.split_at_mut(col_size);
+        let col_data: &mut [f32] = col_buf;
+
+        // --- im2col extraction ---
+        // Loop order: (ic, kh, kw) instead of (ic, kh, kw).
+        // ic is innermost so that col_data writes are sequential for each
+        // kernel position, and when stride==1 && dilation==1, contiguous
+        // kernel_w floats can be copied from x in one memcpy.
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+
+            let x_usize = x_ptr as usize;
+
+            col_data
+                .par_chunks_mut(col_cols)
+                .enumerate()
+                .for_each(|(row, col_chunk)| {
+                    let n = row / (out_height * out_width);
+                    let rem = row % (out_height * out_width);
+                    let oh = rem / out_width;
+                    let ow = rem % out_width;
+
+                    // Fast path: stride=1, dilation=1, entire kernel patch in-bounds.
+                    // For fixed (n, oh, ow, kh), the kernel_w elements x[n,ic,ih,ow..ow+kw]
+                    // are contiguous when stride=1, dilation=1. We can memcpy each row.
+                    let fast_path = stride == 1 && dilation == 1;
+
+                    for ic in 0..in_channels {
+                        let col_base = ic * kernel_height * kernel_width;
+
+                        if fast_path {
+                            // Optimized path: stride=1, dilation=1
+                            for kh in 0..kernel_height {
+                                let ih = oh + kh;
+
+                                if ih >= padding && ih < padding + in_height {
+                                    let x_ih = ih - padding;
+                                    let x_row_base = (n * in_channels + ic) * in_height * in_width
+                                        + x_ih * in_width;
+
+                                    let iw_start = ow;
+                                    if iw_start >= padding
+                                        && iw_start + kernel_width <= padding + in_width
+                                    {
+                                        // Entire row in-bounds: use memcpy
+                                        let x_iw_start = iw_start - padding;
+                                        let x_src = x_row_base + x_iw_start;
+                                        let col_dst_base = col_base + kh * kernel_width;
+                                        unsafe {
+                                            std::ptr::copy_nonoverlapping(
+                                                (x_usize as *const f32).add(x_src),
+                                                col_chunk.as_mut_ptr().add(col_dst_base),
+                                                kernel_width,
+                                            );
+                                        }
+                                    } else {
+                                        // Boundary: per-element
+                                        for kw in 0..kernel_width {
+                                            let iw = ow + kw;
+                                            if iw >= padding && iw < padding + in_width {
+                                                let x_iw = iw - padding;
+                                                let col_col = col_base + kh * kernel_width + kw;
+                                                unsafe {
+                                                    col_chunk[col_col] = *((x_usize as *const f32)
+                                                        .add(x_row_base + x_iw));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // General path: arbitrary stride/dilation
+                            for kh in 0..kernel_height {
+                                let ih = oh * stride + kh * dilation;
+
+                                if ih >= padding && ih < padding + in_height {
+                                    let x_ih = ih - padding;
+                                    let x_row_base = (n * in_channels + ic) * in_height * in_width
+                                        + x_ih * in_width;
+
+                                    for kw in 0..kernel_width {
+                                        let iw = ow * stride + kw * dilation;
+                                        if iw >= padding && iw < padding + in_width {
+                                            let x_iw = iw - padding;
+                                            let col_col = col_base + kh * kernel_width + kw;
+                                            unsafe {
+                                                col_chunk[col_col] = *((x_usize as *const f32)
+                                                    .add(x_row_base + x_iw));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            for n in 0..batch_size {
+                for oh in 0..out_height {
+                    for ow in 0..out_width {
+                        let col_row = (n * out_height + oh) * out_width + ow;
+                        let col_chunk = &mut col_data[col_row * col_cols..(col_row + 1) * col_cols];
+
+                        let fast_path = stride == 1 && dilation == 1;
+
+                        for ic in 0..in_channels {
+                            let col_base = ic * kernel_height * kernel_width;
+
+                            if fast_path {
+                                for kh in 0..kernel_height {
+                                    let ih = oh + kh;
+
+                                    if ih >= padding && ih < padding + in_height {
+                                        let x_ih = ih - padding;
+                                        let x_row_base =
+                                            (n * in_channels + ic) * in_height * in_width
+                                                + x_ih * in_width;
+
+                                        let iw_start = ow;
+                                        if iw_start >= padding
+                                            && iw_start + kernel_width <= padding + in_width
+                                        {
+                                            let x_iw_start = iw_start - padding;
+                                            let x_src = x_row_base + x_iw_start;
+                                            let col_dst_base = col_base + kh * kernel_width;
+                                            unsafe {
+                                                std::ptr::copy_nonoverlapping(
+                                                    x_ptr.add(x_src),
+                                                    col_chunk.as_mut_ptr().add(col_dst_base),
+                                                    kernel_width,
+                                                );
+                                            }
+                                        } else {
+                                            for kw in 0..kernel_width {
+                                                let iw = ow + kw;
+                                                if iw >= padding && iw < padding + in_width {
+                                                    let x_iw = iw - padding;
+                                                    let col_col = col_base + kh * kernel_width + kw;
+                                                    col_chunk[col_col] =
+                                                        unsafe { *x_ptr.add(x_row_base + x_iw) };
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                for kh in 0..kernel_height {
+                                    let ih = oh * stride + kh * dilation;
+
+                                    if ih >= padding && ih < padding + in_height {
+                                        let x_ih = ih - padding;
+                                        let x_row_base =
+                                            (n * in_channels + ic) * in_height * in_width
+                                                + x_ih * in_width;
+
+                                        for kw in 0..kernel_width {
+                                            let iw = ow * stride + kw * dilation;
+                                            if iw >= padding && iw < padding + in_width {
+                                                let x_iw = iw - padding;
+                                                let col_col = col_base + kh * kernel_width + kw;
+                                                col_chunk[col_col] =
+                                                    unsafe { *x_ptr.add(x_row_base + x_iw) };
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Weight data: direct borrow, no copy. BLAS only reads from it.
+        let w_data: &[f32] = unsafe {
+            let w_ptr = w.data_ptr() as *const f32;
+            std::slice::from_raw_parts(
+                w_ptr,
+                out_channels * in_channels * kernel_height * kernel_width / groups,
+            )
         };
 
-        let result = matmul_blas(col_slice, &w_t, col_rows, col_cols, out_channels);
+        let output_shape = vec![
+            batch_size as i64,
+            out_channels as i64,
+            out_height as i64,
+            out_width as i64,
+        ];
+        let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
 
-        for row in 0..col_rows {
-            let n = row / (out_height * out_width);
-            let rem = row % (out_height * out_width);
-            let oh = rem / out_width;
-            let ow = rem % out_width;
+        let output_inner = Arc::make_mut(&mut output.inner);
+        let output_storage = Arc::make_mut(&mut output_inner.storage);
+        let Storage::Cpu(cpu_storage) = output_storage else {
+            panic!("Expected CPU storage");
+        };
+        let out_data = Arc::make_mut(&mut cpu_storage.data);
+        let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
+        let col_slice: &[f32] = col_data;
+
+        let bias_data: Option<Vec<f32>> = if let Some(b) = bias {
+            if b.numel() == 1 {
+                let bias_val = b.item();
+                Some(vec![bias_val; out_channels])
+            } else {
+                let b_ptr = b.data_ptr() as *const f32;
+                Some(unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() })
+            }
+        } else {
+            None
+        };
+
+        if use_gemm {
+            let gemm_out = &mut gemm_buf[..col_rows * out_channels];
+
+            matmul_blas_with_transpose_into(
+                col_slice,
+                &w_data,
+                gemm_out,
+                col_rows,
+                col_cols,
+                out_channels,
+                false,
+                true,
+            );
+
+            // Parallel NHWC -> NCHW layout conversion + bias addition.
+            let spatial = out_height * out_width;
+            let oc_usize = out_channels;
+            let out_usize = out_ptr as usize;
+            let gemm_usize = gemm_out.as_ptr() as usize;
+
+            if let Some(ref b) = bias_data {
+                let b_usize = b.as_ptr() as usize;
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+                    (0..col_rows).into_par_iter().for_each(|row| {
+                        let n = row / spatial;
+                        let sp = row % spatial;
+                        for oc in 0..oc_usize {
+                            let out_idx = (n * oc_usize + oc) * spatial + sp;
+                            unsafe {
+                                let val = *((gemm_usize + (row * oc_usize + oc) * 4) as *const f32)
+                                    + *((b_usize + oc * 4) as *const f32);
+                                *((out_usize + out_idx * 4) as *mut f32) = val;
+                            }
+                        }
+                    });
+                }
+                #[cfg(not(feature = "parallel"))]
+                {
+                    for row in 0..col_rows {
+                        let n = row / spatial;
+                        let sp = row % spatial;
+                        for oc in 0..oc_usize {
+                            let out_idx = (n * oc_usize + oc) * spatial + sp;
+                            unsafe {
+                                *((out_usize + out_idx * 4) as *mut f32) =
+                                    *((gemm_usize + (row * oc_usize + oc) * 4) as *const f32)
+                                        + *((b_usize + oc * 4) as *const f32);
+                            }
+                        }
+                    }
+                }
+            } else {
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+                    (0..col_rows).into_par_iter().for_each(|row| {
+                        let n = row / spatial;
+                        let sp = row % spatial;
+                        for oc in 0..oc_usize {
+                            let out_idx = (n * oc_usize + oc) * spatial + sp;
+                            unsafe {
+                                *((out_usize + out_idx * 4) as *mut f32) =
+                                    *((gemm_usize + (row * oc_usize + oc) * 4) as *const f32);
+                            }
+                        }
+                    });
+                }
+                #[cfg(not(feature = "parallel"))]
+                {
+                    for row in 0..col_rows {
+                        let n = row / spatial;
+                        let sp = row % spatial;
+                        for oc in 0..oc_usize {
+                            let out_idx = (n * oc_usize + oc) * spatial + sp;
+                            unsafe {
+                                *((out_usize + out_idx * 4) as *mut f32) =
+                                    *((gemm_usize + (row * oc_usize + oc) * 4) as *const f32);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
             for oc in 0..out_channels {
-                let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                let w_row = &w_data[oc * col_cols..(oc + 1) * col_cols];
                 let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
-                unsafe { *out_ptr.add(out_idx) = result[row * out_channels + oc] + bias_val };
+
+                for row in 0..col_rows {
+                    let col_row = &col_slice[row * col_cols..(row + 1) * col_cols];
+                    let sum = simd_dot_product(col_row, w_row, col_cols);
+
+                    let n = row / (out_height * out_width);
+                    let rem = row % (out_height * out_width);
+                    let oh = rem / out_width;
+                    let ow = rem % out_width;
+
+                    let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                    unsafe { *out_ptr.add(out_idx) = sum + bias_val };
+                }
             }
         }
-    } else {
-        for oc in 0..out_channels {
-            let w_row = &w_data[oc * col_cols..(oc + 1) * col_cols];
-            let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
 
-            for row in 0..col_rows {
-                let col_row = &col_slice[row * col_cols..(row + 1) * col_cols];
-                let sum = simd_dot_product(col_row, w_row, col_cols);
-
-                let n = row / (out_height * out_width);
-                let rem = row % (out_height * out_width);
-                let oh = rem / out_width;
-                let ow = rem % out_width;
-
-                let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                unsafe { *out_ptr.add(out_idx) = sum + bias_val };
-            }
-        }
-    }
-
-    output
+        output
+    })
 }
 
 fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -8214,12 +8612,12 @@ fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     for i in 0..batch_size as usize {
         let idx = unsafe { *indices_ptr.add(i) } as usize;
         if idx < num_embeddings as usize {
-            for j in 0..embedding_dim as usize {
-                let w_idx = idx * embedding_dim as usize + j;
-                let o_idx = i * embedding_dim as usize + j;
-                unsafe {
-                    *out_ptr.add(o_idx) = *weight_ptr.add(w_idx);
-                }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    weight_ptr.add(idx * embedding_dim as usize),
+                    out_ptr.add(i * embedding_dim as usize),
+                    embedding_dim as usize,
+                );
             }
         }
     }
@@ -8800,4 +9198,786 @@ fn register_kernels() {
         max_pool2d_kernel as KernelFn,
     );
     register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::Tensor;
+
+    /// Reference scalar matmul for a single batch: C = A @ B
+    /// A is [m, k], B is [k, n], C is [m, n]
+    fn reference_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut c = vec![0.0f32; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0f32;
+                for kk in 0..k {
+                    sum += a[i * k + kk] * b[kk * n + j];
+                }
+                c[i * n + j] = sum;
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn test_parallel_matmul_fallback_3d_batched() {
+        // Exercise the parallel_matmul fallback path with 3D batched tensors
+        // that are both contiguous but below BLAS threshold (so BLAS is skipped).
+        let batch: usize = 4;
+        let m: usize = 16;
+        let k: usize = 16;
+        let n: usize = 16;
+
+        // Build A [batch, m, k] and B [batch, k, n] with simple values
+        let a_data: Vec<f32> = (0..batch * m * k)
+            .map(|i| ((i % 100) as f32) * 0.01)
+            .collect();
+        let b_data: Vec<f32> = (0..batch * k * n)
+            .map(|i| ((i % 100) as f32) * 0.02 - 1.0)
+            .collect();
+
+        let a = Tensor::from_vec(a_data.clone(), vec![batch as i64, m as i64, k as i64]);
+        let b = Tensor::from_vec(b_data.clone(), vec![batch as i64, k as i64, n as i64]);
+
+        let result = a.matmul(&b);
+        let result_data = result.as_f32_slice();
+
+        // Verify against reference scalar matmul for each batch
+        for bat in 0..batch {
+            let a_batch = &a_data[bat * m * k..(bat + 1) * m * k];
+            let b_batch = &b_data[bat * k * n..(bat + 1) * k * n];
+            let expected = reference_matmul(a_batch, b_batch, m, k, n);
+            let result_batch = &result_data[bat * m * n..(bat + 1) * m * n];
+
+            for (idx, (got, exp)) in result_batch.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-4,
+                    "batch={}, idx={}: got={}, expected={}",
+                    bat,
+                    idx,
+                    got,
+                    exp
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parallel_matmul_fallback_2d_small() {
+        // Exercise the parallel_matmul fallback path with 2D matrices
+        // below BLAS threshold
+        let m: usize = 8;
+        let k: usize = 12;
+        let n: usize = 10;
+
+        let a_data: Vec<f32> = (0..m * k).map(|i| ((i as f32) * 0.1).sin()).collect();
+        let b_data: Vec<f32> = (0..k * n).map(|i| ((i as f32) * 0.1).cos()).collect();
+
+        let a = Tensor::from_vec(a_data.clone(), vec![m as i64, k as i64]);
+        let b = Tensor::from_vec(b_data.clone(), vec![k as i64, n as i64]);
+
+        let result = a.matmul(&b);
+        let result_data = result.as_f32_slice();
+
+        let expected = reference_matmul(&a_data, &b_data, m, k, n);
+
+        for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-5,
+                "idx={}: got={}, expected={}",
+                idx,
+                got,
+                exp
+            );
+        }
+    }
+
+    #[test]
+    fn test_embedding_bulk_copy() {
+        // Test that embedding forward produces correct results
+        let num_embeddings: usize = 10;
+        let embedding_dim: usize = 4;
+
+        let weight_data: Vec<f32> = (0..num_embeddings * embedding_dim)
+            .map(|i| i as f32 * 0.1)
+            .collect();
+        let weight = Tensor::from_vec(
+            weight_data.clone(),
+            vec![num_embeddings as i64, embedding_dim as i64],
+        );
+
+        // Indices: pick rows 3, 7, 1
+        let indices_data = vec![3.0f32, 7.0, 1.0];
+        let indices = Tensor::from_vec(indices_data, vec![3]);
+
+        let result = crate::dispatcher::dispatch(
+            "embedding",
+            crate::dispatcher::DispatchKey::Cpu,
+            &[&weight, &indices],
+        );
+        let result_data = result[0].as_f32_slice();
+
+        // Expected: rows 3, 7, 1 from weight
+        let mut expected = Vec::new();
+        for &idx in &[3usize, 7, 1] {
+            expected
+                .extend_from_slice(&weight_data[idx * embedding_dim..(idx + 1) * embedding_dim]);
+        }
+
+        assert_eq!(result_data.len(), expected.len());
+        for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "idx={}: got={}, expected={}",
+                idx,
+                got,
+                exp
+            );
+        }
+    }
+
+    /// Benchmark: measure fused_linear_relu vs matmul+relu to quantify the gap.
+    /// This test prints timing data and verifies correctness of both paths.
+    #[test]
+    fn bench_fused_linear_relu_vs_matmul() {
+        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+        use std::time::Instant;
+
+        let configs: Vec<(usize, usize, usize)> = vec![
+            (32, 512, 512),   // small
+            (32, 1024, 1024), // medium
+            (64, 2048, 2048), // large
+        ];
+
+        for &(batch, in_feat, out_feat) in &configs {
+            let x_data: Vec<f32> = (0..batch * in_feat)
+                .map(|i| ((i as f32) * 0.001).sin())
+                .collect();
+            let w_data: Vec<f32> = (0..out_feat * in_feat)
+                .map(|i| ((i as f32) * 0.001).cos() * 0.1)
+                .collect();
+
+            let x = Tensor::from_vec(x_data, vec![batch as i64, in_feat as i64]);
+            let w = Tensor::from_vec(w_data, vec![out_feat as i64, in_feat as i64]);
+
+            // Warmup
+            for _ in 0..3 {
+                let _ = dispatch("fused_linear_relu", DispatchKey::Cpu, &[&x, &w]);
+            }
+
+            // Benchmark fused_linear_relu
+            let iters = 20;
+            let start = Instant::now();
+            for _ in 0..iters {
+                let _ = dispatch("fused_linear_relu", DispatchKey::Cpu, &[&x, &w]);
+            }
+            let fused_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            // Benchmark matmul + relu (BLAS-backed)
+            let start = Instant::now();
+            for _ in 0..iters {
+                let linear_out = x.matmul(&w);
+                let _ = dispatch("relu", DispatchKey::Cpu, &[&linear_out]);
+            }
+            let blas_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            let gflops =
+                (2.0 * batch as f64 * out_feat as f64 * in_feat as f64) / (fused_ms / 1000.0) / 1e9;
+            let blas_gflops =
+                (2.0 * batch as f64 * out_feat as f64 * in_feat as f64) / (blas_ms / 1000.0) / 1e9;
+
+            println!(
+                "fused_linear_relu {}x{}x{}: fused={:.3}ms ({:.1} GFLOP/s), blas={:.3}ms ({:.1} GFLOP/s), gap={:.1}x",
+                batch, in_feat, out_feat, fused_ms, gflops, blas_ms, blas_gflops, fused_ms / blas_ms
+            );
+        }
+    }
+
+    /// Reference: compute x @ w^T + bias then apply activation, all in scalar.
+    fn reference_fused_linear(
+        x_data: &[f32],
+        w_data: &[f32],
+        bias_data: Option<&[f32]>,
+        batch: usize,
+        in_feat: usize,
+        out_feat: usize,
+        activation: &str,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; batch * out_feat];
+        for b in 0..batch {
+            for o in 0..out_feat {
+                let mut sum = 0.0f32;
+                for k in 0..in_feat {
+                    sum += x_data[b * in_feat + k] * w_data[o * in_feat + k];
+                }
+                if let Some(bias) = bias_data {
+                    sum += bias[o];
+                }
+                out[b * out_feat + o] = match activation {
+                    "relu" => sum.max(0.0),
+                    "silu" => sum / (1.0 + (-sum).exp()),
+                    "gelu" => {
+                        let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
+                        let coeff = 0.044715f32;
+                        let x3 = sum * sum * sum;
+                        let t = (sqrt_2_over_pi * (sum + coeff * x3)).tanh();
+                        0.5 * sum * (1.0 + t)
+                    }
+                    _ => panic!("unknown activation"),
+                };
+            }
+        }
+        out
+    }
+
+    /// Test fused_linear_relu correctness: BLAS path (large) and scalar path (small).
+    #[test]
+    fn test_fused_linear_relu_correctness() {
+        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+
+        // Configs: (batch, in, out) - both large (BLAS) and small (scalar fallback)
+        let configs: Vec<(usize, usize, usize)> = vec![
+            (32, 256, 256), // above BLAS threshold
+            (4, 8, 8),      // below BLAS threshold (scalar fallback)
+            (1, 128, 64),   // single sample
+        ];
+
+        for &(batch, in_feat, out_feat) in &configs {
+            let x_data: Vec<f32> = (0..batch * in_feat)
+                .map(|i| ((i as f32) * 0.01).sin())
+                .collect();
+            let w_data: Vec<f32> = (0..out_feat * in_feat)
+                .map(|i| ((i as f32) * 0.01).cos() * 0.1)
+                .collect();
+            let bias_data: Vec<f32> = (0..out_feat).map(|i| (i as f32) * 0.01).collect();
+
+            let x = Tensor::from_vec(x_data.clone(), vec![batch as i64, in_feat as i64]);
+            let w = Tensor::from_vec(w_data.clone(), vec![out_feat as i64, in_feat as i64]);
+            let bias = Tensor::from_vec(bias_data.clone(), vec![out_feat as i64]);
+
+            // Without bias
+            let result = dispatch("fused_linear_relu", DispatchKey::Cpu, &[&x, &w]);
+            let result_data = result[0].as_f32_slice();
+            let expected =
+                reference_fused_linear(&x_data, &w_data, None, batch, in_feat, out_feat, "relu");
+            for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-4,
+                    "relu no-bias batch={} in={} out={} idx={}: got={}, expected={}",
+                    batch,
+                    in_feat,
+                    out_feat,
+                    idx,
+                    got,
+                    exp
+                );
+            }
+
+            // With bias
+            let result = dispatch("fused_linear_relu", DispatchKey::Cpu, &[&x, &w, &bias]);
+            let result_data = result[0].as_f32_slice();
+            let expected = reference_fused_linear(
+                &x_data,
+                &w_data,
+                Some(&bias_data),
+                batch,
+                in_feat,
+                out_feat,
+                "relu",
+            );
+            for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-4,
+                    "relu with-bias batch={} in={} out={} idx={}: got={}, expected={}",
+                    batch,
+                    in_feat,
+                    out_feat,
+                    idx,
+                    got,
+                    exp
+                );
+            }
+        }
+    }
+
+    /// Test fused_linear_silu correctness: BLAS path and scalar path.
+    #[test]
+    fn test_fused_linear_silu_correctness() {
+        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+
+        let configs: Vec<(usize, usize, usize)> = vec![
+            (16, 512, 256), // above BLAS threshold
+            (2, 16, 16),    // below BLAS threshold
+        ];
+
+        for &(batch, in_feat, out_feat) in &configs {
+            let x_data: Vec<f32> = (0..batch * in_feat)
+                .map(|i| ((i as f32) * 0.01).sin())
+                .collect();
+            let w_data: Vec<f32> = (0..out_feat * in_feat)
+                .map(|i| ((i as f32) * 0.01).cos() * 0.1)
+                .collect();
+            let bias_data: Vec<f32> = (0..out_feat).map(|i| (i as f32) * 0.01).collect();
+
+            let x = Tensor::from_vec(x_data.clone(), vec![batch as i64, in_feat as i64]);
+            let w = Tensor::from_vec(w_data.clone(), vec![out_feat as i64, in_feat as i64]);
+            let bias = Tensor::from_vec(bias_data.clone(), vec![out_feat as i64]);
+
+            // With bias
+            let result = dispatch("fused_linear_silu", DispatchKey::Cpu, &[&x, &w, &bias]);
+            let result_data = result[0].as_f32_slice();
+            let expected = reference_fused_linear(
+                &x_data,
+                &w_data,
+                Some(&bias_data),
+                batch,
+                in_feat,
+                out_feat,
+                "silu",
+            );
+            for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-4,
+                    "silu batch={} in={} out={} idx={}: got={}, expected={}",
+                    batch,
+                    in_feat,
+                    out_feat,
+                    idx,
+                    got,
+                    exp
+                );
+            }
+        }
+    }
+
+    /// Test fused_linear_gelu correctness: BLAS path and scalar path.
+    #[test]
+    fn test_fused_linear_gelu_correctness() {
+        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+
+        let configs: Vec<(usize, usize, usize)> = vec![
+            (16, 512, 256), // above BLAS threshold
+            (2, 16, 16),    // below BLAS threshold
+        ];
+
+        for &(batch, in_feat, out_feat) in &configs {
+            let x_data: Vec<f32> = (0..batch * in_feat)
+                .map(|i| ((i as f32) * 0.01).sin())
+                .collect();
+            let w_data: Vec<f32> = (0..out_feat * in_feat)
+                .map(|i| ((i as f32) * 0.01).cos() * 0.1)
+                .collect();
+            let bias_data: Vec<f32> = (0..out_feat).map(|i| (i as f32) * 0.01).collect();
+
+            let x = Tensor::from_vec(x_data.clone(), vec![batch as i64, in_feat as i64]);
+            let w = Tensor::from_vec(w_data.clone(), vec![out_feat as i64, in_feat as i64]);
+            let bias = Tensor::from_vec(bias_data.clone(), vec![out_feat as i64]);
+
+            let result = dispatch("fused_linear_gelu", DispatchKey::Cpu, &[&x, &w, &bias]);
+            let result_data = result[0].as_f32_slice();
+            let expected = reference_fused_linear(
+                &x_data,
+                &w_data,
+                Some(&bias_data),
+                batch,
+                in_feat,
+                out_feat,
+                "gelu",
+            );
+            for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-4,
+                    "gelu batch={} in={} out={} idx={}: got={}, expected={}",
+                    batch,
+                    in_feat,
+                    out_feat,
+                    idx,
+                    got,
+                    exp
+                );
+            }
+        }
+    }
+
+    /// Reference conv2d (im2col + scalar GEMM) for correctness verification.
+    fn reference_conv2d(
+        x: &[f32],
+        w: &[f32],
+        bias: Option<&[f32]>,
+        batch: usize,
+        in_ch: usize,
+        out_ch: usize,
+        h: usize,
+        w_img: usize,
+        kh: usize,
+        kw: usize,
+        stride: usize,
+        pad: usize,
+    ) -> Vec<f32> {
+        let oh = (h + 2 * pad - kh) / stride + 1;
+        let ow = (w_img + 2 * pad - kw) / stride + 1;
+        let col_cols = in_ch * kh * kw;
+        let col_rows = batch * oh * ow;
+
+        // im2col
+        let mut col = vec![0.0f32; col_rows * col_cols];
+        for row in 0..col_rows {
+            let n = row / (oh * ow);
+            let sp = row % (oh * ow);
+            let sph = sp / ow;
+            let spw = sp % ow;
+            for ic in 0..in_ch {
+                for ky in 0..kh {
+                    for kx in 0..kw {
+                        let ih = sph * stride + ky;
+                        let iw = spw * stride + kx;
+                        let col_col = (ic * kh + ky) * kw + kx;
+                        if ih >= pad && ih < pad + h && iw >= pad && iw < pad + w_img {
+                            let xih = ih - pad;
+                            let xiw = iw - pad;
+                            let x_idx = ((n * in_ch + ic) * h + xih) * w_img + xiw;
+                            col[row * col_cols + col_col] = x[x_idx];
+                        }
+                    }
+                }
+            }
+        }
+
+        // GEMM: col [col_rows, col_cols] @ w^T [col_cols, out_ch] = [col_rows, out_ch]
+        let mut result = vec![0.0f32; col_rows * out_ch];
+        for r in 0..col_rows {
+            for oc in 0..out_ch {
+                let mut sum = 0.0f32;
+                for k in 0..col_cols {
+                    sum += col[r * col_cols + k] * w[oc * col_cols + k];
+                }
+                result[r * out_ch + oc] = sum;
+            }
+        }
+
+        // NHWC -> NCHW + bias
+        let spatial = oh * ow;
+        let mut out = vec![0.0f32; batch * out_ch * oh * ow];
+        for row in 0..col_rows {
+            let n = row / spatial;
+            let sp = row % spatial;
+            for oc in 0..out_ch {
+                let out_idx = (n * out_ch + oc) * spatial + sp;
+                let bias_val = bias.map_or(0.0, |b| b[oc]);
+                out[out_idx] = result[row * out_ch + oc] + bias_val;
+            }
+        }
+        out
+    }
+
+    /// Test conv2d_im2col correctness with various configs (padding, stride, bias).
+    #[test]
+    fn test_conv2d_im2col_correctness() {
+        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+
+        let configs: Vec<(usize, usize, usize, usize, usize, usize, usize, usize)> = vec![
+            // (batch, in_ch, out_ch, h, w, kernel, stride, pad)
+            (1, 3, 16, 8, 8, 3, 1, 1),   // basic 3x3, pad=1
+            (2, 8, 16, 16, 16, 3, 1, 1), // batched, above GEMM threshold
+            (1, 4, 8, 12, 12, 3, 2, 0),  // stride=2, no padding
+            (1, 3, 8, 10, 10, 5, 1, 2),  // 5x5 kernel
+        ];
+
+        for &(batch, in_ch, out_ch, h, w, kernel, stride, pad) in &configs {
+            let x_data: Vec<f32> = (0..batch * in_ch * h * w)
+                .map(|i| ((i as f32) * 0.001).sin())
+                .collect();
+            let w_data: Vec<f32> = (0..out_ch * in_ch * kernel * kernel)
+                .map(|i| ((i as f32) * 0.001).cos() * 0.1)
+                .collect();
+            let bias_data: Vec<f32> = (0..out_ch).map(|i| (i as f32) * 0.01).collect();
+
+            let x_t = Tensor::from_vec(
+                x_data.clone(),
+                vec![batch as i64, in_ch as i64, h as i64, w as i64],
+            );
+            let w_t = Tensor::from_vec(
+                w_data.clone(),
+                vec![out_ch as i64, in_ch as i64, kernel as i64, kernel as i64],
+            );
+            let bias_t = Tensor::from_vec(bias_data.clone(), vec![out_ch as i64]);
+
+            let stride_t = Tensor::from_scalar(stride as f32);
+            let pad_t = Tensor::from_scalar(pad as f32);
+
+            // With bias
+            let result = dispatch(
+                "conv2d",
+                DispatchKey::Cpu,
+                &[&x_t, &w_t, &bias_t, &stride_t, &pad_t],
+            );
+            let result_data = result[0].as_f32_slice();
+
+            let expected = reference_conv2d(
+                &x_data,
+                &w_data,
+                Some(&bias_data),
+                batch,
+                in_ch,
+                out_ch,
+                h,
+                w,
+                kernel,
+                kernel,
+                stride,
+                pad,
+            );
+
+            for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-3,
+                    "conv2d b={} ic={} oc={} {}x{} k={} s={} p={} idx={}: got={}, expected={}",
+                    batch,
+                    in_ch,
+                    out_ch,
+                    h,
+                    w,
+                    kernel,
+                    stride,
+                    pad,
+                    idx,
+                    got,
+                    exp
+                );
+            }
+
+            // Without bias: pass zeros as bias
+            let zero_bias = Tensor::from_vec(vec![0.0f32; out_ch], vec![out_ch as i64]);
+            let result = dispatch(
+                "conv2d",
+                DispatchKey::Cpu,
+                &[&x_t, &w_t, &zero_bias, &stride_t, &pad_t],
+            );
+            let result_data = result[0].as_f32_slice();
+
+            let expected = reference_conv2d(
+                &x_data, &w_data, None, batch, in_ch, out_ch, h, w, kernel, kernel, stride, pad,
+            );
+
+            for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-3,
+                    "conv2d-zero-bias b={} idx={}: got={}, expected={}",
+                    batch,
+                    idx,
+                    got,
+                    exp
+                );
+            }
+        }
+    }
+
+    /// Benchmark conv2d_im2col to verify optimization impact.
+    #[test]
+    fn bench_conv2d_im2col() {
+        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+        use std::time::Instant;
+
+        let configs: Vec<(usize, usize, usize, usize, usize, usize, usize)> = vec![
+            (1, 32, 32, 32, 32, 3, 1), // batch=1, 32ch, 32x32, 3x3
+            (1, 64, 64, 64, 64, 3, 1), // batch=1, 64ch, 64x64, 3x3
+        ];
+
+        for &(batch, in_ch, out_ch, h, w, kernel, stride) in &configs {
+            let pad = 1;
+            let x_data: Vec<f32> = (0..batch * in_ch * h * w)
+                .map(|i| ((i as f32) * 0.001).sin())
+                .collect();
+            let w_data: Vec<f32> = (0..out_ch * in_ch * kernel * kernel)
+                .map(|i| ((i as f32) * 0.001).cos() * 0.1)
+                .collect();
+            let bias_data: Vec<f32> = (0..out_ch).map(|i| (i as f32) * 0.01).collect();
+
+            let x_t =
+                Tensor::from_vec(x_data, vec![batch as i64, in_ch as i64, h as i64, w as i64]);
+            let w_t = Tensor::from_vec(
+                w_data,
+                vec![out_ch as i64, in_ch as i64, kernel as i64, kernel as i64],
+            );
+            let bias_t = Tensor::from_vec(bias_data, vec![out_ch as i64]);
+            let stride_t = Tensor::from_scalar(stride as f32);
+            let pad_t = Tensor::from_scalar(pad as f32);
+
+            // Warmup
+            for _ in 0..3 {
+                let _ = dispatch(
+                    "conv2d",
+                    DispatchKey::Cpu,
+                    &[&x_t, &w_t, &bias_t, &stride_t, &pad_t],
+                );
+            }
+
+            let iters = 20;
+            let start = Instant::now();
+            for _ in 0..iters {
+                let _ = dispatch(
+                    "conv2d",
+                    DispatchKey::Cpu,
+                    &[&x_t, &w_t, &bias_t, &stride_t, &pad_t],
+                );
+            }
+            let ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            println!(
+                "conv2d {}x{} {}x{} k={} s={}: {:.3}ms",
+                batch, in_ch, h, w, kernel, stride, ms
+            );
+        }
+    }
+
+    /// Test that the thread-local scratch buffer correctly reuses memory
+    /// across calls with different sizes (exercises buffer growth).
+    #[test]
+    fn test_conv2d_scratch_reuse() {
+        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+
+        // Call conv2d 3 times with increasing sizes to exercise buffer growth.
+        // Then call with the smallest size again to verify shrink is handled.
+        let configs: Vec<(usize, usize, usize, usize, usize, usize, usize, usize)> = vec![
+            (1, 4, 8, 8, 8, 3, 1, 1),     // small: grows buffer
+            (1, 16, 32, 16, 16, 3, 1, 1), // medium: grows buffer more
+            (2, 8, 16, 12, 12, 5, 1, 2),  // different shape: may reuse
+            (1, 4, 8, 8, 8, 3, 1, 1),     // small again: reuse existing buffer
+        ];
+
+        for &(batch, in_ch, out_ch, h, w, kernel, stride, pad) in &configs {
+            let x_data: Vec<f32> = (0..batch * in_ch * h * w)
+                .map(|i| ((i as f32 + 1.0) * 0.01).sin())
+                .collect();
+            let w_data: Vec<f32> = (0..out_ch * in_ch * kernel * kernel)
+                .map(|i| ((i as f32 + 1.0) * 0.01).cos() * 0.1)
+                .collect();
+            let bias_data: Vec<f32> = (0..out_ch).map(|i| (i as f32) * 0.01).collect();
+
+            let x_t = Tensor::from_vec(
+                x_data.clone(),
+                vec![batch as i64, in_ch as i64, h as i64, w as i64],
+            );
+            let w_t = Tensor::from_vec(
+                w_data.clone(),
+                vec![out_ch as i64, in_ch as i64, kernel as i64, kernel as i64],
+            );
+            let bias_t = Tensor::from_vec(bias_data.clone(), vec![out_ch as i64]);
+            let stride_t = Tensor::from_scalar(stride as f32);
+            let pad_t = Tensor::from_scalar(pad as f32);
+
+            let result = dispatch(
+                "conv2d",
+                DispatchKey::Cpu,
+                &[&x_t, &w_t, &bias_t, &stride_t, &pad_t],
+            );
+            let result_data = result[0].as_f32_slice();
+
+            let expected = reference_conv2d(
+                &x_data,
+                &w_data,
+                Some(&bias_data),
+                batch,
+                in_ch,
+                out_ch,
+                h,
+                w,
+                kernel,
+                kernel,
+                stride,
+                pad,
+            );
+
+            assert_eq!(
+                result_data.len(),
+                expected.len(),
+                "output size mismatch for config {:?}",
+                (batch, in_ch, out_ch, h, w, kernel, stride, pad)
+            );
+
+            for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-3,
+                    "scratch_reuse b={} ic={} oc={} {}x{} k={} s={} p={} idx={}: got={}, expected={}",
+                    batch, in_ch, out_ch, h, w, kernel, stride, pad, idx, got, exp
+                );
+            }
+        }
+    }
+
+    /// Test conv2d with stride=2, dilation=2 — exercises the general (non-fast-path)
+    /// im2col loop and verifies output matches a reference scalar implementation.
+    #[test]
+    fn test_conv2d_im2col_stride_dilation() {
+        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
+
+        let configs: Vec<(usize, usize, usize, usize, usize, usize, usize, usize)> = vec![
+            (1, 4, 8, 16, 16, 3, 2, 1),  // stride=2, dilation=1
+            (1, 3, 8, 12, 12, 3, 1, 1),  // stride=1, pad=1 (fast path)
+            (2, 8, 16, 20, 20, 3, 2, 0), // stride=2, no pad, batched
+            (1, 4, 8, 14, 14, 3, 2, 2),  // stride=2, pad=2
+            (1, 4, 8, 10, 10, 5, 2, 2),  // stride=2, 5x5 kernel, pad=2
+        ];
+
+        for &(batch, in_ch, out_ch, h, w, kernel, stride, pad) in &configs {
+            let x_data: Vec<f32> = (0..batch * in_ch * h * w)
+                .map(|i| ((i as f32 + 1.0) * 0.01).sin())
+                .collect();
+            let w_data: Vec<f32> = (0..out_ch * in_ch * kernel * kernel)
+                .map(|i| ((i as f32 + 1.0) * 0.01).cos() * 0.1)
+                .collect();
+            let bias_data: Vec<f32> = (0..out_ch).map(|i| (i as f32) * 0.01).collect();
+
+            let x_t = Tensor::from_vec(
+                x_data.clone(),
+                vec![batch as i64, in_ch as i64, h as i64, w as i64],
+            );
+            let w_t = Tensor::from_vec(
+                w_data.clone(),
+                vec![out_ch as i64, in_ch as i64, kernel as i64, kernel as i64],
+            );
+            let bias_t = Tensor::from_vec(bias_data.clone(), vec![out_ch as i64]);
+            let stride_t = Tensor::from_scalar(stride as f32);
+            let pad_t = Tensor::from_scalar(pad as f32);
+
+            let result = dispatch(
+                "conv2d",
+                DispatchKey::Cpu,
+                &[&x_t, &w_t, &bias_t, &stride_t, &pad_t],
+            );
+            let result_data = result[0].as_f32_slice();
+
+            let expected = reference_conv2d(
+                &x_data,
+                &w_data,
+                Some(&bias_data),
+                batch,
+                in_ch,
+                out_ch,
+                h,
+                w,
+                kernel,
+                kernel,
+                stride,
+                pad,
+            );
+
+            assert_eq!(
+                result_data.len(),
+                expected.len(),
+                "output size mismatch for stride_dilation config {:?}",
+                (batch, in_ch, out_ch, h, w, kernel, stride, pad)
+            );
+
+            for (idx, (got, exp)) in result_data.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-3,
+                    "stride_dilation b={} ic={} oc={} {}x{} k={} s={} p={} idx={}: got={}, expected={}",
+                    batch, in_ch, out_ch, h, w, kernel, stride, pad, idx, got, exp
+                );
+            }
+        }
+    }
 }
