@@ -288,6 +288,16 @@ pub fn gemv_wgpu<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
 ) -> Vec<f32> {
+    // Per-row quantized tensors require per-row scale/zero which the GPU shader
+    // does not support. Fall back to CPU tiled path for per-channel quantization.
+    if weights.is_per_channel() {
+        let shape = weights.shape();
+        let m = shape[0];
+        let mut output = vec![0.0f32; m];
+        crate::backends::packed_blas::gemv_packed_tiled(weights, activation, &mut output);
+        return output;
+    }
+
     let shape = weights.shape();
     assert!(shape.len() >= 2);
     let m = shape[0] as u32;
