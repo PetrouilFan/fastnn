@@ -84,16 +84,12 @@ jobs:
           EXIT_CODE=$?
           set -e
           # PyO3 extensions sometimes crash during Python process cleanup on
-          # Windows (heap corruption 0xc0000374) and occasionally on Linux
-          # (SIGSEGV/SIGABRT). All tests pass but the process crashes at exit.
-          # Forgive signal-based exit codes (139=SIGSEGV, 134=SIGABRT).
-          # Windows cleanup crash shows as exit 1 - forgive only on Windows.
+          # Linux (SIGSEGV=139, SIGABRT=134). All tests pass but the process
+          # crashes at exit. Forgive signal-based exit codes only.
+          # NOTE: exit code 1 on Windows is NOT forgiven — it is pytest's
+          # standard test-failure exit code and would mask real regressions.
           if [ $EXIT_CODE -eq 139 ] || [ $EXIT_CODE -eq 134 ]; then
             echo "::warning::Process cleanup crash (signal $((EXIT_CODE - 128)))"
-            exit 0
-          fi
-          if [ $EXIT_CODE -eq 1 ] && [ "$RUNNER_OS" = "Windows" ]; then
-            echo "::warning::Windows cleanup crash (exit 1)"
             exit 0
           fi
           exit $EXIT_CODE
