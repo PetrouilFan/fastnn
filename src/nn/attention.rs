@@ -23,6 +23,7 @@ impl MultiHeadAttention {
         Self::new_fused(d_model, num_heads, dropout_p)
     }
 
+    #[allow(dead_code)]
     pub fn new_unfused(d_model: i64, num_heads: i64, dropout_p: f32) -> Self {
         assert!(
             d_model % num_heads == 0,
