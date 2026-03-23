@@ -1831,7 +1831,6 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
 
     // Pre-allocate gradients vector to avoid repeated allocations
     let mut gradients = Vec::with_capacity(num_replicas);
-    let num_replicas_tensor = crate::tensor::Tensor::from_scalar(num_replicas as f32);
 
     // For each parameter index, average gradients across replicas
     for param_idx in 0..num_params {
@@ -1858,16 +1857,16 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
         // If we collected gradients from all replicas, average them
         if gradients.len() == num_replicas {
             // Compute average gradient: sum all gradients and divide by num_replicas
-            // Start with first gradient as base
+            // Start with first gradient as base, accumulate in-place
             let mut avg_grad = gradients[0].clone();
 
-            // Add remaining gradients (skip first since it's already in avg_grad)
+            // Add remaining gradients in-place (skip first since it's already in avg_grad)
             for i in 1..gradients.len() {
-                avg_grad = avg_grad.add(&gradients[i]);
+                avg_grad.add_(&gradients[i]);
             }
 
-            // Divide by number of replicas
-            avg_grad = avg_grad.div(&num_replicas_tensor);
+            // Divide by number of replicas in-place
+            avg_grad.mul_scalar_(1.0 / num_replicas as f32);
 
             // Set the averaged gradient back to all parameters
             // Create the PyTensor once and reuse for all replicas
