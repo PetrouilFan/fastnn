@@ -15,6 +15,21 @@ use std::arch::x86_64::{
     _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_storeu_ps, _mm256_sub_ps,
 };
 
+/// Cached scalar tensors for common dimension values (0-7)
+/// Avoids heap allocation on every softmax/sum/mean/max call
+fn dim_scalar(dim: i32) -> Tensor {
+    use std::sync::OnceLock;
+    static DIM_SCALARS: OnceLock<[Tensor; 8]> = OnceLock::new();
+    let scalars =
+        DIM_SCALARS.get_or_init(|| std::array::from_fn(|d| Tensor::from_scalar(d as f32)));
+    let idx = dim as usize;
+    if idx < scalars.len() {
+        scalars[idx].clone()
+    } else {
+        Tensor::from_scalar(dim as f32)
+    }
+}
+
 pub struct TensorImpl {
     pub storage: Arc<Storage>,
     pub sizes: SmallVec<[i64; 8]>,
@@ -584,6 +599,7 @@ impl TensorImpl {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => unsafe {
                 let ptr = cpu.data.as_ref().as_ptr() as *const f32;
+                let ptr = ptr.add(self.storage_offset as usize);
                 let numel = self.numel() as usize;
                 std::slice::from_raw_parts(ptr, numel)
             },
@@ -2196,7 +2212,7 @@ impl Tensor {
         let result = dispatch(
             "softmax",
             dispatch_key,
-            &[self, &Tensor::from_scalar(dim as f32)],
+            &[self, &dim_scalar(dim)],
         );
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
@@ -2297,7 +2313,7 @@ impl Tensor {
             dispatch_key,
             &[
                 self,
-                &Tensor::from_scalar(dim as f32),
+                &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
         );
@@ -2323,7 +2339,7 @@ impl Tensor {
             dispatch_key,
             &[
                 self,
-                &Tensor::from_scalar(dim as f32),
+                &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
         );
@@ -2337,7 +2353,7 @@ impl Tensor {
             dispatch_key,
             &[
                 self,
-                &Tensor::from_scalar(dim as f32),
+                &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
         );
