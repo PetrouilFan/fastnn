@@ -18,6 +18,11 @@ pub struct Conv2d {
     pub dilation: i64,
     pub groups: i64,
     training: std::sync::atomic::AtomicBool,
+    // Pre-allocated scalar tensors to avoid per-forward allocation
+    stride_scalar: Tensor,
+    padding_scalar: Tensor,
+    dilation_scalar: Tensor,
+    groups_scalar: Tensor,
 }
 
 impl Conv2d {
@@ -63,6 +68,10 @@ impl Conv2d {
             dilation,
             groups,
             training: std::sync::atomic::AtomicBool::new(true),
+            stride_scalar: Tensor::from_scalar(stride as f32),
+            padding_scalar: Tensor::from_scalar(padding as f32),
+            dilation_scalar: Tensor::from_scalar(dilation as f32),
+            groups_scalar: Tensor::from_scalar(groups as f32),
         }
     }
 }
@@ -81,10 +90,10 @@ impl Module for Conv2d {
                 x,
                 &self.weight,
                 &bias_tensor,
-                &Tensor::from_scalar(self.stride as f32),
-                &Tensor::from_scalar(self.padding as f32),
-                &Tensor::from_scalar(self.dilation as f32),
-                &Tensor::from_scalar(self.groups as f32),
+                &self.stride_scalar,
+                &self.padding_scalar,
+                &self.dilation_scalar,
+                &self.groups_scalar,
             ],
         );
 

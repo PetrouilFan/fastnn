@@ -9472,16 +9472,29 @@ fn eye_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn randn_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let shape_tensor = args[0];
     let shape: Vec<i64> = shape_tensor.inner.sizes.iter().copied().collect();
-    let numel: i64 = shape.iter().product();
+    let numel: usize = shape.iter().product::<i64>() as usize;
 
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let mut values = vec![0.0f32; numel as usize];
+    let mut values = vec![0.0f32; numel];
 
-    for v in &mut values {
-        let u1: f32 = rng.gen();
-        let u2: f32 = rng.gen();
-        *v = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
+    // Box-Muller generates 2 normal samples from 2 uniform samples
+    // Process in pairs to be 2x faster
+    let mut i = 0;
+    while i + 1 < numel {
+        let u1: f32 = rng.gen::<f32>().max(1e-10); // avoid ln(0)
+        let u2: f32 = rng.gen::<f32>();
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f32::consts::PI * u2;
+        values[i] = r * theta.cos();
+        values[i + 1] = r * theta.sin();
+        i += 2;
+    }
+    // Handle odd element
+    if i < numel {
+        let u1: f32 = rng.gen::<f32>().max(1e-10);
+        let u2: f32 = rng.gen::<f32>();
+        values[i] = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
     }
 
     vec![Tensor::from_vec(values, shape)]
