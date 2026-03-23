@@ -143,27 +143,18 @@ impl TensorIterator {
             return;
         }
 
+        let ndim = self.output_shape.len();
         let output_numel = self.numel;
 
-        for idx in 0..output_numel {
+        // Pre-compute strides for carry-based offset tracking
+        let mut input_offsets: SmallVec<[i64; 4]> =
+            self.inputs.iter().map(|inp| inp.storage_offset).collect();
+        let mut indices = vec![0usize; ndim];
+
+        for _ in 0..output_numel {
             let mut ptrs: SmallVec<[&[u8]; 4]> = SmallVec::with_capacity(self.inputs.len());
 
-            for input in &self.inputs {
-                let linear_idx = idx;
-
-                let mut remaining = linear_idx;
-                let mut offset = input.storage_offset;
-
-                for (i, &size) in input.sizes.iter().enumerate() {
-                    if size == 1 {
-                        continue;
-                    }
-                    let stride = input.strides[i];
-                    let dim_idx = remaining % size as usize;
-                    remaining /= size as usize;
-                    offset += dim_idx as i64 * stride;
-                }
-
+            for (inp_idx, input) in self.inputs.iter().enumerate() {
                 let ptr = match input.tensor.inner.storage.as_ref() {
                     crate::storage::Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
                     crate::storage::Storage::Wgpu(_) => {
@@ -171,13 +162,31 @@ impl TensorIterator {
                     }
                 };
                 let nbytes = input.tensor.inner.dtype.size();
-                let slice = unsafe {
-                    std::slice::from_raw_parts(ptr.add(offset as usize * nbytes), nbytes)
-                };
+                let offset = input_offsets[inp_idx] as usize * nbytes;
+                let slice = unsafe { std::slice::from_raw_parts(ptr.add(offset), nbytes) };
                 ptrs.push(slice);
             }
 
             f(&ptrs);
+
+            // Increment indices and update offsets (carry-based)
+            for d in (0..ndim).rev() {
+                indices[d] += 1;
+                if indices[d] < self.output_shape[d] as usize {
+                    for (inp_idx, input) in self.inputs.iter().enumerate() {
+                        if d < input.strides.len() && input.sizes[d] != 1 {
+                            input_offsets[inp_idx] += input.strides[d];
+                        }
+                    }
+                    break;
+                }
+                for (inp_idx, input) in self.inputs.iter().enumerate() {
+                    if d < input.strides.len() && d < input.sizes.len() && input.sizes[d] != 1 {
+                        input_offsets[inp_idx] -= input.sizes[d] * input.strides[d];
+                    }
+                }
+                indices[d] = 0;
+            }
         }
     }
 
@@ -190,27 +199,17 @@ impl TensorIterator {
             return;
         }
 
+        let ndim = self.output_shape.len();
         let output_numel = self.numel;
+
+        let mut input_offsets: SmallVec<[i64; 4]> =
+            self.inputs.iter().map(|inp| inp.storage_offset).collect();
+        let mut indices = vec![0usize; ndim];
 
         for idx in 0..output_numel {
             let mut ptrs: SmallVec<[&[u8]; 4]> = SmallVec::with_capacity(self.inputs.len());
 
-            for input in &self.inputs {
-                let linear_idx = idx;
-
-                let mut remaining = linear_idx;
-                let mut offset = input.storage_offset;
-
-                for (i, &size) in input.sizes.iter().enumerate() {
-                    if size == 1 {
-                        continue;
-                    }
-                    let stride = input.strides[i];
-                    let dim_idx = remaining % size as usize;
-                    remaining /= size as usize;
-                    offset += dim_idx as i64 * stride;
-                }
-
+            for (inp_idx, input) in self.inputs.iter().enumerate() {
                 let ptr = match input.tensor.inner.storage.as_ref() {
                     crate::storage::Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
                     crate::storage::Storage::Wgpu(_) => {
@@ -218,13 +217,31 @@ impl TensorIterator {
                     }
                 };
                 let nbytes = input.tensor.inner.dtype.size();
-                let slice = unsafe {
-                    std::slice::from_raw_parts(ptr.add(offset as usize * nbytes), nbytes)
-                };
+                let offset = input_offsets[inp_idx] as usize * nbytes;
+                let slice = unsafe { std::slice::from_raw_parts(ptr.add(offset), nbytes) };
                 ptrs.push(slice);
             }
 
             f(idx, &ptrs);
+
+            // Increment indices and update offsets (carry-based)
+            for d in (0..ndim).rev() {
+                indices[d] += 1;
+                if indices[d] < self.output_shape[d] as usize {
+                    for (inp_idx, input) in self.inputs.iter().enumerate() {
+                        if d < input.strides.len() && input.sizes[d] != 1 {
+                            input_offsets[inp_idx] += input.strides[d];
+                        }
+                    }
+                    break;
+                }
+                for (inp_idx, input) in self.inputs.iter().enumerate() {
+                    if d < input.strides.len() && d < input.sizes.len() && input.sizes[d] != 1 {
+                        input_offsets[inp_idx] -= input.sizes[d] * input.strides[d];
+                    }
+                }
+                indices[d] = 0;
+            }
         }
     }
 }
