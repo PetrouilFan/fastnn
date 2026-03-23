@@ -13,11 +13,11 @@ pub fn is_grad_enabled() -> bool {
 }
 
 pub fn no_grad_enter() {
-    NO_GRAD_GLOBAL.store(true, Ordering::SeqCst);
+    NO_GRAD_GLOBAL.store(true, Ordering::Release);
 }
 
 pub fn no_grad_exit() {
-    NO_GRAD_GLOBAL.store(false, Ordering::SeqCst);
+    NO_GRAD_GLOBAL.store(false, Ordering::Release);
 }
 
 pub struct AutogradMeta {
