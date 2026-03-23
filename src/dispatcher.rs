@@ -20,7 +20,7 @@ pub fn device_to_dispatch_key(device: Device) -> DispatchKey {
 pub type KernelFn = fn(&[&Tensor]) -> Vec<Tensor>;
 
 struct DispatcherInner {
-    ops: HashMap<(String, DispatchKey), KernelFn>,
+    ops: HashMap<(&'static str, DispatchKey), KernelFn>,
 }
 
 impl DispatcherInner {
@@ -40,15 +40,17 @@ fn get_dispatcher() -> &'static RwLock<DispatcherInner> {
 pub fn register(op: &'static str, key: DispatchKey, kernel: KernelFn) {
     let dispatcher = get_dispatcher();
     let mut guard = dispatcher.write();
-    guard.ops.insert((op.to_string(), key), kernel);
+    guard.ops.insert((op, key), kernel);
 }
 
 pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Vec<Tensor> {
     let dispatcher = get_dispatcher();
     let guard = dispatcher.read();
 
+    // Use &str directly as key - no allocation needed since HashMap stores &'static str
+    // and we look up by borrowed &str which is compatible via Borrow
     #[allow(clippy::expect_fun_call)]
-    let kernel = guard.ops.get(&(op.to_string(), key)).expect(&format!(
+    let kernel = guard.ops.get(&(op, key)).expect(&format!(
         "No kernel registered for op '{}' with key {:?}",
         op, key
     ));
@@ -60,7 +62,7 @@ pub fn list_registered_ops() -> Vec<String> {
     let dispatcher = get_dispatcher();
     let guard = dispatcher.read();
 
-    let mut ops: Vec<String> = guard.ops.keys().map(|(name, _)| name.clone()).collect();
+    let mut ops: Vec<String> = guard.ops.keys().map(|(name, _)| name.to_string()).collect();
     ops.sort();
     ops.dedup();
     ops
@@ -70,5 +72,5 @@ pub fn list_registered_ops() -> Vec<String> {
 pub fn is_registered(op: &str, key: DispatchKey) -> bool {
     let dispatcher = get_dispatcher();
     let guard = dispatcher.read();
-    guard.ops.contains_key(&(op.to_string(), key))
+    guard.ops.contains_key(&(op, key))
 }
