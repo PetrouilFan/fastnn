@@ -20,11 +20,12 @@ impl Module for Dropout {
     fn forward(&self, x: &Tensor) -> Tensor {
         if self.training.load(std::sync::atomic::Ordering::SeqCst) {
             let x_data = x.as_f32_slice();
+            let scale = 1.0 / (1.0 - self.p) as f32;
             let mask_data: Vec<f32> = x_data
                 .iter()
                 .map(|&v| {
                     if rand::random::<f64>() < (1.0 - self.p) {
-                        v / (1.0 - self.p) as f32
+                        v * scale
                     } else {
                         0.0
                     }
@@ -32,9 +33,9 @@ impl Module for Dropout {
                 .collect();
 
             let shape = x.shape();
-            let mask = Tensor::from_vec(mask_data, shape);
-
-            x.mul(&mask)
+            // mask_data already contains the final dropout result (x * scale or 0),
+            // no need for redundant x.mul(&mask)
+            Tensor::from_vec(mask_data, shape)
         } else {
             x.clone()
         }

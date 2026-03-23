@@ -809,47 +809,33 @@ impl Tensor {
             panic!("Expected CPU storage for ones()");
         };
         let data = Arc::make_mut(&mut cpu_storage.data);
-        let ptr = data.as_mut_ptr();
         match dtype {
             DType::F32 => {
-                let f32_ptr = ptr as *mut f32;
-                for i in 0..numel {
-                    unsafe {
-                        *f32_ptr.add(i) = 1.0;
-                    }
-                }
+                let slice =
+                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f32, numel) };
+                slice.fill(1.0);
             }
             DType::F64 => {
-                let f64_ptr = ptr as *mut f64;
-                for i in 0..numel {
-                    unsafe {
-                        *f64_ptr.add(i) = 1.0;
-                    }
-                }
+                let slice =
+                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, numel) };
+                slice.fill(1.0);
             }
             DType::I32 => {
-                let i32_ptr = ptr as *mut i32;
-                for i in 0..numel {
-                    unsafe {
-                        *i32_ptr.add(i) = 1;
-                    }
-                }
+                let slice =
+                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i32, numel) };
+                slice.fill(1);
             }
             DType::BF16 => {
-                let bf16_ptr = ptr as *mut half::bf16;
-                for i in 0..numel {
-                    unsafe {
-                        *bf16_ptr.add(i) = half::bf16::from_f32(1.0);
-                    }
-                }
+                let slice = unsafe {
+                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut half::bf16, numel)
+                };
+                slice.fill(half::bf16::from_f32(1.0));
             }
             DType::F16 => {
-                let f16_ptr = ptr as *mut half::f16;
-                for i in 0..numel {
-                    unsafe {
-                        *f16_ptr.add(i) = half::f16::from_f32(1.0);
-                    }
-                }
+                let slice = unsafe {
+                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut half::f16, numel)
+                };
+                slice.fill(half::f16::from_f32(1.0));
             }
             _ => {}
         }

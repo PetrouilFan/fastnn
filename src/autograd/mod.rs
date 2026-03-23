@@ -159,24 +159,22 @@ impl Node for AddBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        // if a.shape() == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
-        //     panic!("AddBackward: a=[64, 64], grad=[32, 64, 64]");
-        // }
 
         // Handle broadcasting: if input shape doesn't match output shape,
-        // sum over the extra dimensions
-        let grad_a = if a.shape() == grad.shape() {
+        // sum over the extra dimensions. Avoid double-clone when both match.
+        let a_matches = a.shape() == grad.shape();
+        let b_matches = b.shape() == grad.shape();
+
+        let grad_a = if a_matches {
             grad.clone()
         } else {
-            // Sum over dimensions that exist in grad but not in a
-            // Broadcasting aligns dimensions on the right
             let mut grad_a = grad.clone();
             let diff = grad.shape().len() as i32 - a.shape().len() as i32;
             for i in (0..grad.shape().len()).rev() {
                 let a_dim = if i as i32 >= diff {
                     a.shape()[(i as i32 - diff) as usize]
                 } else {
-                    1 // Dimension doesn't exist in a, treat as 1 (broadcasted)
+                    1
                 };
                 if a_dim != grad.shape()[i] {
                     grad_a = grad_a.sum(i as i32, false);
@@ -185,19 +183,23 @@ impl Node for AddBackward {
             grad_a
         };
 
-        let grad_b = if b.shape() == grad.shape() {
-            grad.clone()
+        let grad_b = if b_matches {
+            if a_matches {
+                // Both match: reuse grad instead of cloning again
+                grad
+            } else {
+                grad.clone()
+            }
         } else {
-            // Sum over dimensions that exist in grad but not in b
-            let mut grad_b = grad.clone();
-            let diff = grad.shape().len() as i32 - b.shape().len() as i32;
-            for i in (0..grad.shape().len()).rev() {
+            let mut grad_b = grad;
+            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
+            for i in (0..grad_b.shape().len()).rev() {
                 let b_dim = if i as i32 >= diff {
                     b.shape()[(i as i32 - diff) as usize]
                 } else {
                     1
                 };
-                if b_dim != grad.shape()[i] {
+                if b_dim != grad_b.shape()[i] {
                     grad_b = grad_b.sum(i as i32, false);
                 }
             }
@@ -527,23 +529,6 @@ impl Node for MatmulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        // Debug: print shapes
-        eprintln!(
-            "MatmulBackward: a.shape={:?}, b.shape={:?}, grad.shape={:?}",
-            a.shape(),
-            b.shape(),
-            grad.shape()
-        );
-        // if (a.shape() == vec![32, 64, 64] && b.shape() == vec![64, 64])
-        //     && grad.shape() == vec![32, 64, 64]
-        // {
-        //     panic!(
-        //         "MatmulBackward: a={:?}, b={:?}, grad={:?}",
-        //         a.shape(),
-        //         b.shape(),
-        //         grad.shape()
-        //     );
-        // }
 
         // If grad is a scalar (e.g., from sum()), we need to expand it to the output shape
         let grad_shape = grad.shape();
@@ -1497,22 +1482,13 @@ impl Node for SliceBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
 
-        // Create a zero tensor for the gradient of the input
         let input_shape = self.input.shape();
-        // if input_shape == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
-        //     panic!(
-        //         "SliceBackward: input_shape {:?} != grad.shape() {:?}",
-        //         input_shape,
-        //         grad.shape()
-        //     );
-        // }
         let mut grad_input = Tensor::zeros(
             input_shape.clone(),
             crate::storage::DType::F32,
             self.input.device(),
         );
 
-        // For simplicity, assume CPU and contiguous tensors
         use crate::storage::Storage;
 
         if let Storage::Cpu(cpu_grad) = grad.inner.storage.as_ref() {
@@ -1530,24 +1506,36 @@ impl Node for SliceBackward {
                 let mut grad_shape = input_shape.clone();
                 grad_shape[self.dim] = sliced_size;
 
-                // Iterate over grad and scatter to grad_input
+                let ndim = grad_shape.len();
+                // Pre-allocate coordinate arrays once instead of per-element
+                let mut grad_coords = vec![0usize; ndim];
+                let mut input_coords = vec![0usize; ndim];
+                let start = self.start as usize;
+                let step = self.step as usize;
+
+                // Pre-compute shape strides for index decomposition
+                let mut shape_strides = vec![0usize; ndim];
+                let mut stride = 1usize;
+                for d in (0..ndim).rev() {
+                    shape_strides[d] = stride;
+                    stride *= grad_shape[d] as usize;
+                }
+
                 for i in 0..grad_numel {
-                    // Compute multi-dimensional index for grad
+                    // Decompose linear index to coordinates
                     let mut temp = i;
-                    let mut grad_coords = vec![0; grad_shape.len()];
-                    for d in (0..grad_shape.len()).rev() {
+                    for d in (0..ndim).rev() {
                         grad_coords[d] = temp % grad_shape[d] as usize;
                         temp /= grad_shape[d] as usize;
                     }
 
                     // Map to input coordinates
-                    let mut input_coords = grad_coords.clone();
-                    input_coords[self.dim] =
-                        (self.start as usize) + (grad_coords[self.dim] * self.step as usize);
+                    input_coords.copy_from_slice(&grad_coords);
+                    input_coords[self.dim] = start + (grad_coords[self.dim] * step);
 
-                    // Compute linear index in input
+                    // Compute linear index in input using strides
                     let mut input_idx = 0;
-                    for d in 0..input_coords.len() {
+                    for d in 0..ndim {
                         input_idx += input_coords[d] * input_strides[d] as usize;
                     }
 
