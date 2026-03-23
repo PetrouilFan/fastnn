@@ -7773,33 +7773,104 @@ fn im2col_kernel(
 
     let x_ptr = x.data_ptr() as *const f32;
 
-    let _in_height_pad = in_height + 2 * padding;
-    let _in_width_pad = in_width + 2 * padding;
+    #[cfg(feature = "parallel")]
+    {
+        if batch_size > 1 {
+            use rayon::prelude::*;
+            let col_rows_per_batch = out_height * out_width;
+            let x_usize = x_ptr as usize;
+            let col_usize = col_data.as_mut_ptr() as usize;
 
-    for n in 0..batch_size {
-        for oh in 0..out_height {
-            for ow in 0..out_width {
-                let col_row = (n * out_height + oh) * out_width + ow;
+            (0..batch_size).into_par_iter().for_each(|n| {
+                unsafe {
+                    let x_p = x_usize as *const f32;
+                    let col_p = (col_usize as *mut f32).add(n * col_rows_per_batch * col_cols);
+                    for oh in 0..out_height {
+                        for ow in 0..out_width {
+                            let col_row = oh * out_width + ow;
+                            for ic in 0..in_channels {
+                                for kh in 0..kernel_height {
+                                    for kw in 0..kernel_width {
+                                        let ih = oh * stride + kh * dilation;
+                                        let iw = ow * stride + kw * dilation;
+                                        let col_col =
+                                            ((ic * kernel_height) + kh) * kernel_width + kw;
+                                        if ih >= padding
+                                            && ih < padding + in_height
+                                            && iw >= padding
+                                            && iw < padding + in_width
+                                        {
+                                            let x_ih = ih - padding;
+                                            let x_iw = iw - padding;
+                                            let x_idx = ((n * in_channels + ic) * in_height + x_ih)
+                                                * in_width
+                                                + x_iw;
+                                            unsafe {
+                                                *col_p.add(col_row * col_cols + col_col) =
+                                                    *x_p.add(x_idx);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } // end unsafe
+            });
+        } else {
+            for oh in 0..out_height {
+                for ow in 0..out_width {
+                    let col_row = oh * out_width + ow;
+                    for ic in 0..in_channels {
+                        for kh in 0..kernel_height {
+                            for kw in 0..kernel_width {
+                                let ih = oh * stride + kh * dilation;
+                                let iw = ow * stride + kw * dilation;
+                                let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
+                                if ih >= padding
+                                    && ih < padding + in_height
+                                    && iw >= padding
+                                    && iw < padding + in_width
+                                {
+                                    let x_ih = ih - padding;
+                                    let x_iw = iw - padding;
+                                    let x_idx = (ic * in_height + x_ih) * in_width + x_iw;
+                                    col_data[col_row * col_cols + col_col] =
+                                        unsafe { *x_ptr.add(x_idx) };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-                for ic in 0..in_channels {
-                    for kh in 0..kernel_height {
-                        for kw in 0..kernel_width {
-                            let ih = oh * stride + kh * dilation;
-                            let iw = ow * stride + kw * dilation;
-
-                            let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
-
-                            if ih >= padding
-                                && ih < padding + in_height
-                                && iw >= padding
-                                && iw < padding + in_width
-                            {
-                                let x_ih = ih - padding;
-                                let x_iw = iw - padding;
-                                let x_idx =
-                                    ((n * in_channels + ic) * in_height + x_ih) * in_width + x_iw;
-                                col_data[col_row * col_cols + col_col] =
-                                    unsafe { *x_ptr.add(x_idx) };
+    #[cfg(not(feature = "parallel"))]
+    {
+        for n in 0..batch_size {
+            for oh in 0..out_height {
+                for ow in 0..out_width {
+                    let col_row = (n * out_height + oh) * out_width + ow;
+                    for ic in 0..in_channels {
+                        for kh in 0..kernel_height {
+                            for kw in 0..kernel_width {
+                                let ih = oh * stride + kh * dilation;
+                                let iw = ow * stride + kw * dilation;
+                                let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
+                                if ih >= padding
+                                    && ih < padding + in_height
+                                    && iw >= padding
+                                    && iw < padding + in_width
+                                {
+                                    let x_ih = ih - padding;
+                                    let x_iw = iw - padding;
+                                    let x_idx = ((n * in_channels + ic) * in_height + x_ih)
+                                        * in_width
+                                        + x_iw;
+                                    col_data[col_row * col_cols + col_col] =
+                                        unsafe { *x_ptr.add(x_idx) };
+                                }
                             }
                         }
                     }
