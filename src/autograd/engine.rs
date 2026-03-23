@@ -80,7 +80,6 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         let grad_output_for_node = grads.get(&tensor_id).cloned();
 
         // Apply backward to get gradients for inputs
-
         let grad_inputs = node.apply(&[grad_output_for_node]);
 
         // Get the input tensors for this node
