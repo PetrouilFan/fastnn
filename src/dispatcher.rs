@@ -49,11 +49,10 @@ pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Vec<Tensor> {
 
     // Use &str directly as key - no allocation needed since HashMap stores &'static str
     // and we look up by borrowed &str which is compatible via Borrow
-    #[allow(clippy::expect_fun_call)]
-    let kernel = guard.ops.get(&(op, key)).expect(&format!(
-        "No kernel registered for op '{}' with key {:?}",
-        op, key
-    ));
+    let kernel = guard
+        .ops
+        .get(&(op, key))
+        .unwrap_or_else(|| panic!("No kernel registered for op '{}' with key {:?}", op, key));
 
     kernel(args)
 }

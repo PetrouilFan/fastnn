@@ -16,6 +16,8 @@ pub struct MultiHeadAttention {
     training: AtomicBool,
     // Fused projection for better memory locality
     pub qkv_proj: Option<Linear>,
+    // Pre-allocated scale tensor to avoid per-forward allocation
+    scale: f32,
 }
 
 impl MultiHeadAttention {
@@ -48,6 +50,7 @@ impl MultiHeadAttention {
             dropout_p,
             training: AtomicBool::new(true),
             qkv_proj: None,
+            scale: 1.0 / (head_dim as f32).sqrt(),
         }
     }
 
@@ -79,6 +82,7 @@ impl MultiHeadAttention {
             dropout_p,
             training: AtomicBool::new(true),
             qkv_proj: Some(qkv_proj),
+            scale: 1.0 / (head_dim as f32).sqrt(),
         }
     }
 
@@ -138,7 +142,6 @@ impl MultiHeadAttention {
         };
 
         // 3. Compute attention scores with scale factor
-        let scale = 1.0 / (self.head_dim as f32).sqrt();
         // Q @ K^T: [batch, num_heads, seq_len, head_dim] @ [batch, num_heads, head_dim, seq_len]
         // Only make contiguous right before matmul
         let q = if q.is_contiguous() { q } else { q.contiguous() };
@@ -149,7 +152,7 @@ impl MultiHeadAttention {
             k_t.contiguous()
         };
         let mut attn_scores = q.matmul(&k_t);
-        attn_scores = attn_scores.mul(&Tensor::from_scalar(scale));
+        attn_scores = attn_scores.mul_scalar(self.scale);
 
         // 4. Apply softmax along the last dimension (seq_len)
         let attn_weights = attn_scores.softmax(3);
