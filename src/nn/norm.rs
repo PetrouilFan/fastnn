@@ -127,16 +127,16 @@ impl Module for LayerNorm {
 
     fn train_mode(&self) {
         self.training
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn eval_mode(&self) {
         self.training
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::SeqCst)
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -214,7 +214,7 @@ impl Module for BatchNorm1d {
         let running_mean = self.running_mean.read().clone();
         let running_var = self.running_var.read().clone();
 
-        let training_flag = if self.training.load(std::sync::atomic::Ordering::SeqCst) {
+        let training_flag = if self.training.load(std::sync::atomic::Ordering::Relaxed) {
             &self.training_true_scalar
         } else {
             &self.training_false_scalar
@@ -278,15 +278,15 @@ impl Module for BatchNorm1d {
 
     fn train_mode(&self) {
         self.training
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn eval_mode(&self) {
         self.training
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::SeqCst)
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
