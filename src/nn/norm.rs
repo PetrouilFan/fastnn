@@ -143,8 +143,11 @@ impl Module for LayerNorm {
 }
 
 pub struct BatchNorm1d {
+    #[allow(dead_code)]
     pub num_features: i64,
+    #[allow(dead_code)]
     pub eps: f64,
+    #[allow(dead_code)]
     pub momentum: f64,
     pub weight: Option<Tensor>,
     pub bias: Option<Tensor>,
