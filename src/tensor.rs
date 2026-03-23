@@ -1683,6 +1683,83 @@ impl Tensor {
         self
     }
 
+    /// In-place scalar multiplication: self *= scalar
+    /// Avoids allocating a scalar tensor for optimizer hot paths.
+    pub fn mul_scalar_(&mut self, scalar: f32) -> &mut Self {
+        if self.inner.is_gpu() {
+            let scalar_t = Tensor::from_scalar(scalar);
+            let result = (self as &Tensor).mul(&scalar_t);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let self_ptr = self.data_ptr_f32_mut();
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) *= scalar;
+            }
+        }
+        self
+    }
+
+    /// In-place scalar addition: self += scalar
+    pub fn add_scalar_(&mut self, scalar: f32) -> &mut Self {
+        if self.inner.is_gpu() {
+            let scalar_t = Tensor::from_scalar(scalar);
+            let result = (self as &Tensor).add(&scalar_t);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let self_ptr = self.data_ptr_f32_mut();
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) += scalar;
+            }
+        }
+        self
+    }
+
+    /// In-place subtraction: self -= other
+    pub fn sub_(&mut self, other: &Tensor) -> &mut Self {
+        if self.inner.is_gpu() || other.inner.is_gpu() {
+            let result = (self as &Tensor).sub(other);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) -= *other_ptr.add(i);
+            }
+        }
+        self
+    }
+
+    /// In-place division: self /= other
+    pub fn div_(&mut self, other: &Tensor) -> &mut Self {
+        if self.inner.is_gpu() || other.inner.is_gpu() {
+            let result = (self as &Tensor).div(other);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) /= *other_ptr.add(i);
+            }
+        }
+        self
+    }
+
     pub fn sub(&self, other: &Tensor) -> Tensor {
         let dispatch_key = match (self.device(), other.device()) {
             (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
