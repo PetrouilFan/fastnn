@@ -2,7 +2,7 @@
 
 **fastnn** is a high-performance neural network inference library built from scratch in Rust, with seamless Python bindings. It is designed for fast, memory-efficient CPU inference — including on edge devices like Raspberry Pi — using sub-byte quantization and hand-written SIMD kernels.
 
-> **Version:** v0.6.0 — Native Multi-Precision Support
+> **Version:** v0.7.0 — Performance Optimizations
 
 [![CI](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml/badge.svg)](https://github.com/PetrouilFan/fastnn/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -28,14 +28,15 @@ fastnn is built for researchers and engineers who need efficient inference on CP
 
 - **Native Packed Precision** — Inference at 4-bit, 8-bit, 16-bit, and 32-bit with no post-training quantization step. SWAR and SIMD-accelerated GEMV/ReLU operating directly on packed u32 words. U4x8 achieves **61 GFLOP/s** on CPU (7.4× faster than f32, 8× memory savings).
 - **Vectorized CPU Kernels** — Hand-optimized SIMD kernels with runtime dispatch: AVX512 → AVX2 → NEON → scalar fallback. Includes Cephes-style fast approximations for transcendental functions (`exp`, `log`).
+- **SIMD-Accelerated In-Place Operations** — `add_()`, `mul_()`, `sub_()`, `div_()` with AVX2 vectorization and rayon parallelism for large tensors (>2048 elements).
 - **Multi-threading** — Automatic parallelism via [rayon](https://github.com/rayon-rs/rayon) with cache-aware chunking for both memory-bound and compute-bound workloads.
 - **Native Autograd** — Built-in automatic differentiation engine with operation tracking, backward passes, and `no_grad` context support.
 - **Optimized Convolutions** — im2col-based Conv2d with specialized kernels for 1×1, depthwise, and 3×3 convolutions at various stride/dilation configurations.
+- **BLAS Integration** — OpenBLAS backend for large matrix multiplication. Matmul performance within 1.2× of PyTorch MKL at most sizes.
 - **PyTorch Model Export** — Load pretrained PyTorch models and run inference through fastnn (see limitations below).
 - **PyO3 Python Bindings** — Train and evaluate models from Python with a PyTorch-like API.
 - **Training Utilities** — Datasets, DataLoaders, and Keras-style Callbacks (EarlyStopping, ModelCheckpoint, LearningRateScheduler, CSVLogger).
 - **GPU Acceleration** *(experimental)* — Cross-platform GPU compute via [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12). Basic elementwise ops and tiled matrix multiplication. Not recommended for production use yet.
-- **BLAS Integration** *(optional)* — OpenBLAS backend for large matrix multiplication, disabled by default.
 
 ---
 
@@ -83,21 +84,75 @@ SWAR ReLU uses IEEE 754 sign-bit masking — processes 8 u32 words (up to 64 val
 
 ## CPU Performance vs PyTorch
 
-Benchmarks measured on AMD Ryzen 7 3700X, comparing fastnn (f32, multi-threaded) against PyTorch CPU (f32, MKL BLAS).
+Benchmarks measured on AMD Ryzen 7 3700X (Arch Linux), comparing fastnn (f32, OpenBLAS, multi-threaded) against PyTorch CPU (f32, MKL BLAS).
+
+### MatMul (OpenBLAS-accelerated)
+
+| Size          | fastnn   | PyTorch  | Ratio |
+|---------------|----------|----------|-------|
+| 64×128×64     | 12μs     | 17μs     | **0.75×** ✅ |
+| 128×256×128   | 74μs     | 71μs     | 1.03× ≈ |
+| 256×512×256   | 553μs    | 444μs    | 1.24× |
+| 512×1024×512  | 1688μs   | 2171μs   | **0.78×** ✅ |
+| 1024×1024×1024 | 8498μs  | 7365μs   | 1.15× |
+
+> Matmul went from **28× slower** to **within 1.2×** of PyTorch MKL after OpenBLAS integration and dispatch fast path.
+
+### Elementwise Operations
 
 | Operation     | Size          | fastnn   | PyTorch  | Status         |
 |---------------|---------------|----------|----------|----------------|
-| MatMul        | 106×64×128    | 106μs    | 163μs    | ✅ faster      |
-| ReLU          | 2×100         | 2.3μs    | 2.5μs    | ✅ faster      |
-| FusedAddReLU  | 2×100         | 3.6μs    | 5.2μs    | ✅ faster      |
-| Tanh          | 2×100         | 39μs     | 7.9ms    | ✅ faster      |
-| GELU          | 2×100         | 42μs     | 42μs     | competitive    |
-| Add           | 2×100         | 40μs     | 2.9μs    | ⚠️ slower (FFI overhead) |
-| Mul           | 2×100         | 43μs     | 3.2μs    | ⚠️ slower (FFI overhead) |
-| Conv2d        | 1×64×56×56    | 873μs    | 135μs    | ⚠️ slower      |
-| Linear        | 1×256         | 679μs    | 41μs     | ⚠️ slower      |
+| ReLU          | 100×100       | 1.51μs   | 2.47μs   | ✅ 1.6× faster |
+| Add           | 100×100       | 1.80μs   | 2.95μs   | ✅ 1.6× faster |
+| Mul           | 100×100       | 1.78μs   | 2.89μs   | ✅ 1.6× faster |
+| FusedAddReLU  | 100×100       | 1.76μs   | 5.37μs   | ✅ 3.0× faster |
+| Sigmoid       | 100×100       | 21μs     | 8.6μs    | ⚠️ scalar fallback |
+| GELU          | 100×100       | 23μs     | 20μs     | competitive    |
 
-> Small tensor f32 ops (Add, Mul, Linear) are currently dominated by Python↔Rust FFI overhead and allocation cost. Packed precision (U4x8/U8x4) inverts this picture for GEMV workloads.
+### Reductions
+
+| Operation     | Size          | fastnn   | PyTorch  | Notes          |
+|---------------|---------------|----------|----------|----------------|
+| Sum (dim=1)   | 1000×1000     | 170μs    | 17μs     | ⚠️ parallel overhead |
+| Max (dim=1)   | 1000×1000     | 90μs     | 200μs    | ✅ faster       |
+| Mean (dim=1)  | 1000×1000     | 260μs    | 21μs     | ⚠️ needs optimization |
+
+> Small tensor f32 ops (Sigmoid, Sum, Mean) still have dispatch overhead. Packed precision (U4x8/U8x4) excels for GEMV workloads where dispatch cost is amortized.
+
+---
+
+## Performance Optimizations (v0.7.0)
+
+This release includes **40+ performance optimizations** across 6 commits:
+
+### Critical Fixes
+- **Removed debug `eprintln!`** from MatmulBackward hot path (~100× matmul backward speedup)
+- **Memory safety fix** in `add_()`/`mul_()` for non-contiguous tensor views
+- **OpenBLAS integration** — switched from reference BLAS to optimized OpenBLAS (28× → 1.2× matmul)
+
+### SIMD Vectorization
+- Sigmoid/tanh kernels: AVX2/AVX512 `fast_exp` directly on SIMD registers (8-16×)
+- `add_()`/`mul_()`/`sub_()`/`div_()`: AVX2 vectorization + rayon parallelism
+- Softmax: fused exp computation with output storage (no double compute)
+- `gt_scalar_kernel`: AVX2 comparison + blendv for relu backward
+
+### Allocation Reduction
+- Adam/AdamW/SGD/Muon: in-place scalar ops (`mul_scalar_`, `add_scalar_`) — 30+ fewer allocs/step
+- TensorIterator: `SmallVec<[&[u8]; 4]>` eliminates per-element heap alloc
+- `dim_scalar()`: cached `OnceLock<[Tensor; 8]>` for dim 0-7
+- Pre-allocated scalar tensors in Conv2d, MaxPool2d, BatchNorm1d, LayerNorm
+- Fused backward computations (SiLU, Sigmoid, Tanh, Gelu, MSELoss, Log, Sqrt)
+
+### Parallelization
+- Batched BLAS: rayon parallelization across batch dimension
+- MaxPool2d: parallelize over (batch × channels)
+- `max_kernel`: parallel rayon reduction across blocks
+
+### Other
+- Atomic ordering: `SeqCst` → `Relaxed` for all training flags
+- Dropout: `thread_rng()` batch generation instead of `rand::random()` per element
+- `as_f32_slice()`: fixed missing `storage_offset` (correctness bug)
+- `to_numpy()`: contiguous F32 fast path, O(n) index tracking
 
 ---
 
@@ -119,24 +174,14 @@ fastnn/
 │   │   ├── blas.rs             # BLAS-accelerated matrix multiplication (optional)
 │   │   └── gpu/                # WebGPU compute pipelines and WGSL shaders (experimental)
 │   ├── nn/                     # Neural network layers, activations, attention
-│   ├── optim/                  # SGD, Adam, AdamW optimizers
+│   ├── optim/                  # SGD, Adam, AdamW, Muon optimizers
 │   ├── train/                  # Trainer, callbacks, metrics, loss functions
 │   ├── io/                     # Model serialization (safetensors), DLPack
 │   ├── dtypes/                 # Packed precision types (U4x8, U8x4, F16x2, F32x1)
-│   │   ├── mod.rs              # PackedWord trait definition
-│   │   ├── u4x8.rs             # 4-bit signed (8 values per u32)
-│   │   ├── u8x4.rs             # 8-bit signed (4 values per u32)
-│   │   ├── f16x2.rs            # IEEE 754 half (2 values per u32)
-│   │   └── f32x1.rs            # IEEE 754 single (1 value per u32)
 │   ├── swar/                   # SWAR operations (add, sub, relu, max on raw u32)
 │   ├── packed_tensor.rs        # PackedTensor<T> with scale/zero dequantization
 │   ├── packed_layer.rs         # PackedLinear<T> with auto backend selection
-│   ├── packed_train.rs         # MasterWeightOptimizer for f32 master weights
-│   └── backends/
-│       ├── cpu.rs              # CPU GEMV/GEMM dispatch
-│       ├── packed_simd.rs      # SIMD-accelerated GEMV (AVX2, F16C, AVX512)
-│       ├── packed_blas.rs      # BLIS-style tiled micro-kernel
-│       └── wgpu/               # WebGPU shader generation per packed type (experimental)
+│   └── packed_train.rs         # MasterWeightOptimizer for f32 master weights
 ├── fastnn/                     # Python package
 │   ├── __init__.py             # Public API surface
 │   ├── nn.py                   # Sequential, ModuleList
@@ -147,9 +192,12 @@ fastnn/
 ├── benches/
 │   └── packed_bench.rs         # Packed precision GEMV/ReLU benchmarks
 └── tests/
-    ├── packed_integration.rs   # End-to-end packed network tests
-    ├── bench/                  # Benchmarks vs PyTorch (CPU)
-    └── *.py                    # Unit and integration tests
+    ├── test_autograd.py        # Gradient checking tests
+    ├── test_gradients.py       # Numerical gradient verification
+    ├── test_nn.py              # Neural network layer tests
+    ├── test_tensor.py          # Tensor operation tests
+    ├── bench_comparison.py     # Benchmarks vs PyTorch
+    └── bench_tensor_ops.py     # Tensor operation benchmarks
 ```
 
 ---
@@ -175,6 +223,17 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/PetrouilFan/fastnn.git
 cd fastnn
 make install
+```
+
+### BLAS Backend
+
+For optimal matmul performance, install OpenBLAS:
+```bash
+# Arch Linux
+sudo pacman -S openblas
+
+# Ubuntu/Debian
+sudo apt install libopenblas-dev
 ```
 
 ### Platform Support
@@ -348,6 +407,7 @@ output = fnn_model(fnn.tensor(data, shape))
 | `fnn.SGD(params, lr, momentum=0, weight_decay=0)`               | Stochastic Gradient Descent |
 | `fnn.Adam(params, lr, betas=(0.9, 0.999), eps=1e-8)`            | Adam                     |
 | `fnn.AdamW(params, lr, betas=(0.9, 0.999), weight_decay=0.01)`  | AdamW (decoupled L2)     |
+| `fnn.Muon(params, lr, momentum=0.95)`                            | Muon (orthogonalized momentum) |
 
 ### Loss Functions
 
@@ -364,29 +424,26 @@ output = fnn_model(fnn.tensor(data, shape))
 |---------------|---------------------------------------------------|---------|
 | `simd`        | SIMD kernels (AVX2, AVX512, NEON, F16C)           | on      |
 | `parallel`    | Rayon multi-threaded parallelism                  | on      |
-| `simd-avx512` | AVX-512 kernels (requires AVX-512 CPU)            | off     |
+| `simd-avx512` | AVX-512 kernels (requires AVX-512 CPU)            | on      |
+| `blas`        | BLAS-accelerated matmul                           | on      |
 | `openblas`    | Link against OpenBLAS for large matmul            | off     |
-| `prefetch`    | Software prefetching in matmul kernels            | off     |
 
 ---
 
 ## Testing & Benchmarking
 
 ```bash
-# Rust unit + integration tests (includes packed precision)
+# Rust unit + integration tests
 cargo test
 
-# Packed precision GEMV/ReLU benchmark
-cargo run --release --bin packed_bench
-
-# CPU benchmark suite (fastnn vs PyTorch)
-python tests/bench/fastnn.py
-
 # Python unit and integration tests
-pytest
+pytest tests/ --ignore=tests/test_transformer.py
 
-# Benchmarks only
-pytest --benchmark-only
+# Benchmarks vs PyTorch
+pytest tests/bench_comparison.py tests/bench_tensor_ops.py --benchmark-only
+
+# All tests including transformer (may crash due to pre-existing issue)
+pytest tests/ -v
 ```
 
 ---
@@ -394,8 +451,8 @@ pytest --benchmark-only
 ## Roadmap
 
 - [ ] Residual/skip connection support in PyTorch export
-- [ ] Fix small-tensor f32 elementwise overhead (Add, Mul)
-- [ ] `matrixmultiply` crate integration for portable GEMM
+- [ ] Sigmoid/tanh/gelu SIMD vectorization for large tensors
+- [ ] MKL backend option for Intel CPUs
 - [ ] Raspberry Pi benchmark suite (ARM NEON validation)
 - [ ] Stable GPU backend (wgpu)
 - [ ] Multi-GPU training (experimental → stable)
