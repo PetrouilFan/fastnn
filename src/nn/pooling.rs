@@ -3,9 +3,13 @@ use crate::nn::Module;
 use crate::tensor::Tensor;
 
 pub struct MaxPool2d {
+    #[allow(dead_code)]
     kernel_size: i64,
+    #[allow(dead_code)]
     stride: i64,
+    #[allow(dead_code)]
     padding: i64,
+    #[allow(dead_code)]
     dilation: i64,
     // Pre-allocated scalar tensors
     kernel_size_scalar: Tensor,
