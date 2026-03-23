@@ -8,6 +8,7 @@
 
 use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
+use std::mem::MaybeUninit;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
@@ -859,11 +860,17 @@ fn gemv_packed_inner<T: PackedWord>(
             .for_each(|(chunk_idx, out_chunk)| {
                 let start_row = chunk_idx * rows_per_chunk;
                 // Pre-allocate buffer without zeroing - all read elements are written first
-                let mut unpack_buf = Vec::with_capacity(k_packed * T::ITEMS);
-                unsafe { unpack_buf.set_len(k_packed * T::ITEMS) };
+                let mut unpack_buf: Vec<MaybeUninit<f32>> = Vec::with_capacity(k_packed * T::ITEMS);
+                unpack_buf.resize(k_packed * T::ITEMS, MaybeUninit::uninit());
+                let unpack_buf: &mut [f32] = unsafe {
+                    &mut *(std::ptr::slice_from_raw_parts_mut(
+                        unpack_buf.as_mut_ptr(),
+                        k_packed * T::ITEMS,
+                    ) as *mut [f32])
+                };
                 for (local_row, out) in out_chunk.iter_mut().enumerate() {
                     let row = start_row + local_row;
-                    let dot = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf);
+                    let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf);
                     *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
                 }
             });
@@ -872,10 +879,14 @@ fn gemv_packed_inner<T: PackedWord>(
     #[cfg(not(feature = "parallel"))]
     {
         // Pre-allocate buffer without zeroing - all read elements are written first
-        let mut unpack_buf = Vec::with_capacity(k_packed * T::ITEMS);
-        unsafe { unpack_buf.set_len(k_packed * T::ITEMS) };
+        let mut unpack_buf: Vec<MaybeUninit<f32>> = Vec::with_capacity(k_packed * T::ITEMS);
+        unpack_buf.resize(k_packed * T::ITEMS, MaybeUninit::uninit());
+        let unpack_buf: &mut [f32] = unsafe {
+            &mut *(std::ptr::slice_from_raw_parts_mut(unpack_buf.as_mut_ptr(), k_packed * T::ITEMS)
+                as *mut [f32])
+        };
         for row in 0.._m {
-            let dot = gemv_row::<T>(weights, activation, row, k, k_packed, &mut unpack_buf);
+            let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf);
             output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
     }
