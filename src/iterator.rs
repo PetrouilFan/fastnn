@@ -146,7 +146,7 @@ impl TensorIterator {
         let output_numel = self.numel;
 
         for idx in 0..output_numel {
-            let mut ptrs: Vec<&[u8]> = Vec::with_capacity(self.inputs.len());
+            let mut ptrs: SmallVec<[&[u8]; 4]> = SmallVec::with_capacity(self.inputs.len());
 
             for input in &self.inputs {
                 let linear_idx = idx;
@@ -193,7 +193,7 @@ impl TensorIterator {
         let output_numel = self.numel;
 
         for idx in 0..output_numel {
-            let mut ptrs: Vec<&[u8]> = Vec::with_capacity(self.inputs.len());
+            let mut ptrs: SmallVec<[&[u8]; 4]> = SmallVec::with_capacity(self.inputs.len());
 
             for input in &self.inputs {
                 let linear_idx = idx;
