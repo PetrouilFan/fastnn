@@ -11,6 +11,7 @@ pub struct LayerNorm {
     pub bias: Option<Tensor>,
     pub eps: f64,
     training: std::sync::atomic::AtomicBool,
+    eps_scalar: Tensor,
 }
 
 impl LayerNorm {
@@ -27,6 +28,7 @@ impl LayerNorm {
             normalized_shape,
             eps,
             training: std::sync::atomic::AtomicBool::new(true),
+            eps_scalar: Tensor::from_scalar(eps as f32),
         }
     }
 }
@@ -49,7 +51,7 @@ impl Module for LayerNorm {
         let result = dispatch(
             "layer_norm",
             DispatchKey::Cpu,
-            &[x, x, weight, bias, &Tensor::from_scalar(self.eps as f32)],
+            &[x, x, weight, bias, &self.eps_scalar],
         );
 
         let output = result[0].clone();
