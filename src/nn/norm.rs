@@ -141,10 +141,8 @@ impl Module for LayerNorm {
 }
 
 pub struct BatchNorm1d {
-    #[allow(dead_code)]
     pub num_features: i64,
     pub eps: f64,
-    #[allow(dead_code)]
     pub momentum: f64,
     pub weight: Option<Tensor>,
     pub bias: Option<Tensor>,
@@ -153,6 +151,10 @@ pub struct BatchNorm1d {
     pub training: std::sync::atomic::AtomicBool,
     #[allow(dead_code)]
     pub track_running_stats: bool,
+    // Pre-allocated scalar tensors
+    eps_scalar: Tensor,
+    training_true_scalar: Tensor,
+    training_false_scalar: Tensor,
 }
 
 impl BatchNorm1d {
@@ -179,36 +181,56 @@ impl BatchNorm1d {
             running_var: Arc::new(RwLock::new(running_var)),
             training: std::sync::atomic::AtomicBool::new(true),
             track_running_stats: true,
+            eps_scalar: Tensor::from_scalar(eps as f32),
+            training_true_scalar: Tensor::from_scalar(1.0),
+            training_false_scalar: Tensor::from_scalar(0.0),
         }
     }
 }
 
 impl Module for BatchNorm1d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let weight = self
-            .weight
-            .clone()
-            .unwrap_or_else(|| Tensor::from_scalar(1.0));
-        let bias = self
-            .bias
-            .clone()
-            .unwrap_or_else(|| Tensor::from_scalar(0.0));
+        // Use references instead of cloning weight/bias
+        let default_weight;
+        let default_bias;
+        let weight_ref = match &self.weight {
+            Some(w) => w,
+            None => {
+                default_weight = Tensor::from_scalar(1.0);
+                &default_weight
+            }
+        };
+        let bias_ref = match &self.bias {
+            Some(b) => b,
+            None => {
+                default_bias = Tensor::from_scalar(0.0);
+                &default_bias
+            }
+        };
+
+        // Read running stats without cloning - pass reference to dispatch
+        // We need to clone here because dispatch takes &[&Tensor] and the RwLockGuard
+        // would be dropped. But we can avoid cloning when running stats aren't needed.
+        let running_mean = self.running_mean.read().clone();
+        let running_var = self.running_var.read().clone();
+
+        let training_flag = if self.training.load(std::sync::atomic::Ordering::SeqCst) {
+            &self.training_true_scalar
+        } else {
+            &self.training_false_scalar
+        };
 
         let result = dispatch(
             "batch_norm",
             DispatchKey::Cpu,
             &[
                 x,
-                &weight,
-                &bias,
-                &self.running_mean.read().clone(),
-                &self.running_var.read().clone(),
-                &Tensor::from_scalar(if self.training.load(std::sync::atomic::Ordering::SeqCst) {
-                    1.0
-                } else {
-                    0.0
-                }),
-                &Tensor::from_scalar(self.eps as f32),
+                weight_ref,
+                bias_ref,
+                &running_mean,
+                &running_var,
+                training_flag,
+                &self.eps_scalar,
             ],
         );
 
