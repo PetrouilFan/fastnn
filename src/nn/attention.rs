@@ -221,7 +221,7 @@ impl Module for MultiHeadAttention {
     }
 
     fn train_mode(&self) {
-        self.training.store(true, Ordering::SeqCst);
+        self.training.store(true, Ordering::Relaxed);
         self.q_proj.train_mode();
         self.k_proj.train_mode();
         self.v_proj.train_mode();
@@ -229,7 +229,7 @@ impl Module for MultiHeadAttention {
     }
 
     fn eval_mode(&self) {
-        self.training.store(false, Ordering::SeqCst);
+        self.training.store(false, Ordering::Relaxed);
         self.q_proj.eval_mode();
         self.k_proj.eval_mode();
         self.v_proj.eval_mode();
@@ -237,6 +237,6 @@ impl Module for MultiHeadAttention {
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(Ordering::SeqCst)
+        self.training.load(Ordering::Relaxed)
     }
 }
