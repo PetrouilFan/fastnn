@@ -323,19 +323,9 @@ impl Node for MulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        // if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
-        //     && grad.shape() == vec![32, 64, 64]
-        // {
-        //     panic!(
-        //         "MulBackward: a=[{}], b=[{}], grad=[{}]",
-        //         a.shape().len(),
-        //         b.shape().len(),
-        //         grad.shape().len()
-        //     );
-        // }
 
         // Compute gradient for a: grad * b
-        let mut grad_a = grad.clone().mul(b);
+        let mut grad_a = grad.mul(b);
         // Sum over dimensions that were broadcasted in a
         if a.shape() != grad_a.shape() {
             let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
@@ -405,19 +395,10 @@ impl Node for DivBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        // if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
-        //     && grad.shape() == vec![32, 64, 64]
-        // {
-        //     panic!(
-        //         "DivBackward: a=[{}], b=[{}], grad=[{}]",
-        //         a.shape().len(),
-        //         b.shape().len(),
-        //         grad.shape().len()
-        //     );
-        // }
 
+        // d/da (a/b) = 1/b, d/db (a/b) = -a/b^2
+        let grad_a = grad.div(b);
         let b_sq = b.mul(b);
-        let grad_a = grad.clone().div(&b.clone());
         let grad_b = grad.mul(a).div(&b_sq).neg();
 
         vec![Some(grad_a), Some(grad_b)]
@@ -848,11 +829,25 @@ impl Node for AbsBackward {
 pub struct GeluBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    // Pre-allocated scalar constants to avoid per-call allocation
+    sqrt_2_over_pi: Tensor,
+    coeff: Tensor,
+    d_inner_coeff: Tensor,
+    half: Tensor,
+    one: Tensor,
 }
 
 impl GeluBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        GeluBackward { input, edges }
+        GeluBackward {
+            input,
+            edges,
+            sqrt_2_over_pi: Tensor::from_scalar((2.0_f32 / std::f32::consts::PI).sqrt()),
+            coeff: Tensor::from_scalar(0.044715_f32),
+            d_inner_coeff: Tensor::from_scalar(0.134145_f32),
+            half: Tensor::from_scalar(0.5),
+            one: Tensor::from_scalar(1.0),
+        }
     }
 }
 
@@ -860,20 +855,20 @@ impl Node for GeluBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let x = &self.input;
-        let sqrt_2_over_pi = Tensor::from_scalar((2.0_f32 / std::f32::consts::PI).sqrt());
-        let coeff = Tensor::from_scalar(0.044715_f32);
-        let d_inner_coeff = Tensor::from_scalar(0.134145_f32);
 
         let x2 = x.mul(x);
         let x3 = x2.mul(x);
-        let inner = sqrt_2_over_pi.mul(&x.add(&coeff.mul(&x3)));
+        let inner = self.sqrt_2_over_pi.mul(&x.add(&self.coeff.mul(&x3)));
         let t = inner.tanh();
         let t2 = t.mul(&t);
-        let sech2 = Tensor::from_scalar(1.0).sub(&t2);
-        let d_inner_dx = sqrt_2_over_pi.mul(&Tensor::from_scalar(1.0).add(&d_inner_coeff.mul(&x2)));
-        let derivative = Tensor::from_scalar(0.5)
-            .mul(&Tensor::from_scalar(1.0).add(&t))
-            .add(&Tensor::from_scalar(0.5).mul(x).mul(&sech2).mul(&d_inner_dx));
+        let sech2 = self.one.sub(&t2);
+        let d_inner_dx = self
+            .sqrt_2_over_pi
+            .mul(&self.one.add(&self.d_inner_coeff.mul(&x2)));
+        let derivative = self
+            .half
+            .mul(&self.one.add(&t))
+            .add(&self.half.mul(x).mul(&sech2).mul(&d_inner_dx));
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -909,7 +904,25 @@ impl Node for SigmoidBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let sigmoid_x = self.input.sigmoid();
-        let derivative = sigmoid_x.mul(&Tensor::from_scalar(1.0).sub(&sigmoid_x));
+        // derivative = sigmoid * (1 - sigmoid)
+        // Avoid allocating scalar tensor for 1.0: compute directly
+        let mut derivative = sigmoid_x.clone();
+        // Ensure exclusive ownership before in-place modification
+        let inner = Arc::make_mut(&mut derivative.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage");
+        };
+        let data = Arc::make_mut(&mut cpu_storage.data);
+        let ptr = data.as_mut_ptr() as *mut f32;
+        let sigmoid_ptr = sigmoid_x.data_ptr_f32();
+        let numel = sigmoid_x.inner.numel() as usize;
+        for i in 0..numel {
+            unsafe {
+                let s = *sigmoid_ptr.add(i);
+                *ptr.add(i) = s * (1.0 - s);
+            }
+        }
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -945,7 +958,25 @@ impl Node for TanhBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let tanh_x = self.input.tanh();
-        let derivative = Tensor::from_scalar(1.0).sub(&tanh_x.mul(&tanh_x));
+        // derivative = 1 - tanh^2
+        // Avoid allocating scalar tensor for 1.0: compute directly
+        let mut derivative = tanh_x.clone();
+        // Ensure exclusive ownership before in-place modification
+        let inner = Arc::make_mut(&mut derivative.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage");
+        };
+        let data = Arc::make_mut(&mut cpu_storage.data);
+        let ptr = data.as_mut_ptr() as *mut f32;
+        let tanh_ptr = tanh_x.data_ptr_f32();
+        let numel = tanh_x.inner.numel() as usize;
+        for i in 0..numel {
+            unsafe {
+                let t = *tanh_ptr.add(i);
+                *ptr.add(i) = 1.0 - t * t;
+            }
+        }
         vec![Some(grad.mul(&derivative))]
     }
 
