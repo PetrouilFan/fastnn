@@ -1593,9 +1593,9 @@ fn fused_mul_add_parallel_scalar(
     }
 }
 
-// Parallel sigmoid AVX2 kernel using exp approximation
+// Parallel sigmoid AVX2 kernel using vectorized fast_exp
 #[cfg(all(feature = "parallel", feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn sigmoid_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
@@ -1606,42 +1606,33 @@ unsafe fn sigmoid_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let one = _mm256_set1_ps(1.0f32);
+
     let mut i = start;
     while i + 8 <= end {
         let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        // Compute sigmoid using 1/(1+exp(-x))
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            if val > 9.0 {
-                results[j] = 1.0;
-            } else if val < -9.0 {
-                results[j] = 0.0;
-            } else {
-                results[j] = 1.0 / (1.0 + (-val).exp());
-            }
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        // sigmoid(x) = 1 / (1 + exp(-x))
+        let neg_x = _mm256_xor_ps(x, _mm256_set1_ps(-0.0f32));
+        let exp_neg_x = fast_exp_avx2(neg_x);
+        let denom = _mm256_add_ps(one, exp_neg_x);
+        // Use Newton-Raphson reciprocal approximation for better accuracy
+        let rcp = _mm256_rcp_ps(denom);
+        let result = _mm256_mul_ps(
+            _mm256_mul_ps(rcp, _mm256_fnmadd_ps(rcp, denom, _mm256_set1_ps(2.0f32))),
+            one,
+        );
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
     }
 
     while i < end {
         let x = *((a_usize + i * 4) as *const f32);
-        if x > 9.0 {
-            *((out_usize + i * 4) as *mut f32) = 1.0;
-        } else if x < -9.0 {
-            *((out_usize + i * 4) as *mut f32) = 0.0;
-        } else {
-            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
-        }
+        *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
         i += 1;
     }
 }
 
-// Sigmoid parallel AVX512 kernel
+// Sigmoid parallel AVX512 kernel using vectorized fast_exp
 #[cfg(all(feature = "parallel", feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn sigmoid_parallel_avx512(
@@ -1654,55 +1645,32 @@ unsafe fn sigmoid_parallel_avx512(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let one = _mm512_set1_ps(1.0f32);
+
     let mut i = start;
     while i + 16 <= end {
         let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
-        // Compute sigmoid using 1/(1+exp(-x))
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m512, [f32; 16]>(x);
-        let mut results = [0.0f32; 16];
-        for j in 0..16 {
-            let val = x_f32[j];
-            if val > 9.0 {
-                results[j] = 1.0;
-            } else if val < -9.0 {
-                results[j] = 0.0;
-            } else {
-                results[j] = 1.0 / (1.0 + (-val).exp());
-            }
-        }
-        let result = std::mem::transmute::<[f32; 16], __m512>(results);
+        // sigmoid(x) = 1 / (1 + exp(-x))
+        let neg_x = _mm512_xor_ps(x, _mm512_set1_ps(-0.0f32));
+        let exp_neg_x = fast_exp_avx512(neg_x);
+        let denom = _mm512_add_ps(one, exp_neg_x);
+        let result = _mm512_div_ps(one, denom);
         _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 16;
     }
     // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
     while i + 8 <= end {
         let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            if val > 9.0 {
-                results[j] = 1.0;
-            } else if val < -9.0 {
-                results[j] = 0.0;
-            } else {
-                results[j] = 1.0 / (1.0 + (-val).exp());
-            }
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        let neg_x = _mm256_xor_ps(x, _mm256_set1_ps(-0.0f32));
+        let exp_neg_x = fast_exp_avx2(neg_x);
+        let denom = _mm256_add_ps(_mm256_set1_ps(1.0f32), exp_neg_x);
+        let result = _mm256_div_ps(_mm256_set1_ps(1.0f32), denom);
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
     }
     while i < end {
         let x = *((a_usize + i * 4) as *const f32);
-        if x > 9.0 {
-            *((out_usize + i * 4) as *mut f32) = 1.0;
-        } else if x < -9.0 {
-            *((out_usize + i * 4) as *mut f32) = 0.0;
-        } else {
-            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
-        }
+        *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
         i += 1;
     }
 }
@@ -1766,7 +1734,7 @@ unsafe fn sigmoid_parallel_neon(
     }
 }
 
-// Parallel tanh AVX2 kernel using exact computation
+// Parallel tanh AVX2 kernel using vectorized fast_exp
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn tanh_parallel_avx2(
@@ -1781,24 +1749,18 @@ unsafe fn tanh_parallel_avx2(
 
     let clamp_lo = _mm256_set1_ps(-10.0f32);
     let clamp_hi = _mm256_set1_ps(10.0f32);
+    let one = _mm256_set1_ps(1.0f32);
+    let two = _mm256_set1_ps(2.0f32);
 
     let mut i = start;
     while i + 8 <= end {
         let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-
         // Clamp values to prevent overflow in exp
         let x_clamped = _mm256_min_ps(_mm256_max_ps(x, clamp_lo), clamp_hi);
-
-        // Compute tanh using formula: tanh(x) = (e^2x - 1) / (e^2x + 1)
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x_clamped);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            let exp_2x = (2.0 * val).exp();
-            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        let two_x = _mm256_mul_ps(two, x_clamped);
+        let exp_2x = fast_exp_avx2(two_x);
+        let result = _mm256_div_ps(_mm256_sub_ps(exp_2x, one), _mm256_add_ps(exp_2x, one));
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
     }
@@ -1811,7 +1773,7 @@ unsafe fn tanh_parallel_avx2(
     }
 }
 
-// Tanh parallel AVX512 kernel
+// Tanh parallel AVX512 kernel using vectorized fast_exp
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn tanh_parallel_avx512(
@@ -1826,24 +1788,18 @@ unsafe fn tanh_parallel_avx512(
 
     let clamp_lo = _mm512_set1_ps(-10.0f32);
     let clamp_hi = _mm512_set1_ps(10.0f32);
+    let one = _mm512_set1_ps(1.0f32);
+    let two = _mm512_set1_ps(2.0f32);
 
     let mut i = start;
     while i + 16 <= end {
         let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
-
         // Clamp values to prevent overflow in exp
         let x_clamped = _mm512_min_ps(_mm512_max_ps(x, clamp_lo), clamp_hi);
-
-        // Compute tanh using formula: tanh(x) = (e^2x - 1) / (e^2x + 1)
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m512, [f32; 16]>(x_clamped);
-        let mut results = [0.0f32; 16];
-        for j in 0..16 {
-            let val = x_f32[j];
-            let exp_2x = (2.0 * val).exp();
-            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
-        }
-        let result = std::mem::transmute::<[f32; 16], __m512>(results);
+        // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        let two_x = _mm512_mul_ps(two, x_clamped);
+        let exp_2x = fast_exp_avx512(two_x);
+        let result = _mm512_div_ps(_mm512_sub_ps(exp_2x, one), _mm512_add_ps(exp_2x, one));
         _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 16;
     }
@@ -1853,14 +1809,12 @@ unsafe fn tanh_parallel_avx512(
         let clamp_lo_256 = _mm256_set1_ps(-10.0f32);
         let clamp_hi_256 = _mm256_set1_ps(10.0f32);
         let x_clamped = _mm256_min_ps(_mm256_max_ps(x, clamp_lo_256), clamp_hi_256);
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x_clamped);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            let exp_2x = (2.0 * val).exp();
-            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        let two_x = _mm256_mul_ps(_mm256_set1_ps(2.0f32), x_clamped);
+        let exp_2x = fast_exp_avx2(two_x);
+        let result = _mm256_div_ps(
+            _mm256_sub_ps(exp_2x, _mm256_set1_ps(1.0f32)),
+            _mm256_add_ps(exp_2x, _mm256_set1_ps(1.0f32)),
+        );
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
     }
@@ -2309,8 +2263,8 @@ fn broadcast_index_decomposition(
     storage_offset: usize,
 ) -> usize {
     let ndim = out_shape.len();
-    // Precompute multipliers: multipliers[i] = product(out_shape[i+1..])
-    let mut multipliers = vec![0usize; ndim];
+    // Precompute multipliers on the stack: multipliers[i] = product(out_shape[i+1..])
+    let mut multipliers: smallvec::SmallVec<[usize; 8]> = smallvec::smallvec![0usize; ndim];
     let mut mult = 1usize;
     for i in (0..ndim).rev() {
         multipliers[i] = mult;
@@ -2551,12 +2505,17 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    // Convert to usize for the helper function
-    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
+    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        b_strides.iter().map(|&x| x as usize).collect();
 
     for idx in 0..numel {
         let a_idx = broadcast_index_decomposition(
@@ -2794,12 +2753,17 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    // Convert to usize for the helper function
-    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
+    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        b_strides.iter().map(|&x| x as usize).collect();
 
     // Broadcast loop should always run when shapes differ or tensors are non-contiguous
     for idx in 0..numel {
@@ -3052,12 +3016,17 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    // Convert to usize for the helper function
-    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
+    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        b_strides.iter().map(|&x| x as usize).collect();
 
     for idx in 0..numel {
         let a_idx = broadcast_index_decomposition(
@@ -3115,12 +3084,17 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    // Convert to usize for the helper function
-    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
+    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        b_strides.iter().map(|&x| x as usize).collect();
 
     // Check if broadcasting is needed - only use parallel path when shapes are equal
     let needs_broadcast = a_shape != b_shape;
@@ -5634,20 +5608,52 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 unsafe { std::slice::from_raw_parts(b_ptr, batch * k as usize * n as usize) };
             let out_slice =
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, batch * m as usize * n as usize) };
-            for bat in 0..batch {
-                let a_offset = bat * m as usize * k as usize;
-                let b_offset = bat * k as usize * n as usize;
-                let out_offset = bat * m as usize * n as usize;
-                matmul_blas_with_transpose_into(
-                    &a_slice[a_offset..],
-                    &b_slice[b_offset..],
-                    &mut out_slice[out_offset..],
-                    m as usize,
-                    k as usize,
-                    n as usize,
-                    false,
-                    false,
-                );
+
+            let m_usize = m as usize;
+            let k_usize = k as usize;
+            let n_usize = n as usize;
+            let a_batch_elems = m_usize * k_usize;
+            let b_batch_elems = k_usize * n_usize;
+            let out_batch_elems = m_usize * n_usize;
+
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                out_slice
+                    .par_chunks_mut(out_batch_elems)
+                    .enumerate()
+                    .for_each(|(bat, out_chunk)| {
+                        let a_offset = bat * a_batch_elems;
+                        let b_offset = bat * b_batch_elems;
+                        matmul_blas_with_transpose_into(
+                            &a_slice[a_offset..],
+                            &b_slice[b_offset..],
+                            out_chunk,
+                            m_usize,
+                            k_usize,
+                            n_usize,
+                            false,
+                            false,
+                        );
+                    });
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                for bat in 0..batch {
+                    let a_offset = bat * a_batch_elems;
+                    let b_offset = bat * b_batch_elems;
+                    let out_offset = bat * out_batch_elems;
+                    matmul_blas_with_transpose_into(
+                        &a_slice[a_offset..],
+                        &b_slice[b_offset..],
+                        &mut out_slice[out_offset..],
+                        m_usize,
+                        k_usize,
+                        n_usize,
+                        false,
+                        false,
+                    );
+                }
             }
         } else {
             // Single batch BLAS
@@ -7128,7 +7134,7 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                     }
                 }
 
-                // Vectorized exp and sum for small dims
+                // Fused pass: compute exp(x-max), store to output, and accumulate sum
                 let mut sum_exp = 0.0f32;
 
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -7143,58 +7149,62 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                                 let shifted = _mm256_sub_ps(x_vec, max_vec);
                                 let exp_vec = fast_exp_avx2(shifted);
                                 sum_vec = _mm256_add_ps(sum_vec, exp_vec);
+                                _mm256_storeu_ps(out_row.as_mut_ptr().add(j), exp_vec);
                                 j += 8;
                             }
                             sum_exp = hsum256_ps(sum_vec);
                             for j2 in j..dim_size {
-                                sum_exp += (x_row[j2] - max_val).exp();
+                                let e = (x_row[j2] - max_val).exp();
+                                sum_exp += e;
+                                out_row[j2] = e;
                             }
                         }
                     } else {
                         for j in 0..dim_size {
-                            sum_exp += (x_row[j] - max_val).exp();
+                            let e = (x_row[j] - max_val).exp();
+                            sum_exp += e;
+                            out_row[j] = e;
                         }
                     }
                 }
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for j in 0..dim_size {
-                        sum_exp += (x_row[j] - max_val).exp();
+                        let e = (x_row[j] - max_val).exp();
+                        sum_exp += e;
+                        out_row[j] = e;
                     }
                 }
 
                 let inv_sum = 1.0 / sum_exp;
 
-                // Vectorized exp and multiply for output
+                // Normalize: multiply stored exp values by inv_sum
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") {
                         unsafe {
-                            let max_vec = _mm256_set1_ps(max_val);
                             let inv_vec = _mm256_set1_ps(inv_sum);
                             let mut j = 0;
                             while j + 8 <= dim_size {
-                                let x_vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
-                                let shifted = _mm256_sub_ps(x_vec, max_vec);
-                                let exp_vec = fast_exp_avx2(shifted);
+                                let exp_vec = _mm256_loadu_ps(out_row.as_ptr().add(j));
                                 let result = _mm256_mul_ps(exp_vec, inv_vec);
                                 _mm256_storeu_ps(out_row.as_mut_ptr().add(j), result);
                                 j += 8;
                             }
                             for j2 in j..dim_size {
-                                out_row[j2] = (x_row[j2] - max_val).exp() * inv_sum;
+                                out_row[j2] *= inv_sum;
                             }
                         }
                     } else {
                         for j in 0..dim_size {
-                            out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                            out_row[j] *= inv_sum;
                         }
                     }
                 }
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for j in 0..dim_size {
-                        out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                        out_row[j] *= inv_sum;
                     }
                 }
             });
@@ -7246,6 +7256,7 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                 }
             }
 
+            // Fused pass: compute exp(x-max), store to output, and accumulate sum
             let mut sum_exp = 0.0f32;
 
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -7260,57 +7271,62 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                             let shifted = _mm256_sub_ps(x_vec, max_vec);
                             let exp_vec = fast_exp_avx2(shifted);
                             sum_vec = _mm256_add_ps(sum_vec, exp_vec);
+                            _mm256_storeu_ps(out_row.as_mut_ptr().add(j), exp_vec);
                             j += 8;
                         }
                         sum_exp = hsum256_ps(sum_vec);
                         for j2 in j..dim_size {
-                            sum_exp += (x_row[j2] - max_val).exp();
+                            let e = (x_row[j2] - max_val).exp();
+                            sum_exp += e;
+                            out_row[j2] = e;
                         }
                     }
                 } else {
                     for j in 0..dim_size {
-                        sum_exp += (x_row[j] - max_val).exp();
+                        let e = (x_row[j] - max_val).exp();
+                        sum_exp += e;
+                        out_row[j] = e;
                     }
                 }
             }
             #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for j in 0..dim_size {
-                    sum_exp += (x_row[j] - max_val).exp();
+                    let e = (x_row[j] - max_val).exp();
+                    sum_exp += e;
+                    out_row[j] = e;
                 }
             }
 
             let inv_sum = 1.0 / sum_exp;
 
+            // Normalize: multiply stored exp values by inv_sum
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     unsafe {
-                        let max_vec = _mm256_set1_ps(max_val);
                         let inv_vec = _mm256_set1_ps(inv_sum);
                         let mut j = 0;
                         while j + 8 <= dim_size {
-                            let x_vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
-                            let shifted = _mm256_sub_ps(x_vec, max_vec);
-                            let exp_vec = fast_exp_avx2(shifted);
+                            let exp_vec = _mm256_loadu_ps(out_row.as_ptr().add(j));
                             let result = _mm256_mul_ps(exp_vec, inv_vec);
                             _mm256_storeu_ps(out_row.as_mut_ptr().add(j), result);
                             j += 8;
                         }
                         for j2 in j..dim_size {
-                            out_row[j2] = (x_row[j2] - max_val).exp() * inv_sum;
+                            out_row[j2] *= inv_sum;
                         }
                     }
                 } else {
                     for j in 0..dim_size {
-                        out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                        out_row[j] *= inv_sum;
                     }
                 }
             }
             #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for j in 0..dim_size {
-                    out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+                    out_row[j] *= inv_sum;
                 }
             }
         }
@@ -7336,6 +7352,13 @@ fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let ndim = x_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
+    let dim_size = x_shape[dim] as usize;
+
+    // Fast path: last-dim, contiguous - fused kernel avoids intermediate tensors
+    if dim == ndim - 1 && x.is_contiguous() {
+        return vec![log_softmax_last_dim_fused(x, dim_size)];
+    }
+
     let max_vals = max_kernel(&[
         x,
         &Tensor::from_scalar(dim as f32),
@@ -7346,6 +7369,85 @@ fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let log_sum_exp = x_shifted.exp().sum(dim as i32, true).ln();
 
     vec![x_shifted.sub(&log_sum_exp)]
+}
+
+#[inline]
+fn log_softmax_last_dim_fused(x: &Tensor, dim_size: usize) -> Tensor {
+    let x_shape = x.shape();
+    let x_ptr = x.data_ptr() as *const f32;
+    let numel = x.numel() as usize;
+
+    let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    #[cfg(feature = "parallel")]
+    {
+        let a_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+        out_slice
+            .par_chunks_mut(dim_size)
+            .zip(a_slice.par_chunks(dim_size))
+            .for_each(|(out_row, x_row)| {
+                // Pass 1: Find max
+                let mut max_val = f32::MIN;
+                for j in 0..dim_size {
+                    max_val = max_val.max(x_row[j]);
+                }
+
+                // Pass 2: Compute sum of exp(x - max) and store (x - max) in output
+                let mut sum_exp = 0.0f32;
+                for j in 0..dim_size {
+                    let shifted = x_row[j] - max_val;
+                    sum_exp += shifted.exp();
+                    out_row[j] = shifted;
+                }
+
+                // Pass 3: log_softmax = (x - max) - log(sum_exp)
+                let log_sum = sum_exp.ln();
+                for j in 0..dim_size {
+                    out_row[j] -= log_sum;
+                }
+            });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        let num_rows = numel / dim_size;
+        let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+        for row in 0..num_rows {
+            let row_start = row * dim_size;
+            let x_row = &x_slice[row_start..row_start + dim_size];
+            let out_row = &mut out_slice[row_start..row_start + dim_size];
+
+            let mut max_val = f32::MIN;
+            for j in 0..dim_size {
+                max_val = max_val.max(x_row[j]);
+            }
+
+            let mut sum_exp = 0.0f32;
+            for j in 0..dim_size {
+                let shifted = x_row[j] - max_val;
+                sum_exp += shifted.exp();
+                out_row[j] = shifted;
+            }
+
+            let log_sum = sum_exp.ln();
+            for j in 0..dim_size {
+                out_row[j] -= log_sum;
+            }
+        }
+    }
+
+    output
 }
 
 fn mse_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {

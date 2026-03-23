@@ -452,9 +452,7 @@ impl NegBackward {
 
 impl Node for NegBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![Some(
-            Tensor::from_scalar(0.0).sub(&grad_outputs[0].clone().unwrap()),
-        )]
+        vec![Some(grad_outputs[0].clone().unwrap().neg())]
     }
 
     fn next_edges(&self) -> &[Edge] {
