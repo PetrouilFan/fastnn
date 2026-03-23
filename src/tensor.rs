@@ -1147,140 +1147,148 @@ impl Tensor {
     pub fn to_numpy(&self) -> Vec<f32> {
         match &self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
+                // Fast path: contiguous F32 tensor - direct memory copy
+                if self.inner.dtype == DType::F32
+                    && self.inner.is_contiguous()
+                    && self.inner.storage_offset == 0
+                {
+                    let data = cpu.data.as_ref().as_ptr() as *const f32;
+                    let numel = self.inner.numel() as usize;
+                    return unsafe { std::slice::from_raw_parts(data, numel) }.to_vec();
+                }
+
                 match self.inner.dtype {
                     DType::F32 => {
-                        // Use stride-aware indexing
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const f32;
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
 
-                        // Create an iterator over all elements using strides
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        // Maintain running linear index and increment it
+                        // instead of recomputing from scratch each iteration
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            // Calculate linear index from multi-dimensional indices using strides
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(*data.add(linear_idx as usize));
                             }
 
-                            // Increment indices
-                            for dim in (0..self.inner.ndim()).rev() {
+                            // Increment indices and update linear_idx incrementally
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                // Wrap: subtract size * stride, reset to 0
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
                         result
                     }
                     DType::F64 => {
-                        // Similar for F64
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const f64;
-
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(*data.add(linear_idx as usize) as f32);
                             }
-
-                            for dim in (0..self.inner.ndim()).rev() {
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
                         result
                     }
                     DType::I32 => {
-                        // Similar for I32
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const i32;
-
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(*data.add(linear_idx as usize) as f32);
                             }
-
-                            for dim in (0..self.inner.ndim()).rev() {
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
                         result
                     }
                     DType::BF16 => {
-                        // Similar for BF16
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const half::bf16;
-
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(f32::from(*data.add(linear_idx as usize)));
                             }
-
-                            for dim in (0..self.inner.ndim()).rev() {
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
                         result
                     }
                     DType::F16 => {
-                        // Similar for F16
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const half::f16;
-
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(f32::from(*data.add(linear_idx as usize)));
                             }
-
-                            for dim in (0..self.inner.ndim()).rev() {
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
