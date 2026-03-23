@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use std::arch::x86_64::{_mm256_add_ps, _mm256_loadu_ps, _mm256_storeu_ps};
+use std::arch::x86_64::{
+    _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_storeu_ps, _mm256_sub_ps,
+};
 
 pub struct TensorImpl {
     pub storage: Arc<Storage>,
@@ -501,11 +503,11 @@ impl TensorImpl {
     }
 
     pub fn increment_version(&self) {
-        self.version_counter.fetch_add(1, Ordering::SeqCst);
+        self.version_counter.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn version(&self) -> u64 {
-        self.version_counter.load(Ordering::SeqCst)
+        self.version_counter.load(Ordering::Relaxed)
     }
 
     #[track_caller]
@@ -1696,12 +1698,69 @@ impl Tensor {
         let dtype = self.inner.dtype;
         let numel = self.inner.numel() as usize;
 
-        // Use data_ptr_f32_mut for in-place update (as per user's suggestion)
         let self_ptr = self.data_ptr_f32_mut();
         let other_ptr = other.data_ptr_f32();
 
         match dtype {
             DType::F32 => {
+                #[cfg(feature = "parallel")]
+                {
+                    if numel > 2048 {
+                        use rayon::prelude::*;
+                        const CHUNK: usize = 4096;
+                        let num_chunks = numel.div_ceil(CHUNK);
+                        let self_usize = self_ptr as usize;
+                        let other_usize = other_ptr as usize;
+                        (0..num_chunks).into_par_iter().for_each(|chunk| {
+                            let start = chunk * CHUNK;
+                            let end = (start + CHUNK).min(numel);
+                            let s_p = self_usize as *mut f32;
+                            let o_p = other_usize as *const f32;
+                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                            {
+                                if is_x86_feature_detected!("avx2") {
+                                    unsafe {
+                                        let mut i = start;
+                                        while i + 8 <= end {
+                                            let sv = _mm256_loadu_ps(s_p.add(i));
+                                            let ov = _mm256_loadu_ps(o_p.add(i));
+                                            _mm256_storeu_ps(s_p.add(i), _mm256_mul_ps(sv, ov));
+                                            i += 8;
+                                        }
+                                        for j in i..end {
+                                            *s_p.add(j) *= *o_p.add(j);
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            for j in start..end {
+                                unsafe {
+                                    *s_p.add(j) *= *o_p.add(j);
+                                }
+                            }
+                        });
+                        return self;
+                    }
+                }
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                let ov = _mm256_loadu_ps(other_ptr.add(i));
+                                _mm256_storeu_ps(self_ptr.add(i), _mm256_mul_ps(sv, ov));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *self_ptr.add(j) *= *other_ptr.add(j);
+                            }
+                            return self;
+                        }
+                    }
+                }
                 for i in 0..numel {
                     unsafe {
                         *self_ptr.add(i) *= *other_ptr.add(i);
@@ -1798,15 +1857,40 @@ impl Tensor {
 
     /// In-place subtraction: self -= other
     pub fn sub_(&mut self, other: &Tensor) -> &mut Self {
-        if self.inner.is_gpu() || other.inner.is_gpu() {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).sub(other);
+            *self = result;
+            return self;
+        }
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
             let result = (self as &Tensor).sub(other);
             *self = result;
             return self;
         }
 
-        let numel = self.inner.numel() as usize;
         let self_ptr = self.data_ptr_f32_mut();
         let other_ptr = other.data_ptr_f32();
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let sv = _mm256_loadu_ps(self_ptr.add(i));
+                        let ov = _mm256_loadu_ps(other_ptr.add(i));
+                        _mm256_storeu_ps(self_ptr.add(i), _mm256_sub_ps(sv, ov));
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *self_ptr.add(j) -= *other_ptr.add(j);
+                    }
+                    return self;
+                }
+            }
+        }
         for i in 0..numel {
             unsafe {
                 *self_ptr.add(i) -= *other_ptr.add(i);
@@ -1817,15 +1901,40 @@ impl Tensor {
 
     /// In-place division: self /= other
     pub fn div_(&mut self, other: &Tensor) -> &mut Self {
-        if self.inner.is_gpu() || other.inner.is_gpu() {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).div(other);
+            *self = result;
+            return self;
+        }
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
             let result = (self as &Tensor).div(other);
             *self = result;
             return self;
         }
 
-        let numel = self.inner.numel() as usize;
         let self_ptr = self.data_ptr_f32_mut();
         let other_ptr = other.data_ptr_f32();
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let sv = _mm256_loadu_ps(self_ptr.add(i));
+                        let ov = _mm256_loadu_ps(other_ptr.add(i));
+                        _mm256_storeu_ps(self_ptr.add(i), _mm256_div_ps(sv, ov));
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *self_ptr.add(j) /= *other_ptr.add(j);
+                    }
+                    return self;
+                }
+            }
+        }
         for i in 0..numel {
             unsafe {
                 *self_ptr.add(i) /= *other_ptr.add(i);

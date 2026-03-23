@@ -7005,7 +7005,38 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         strides_after *= a_shape[i];
     }
 
-    for block in 0..(strides_before as usize * strides_after as usize) {
+    let total_blocks = strides_before as usize * strides_after as usize;
+    let a_usize = a_ptr as usize;
+    let out_usize = out_ptr as usize;
+    let a_off = a_storage_offset;
+
+    #[cfg(feature = "parallel")]
+    {
+        if total_blocks > 64 {
+            use rayon::prelude::*;
+            (0..total_blocks).into_par_iter().for_each(|block| {
+                let mut max_val = f32::NEG_INFINITY;
+                let a_p = a_usize as *const f32;
+                let ds = dim_size;
+                let sa = strides_after as usize;
+                for i in 0..ds {
+                    let a_idx = (block / sa) * ds * sa + i * sa + block % sa;
+                    unsafe {
+                        let val = *a_p.add(a_idx + a_off);
+                        if val > max_val {
+                            max_val = val;
+                        }
+                    }
+                }
+                unsafe {
+                    *(out_usize as *mut f32).add(block) = max_val;
+                }
+            });
+            return vec![output];
+        }
+    }
+
+    for block in 0..total_blocks {
         let mut max_val = f32::NEG_INFINITY;
         for i in 0..dim_size {
             let a_idx = (block / (strides_after as usize)) * dim_size * (strides_after as usize)
@@ -8929,39 +8960,86 @@ fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x_ptr = x.data_ptr() as *const f32;
     let out_ptr = output.data_ptr() as *mut f32;
 
-    for b in 0..batch_size as usize {
-        for c in 0..channels as usize {
-            for oh in 0..out_height as usize {
-                for ow in 0..out_width as usize {
+    let total_bc = batch_size as usize * channels as usize;
+    let stride_usize = stride as usize;
+    let dilation_usize = dilation as usize;
+    let kernel_size_usize = kernel_size as usize;
+    let in_h = in_height as usize;
+    let in_w = in_width as usize;
+    let out_h = out_height as usize;
+    let out_w = out_width as usize;
+    let pad = padding;
+    let channels_usize = channels as usize;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let x_usize = x_ptr as usize;
+        let out_usize = out_ptr as usize;
+        (0..total_bc).into_par_iter().for_each(|bc| {
+            let b = bc / channels_usize;
+            let c = bc % channels_usize;
+            let x_p = x_usize as *const f32;
+            let o_p = out_usize as *mut f32;
+            for oh in 0..out_h {
+                for ow in 0..out_w {
                     let mut max_val = f32::NEG_INFINITY;
-
-                    for kh in 0..kernel_size as usize {
-                        for kw in 0..kernel_size as usize {
-                            // Calculate the position in the input tensor
-                            // The output position (oh, ow) corresponds to input positions
-                            // starting at (oh*stride - padding, ow*stride - padding)
-                            let h =
-                                (oh * stride as usize + kh * dilation as usize) as i64 - padding;
-                            let w =
-                                (ow * stride as usize + kw * dilation as usize) as i64 - padding;
-
-                            if h >= 0 && h < in_height && w >= 0 && w < in_width {
-                                let idx = ((b * channels as usize + c) * in_height as usize
-                                    + h as usize)
-                                    * in_width as usize
+                    for kh in 0..kernel_size_usize {
+                        for kw in 0..kernel_size_usize {
+                            let h = (oh * stride_usize + kh * dilation_usize) as i64 - pad;
+                            let w = (ow * stride_usize + kw * dilation_usize) as i64 - pad;
+                            if h >= 0 && h < in_h as i64 && w >= 0 && w < in_w as i64 {
+                                let idx = ((b * channels_usize + c) * in_h + h as usize) * in_w
                                     + w as usize;
-                                let val = unsafe { *x_ptr.add(idx) };
+                                let val = unsafe { *x_p.add(idx) };
                                 if val > max_val {
                                     max_val = val;
                                 }
                             }
                         }
                     }
+                    let out_idx = ((b * channels_usize + c) * out_h + oh) * out_w + ow;
+                    unsafe {
+                        *o_p.add(out_idx) = max_val;
+                    }
+                }
+            }
+        });
+    }
 
-                    let out_idx = ((b * channels as usize + c) * out_height as usize + oh)
-                        * out_width as usize
-                        + ow;
-                    unsafe { *out_ptr.add(out_idx) = max_val };
+    #[cfg(not(feature = "parallel"))]
+    {
+        for b in 0..batch_size as usize {
+            for c in 0..channels as usize {
+                for oh in 0..out_height as usize {
+                    for ow in 0..out_width as usize {
+                        let mut max_val = f32::NEG_INFINITY;
+
+                        for kh in 0..kernel_size as usize {
+                            for kw in 0..kernel_size as usize {
+                                let h = (oh * stride as usize + kh * dilation as usize) as i64
+                                    - padding;
+                                let w = (ow * stride as usize + kw * dilation as usize) as i64
+                                    - padding;
+
+                                if h >= 0 && h < in_height && w >= 0 && w < in_width {
+                                    let idx = ((b * channels as usize + c) * in_height as usize
+                                        + h as usize)
+                                        * in_width as usize
+                                        + w as usize;
+                                    let val = unsafe { *x_ptr.add(idx) };
+                                    if val > max_val {
+                                        max_val = val;
+                                    }
+                                }
+                            }
+                        }
+
+                        let out_idx = ((b * channels as usize + c) * out_height as usize + oh)
+                            * out_width as usize
+                            + ow;
+                        unsafe { *out_ptr.add(out_idx) = max_val };
+                    }
                 }
             }
         }
@@ -9711,10 +9789,79 @@ fn gt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
-    for idx in 0..numel {
-        unsafe {
-            let val = *a_ptr.add(idx);
-            *out_ptr.add(idx) = if val > threshold { 1.0 } else { 0.0 };
+    if a.is_contiguous() && numel > 2048 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = (start + chunk_size).min(numel);
+                let a_p = a_usize as *const f32;
+                let o_p = out_usize as *mut f32;
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        unsafe {
+                            let thresh = _mm256_set1_ps(threshold);
+                            let one = _mm256_set1_ps(1.0f32);
+                            let zero = _mm256_set1_ps(0.0f32);
+                            let mut i = start;
+                            while i + 8 <= end {
+                                let v = _mm256_loadu_ps(a_p.add(i));
+                                let mask = _mm256_cmp_ps(v, thresh, _CMP_GT_OQ);
+                                let r = _mm256_blendv_ps(zero, one, mask);
+                                _mm256_storeu_ps(o_p.add(i), r);
+                                i += 8;
+                            }
+                            for j in i..end {
+                                *o_p.add(j) = if *a_p.add(j) > threshold { 1.0 } else { 0.0 };
+                            }
+                            return;
+                        }
+                    }
+                }
+                for j in start..end {
+                    unsafe {
+                        *o_p.add(j) = if *a_p.add(j) > threshold { 1.0 } else { 0.0 };
+                    }
+                }
+            });
+        }
+    } else {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let thresh = _mm256_set1_ps(threshold);
+                    let one = _mm256_set1_ps(1.0f32);
+                    let zero = _mm256_set1_ps(0.0f32);
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let v = _mm256_loadu_ps(a_ptr.add(i));
+                        let mask = _mm256_cmp_ps(v, thresh, _CMP_GT_OQ);
+                        let r = _mm256_blendv_ps(zero, one, mask);
+                        _mm256_storeu_ps(out_ptr.add(i), r);
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *out_ptr.add(j) = if *a_ptr.add(j) > threshold { 1.0 } else { 0.0 };
+                    }
+                    return vec![output];
+                }
+            }
+        }
+        for idx in 0..numel {
+            unsafe {
+                *out_ptr.add(idx) = if *a_ptr.add(idx) > threshold {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
         }
     }
 
@@ -9740,16 +9887,43 @@ fn sign_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
-    for idx in 0..numel {
-        unsafe {
-            let val = *a_ptr.add(idx);
-            *out_ptr.add(idx) = if val > 0.0 {
-                1.0
-            } else if val < 0.0 {
-                -1.0
-            } else {
-                0.0
-            };
+    if a.is_contiguous() && numel > 2048 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = (start + chunk_size).min(numel);
+                for j in start..end {
+                    unsafe {
+                        let val = *(a_usize as *const f32).add(j);
+                        *(out_usize as *mut f32).add(j) = if val > 0.0 {
+                            1.0
+                        } else if val < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+            });
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let val = *a_ptr.add(idx);
+                *out_ptr.add(idx) = if val > 0.0 {
+                    1.0
+                } else if val < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+            }
         }
     }
 
