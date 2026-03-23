@@ -66,7 +66,7 @@ def _patch_numpy(tensor_cls):
     def _new_numpy(self):
         data = _original_numpy(self)
         shape = self.shape
-        return np.array(data).reshape(shape)
+        return np.array(data, dtype=np.float32).reshape(shape)
 
     tensor_cls.numpy = _new_numpy
 

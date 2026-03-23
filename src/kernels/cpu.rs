@@ -8192,24 +8192,18 @@ fn depthwise_conv2d(
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
     // Use direct pointers instead of copying data
-    let w_data: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(w_ptr, in_channels * kernel_height * kernel_width).to_vec()
-    };
-
-    let x_data: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width).to_vec()
-    };
-
-    let bias_data: Option<Vec<f32>> = bias.map(|b| {
-        let ptr = b.data_ptr() as *const f32;
-        unsafe { std::slice::from_raw_parts(ptr, in_channels).to_vec() }
-    });
+    let w_ptr = w.data_ptr() as *const f32;
+    let x_ptr = x.data_ptr() as *const f32;
+    let bias_ptr = bias.map(|b| b.data_ptr() as *const f32);
 
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
 
         let total = batch_size * in_channels * out_height * out_width;
+        let x_usize = x_ptr as usize;
+        let w_usize = w_ptr as usize;
+        let bias_usize = bias_ptr.map(|p| p as usize);
 
         let results: Vec<f32> = (0..total)
             .into_par_iter()
@@ -8231,13 +8225,18 @@ fn depthwise_conv2d(
                         if ih < in_height && iw < in_width {
                             let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
                             let w_idx = ((ic * kernel_height) + kh) * kernel_width + kw;
-                            sum += x_data[x_idx] * w_data[w_idx];
+                            unsafe {
+                                sum += *(x_usize as *const f32).add(x_idx)
+                                    * *(w_usize as *const f32).add(w_idx);
+                            }
                         }
                     }
                 }
 
-                if let Some(ref b) = bias_data {
-                    sum += b[ic];
+                if let Some(b) = bias_usize {
+                    unsafe {
+                        sum += *(b as *const f32).add(ic);
+                    }
                 }
 
                 sum
@@ -8266,13 +8265,13 @@ fn depthwise_conv2d(
                                     let x_idx =
                                         ((n * in_channels + ic) * in_height + ih) * in_width + iw;
                                     let w_idx = ((ic * kernel_height) + kh) * kernel_width + kw;
-                                    sum += unsafe { *x_ptr.add(x_idx) } * w_data[w_idx];
+                                    sum += unsafe { *x_ptr.add(x_idx) * *w_ptr.add(w_idx) };
                                 }
                             }
                         }
 
-                        if let Some(ref b) = bias_data {
-                            sum += b[ic];
+                        if let Some(b) = bias_ptr {
+                            sum += unsafe { *b.add(ic) };
                         }
 
                         let out_idx = ((n * in_channels + ic) * out_height + oh) * out_width + ow;

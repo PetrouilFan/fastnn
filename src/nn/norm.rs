@@ -213,16 +213,28 @@ impl Module for BatchNorm1d {
             }
         };
 
-        // Read running stats without cloning - pass reference to dispatch
-        // We need to clone here because dispatch takes &[&Tensor] and the RwLockGuard
-        // would be dropped. But we can avoid cloning when running stats aren't needed.
-        let running_mean = self.running_mean.read().clone();
-        let running_var = self.running_var.read().clone();
+        let is_training = self.training.load(std::sync::atomic::Ordering::Relaxed);
 
-        let training_flag = if self.training.load(std::sync::atomic::Ordering::Relaxed) {
+        let training_flag = if is_training {
             &self.training_true_scalar
         } else {
             &self.training_false_scalar
+        };
+
+        // In eval mode, running stats are read-only - hold RwLock guards to avoid clone
+        // In training mode, we must clone since we update them after forward
+        let running_mean_guard;
+        let running_var_guard;
+        let running_mean_clone;
+        let running_var_clone;
+        let (running_mean_ref, running_var_ref) = if is_training {
+            running_mean_clone = self.running_mean.read().clone();
+            running_var_clone = self.running_var.read().clone();
+            (&running_mean_clone, &running_var_clone)
+        } else {
+            running_mean_guard = self.running_mean.read();
+            running_var_guard = self.running_var.read();
+            (&*running_mean_guard, &*running_var_guard)
         };
 
         let result = dispatch(
@@ -232,8 +244,8 @@ impl Module for BatchNorm1d {
                 x,
                 weight_ref,
                 bias_ref,
-                &running_mean,
-                &running_var,
+                running_mean_ref,
+                running_var_ref,
                 training_flag,
                 &self.eps_scalar,
             ],
