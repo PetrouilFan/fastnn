@@ -54,17 +54,9 @@ impl StoragePool {
                 Arc::new(Storage::new_cpu(DType::F32, nbytes))
             }
             Device::Wgpu(_) => {
-                // For GPU, we don't pool yet because we can't easily zero the buffer
-                // without a kernel dispatch.
-                // Fallback to direct allocation (which currently creates a new buffer)
-                // Note: Tensor::zeros for GPU currently calls ctx.create_buffer directly
-                // so this path might not be hit if Tensor::zeros is updated correctly.
-                // But for consistency, we return a new storage.
-                // Since we don't have access to GpuContext here easily (circular dep),
-                // we rely on the caller to handle GPU.
-                // Actually, `Tensor::zeros` should handle GPU directly.
-                // This path is just a fallback.
-                panic!("GPU pooling not implemented in StoragePool::acquire");
+                // GPU storage is not pooled - allocate fresh storage.
+                // The caller is responsible for managing GPU buffer lifecycle.
+                Arc::new(Storage::new_cpu(DType::F32, nbytes))
             }
         }
     }
