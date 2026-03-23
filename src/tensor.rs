@@ -10,6 +10,9 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use std::arch::x86_64::{_mm256_add_ps, _mm256_loadu_ps, _mm256_storeu_ps};
+
 pub struct TensorImpl {
     pub storage: Arc<Storage>,
     pub sizes: SmallVec<[i64; 8]>,
@@ -1526,21 +1529,25 @@ impl Tensor {
     /// In-place addition for gradient accumulation
     /// This is used internally by the autograd engine to accumulate gradients
     pub fn add_(&mut self, other: &Tensor) -> &mut Self {
-        // For GPU tensors, we need to use dispatch-based addition
-        if self.inner.is_gpu() || other.inner.is_gpu() {
-            // Perform addition using the dispatch system
-            // Use &*self to get &Tensor from &mut Tensor
+        // For GPU tensors or non-contiguous tensors, use dispatch-based addition
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
             let result = (self as &Tensor).add(other);
-            // Update self with the result
             *self = result;
             return self;
         }
 
-        // CPU path: direct memory manipulation
+        // CPU path: direct memory manipulation (requires contiguous self)
         let dtype = self.inner.dtype;
         let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
 
-        // Use data_ptr_f32_mut for in-place update (as per user's suggestion)
+        // If other is broadcast (e.g., expanded scalar), use general path
+        if other_numel != numel || !other.is_contiguous() {
+            let result = (self as &Tensor).add(other);
+            *self = result;
+            return self;
+        }
+
         let self_ptr = self.data_ptr_f32_mut();
         let other_ptr = other.data_ptr_f32();
 
@@ -1550,6 +1557,71 @@ impl Tensor {
 
         match dtype {
             DType::F32 => {
+                // SIMD + parallel path for F32 gradient accumulation (hot path)
+                #[cfg(feature = "parallel")]
+                {
+                    if numel > 2048 {
+                        use rayon::prelude::*;
+                        const CHUNK: usize = 4096;
+                        let num_chunks = numel.div_ceil(CHUNK);
+                        let self_usize = self_ptr as usize;
+                        let other_usize = other_ptr as usize;
+                        (0..num_chunks).into_par_iter().for_each(|chunk| {
+                            let start = chunk * CHUNK;
+                            let end = (start + CHUNK).min(numel);
+                            let s_ptr = self_usize as *mut f32;
+                            let o_ptr = other_usize as *const f32;
+
+                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                            {
+                                if is_x86_feature_detected!("avx2") {
+                                    unsafe {
+                                        let mut i = start;
+                                        while i + 8 <= end {
+                                            let sv = _mm256_loadu_ps(s_ptr.add(i));
+                                            let ov = _mm256_loadu_ps(o_ptr.add(i));
+                                            let r = _mm256_add_ps(sv, ov);
+                                            _mm256_storeu_ps(s_ptr.add(i), r);
+                                            i += 8;
+                                        }
+                                        for j in i..end {
+                                            *s_ptr.add(j) += *o_ptr.add(j);
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            // Scalar fallback for this chunk
+                            for i in start..end {
+                                unsafe {
+                                    *s_ptr.add(i) += *o_ptr.add(i);
+                                }
+                            }
+                        });
+                        return self;
+                    }
+                }
+                // Small tensor or non-parallel: SIMD inline or scalar
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                let ov = _mm256_loadu_ps(other_ptr.add(i));
+                                let r = _mm256_add_ps(sv, ov);
+                                _mm256_storeu_ps(self_ptr.add(i), r);
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *self_ptr.add(j) += *other_ptr.add(j);
+                            }
+                            return self;
+                        }
+                    }
+                }
+                // Scalar fallback
                 for i in 0..numel {
                     unsafe {
                         *self_ptr.add(i) += *other_ptr.add(i);
@@ -1607,7 +1679,15 @@ impl Tensor {
 
     /// In-place multiplication
     pub fn mul_(&mut self, other: &Tensor) -> &mut Self {
-        if self.inner.is_gpu() || other.inner.is_gpu() {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).mul(other);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
             let result = (self as &Tensor).mul(other);
             *self = result;
             return self;

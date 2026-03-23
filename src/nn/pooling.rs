@@ -7,6 +7,11 @@ pub struct MaxPool2d {
     stride: i64,
     padding: i64,
     dilation: i64,
+    // Pre-allocated scalar tensors
+    kernel_size_scalar: Tensor,
+    stride_scalar: Tensor,
+    padding_scalar: Tensor,
+    dilation_scalar: Tensor,
 }
 
 impl MaxPool2d {
@@ -16,6 +21,10 @@ impl MaxPool2d {
             stride,
             padding,
             dilation,
+            kernel_size_scalar: Tensor::from_scalar(kernel_size as f32),
+            stride_scalar: Tensor::from_scalar(stride as f32),
+            padding_scalar: Tensor::from_scalar(padding as f32),
+            dilation_scalar: Tensor::from_scalar(dilation as f32),
         }
     }
 }
@@ -27,10 +36,10 @@ impl Module for MaxPool2d {
             DispatchKey::Cpu,
             &[
                 x,
-                &Tensor::from_scalar(self.kernel_size as f32),
-                &Tensor::from_scalar(self.stride as f32),
-                &Tensor::from_scalar(self.padding as f32),
-                &Tensor::from_scalar(self.dilation as f32),
+                &self.kernel_size_scalar,
+                &self.stride_scalar,
+                &self.padding_scalar,
+                &self.dilation_scalar,
             ],
         );
         result[0].clone()

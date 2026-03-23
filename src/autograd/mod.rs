@@ -585,8 +585,9 @@ impl Node for SumBackward {
         let grad_shape = grad.shape();
 
         if grad_shape.is_empty() {
-            // Create ones tensor on the same device as grad
-            let ones = Tensor::full(shape.clone(), 1.0, grad.dtype(), grad.device());
+            // Scalar gradient: multiply by ones to broadcast to input shape
+            // (expand creates non-contiguous views that many kernels can't handle)
+            let ones = Tensor::ones(shape.clone(), grad.dtype(), grad.device());
             vec![Some(grad.mul(&ones))]
         } else if self.keepdim {
             vec![Some(grad.expand(shape))]
@@ -646,18 +647,22 @@ impl Node for MeanBackward {
             .unwrap_or_default();
 
         let result = if grad_shape.is_empty() {
-            // Create ones tensor on the same device as grad
-            let ones = Tensor::full(shape.clone(), 1.0, grad.dtype(), grad.device());
-            grad.mul(&ones).mul(&Tensor::from_scalar(scale))
+            // Scalar gradient: create ones and multiply
+            let ones = Tensor::ones(shape.clone(), grad.dtype(), grad.device());
+            let mut scaled = grad;
+            scaled.mul_scalar_(scale);
+            scaled.mul(&ones)
         } else if self.keepdim {
-            let scaled_grad = grad.mul(&Tensor::from_scalar(scale));
-            scaled_grad.expand(shape)
+            let mut scaled = grad;
+            scaled.mul_scalar_(scale);
+            scaled.expand(shape)
         } else {
             let mut new_shape = shape.clone();
             new_shape[self.dim] = 1;
             let reshaped = grad.reshape(new_shape);
-            let scaled_grad = reshaped.mul(&Tensor::from_scalar(scale));
-            scaled_grad.expand(shape)
+            let mut scaled = reshaped;
+            scaled.mul_scalar_(scale);
+            scaled.expand(shape)
         };
 
         vec![Some(result)]
@@ -1013,8 +1018,25 @@ impl Node for SiLUBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let x = &self.input;
         let s = x.sigmoid();
-        let one_minus_s = Tensor::from_scalar(1.0).sub(&s);
-        let derivative = s.mul(&Tensor::from_scalar(1.0).add(&x.mul(&one_minus_s)));
+        // SiLU derivative = s * (1 + x * (1 - s))
+        // Avoid scalar tensor allocations: compute in single pass on owned copy
+        let mut derivative = s.clone();
+        let inner = Arc::make_mut(&mut derivative.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage");
+        };
+        let data = Arc::make_mut(&mut cpu_storage.data);
+        let ptr = data.as_mut_ptr() as *mut f32;
+        let numel = s.inner.numel() as usize;
+        let x_ptr = x.data_ptr_f32();
+        let s_ptr = s.data_ptr_f32();
+        for i in 0..numel {
+            unsafe {
+                let si = *s_ptr.add(i);
+                *ptr.add(i) = si * (1.0 + *x_ptr.add(i) * (1.0 - si));
+            }
+        }
         vec![Some(grad.mul(&derivative))]
     }
 
