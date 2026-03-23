@@ -7469,22 +7469,18 @@ fn mse_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     match reduction {
         "none" => vec![loss],
         "mean" => {
-            // Sum over all elements and divide by total count
-            let num_dims = loss.ndim();
-            let mut result = loss.clone();
-            for _ in 0..num_dims {
-                result = result.sum(0, false);
-            }
-            vec![result.div(&Tensor::from_scalar(loss.numel() as f32))]
+            // Flatten then single sum instead of O(dims) kernel dispatches
+            let numel = loss.numel() as usize;
+            let flat = loss.reshape(vec![numel as i64]);
+            let mut result = flat.sum(0, false);
+            result.mul_scalar_(1.0 / numel as f32);
+            vec![result]
         }
         "sum" => {
-            // Sum over all dimensions to get a scalar
-            let num_dims = loss.ndim();
-            let mut result = loss.clone();
-            for _ in 0..num_dims {
-                result = result.sum(0, false);
-            }
-            vec![result]
+            // Flatten then single sum
+            let numel = loss.numel() as usize;
+            let flat = loss.reshape(vec![numel as i64]);
+            vec![flat.sum(0, false)]
         }
         _ => vec![loss.sum(0, false)],
     }
