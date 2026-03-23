@@ -5502,7 +5502,8 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let batch = batch_a.max(batch_b);
 
-    let mut output_shape: Vec<i64> = vec![];
+    let mut output_shape: smallvec::SmallVec<[i64; 4]> =
+        smallvec::SmallVec::with_capacity(a_shape.len());
     if a_shape.len() > 2 {
         for i in 0..a_shape.len() - 2 {
             // If b has matching dimensions, use max (broadcasting)
@@ -5517,7 +5518,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     output_shape.push(m as i64);
     output_shape.push(n as i64);
 
-    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.to_vec(), a.dtype(), a.device());
 
     let a_ptr = a.data_ptr() as *const f32;
     let b_ptr = b.data_ptr() as *const f32;
@@ -5534,9 +5535,9 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_cols = a_shape[a_shape.len() - 1] as usize;
     let b_cols = b_shape[b_shape.len() - 1] as usize;
 
-    let a_strides = a.strides();
-    let b_strides = b.strides();
-
+    // Detect transposed matrices by checking strides
+    // For row-major contiguous matrix [rows, cols], stride_0 = cols, stride_1 = 1
+    // For transposed [rows, cols] stored as [cols, rows], stride_0 = 1, stride_1 = rows
     let a_stride_0 = a_strides[a.ndim() - 2];
     let a_stride_1 = a_strides[a.ndim() - 1];
     let b_stride_0 = b_strides[b.ndim() - 2];
