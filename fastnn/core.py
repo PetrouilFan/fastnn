@@ -22,24 +22,17 @@ SiLU = _core.SiLU
 
 def sum(a, dim=None, keepdim=False):
     if dim is None:
-        # For full sum, sum all dimensions with keepdim=True to preserve shape for backward
-        # Then squeeze all dimensions
-        result = a
-        for i in range(a.ndim):
-            result = _core.sum(result, 0, True)  # keepdim=True
-        # Now squeeze to get scalar
-        while result.ndim > 0:
-            result = _core.sum(result, 0, False)
-        return result
+        # Flatten then single sum instead of O(dims) dispatches
+        flat = a.reshape([-1])
+        return _core.sum(flat, 0, False)
     return _core.sum(a, dim, keepdim)
 
 
 def mean(a, dim=None, keepdim=False):
     if dim is None:
-        result = _core.mean(a)
-        while result.ndim > 0:
-            result = _core.mean(result)
-        return result
+        # Flatten then single mean
+        flat = a.reshape([-1])
+        return _core.mean(flat, 0, False)
     return _core.mean(a, dim, keepdim)
 
 

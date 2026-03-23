@@ -1852,6 +1852,14 @@ impl Tensor {
         self
     }
 
+    /// Non-in-place scalar multiplication without creating a scalar tensor.
+    /// Avoids the 5-heap-alloc overhead of Tensor::from_scalar().
+    pub fn mul_scalar(&self, scalar: f32) -> Tensor {
+        let mut result = self.clone();
+        result.mul_scalar_(scalar);
+        result
+    }
+
     /// In-place scalar addition: self += scalar
     pub fn add_scalar_(&mut self, scalar: f32) -> &mut Self {
         if self.inner.is_gpu() {
