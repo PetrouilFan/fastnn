@@ -725,19 +725,23 @@ impl Node for ExpBackward {
 pub struct LogBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    one: Tensor,
 }
 
 impl LogBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        LogBackward { input, edges }
+        LogBackward {
+            input,
+            edges,
+            one: Tensor::from_scalar(1.0),
+        }
     }
 }
 
 impl Node for LogBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
-        let one = Tensor::from_scalar(1.0);
-        let inv_x = one.div(&self.input);
+        let inv_x = self.one.div(&self.input);
         vec![Some(grad.mul(&inv_x))]
     }
 
@@ -762,19 +766,23 @@ impl Node for LogBackward {
 pub struct SqrtBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    half: Tensor,
 }
 
 impl SqrtBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        SqrtBackward { input, edges }
+        SqrtBackward {
+            input,
+            edges,
+            half: Tensor::from_scalar(0.5),
+        }
     }
 }
 
 impl Node for SqrtBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
-        let half = Tensor::from_scalar(0.5);
-        let inv_sqrt_x = half.div(&self.input.sqrt());
+        let inv_sqrt_x = self.half.div(&self.input.sqrt());
         vec![Some(grad.mul(&inv_sqrt_x))]
     }
 
@@ -1415,6 +1423,7 @@ pub struct MSELossBackward {
     pub target: Tensor,
     pub reduction: String,
     pub edges: Vec<Edge>,
+    two_scalar: Tensor,
 }
 
 impl MSELossBackward {
@@ -1424,27 +1433,27 @@ impl MSELossBackward {
             target,
             reduction,
             edges,
+            two_scalar: Tensor::from_scalar(2.0),
         }
     }
 }
 
 impl Node for MSELossBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap(); // This is d(loss)/d(mse_loss_output)
+        let grad = grad_outputs[0].clone().unwrap();
         let diff = self.pred.sub(&self.target);
 
-        // The gradient of MSE loss with respect to predictions is 2 * (pred - target) / N
         let grad_loss = match self.reduction.as_str() {
             "mean" => {
                 let n = diff.numel() as f32;
-                diff.mul(&Tensor::from_scalar(2.0))
-                    .div(&Tensor::from_scalar(n))
+                let mut g = diff.mul(&self.two_scalar);
+                g.mul_scalar_(1.0 / n);
+                g
             }
-            "sum" => diff.mul(&Tensor::from_scalar(2.0)),
-            _ => diff.mul(&Tensor::from_scalar(2.0)),
+            "sum" => diff.mul(&self.two_scalar),
+            _ => diff.mul(&self.two_scalar),
         };
 
-        // Multiply by the incoming gradient
         vec![Some(grad.mul(&grad_loss))]
     }
 

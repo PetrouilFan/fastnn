@@ -61,7 +61,6 @@ pub fn save_model(model: &dyn Module, path: &str) -> Result<(), String> {
     writer
         .flush()
         .map_err(|e| format!("Failed to flush: {}", e))?;
-    println!("Saved model to {} with {} parameters", path, params.len());
     Ok(())
 }
 
@@ -133,10 +132,5 @@ pub fn load_model(
         result.insert(name, tensor);
     }
 
-    println!(
-        "Loaded model from {} with {} parameters",
-        path,
-        result.len()
-    );
     Ok(result)
 }
