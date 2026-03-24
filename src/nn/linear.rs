@@ -91,15 +91,15 @@ impl Module for Linear {
 
     fn train_mode(&self) {
         self.training
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn eval_mode(&self) {
         self.training
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::SeqCst)
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

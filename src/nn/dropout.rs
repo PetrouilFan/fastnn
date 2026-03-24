@@ -1,5 +1,6 @@
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use rand::Rng;
 use std::sync::atomic::AtomicBool;
 
 pub struct Dropout {
@@ -18,13 +19,17 @@ impl Dropout {
 
 impl Module for Dropout {
     fn forward(&self, x: &Tensor) -> Tensor {
-        if self.training.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.training.load(std::sync::atomic::Ordering::Relaxed) {
             let x_data = x.as_f32_slice();
+            let scale = 1.0 / (1.0 - self.p) as f32;
+            let keep_prob = 1.0 - self.p;
+            // Use thread-local RNG for batch generation (much faster than rand::random per element)
+            let mut rng = rand::thread_rng();
             let mask_data: Vec<f32> = x_data
                 .iter()
                 .map(|&v| {
-                    if rand::random::<f64>() < (1.0 - self.p) {
-                        v / (1.0 - self.p) as f32
+                    if rng.gen::<f64>() < keep_prob {
+                        v * scale
                     } else {
                         0.0
                     }
@@ -32,9 +37,7 @@ impl Module for Dropout {
                 .collect();
 
             let shape = x.shape();
-            let mask = Tensor::from_vec(mask_data, shape);
-
-            x.mul(&mask)
+            Tensor::from_vec(mask_data, shape)
         } else {
             x.clone()
         }
@@ -52,15 +55,15 @@ impl Module for Dropout {
 
     fn train_mode(&self) {
         self.training
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn eval_mode(&self) {
         self.training
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::SeqCst)
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

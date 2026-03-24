@@ -13,11 +13,11 @@ pub fn is_grad_enabled() -> bool {
 }
 
 pub fn no_grad_enter() {
-    NO_GRAD_GLOBAL.store(true, Ordering::SeqCst);
+    NO_GRAD_GLOBAL.store(true, Ordering::Release);
 }
 
 pub fn no_grad_exit() {
-    NO_GRAD_GLOBAL.store(false, Ordering::SeqCst);
+    NO_GRAD_GLOBAL.store(false, Ordering::Release);
 }
 
 pub struct AutogradMeta {
@@ -159,24 +159,22 @@ impl Node for AddBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        // if a.shape() == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
-        //     panic!("AddBackward: a=[64, 64], grad=[32, 64, 64]");
-        // }
 
         // Handle broadcasting: if input shape doesn't match output shape,
-        // sum over the extra dimensions
-        let grad_a = if a.shape() == grad.shape() {
+        // sum over the extra dimensions. Avoid double-clone when both match.
+        let a_matches = a.shape() == grad.shape();
+        let b_matches = b.shape() == grad.shape();
+
+        let grad_a = if a_matches {
             grad.clone()
         } else {
-            // Sum over dimensions that exist in grad but not in a
-            // Broadcasting aligns dimensions on the right
             let mut grad_a = grad.clone();
             let diff = grad.shape().len() as i32 - a.shape().len() as i32;
             for i in (0..grad.shape().len()).rev() {
                 let a_dim = if i as i32 >= diff {
                     a.shape()[(i as i32 - diff) as usize]
                 } else {
-                    1 // Dimension doesn't exist in a, treat as 1 (broadcasted)
+                    1
                 };
                 if a_dim != grad.shape()[i] {
                     grad_a = grad_a.sum(i as i32, false);
@@ -185,19 +183,23 @@ impl Node for AddBackward {
             grad_a
         };
 
-        let grad_b = if b.shape() == grad.shape() {
-            grad.clone()
+        let grad_b = if b_matches {
+            if a_matches {
+                // Both match: reuse grad instead of cloning again
+                grad
+            } else {
+                grad.clone()
+            }
         } else {
-            // Sum over dimensions that exist in grad but not in b
-            let mut grad_b = grad.clone();
-            let diff = grad.shape().len() as i32 - b.shape().len() as i32;
-            for i in (0..grad.shape().len()).rev() {
+            let mut grad_b = grad;
+            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
+            for i in (0..grad_b.shape().len()).rev() {
                 let b_dim = if i as i32 >= diff {
                     b.shape()[(i as i32 - diff) as usize]
                 } else {
                     1
                 };
-                if b_dim != grad.shape()[i] {
+                if b_dim != grad_b.shape()[i] {
                     grad_b = grad_b.sum(i as i32, false);
                 }
             }
@@ -321,19 +323,9 @@ impl Node for MulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        // if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
-        //     && grad.shape() == vec![32, 64, 64]
-        // {
-        //     panic!(
-        //         "MulBackward: a=[{}], b=[{}], grad=[{}]",
-        //         a.shape().len(),
-        //         b.shape().len(),
-        //         grad.shape().len()
-        //     );
-        // }
 
         // Compute gradient for a: grad * b
-        let mut grad_a = grad.clone().mul(b);
+        let mut grad_a = grad.mul(b);
         // Sum over dimensions that were broadcasted in a
         if a.shape() != grad_a.shape() {
             let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
@@ -403,19 +395,10 @@ impl Node for DivBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        // if (a.shape() == vec![64, 64] || b.shape() == vec![64, 64])
-        //     && grad.shape() == vec![32, 64, 64]
-        // {
-        //     panic!(
-        //         "DivBackward: a=[{}], b=[{}], grad=[{}]",
-        //         a.shape().len(),
-        //         b.shape().len(),
-        //         grad.shape().len()
-        //     );
-        // }
 
+        // d/da (a/b) = 1/b, d/db (a/b) = -a/b^2
+        let grad_a = grad.div(b);
         let b_sq = b.mul(b);
-        let grad_a = grad.clone().div(&b.clone());
         let grad_b = grad.mul(a).div(&b_sq).neg();
 
         vec![Some(grad_a), Some(grad_b)]
@@ -452,9 +435,7 @@ impl NegBackward {
 
 impl Node for NegBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![Some(
-            Tensor::from_scalar(0.0).sub(&grad_outputs[0].clone().unwrap()),
-        )]
+        vec![Some(grad_outputs[0].clone().unwrap().neg())]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -529,23 +510,6 @@ impl Node for MatmulBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
-        // Debug: print shapes
-        eprintln!(
-            "MatmulBackward: a.shape={:?}, b.shape={:?}, grad.shape={:?}",
-            a.shape(),
-            b.shape(),
-            grad.shape()
-        );
-        // if (a.shape() == vec![32, 64, 64] && b.shape() == vec![64, 64])
-        //     && grad.shape() == vec![32, 64, 64]
-        // {
-        //     panic!(
-        //         "MatmulBackward: a={:?}, b={:?}, grad={:?}",
-        //         a.shape(),
-        //         b.shape(),
-        //         grad.shape()
-        //     );
-        // }
 
         // If grad is a scalar (e.g., from sum()), we need to expand it to the output shape
         let grad_shape = grad.shape();
@@ -621,8 +585,9 @@ impl Node for SumBackward {
         let grad_shape = grad.shape();
 
         if grad_shape.is_empty() {
-            // Create ones tensor on the same device as grad
-            let ones = Tensor::full(shape.clone(), 1.0, grad.dtype(), grad.device());
+            // Scalar gradient: multiply by ones to broadcast to input shape
+            // (expand creates non-contiguous views that many kernels can't handle)
+            let ones = Tensor::ones(shape.clone(), grad.dtype(), grad.device());
             vec![Some(grad.mul(&ones))]
         } else if self.keepdim {
             vec![Some(grad.expand(shape))]
@@ -682,18 +647,22 @@ impl Node for MeanBackward {
             .unwrap_or_default();
 
         let result = if grad_shape.is_empty() {
-            // Create ones tensor on the same device as grad
-            let ones = Tensor::full(shape.clone(), 1.0, grad.dtype(), grad.device());
-            grad.mul(&ones).mul(&Tensor::from_scalar(scale))
+            // Scalar gradient: create ones and multiply
+            let ones = Tensor::ones(shape.clone(), grad.dtype(), grad.device());
+            let mut scaled = grad;
+            scaled.mul_scalar_(scale);
+            scaled.mul(&ones)
         } else if self.keepdim {
-            let scaled_grad = grad.mul(&Tensor::from_scalar(scale));
-            scaled_grad.expand(shape)
+            let mut scaled = grad;
+            scaled.mul_scalar_(scale);
+            scaled.expand(shape)
         } else {
             let mut new_shape = shape.clone();
             new_shape[self.dim] = 1;
             let reshaped = grad.reshape(new_shape);
-            let scaled_grad = reshaped.mul(&Tensor::from_scalar(scale));
-            scaled_grad.expand(shape)
+            let mut scaled = reshaped;
+            scaled.mul_scalar_(scale);
+            scaled.expand(shape)
         };
 
         vec![Some(result)]
@@ -756,19 +725,23 @@ impl Node for ExpBackward {
 pub struct LogBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    one: Tensor,
 }
 
 impl LogBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        LogBackward { input, edges }
+        LogBackward {
+            input,
+            edges,
+            one: Tensor::from_scalar(1.0),
+        }
     }
 }
 
 impl Node for LogBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
-        let one = Tensor::from_scalar(1.0);
-        let inv_x = one.div(&self.input);
+        let inv_x = self.one.div(&self.input);
         vec![Some(grad.mul(&inv_x))]
     }
 
@@ -793,19 +766,23 @@ impl Node for LogBackward {
 pub struct SqrtBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    half: Tensor,
 }
 
 impl SqrtBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        SqrtBackward { input, edges }
+        SqrtBackward {
+            input,
+            edges,
+            half: Tensor::from_scalar(0.5),
+        }
     }
 }
 
 impl Node for SqrtBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
-        let half = Tensor::from_scalar(0.5);
-        let inv_sqrt_x = half.div(&self.input.sqrt());
+        let inv_sqrt_x = self.half.div(&self.input.sqrt());
         vec![Some(grad.mul(&inv_sqrt_x))]
     }
 
@@ -865,11 +842,25 @@ impl Node for AbsBackward {
 pub struct GeluBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    // Pre-allocated scalar constants to avoid per-call allocation
+    sqrt_2_over_pi: Tensor,
+    coeff: Tensor,
+    d_inner_coeff: Tensor,
+    half: Tensor,
+    one: Tensor,
 }
 
 impl GeluBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        GeluBackward { input, edges }
+        GeluBackward {
+            input,
+            edges,
+            sqrt_2_over_pi: Tensor::from_scalar((2.0_f32 / std::f32::consts::PI).sqrt()),
+            coeff: Tensor::from_scalar(0.044715_f32),
+            d_inner_coeff: Tensor::from_scalar(0.134145_f32),
+            half: Tensor::from_scalar(0.5),
+            one: Tensor::from_scalar(1.0),
+        }
     }
 }
 
@@ -877,20 +868,20 @@ impl Node for GeluBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let x = &self.input;
-        let sqrt_2_over_pi = Tensor::from_scalar((2.0_f32 / std::f32::consts::PI).sqrt());
-        let coeff = Tensor::from_scalar(0.044715_f32);
-        let d_inner_coeff = Tensor::from_scalar(0.134145_f32);
 
         let x2 = x.mul(x);
         let x3 = x2.mul(x);
-        let inner = sqrt_2_over_pi.mul(&x.add(&coeff.mul(&x3)));
+        let inner = self.sqrt_2_over_pi.mul(&x.add(&self.coeff.mul(&x3)));
         let t = inner.tanh();
         let t2 = t.mul(&t);
-        let sech2 = Tensor::from_scalar(1.0).sub(&t2);
-        let d_inner_dx = sqrt_2_over_pi.mul(&Tensor::from_scalar(1.0).add(&d_inner_coeff.mul(&x2)));
-        let derivative = Tensor::from_scalar(0.5)
-            .mul(&Tensor::from_scalar(1.0).add(&t))
-            .add(&Tensor::from_scalar(0.5).mul(x).mul(&sech2).mul(&d_inner_dx));
+        let sech2 = self.one.sub(&t2);
+        let d_inner_dx = self
+            .sqrt_2_over_pi
+            .mul(&self.one.add(&self.d_inner_coeff.mul(&x2)));
+        let derivative = self
+            .half
+            .mul(&self.one.add(&t))
+            .add(&self.half.mul(x).mul(&sech2).mul(&d_inner_dx));
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -926,7 +917,25 @@ impl Node for SigmoidBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let sigmoid_x = self.input.sigmoid();
-        let derivative = sigmoid_x.mul(&Tensor::from_scalar(1.0).sub(&sigmoid_x));
+        // derivative = sigmoid * (1 - sigmoid)
+        // Avoid allocating scalar tensor for 1.0: compute directly
+        let mut derivative = sigmoid_x.clone();
+        // Ensure exclusive ownership before in-place modification
+        let inner = Arc::make_mut(&mut derivative.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage");
+        };
+        let data = Arc::make_mut(&mut cpu_storage.data);
+        let ptr = data.as_mut_ptr() as *mut f32;
+        let sigmoid_ptr = sigmoid_x.data_ptr_f32();
+        let numel = sigmoid_x.inner.numel() as usize;
+        for i in 0..numel {
+            unsafe {
+                let s = *sigmoid_ptr.add(i);
+                *ptr.add(i) = s * (1.0 - s);
+            }
+        }
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -962,7 +971,25 @@ impl Node for TanhBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
         let tanh_x = self.input.tanh();
-        let derivative = Tensor::from_scalar(1.0).sub(&tanh_x.mul(&tanh_x));
+        // derivative = 1 - tanh^2
+        // Avoid allocating scalar tensor for 1.0: compute directly
+        let mut derivative = tanh_x.clone();
+        // Ensure exclusive ownership before in-place modification
+        let inner = Arc::make_mut(&mut derivative.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage");
+        };
+        let data = Arc::make_mut(&mut cpu_storage.data);
+        let ptr = data.as_mut_ptr() as *mut f32;
+        let tanh_ptr = tanh_x.data_ptr_f32();
+        let numel = tanh_x.inner.numel() as usize;
+        for i in 0..numel {
+            unsafe {
+                let t = *tanh_ptr.add(i);
+                *ptr.add(i) = 1.0 - t * t;
+            }
+        }
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -999,8 +1026,25 @@ impl Node for SiLUBackward {
         let grad = grad_outputs[0].clone().unwrap();
         let x = &self.input;
         let s = x.sigmoid();
-        let one_minus_s = Tensor::from_scalar(1.0).sub(&s);
-        let derivative = s.mul(&Tensor::from_scalar(1.0).add(&x.mul(&one_minus_s)));
+        // SiLU derivative = s * (1 + x * (1 - s))
+        // Avoid scalar tensor allocations: compute in single pass on owned copy
+        let mut derivative = s.clone();
+        let inner = Arc::make_mut(&mut derivative.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
+            panic!("Expected CPU storage");
+        };
+        let data = Arc::make_mut(&mut cpu_storage.data);
+        let ptr = data.as_mut_ptr() as *mut f32;
+        let numel = s.inner.numel() as usize;
+        let x_ptr = x.data_ptr_f32();
+        let s_ptr = s.data_ptr_f32();
+        for i in 0..numel {
+            unsafe {
+                let si = *s_ptr.add(i);
+                *ptr.add(i) = si * (1.0 + *x_ptr.add(i) * (1.0 - si));
+            }
+        }
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -1379,6 +1423,7 @@ pub struct MSELossBackward {
     pub target: Tensor,
     pub reduction: String,
     pub edges: Vec<Edge>,
+    two_scalar: Tensor,
 }
 
 impl MSELossBackward {
@@ -1388,27 +1433,27 @@ impl MSELossBackward {
             target,
             reduction,
             edges,
+            two_scalar: Tensor::from_scalar(2.0),
         }
     }
 }
 
 impl Node for MSELossBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap(); // This is d(loss)/d(mse_loss_output)
+        let grad = grad_outputs[0].clone().unwrap();
         let diff = self.pred.sub(&self.target);
 
-        // The gradient of MSE loss with respect to predictions is 2 * (pred - target) / N
         let grad_loss = match self.reduction.as_str() {
             "mean" => {
                 let n = diff.numel() as f32;
-                diff.mul(&Tensor::from_scalar(2.0))
-                    .div(&Tensor::from_scalar(n))
+                let mut g = diff.mul(&self.two_scalar);
+                g.mul_scalar_(1.0 / n);
+                g
             }
-            "sum" => diff.mul(&Tensor::from_scalar(2.0)),
-            _ => diff.mul(&Tensor::from_scalar(2.0)),
+            "sum" => diff.mul(&self.two_scalar),
+            _ => diff.mul(&self.two_scalar),
         };
 
-        // Multiply by the incoming gradient
         vec![Some(grad.mul(&grad_loss))]
     }
 
@@ -1499,22 +1544,13 @@ impl Node for SliceBackward {
     fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
         let grad = grad_outputs[0].clone().unwrap();
 
-        // Create a zero tensor for the gradient of the input
         let input_shape = self.input.shape();
-        // if input_shape == vec![64, 64] && grad.shape() == vec![32, 64, 64] {
-        //     panic!(
-        //         "SliceBackward: input_shape {:?} != grad.shape() {:?}",
-        //         input_shape,
-        //         grad.shape()
-        //     );
-        // }
         let mut grad_input = Tensor::zeros(
             input_shape.clone(),
             crate::storage::DType::F32,
             self.input.device(),
         );
 
-        // For simplicity, assume CPU and contiguous tensors
         use crate::storage::Storage;
 
         if let Storage::Cpu(cpu_grad) = grad.inner.storage.as_ref() {
@@ -1532,24 +1568,36 @@ impl Node for SliceBackward {
                 let mut grad_shape = input_shape.clone();
                 grad_shape[self.dim] = sliced_size;
 
-                // Iterate over grad and scatter to grad_input
+                let ndim = grad_shape.len();
+                // Pre-allocate coordinate arrays once instead of per-element
+                let mut grad_coords = vec![0usize; ndim];
+                let mut input_coords = vec![0usize; ndim];
+                let start = self.start as usize;
+                let step = self.step as usize;
+
+                // Pre-compute shape strides for index decomposition
+                let mut shape_strides = vec![0usize; ndim];
+                let mut stride = 1usize;
+                for d in (0..ndim).rev() {
+                    shape_strides[d] = stride;
+                    stride *= grad_shape[d] as usize;
+                }
+
                 for i in 0..grad_numel {
-                    // Compute multi-dimensional index for grad
+                    // Decompose linear index to coordinates
                     let mut temp = i;
-                    let mut grad_coords = vec![0; grad_shape.len()];
-                    for d in (0..grad_shape.len()).rev() {
+                    for d in (0..ndim).rev() {
                         grad_coords[d] = temp % grad_shape[d] as usize;
                         temp /= grad_shape[d] as usize;
                     }
 
                     // Map to input coordinates
-                    let mut input_coords = grad_coords.clone();
-                    input_coords[self.dim] =
-                        (self.start as usize) + (grad_coords[self.dim] * self.step as usize);
+                    input_coords.copy_from_slice(&grad_coords);
+                    input_coords[self.dim] = start + (grad_coords[self.dim] * step);
 
-                    // Compute linear index in input
+                    // Compute linear index in input using strides
                     let mut input_idx = 0;
-                    for d in 0..input_coords.len() {
+                    for d in 0..ndim {
                         input_idx += input_coords[d] * input_strides[d] as usize;
                     }
 

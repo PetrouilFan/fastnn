@@ -18,6 +18,12 @@ pub struct Conv2d {
     pub dilation: i64,
     pub groups: i64,
     training: std::sync::atomic::AtomicBool,
+    // Pre-allocated scalar tensors to avoid per-forward allocation
+    stride_scalar: Tensor,
+    padding_scalar: Tensor,
+    dilation_scalar: Tensor,
+    groups_scalar: Tensor,
+    default_bias: Tensor,
 }
 
 impl Conv2d {
@@ -63,16 +69,18 @@ impl Conv2d {
             dilation,
             groups,
             training: std::sync::atomic::AtomicBool::new(true),
+            stride_scalar: Tensor::from_scalar(stride as f32),
+            padding_scalar: Tensor::from_scalar(padding as f32),
+            dilation_scalar: Tensor::from_scalar(dilation as f32),
+            groups_scalar: Tensor::from_scalar(groups as f32),
+            default_bias: Tensor::from_scalar(0.0),
         }
     }
 }
 
 impl Module for Conv2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let bias_tensor = self
-            .bias
-            .clone()
-            .unwrap_or_else(|| Tensor::from_scalar(0.0));
+        let bias_ref = self.bias.as_ref().unwrap_or(&self.default_bias);
 
         let result = dispatch(
             "conv2d",
@@ -80,11 +88,11 @@ impl Module for Conv2d {
             &[
                 x,
                 &self.weight,
-                &bias_tensor,
-                &Tensor::from_scalar(self.stride as f32),
-                &Tensor::from_scalar(self.padding as f32),
-                &Tensor::from_scalar(self.dilation as f32),
-                &Tensor::from_scalar(self.groups as f32),
+                bias_ref,
+                &self.stride_scalar,
+                &self.padding_scalar,
+                &self.dilation_scalar,
+                &self.groups_scalar,
             ],
         );
 
@@ -150,15 +158,15 @@ impl Module for Conv2d {
 
     fn train_mode(&self) {
         self.training
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn eval_mode(&self) {
         self.training
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::SeqCst)
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

@@ -1593,9 +1593,9 @@ fn fused_mul_add_parallel_scalar(
     }
 }
 
-// Parallel sigmoid AVX2 kernel using exp approximation
+// Parallel sigmoid AVX2 kernel using vectorized fast_exp
 #[cfg(all(feature = "parallel", feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn sigmoid_parallel_avx2(
     chunk_idx: usize,
     chunk_size: usize,
@@ -1606,42 +1606,33 @@ unsafe fn sigmoid_parallel_avx2(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let one = _mm256_set1_ps(1.0f32);
+
     let mut i = start;
     while i + 8 <= end {
         let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        // Compute sigmoid using 1/(1+exp(-x))
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            if val > 9.0 {
-                results[j] = 1.0;
-            } else if val < -9.0 {
-                results[j] = 0.0;
-            } else {
-                results[j] = 1.0 / (1.0 + (-val).exp());
-            }
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        // sigmoid(x) = 1 / (1 + exp(-x))
+        let neg_x = _mm256_xor_ps(x, _mm256_set1_ps(-0.0f32));
+        let exp_neg_x = fast_exp_avx2(neg_x);
+        let denom = _mm256_add_ps(one, exp_neg_x);
+        // Use Newton-Raphson reciprocal approximation for better accuracy
+        let rcp = _mm256_rcp_ps(denom);
+        let result = _mm256_mul_ps(
+            _mm256_mul_ps(rcp, _mm256_fnmadd_ps(rcp, denom, _mm256_set1_ps(2.0f32))),
+            one,
+        );
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
     }
 
     while i < end {
         let x = *((a_usize + i * 4) as *const f32);
-        if x > 9.0 {
-            *((out_usize + i * 4) as *mut f32) = 1.0;
-        } else if x < -9.0 {
-            *((out_usize + i * 4) as *mut f32) = 0.0;
-        } else {
-            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
-        }
+        *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
         i += 1;
     }
 }
 
-// Sigmoid parallel AVX512 kernel
+// Sigmoid parallel AVX512 kernel using vectorized fast_exp
 #[cfg(all(feature = "parallel", feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn sigmoid_parallel_avx512(
@@ -1654,55 +1645,32 @@ unsafe fn sigmoid_parallel_avx512(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
 
+    let one = _mm512_set1_ps(1.0f32);
+
     let mut i = start;
     while i + 16 <= end {
         let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
-        // Compute sigmoid using 1/(1+exp(-x))
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m512, [f32; 16]>(x);
-        let mut results = [0.0f32; 16];
-        for j in 0..16 {
-            let val = x_f32[j];
-            if val > 9.0 {
-                results[j] = 1.0;
-            } else if val < -9.0 {
-                results[j] = 0.0;
-            } else {
-                results[j] = 1.0 / (1.0 + (-val).exp());
-            }
-        }
-        let result = std::mem::transmute::<[f32; 16], __m512>(results);
+        // sigmoid(x) = 1 / (1 + exp(-x))
+        let neg_x = _mm512_xor_ps(x, _mm512_set1_ps(-0.0f32));
+        let exp_neg_x = fast_exp_avx512(neg_x);
+        let denom = _mm512_add_ps(one, exp_neg_x);
+        let result = _mm512_div_ps(one, denom);
         _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 16;
     }
     // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
     while i + 8 <= end {
         let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            if val > 9.0 {
-                results[j] = 1.0;
-            } else if val < -9.0 {
-                results[j] = 0.0;
-            } else {
-                results[j] = 1.0 / (1.0 + (-val).exp());
-            }
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        let neg_x = _mm256_xor_ps(x, _mm256_set1_ps(-0.0f32));
+        let exp_neg_x = fast_exp_avx2(neg_x);
+        let denom = _mm256_add_ps(_mm256_set1_ps(1.0f32), exp_neg_x);
+        let result = _mm256_div_ps(_mm256_set1_ps(1.0f32), denom);
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
     }
     while i < end {
         let x = *((a_usize + i * 4) as *const f32);
-        if x > 9.0 {
-            *((out_usize + i * 4) as *mut f32) = 1.0;
-        } else if x < -9.0 {
-            *((out_usize + i * 4) as *mut f32) = 0.0;
-        } else {
-            *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
-        }
+        *((out_usize + i * 4) as *mut f32) = 1.0 / (1.0 + (-x).exp());
         i += 1;
     }
 }
@@ -1766,7 +1734,7 @@ unsafe fn sigmoid_parallel_neon(
     }
 }
 
-// Parallel tanh AVX2 kernel using exact computation
+// Parallel tanh AVX2 kernel using vectorized fast_exp
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn tanh_parallel_avx2(
@@ -1781,24 +1749,18 @@ unsafe fn tanh_parallel_avx2(
 
     let clamp_lo = _mm256_set1_ps(-10.0f32);
     let clamp_hi = _mm256_set1_ps(10.0f32);
+    let one = _mm256_set1_ps(1.0f32);
+    let two = _mm256_set1_ps(2.0f32);
 
     let mut i = start;
     while i + 8 <= end {
         let x = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-
         // Clamp values to prevent overflow in exp
         let x_clamped = _mm256_min_ps(_mm256_max_ps(x, clamp_lo), clamp_hi);
-
-        // Compute tanh using formula: tanh(x) = (e^2x - 1) / (e^2x + 1)
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x_clamped);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            let exp_2x = (2.0 * val).exp();
-            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        let two_x = _mm256_mul_ps(two, x_clamped);
+        let exp_2x = fast_exp_avx2(two_x);
+        let result = _mm256_div_ps(_mm256_sub_ps(exp_2x, one), _mm256_add_ps(exp_2x, one));
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
     }
@@ -1811,7 +1773,7 @@ unsafe fn tanh_parallel_avx2(
     }
 }
 
-// Tanh parallel AVX512 kernel
+// Tanh parallel AVX512 kernel using vectorized fast_exp
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn tanh_parallel_avx512(
@@ -1826,24 +1788,18 @@ unsafe fn tanh_parallel_avx512(
 
     let clamp_lo = _mm512_set1_ps(-10.0f32);
     let clamp_hi = _mm512_set1_ps(10.0f32);
+    let one = _mm512_set1_ps(1.0f32);
+    let two = _mm512_set1_ps(2.0f32);
 
     let mut i = start;
     while i + 16 <= end {
         let x = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
-
         // Clamp values to prevent overflow in exp
         let x_clamped = _mm512_min_ps(_mm512_max_ps(x, clamp_lo), clamp_hi);
-
-        // Compute tanh using formula: tanh(x) = (e^2x - 1) / (e^2x + 1)
-        // Process elements one by one for now - Section 3 will vectorize this
-        let x_f32 = std::mem::transmute::<__m512, [f32; 16]>(x_clamped);
-        let mut results = [0.0f32; 16];
-        for j in 0..16 {
-            let val = x_f32[j];
-            let exp_2x = (2.0 * val).exp();
-            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
-        }
-        let result = std::mem::transmute::<[f32; 16], __m512>(results);
+        // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+        let two_x = _mm512_mul_ps(two, x_clamped);
+        let exp_2x = fast_exp_avx512(two_x);
+        let result = _mm512_div_ps(_mm512_sub_ps(exp_2x, one), _mm512_add_ps(exp_2x, one));
         _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 16;
     }
@@ -1853,14 +1809,12 @@ unsafe fn tanh_parallel_avx512(
         let clamp_lo_256 = _mm256_set1_ps(-10.0f32);
         let clamp_hi_256 = _mm256_set1_ps(10.0f32);
         let x_clamped = _mm256_min_ps(_mm256_max_ps(x, clamp_lo_256), clamp_hi_256);
-        let x_f32 = std::mem::transmute::<__m256, [f32; 8]>(x_clamped);
-        let mut results = [0.0f32; 8];
-        for j in 0..8 {
-            let val = x_f32[j];
-            let exp_2x = (2.0 * val).exp();
-            results[j] = (exp_2x - 1.0) / (exp_2x + 1.0);
-        }
-        let result = std::mem::transmute::<[f32; 8], __m256>(results);
+        let two_x = _mm256_mul_ps(_mm256_set1_ps(2.0f32), x_clamped);
+        let exp_2x = fast_exp_avx2(two_x);
+        let result = _mm256_div_ps(
+            _mm256_sub_ps(exp_2x, _mm256_set1_ps(1.0f32)),
+            _mm256_add_ps(exp_2x, _mm256_set1_ps(1.0f32)),
+        );
         _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 8;
     }
@@ -2309,8 +2263,8 @@ fn broadcast_index_decomposition(
     storage_offset: usize,
 ) -> usize {
     let ndim = out_shape.len();
-    // Precompute multipliers: multipliers[i] = product(out_shape[i+1..])
-    let mut multipliers = vec![0usize; ndim];
+    // Precompute multipliers on the stack: multipliers[i] = product(out_shape[i+1..])
+    let mut multipliers: smallvec::SmallVec<[usize; 8]> = smallvec::smallvec![0usize; ndim];
     let mut mult = 1usize;
     for i in (0..ndim).rev() {
         multipliers[i] = mult;
@@ -2551,12 +2505,17 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    // Convert to usize for the helper function
-    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
+    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        b_strides.iter().map(|&x| x as usize).collect();
 
     for idx in 0..numel {
         let a_idx = broadcast_index_decomposition(
@@ -2794,12 +2753,17 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    // Convert to usize for the helper function
-    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
+    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        b_strides.iter().map(|&x| x as usize).collect();
 
     // Broadcast loop should always run when shapes differ or tensors are non-contiguous
     for idx in 0..numel {
@@ -3052,12 +3016,17 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    // Convert to usize for the helper function
-    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
+    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        b_strides.iter().map(|&x| x as usize).collect();
 
     for idx in 0..numel {
         let a_idx = broadcast_index_decomposition(
@@ -3115,12 +3084,17 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_storage_offset = a.inner.storage_offset as usize;
     let b_storage_offset = b.inner.storage_offset as usize;
 
-    // Convert to usize for the helper function
-    let out_shape_usize: Vec<usize> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: Vec<usize> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: Vec<usize> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: Vec<usize> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: Vec<usize> = b_strides.iter().map(|&x| x as usize).collect();
+    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
+    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        out_shape.iter().map(|&x| x as usize).collect();
+    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        a_shape.iter().map(|&x| x as usize).collect();
+    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+        b_shape.iter().map(|&x| x as usize).collect();
+    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        a_strides.iter().map(|&x| x as usize).collect();
+    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+        b_strides.iter().map(|&x| x as usize).collect();
 
     // Check if broadcasting is needed - only use parallel path when shapes are equal
     let needs_broadcast = a_shape != b_shape;
@@ -5528,7 +5502,8 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let batch = batch_a.max(batch_b);
 
-    let mut output_shape: Vec<i64> = vec![];
+    let mut output_shape: smallvec::SmallVec<[i64; 4]> =
+        smallvec::SmallVec::with_capacity(a_shape.len());
     if a_shape.len() > 2 {
         for i in 0..a_shape.len() - 2 {
             // If b has matching dimensions, use max (broadcasting)
@@ -5543,7 +5518,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     output_shape.push(m as i64);
     output_shape.push(n as i64);
 
-    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.to_vec(), a.dtype(), a.device());
 
     let a_ptr = a.data_ptr() as *const f32;
     let b_ptr = b.data_ptr() as *const f32;
@@ -5560,9 +5535,9 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_cols = a_shape[a_shape.len() - 1] as usize;
     let b_cols = b_shape[b_shape.len() - 1] as usize;
 
-    let a_strides = a.strides();
-    let b_strides = b.strides();
-
+    // Detect transposed matrices by checking strides
+    // For row-major contiguous matrix [rows, cols], stride_0 = cols, stride_1 = 1
+    // For transposed [rows, cols] stored as [cols, rows], stride_0 = 1, stride_1 = rows
     let a_stride_0 = a_strides[a.ndim() - 2];
     let a_stride_1 = a_strides[a.ndim() - 1];
     let b_stride_0 = b_strides[b.ndim() - 2];
@@ -5634,20 +5609,52 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 unsafe { std::slice::from_raw_parts(b_ptr, batch * k as usize * n as usize) };
             let out_slice =
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, batch * m as usize * n as usize) };
-            for bat in 0..batch {
-                let a_offset = bat * m as usize * k as usize;
-                let b_offset = bat * k as usize * n as usize;
-                let out_offset = bat * m as usize * n as usize;
-                matmul_blas_with_transpose_into(
-                    &a_slice[a_offset..],
-                    &b_slice[b_offset..],
-                    &mut out_slice[out_offset..],
-                    m as usize,
-                    k as usize,
-                    n as usize,
-                    false,
-                    false,
-                );
+
+            let m_usize = m as usize;
+            let k_usize = k as usize;
+            let n_usize = n as usize;
+            let a_batch_elems = m_usize * k_usize;
+            let b_batch_elems = k_usize * n_usize;
+            let out_batch_elems = m_usize * n_usize;
+
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                out_slice
+                    .par_chunks_mut(out_batch_elems)
+                    .enumerate()
+                    .for_each(|(bat, out_chunk)| {
+                        let a_offset = bat * a_batch_elems;
+                        let b_offset = bat * b_batch_elems;
+                        matmul_blas_with_transpose_into(
+                            &a_slice[a_offset..],
+                            &b_slice[b_offset..],
+                            out_chunk,
+                            m_usize,
+                            k_usize,
+                            n_usize,
+                            false,
+                            false,
+                        );
+                    });
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                for bat in 0..batch {
+                    let a_offset = bat * a_batch_elems;
+                    let b_offset = bat * b_batch_elems;
+                    let out_offset = bat * out_batch_elems;
+                    matmul_blas_with_transpose_into(
+                        &a_slice[a_offset..],
+                        &b_slice[b_offset..],
+                        &mut out_slice[out_offset..],
+                        m_usize,
+                        k_usize,
+                        n_usize,
+                        false,
+                        false,
+                    );
+                }
             }
         } else {
             // Single batch BLAS
@@ -6999,7 +7006,38 @@ fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         strides_after *= a_shape[i];
     }
 
-    for block in 0..(strides_before as usize * strides_after as usize) {
+    let total_blocks = strides_before as usize * strides_after as usize;
+    let a_usize = a_ptr as usize;
+    let out_usize = out_ptr as usize;
+    let a_off = a_storage_offset;
+
+    #[cfg(feature = "parallel")]
+    {
+        if total_blocks > 64 {
+            use rayon::prelude::*;
+            (0..total_blocks).into_par_iter().for_each(|block| {
+                let mut max_val = f32::NEG_INFINITY;
+                let a_p = a_usize as *const f32;
+                let ds = dim_size;
+                let sa = strides_after as usize;
+                for i in 0..ds {
+                    let a_idx = (block / sa) * ds * sa + i * sa + block % sa;
+                    unsafe {
+                        let val = *a_p.add(a_idx + a_off);
+                        if val > max_val {
+                            max_val = val;
+                        }
+                    }
+                }
+                unsafe {
+                    *(out_usize as *mut f32).add(block) = max_val;
+                }
+            });
+            return vec![output];
+        }
+    }
+
+    for block in 0..total_blocks {
         let mut max_val = f32::NEG_INFINITY;
         for i in 0..dim_size {
             let a_idx = (block / (strides_after as usize)) * dim_size * (strides_after as usize)
@@ -7128,7 +7166,8 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                     }
                 }
 
-                // Vectorized exp and sum for small dims
+
+                // Fused pass: compute exp(x-max), store to output, and accumulate sum
                 let mut sum_exp = 0.0f32;
 
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -7143,58 +7182,71 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                                 let shifted = _mm256_sub_ps(x_vec, max_vec);
                                 let exp_vec = fast_exp_avx2(shifted);
                                 sum_vec = _mm256_add_ps(sum_vec, exp_vec);
+
+                                _mm256_storeu_ps(out_row.as_mut_ptr().add(j), exp_vec);
                                 j += 8;
                             }
                             sum_exp = hsum256_ps(sum_vec);
                             for j2 in j..dim_size {
-                                sum_exp += (x_row[j2] - max_val).exp();
+
+                                let e = (x_row[j2] - max_val).exp();
+                                sum_exp += e;
+                                out_row[j2] = e;
                             }
                         }
                     } else {
                         for j in 0..dim_size {
-                            sum_exp += (x_row[j] - max_val).exp();
+
+                            let e = (x_row[j] - max_val).exp();
+                            sum_exp += e;
+                            out_row[j] = e;
                         }
                     }
                 }
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for j in 0..dim_size {
-                        sum_exp += (x_row[j] - max_val).exp();
+
+                        let e = (x_row[j] - max_val).exp();
+                        sum_exp += e;
+                        out_row[j] = e;
                     }
                 }
 
                 let inv_sum = 1.0 / sum_exp;
 
-                // Vectorized exp and multiply for output
+
+                // Normalize: multiply stored exp values by inv_sum
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") {
                         unsafe {
-                            let max_vec = _mm256_set1_ps(max_val);
+
                             let inv_vec = _mm256_set1_ps(inv_sum);
                             let mut j = 0;
                             while j + 8 <= dim_size {
-                                let x_vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
-                                let shifted = _mm256_sub_ps(x_vec, max_vec);
-                                let exp_vec = fast_exp_avx2(shifted);
+                                let exp_vec = _mm256_loadu_ps(out_row.as_ptr().add(j));
                                 let result = _mm256_mul_ps(exp_vec, inv_vec);
                                 _mm256_storeu_ps(out_row.as_mut_ptr().add(j), result);
                                 j += 8;
                             }
                             for j2 in j..dim_size {
-                                out_row[j2] = (x_row[j2] - max_val).exp() * inv_sum;
+
+                                out_row[j2] *= inv_sum;
                             }
                         }
                     } else {
                         for j in 0..dim_size {
-                            out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+
+                            out_row[j] *= inv_sum;
                         }
                     }
                 }
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for j in 0..dim_size {
-                        out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+
+                        out_row[j] *= inv_sum;
                     }
                 }
             });
@@ -7246,6 +7298,7 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                 }
             }
 
+            // Fused pass: compute exp(x-max), store to output, and accumulate sum
             let mut sum_exp = 0.0f32;
 
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -7260,57 +7313,71 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                             let shifted = _mm256_sub_ps(x_vec, max_vec);
                             let exp_vec = fast_exp_avx2(shifted);
                             sum_vec = _mm256_add_ps(sum_vec, exp_vec);
+
+                            _mm256_storeu_ps(out_row.as_mut_ptr().add(j), exp_vec);
                             j += 8;
                         }
                         sum_exp = hsum256_ps(sum_vec);
                         for j2 in j..dim_size {
-                            sum_exp += (x_row[j2] - max_val).exp();
+
+                            let e = (x_row[j2] - max_val).exp();
+                            sum_exp += e;
+                            out_row[j2] = e;
                         }
                     }
                 } else {
                     for j in 0..dim_size {
-                        sum_exp += (x_row[j] - max_val).exp();
+
+                        let e = (x_row[j] - max_val).exp();
+                        sum_exp += e;
+                        out_row[j] = e;
                     }
                 }
             }
             #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for j in 0..dim_size {
-                    sum_exp += (x_row[j] - max_val).exp();
+
+                    let e = (x_row[j] - max_val).exp();
+                    sum_exp += e;
+                    out_row[j] = e;
                 }
             }
 
             let inv_sum = 1.0 / sum_exp;
 
+
+            // Normalize: multiply stored exp values by inv_sum
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     unsafe {
-                        let max_vec = _mm256_set1_ps(max_val);
+
                         let inv_vec = _mm256_set1_ps(inv_sum);
                         let mut j = 0;
                         while j + 8 <= dim_size {
-                            let x_vec = _mm256_loadu_ps(x_row.as_ptr().add(j));
-                            let shifted = _mm256_sub_ps(x_vec, max_vec);
-                            let exp_vec = fast_exp_avx2(shifted);
+                            let exp_vec = _mm256_loadu_ps(out_row.as_ptr().add(j));
                             let result = _mm256_mul_ps(exp_vec, inv_vec);
                             _mm256_storeu_ps(out_row.as_mut_ptr().add(j), result);
                             j += 8;
                         }
                         for j2 in j..dim_size {
-                            out_row[j2] = (x_row[j2] - max_val).exp() * inv_sum;
+
+                            out_row[j2] *= inv_sum;
                         }
                     }
                 } else {
                     for j in 0..dim_size {
-                        out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+
+                        out_row[j] *= inv_sum;
                     }
                 }
             }
             #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for j in 0..dim_size {
-                    out_row[j] = (x_row[j] - max_val).exp() * inv_sum;
+
+                    out_row[j] *= inv_sum;
                 }
             }
         }
@@ -7336,6 +7403,13 @@ fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let ndim = x_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
+    let dim_size = x_shape[dim] as usize;
+
+    // Fast path: last-dim, contiguous - fused kernel avoids intermediate tensors
+    if dim == ndim - 1 && x.is_contiguous() {
+        return vec![log_softmax_last_dim_fused(x, dim_size)];
+    }
+
     let max_vals = max_kernel(&[
         x,
         &Tensor::from_scalar(dim as f32),
@@ -7346,6 +7420,85 @@ fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let log_sum_exp = x_shifted.exp().sum(dim as i32, true).ln();
 
     vec![x_shifted.sub(&log_sum_exp)]
+}
+
+#[inline]
+fn log_softmax_last_dim_fused(x: &Tensor, dim_size: usize) -> Tensor {
+    let x_shape = x.shape();
+    let x_ptr = x.data_ptr() as *const f32;
+    let numel = x.numel() as usize;
+
+    let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    #[cfg(feature = "parallel")]
+    {
+        let a_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+        out_slice
+            .par_chunks_mut(dim_size)
+            .zip(a_slice.par_chunks(dim_size))
+            .for_each(|(out_row, x_row)| {
+                // Pass 1: Find max
+                let mut max_val = f32::MIN;
+                for j in 0..dim_size {
+                    max_val = max_val.max(x_row[j]);
+                }
+
+                // Pass 2: Compute sum of exp(x - max) and store (x - max) in output
+                let mut sum_exp = 0.0f32;
+                for j in 0..dim_size {
+                    let shifted = x_row[j] - max_val;
+                    sum_exp += shifted.exp();
+                    out_row[j] = shifted;
+                }
+
+                // Pass 3: log_softmax = (x - max) - log(sum_exp)
+                let log_sum = sum_exp.ln();
+                for j in 0..dim_size {
+                    out_row[j] -= log_sum;
+                }
+            });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        let num_rows = numel / dim_size;
+        let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+
+        for row in 0..num_rows {
+            let row_start = row * dim_size;
+            let x_row = &x_slice[row_start..row_start + dim_size];
+            let out_row = &mut out_slice[row_start..row_start + dim_size];
+
+            let mut max_val = f32::MIN;
+            for j in 0..dim_size {
+                max_val = max_val.max(x_row[j]);
+            }
+
+            let mut sum_exp = 0.0f32;
+            for j in 0..dim_size {
+                let shifted = x_row[j] - max_val;
+                sum_exp += shifted.exp();
+                out_row[j] = shifted;
+            }
+
+            let log_sum = sum_exp.ln();
+            for j in 0..dim_size {
+                out_row[j] -= log_sum;
+            }
+        }
+    }
+
+    output
 }
 
 fn mse_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -7367,22 +7520,18 @@ fn mse_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     match reduction {
         "none" => vec![loss],
         "mean" => {
-            // Sum over all elements and divide by total count
-            let num_dims = loss.ndim();
-            let mut result = loss.clone();
-            for _ in 0..num_dims {
-                result = result.sum(0, false);
-            }
-            vec![result.div(&Tensor::from_scalar(loss.numel() as f32))]
+            // Flatten then single sum instead of O(dims) kernel dispatches
+            let numel = loss.numel() as usize;
+            let flat = loss.reshape(vec![numel as i64]);
+            let mut result = flat.sum(0, false);
+            result.mul_scalar_(1.0 / numel as f32);
+            vec![result]
         }
         "sum" => {
-            // Sum over all dimensions to get a scalar
-            let num_dims = loss.ndim();
-            let mut result = loss.clone();
-            for _ in 0..num_dims {
-                result = result.sum(0, false);
-            }
-            vec![result]
+            // Flatten then single sum
+            let numel = loss.numel() as usize;
+            let flat = loss.reshape(vec![numel as i64]);
+            vec![flat.sum(0, false)]
         }
         _ => vec![loss.sum(0, false)],
     }
@@ -7643,33 +7792,104 @@ fn im2col_kernel(
 
     let x_ptr = x.data_ptr() as *const f32;
 
-    let _in_height_pad = in_height + 2 * padding;
-    let _in_width_pad = in_width + 2 * padding;
+    #[cfg(feature = "parallel")]
+    {
+        if batch_size > 1 {
+            use rayon::prelude::*;
+            let col_rows_per_batch = out_height * out_width;
+            let x_usize = x_ptr as usize;
+            let col_usize = col_data.as_mut_ptr() as usize;
 
-    for n in 0..batch_size {
-        for oh in 0..out_height {
-            for ow in 0..out_width {
-                let col_row = (n * out_height + oh) * out_width + ow;
+            (0..batch_size).into_par_iter().for_each(|n| {
+                unsafe {
+                    let x_p = x_usize as *const f32;
+                    let col_p = (col_usize as *mut f32).add(n * col_rows_per_batch * col_cols);
+                    for oh in 0..out_height {
+                        for ow in 0..out_width {
+                            let col_row = oh * out_width + ow;
+                            for ic in 0..in_channels {
+                                for kh in 0..kernel_height {
+                                    for kw in 0..kernel_width {
+                                        let ih = oh * stride + kh * dilation;
+                                        let iw = ow * stride + kw * dilation;
+                                        let col_col =
+                                            ((ic * kernel_height) + kh) * kernel_width + kw;
+                                        if ih >= padding
+                                            && ih < padding + in_height
+                                            && iw >= padding
+                                            && iw < padding + in_width
+                                        {
+                                            let x_ih = ih - padding;
+                                            let x_iw = iw - padding;
+                                            let x_idx = ((n * in_channels + ic) * in_height + x_ih)
+                                                * in_width
+                                                + x_iw;
+                                            unsafe {
+                                                *col_p.add(col_row * col_cols + col_col) =
+                                                    *x_p.add(x_idx);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } // end unsafe
+            });
+        } else {
+            for oh in 0..out_height {
+                for ow in 0..out_width {
+                    let col_row = oh * out_width + ow;
+                    for ic in 0..in_channels {
+                        for kh in 0..kernel_height {
+                            for kw in 0..kernel_width {
+                                let ih = oh * stride + kh * dilation;
+                                let iw = ow * stride + kw * dilation;
+                                let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
+                                if ih >= padding
+                                    && ih < padding + in_height
+                                    && iw >= padding
+                                    && iw < padding + in_width
+                                {
+                                    let x_ih = ih - padding;
+                                    let x_iw = iw - padding;
+                                    let x_idx = (ic * in_height + x_ih) * in_width + x_iw;
+                                    col_data[col_row * col_cols + col_col] =
+                                        unsafe { *x_ptr.add(x_idx) };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-                for ic in 0..in_channels {
-                    for kh in 0..kernel_height {
-                        for kw in 0..kernel_width {
-                            let ih = oh * stride + kh * dilation;
-                            let iw = ow * stride + kw * dilation;
-
-                            let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
-
-                            if ih >= padding
-                                && ih < padding + in_height
-                                && iw >= padding
-                                && iw < padding + in_width
-                            {
-                                let x_ih = ih - padding;
-                                let x_iw = iw - padding;
-                                let x_idx =
-                                    ((n * in_channels + ic) * in_height + x_ih) * in_width + x_iw;
-                                col_data[col_row * col_cols + col_col] =
-                                    unsafe { *x_ptr.add(x_idx) };
+    #[cfg(not(feature = "parallel"))]
+    {
+        for n in 0..batch_size {
+            for oh in 0..out_height {
+                for ow in 0..out_width {
+                    let col_row = (n * out_height + oh) * out_width + ow;
+                    for ic in 0..in_channels {
+                        for kh in 0..kernel_height {
+                            for kw in 0..kernel_width {
+                                let ih = oh * stride + kh * dilation;
+                                let iw = ow * stride + kw * dilation;
+                                let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
+                                if ih >= padding
+                                    && ih < padding + in_height
+                                    && iw >= padding
+                                    && iw < padding + in_width
+                                {
+                                    let x_ih = ih - padding;
+                                    let x_iw = iw - padding;
+                                    let x_idx = ((n * in_channels + ic) * in_height + x_ih)
+                                        * in_width
+                                        + x_iw;
+                                    col_data[col_row * col_cols + col_col] =
+                                        unsafe { *x_ptr.add(x_idx) };
+                                }
                             }
                         }
                     }
@@ -8062,24 +8282,18 @@ fn depthwise_conv2d(
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
     // Use direct pointers instead of copying data
-    let w_data: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(w_ptr, in_channels * kernel_height * kernel_width).to_vec()
-    };
-
-    let x_data: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(x_ptr, batch_size * in_channels * in_height * in_width).to_vec()
-    };
-
-    let bias_data: Option<Vec<f32>> = bias.map(|b| {
-        let ptr = b.data_ptr() as *const f32;
-        unsafe { std::slice::from_raw_parts(ptr, in_channels).to_vec() }
-    });
+    let w_ptr = w.data_ptr() as *const f32;
+    let x_ptr = x.data_ptr() as *const f32;
+    let bias_ptr = bias.map(|b| b.data_ptr() as *const f32);
 
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
 
         let total = batch_size * in_channels * out_height * out_width;
+        let x_usize = x_ptr as usize;
+        let w_usize = w_ptr as usize;
+        let bias_usize = bias_ptr.map(|p| p as usize);
 
         let results: Vec<f32> = (0..total)
             .into_par_iter()
@@ -8101,13 +8315,18 @@ fn depthwise_conv2d(
                         if ih < in_height && iw < in_width {
                             let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
                             let w_idx = ((ic * kernel_height) + kh) * kernel_width + kw;
-                            sum += x_data[x_idx] * w_data[w_idx];
+                            unsafe {
+                                sum += *(x_usize as *const f32).add(x_idx)
+                                    * *(w_usize as *const f32).add(w_idx);
+                            }
                         }
                     }
                 }
 
-                if let Some(ref b) = bias_data {
-                    sum += b[ic];
+                if let Some(b) = bias_usize {
+                    unsafe {
+                        sum += *(b as *const f32).add(ic);
+                    }
                 }
 
                 sum
@@ -8136,13 +8355,13 @@ fn depthwise_conv2d(
                                     let x_idx =
                                         ((n * in_channels + ic) * in_height + ih) * in_width + iw;
                                     let w_idx = ((ic * kernel_height) + kh) * kernel_width + kw;
-                                    sum += unsafe { *x_ptr.add(x_idx) } * w_data[w_idx];
+                                    sum += unsafe { *x_ptr.add(x_idx) * *w_ptr.add(w_idx) };
                                 }
                             }
                         }
 
-                        if let Some(ref b) = bias_data {
-                            sum += b[ic];
+                        if let Some(b) = bias_ptr {
+                            sum += unsafe { *b.add(ic) };
                         }
 
                         let out_idx = ((n * in_channels + ic) * out_height + oh) * out_width + ow;
@@ -8831,39 +9050,86 @@ fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x_ptr = x.data_ptr() as *const f32;
     let out_ptr = output.data_ptr() as *mut f32;
 
-    for b in 0..batch_size as usize {
-        for c in 0..channels as usize {
-            for oh in 0..out_height as usize {
-                for ow in 0..out_width as usize {
+    let total_bc = batch_size as usize * channels as usize;
+    let stride_usize = stride as usize;
+    let dilation_usize = dilation as usize;
+    let kernel_size_usize = kernel_size as usize;
+    let in_h = in_height as usize;
+    let in_w = in_width as usize;
+    let out_h = out_height as usize;
+    let out_w = out_width as usize;
+    let pad = padding;
+    let channels_usize = channels as usize;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let x_usize = x_ptr as usize;
+        let out_usize = out_ptr as usize;
+        (0..total_bc).into_par_iter().for_each(|bc| {
+            let b = bc / channels_usize;
+            let c = bc % channels_usize;
+            let x_p = x_usize as *const f32;
+            let o_p = out_usize as *mut f32;
+            for oh in 0..out_h {
+                for ow in 0..out_w {
                     let mut max_val = f32::NEG_INFINITY;
-
-                    for kh in 0..kernel_size as usize {
-                        for kw in 0..kernel_size as usize {
-                            // Calculate the position in the input tensor
-                            // The output position (oh, ow) corresponds to input positions
-                            // starting at (oh*stride - padding, ow*stride - padding)
-                            let h =
-                                (oh * stride as usize + kh * dilation as usize) as i64 - padding;
-                            let w =
-                                (ow * stride as usize + kw * dilation as usize) as i64 - padding;
-
-                            if h >= 0 && h < in_height && w >= 0 && w < in_width {
-                                let idx = ((b * channels as usize + c) * in_height as usize
-                                    + h as usize)
-                                    * in_width as usize
+                    for kh in 0..kernel_size_usize {
+                        for kw in 0..kernel_size_usize {
+                            let h = (oh * stride_usize + kh * dilation_usize) as i64 - pad;
+                            let w = (ow * stride_usize + kw * dilation_usize) as i64 - pad;
+                            if h >= 0 && h < in_h as i64 && w >= 0 && w < in_w as i64 {
+                                let idx = ((b * channels_usize + c) * in_h + h as usize) * in_w
                                     + w as usize;
-                                let val = unsafe { *x_ptr.add(idx) };
+                                let val = unsafe { *x_p.add(idx) };
                                 if val > max_val {
                                     max_val = val;
                                 }
                             }
                         }
                     }
+                    let out_idx = ((b * channels_usize + c) * out_h + oh) * out_w + ow;
+                    unsafe {
+                        *o_p.add(out_idx) = max_val;
+                    }
+                }
+            }
+        });
+    }
 
-                    let out_idx = ((b * channels as usize + c) * out_height as usize + oh)
-                        * out_width as usize
-                        + ow;
-                    unsafe { *out_ptr.add(out_idx) = max_val };
+    #[cfg(not(feature = "parallel"))]
+    {
+        for b in 0..batch_size as usize {
+            for c in 0..channels as usize {
+                for oh in 0..out_height as usize {
+                    for ow in 0..out_width as usize {
+                        let mut max_val = f32::NEG_INFINITY;
+
+                        for kh in 0..kernel_size as usize {
+                            for kw in 0..kernel_size as usize {
+                                let h = (oh * stride as usize + kh * dilation as usize) as i64
+                                    - padding;
+                                let w = (ow * stride as usize + kw * dilation as usize) as i64
+                                    - padding;
+
+                                if h >= 0 && h < in_height && w >= 0 && w < in_width {
+                                    let idx = ((b * channels as usize + c) * in_height as usize
+                                        + h as usize)
+                                        * in_width as usize
+                                        + w as usize;
+                                    let val = unsafe { *x_ptr.add(idx) };
+                                    if val > max_val {
+                                        max_val = val;
+                                    }
+                                }
+                            }
+                        }
+
+                        let out_idx = ((b * channels as usize + c) * out_height as usize + oh)
+                            * out_width as usize
+                            + ow;
+                        unsafe { *out_ptr.add(out_idx) = max_val };
+                    }
                 }
             }
         }
@@ -9370,16 +9636,29 @@ fn eye_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn randn_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let shape_tensor = args[0];
     let shape: Vec<i64> = shape_tensor.inner.sizes.iter().copied().collect();
-    let numel: i64 = shape.iter().product();
+    let numel: usize = shape.iter().product::<i64>() as usize;
 
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let mut values = vec![0.0f32; numel as usize];
+    let mut values = vec![0.0f32; numel];
 
-    for v in &mut values {
-        let u1: f32 = rng.gen();
-        let u2: f32 = rng.gen();
-        *v = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
+    // Box-Muller generates 2 normal samples from 2 uniform samples
+    // Process in pairs to be 2x faster
+    let mut i = 0;
+    while i + 1 < numel {
+        let u1: f32 = rng.gen::<f32>().max(1e-10); // avoid ln(0)
+        let u2: f32 = rng.gen::<f32>();
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f32::consts::PI * u2;
+        values[i] = r * theta.cos();
+        values[i + 1] = r * theta.sin();
+        i += 2;
+    }
+    // Handle odd element
+    if i < numel {
+        let u1: f32 = rng.gen::<f32>().max(1e-10);
+        let u2: f32 = rng.gen::<f32>();
+        values[i] = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
     }
 
     vec![Tensor::from_vec(values, shape)]
@@ -9600,10 +9879,79 @@ fn gt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
-    for idx in 0..numel {
-        unsafe {
-            let val = *a_ptr.add(idx);
-            *out_ptr.add(idx) = if val > threshold { 1.0 } else { 0.0 };
+    if a.is_contiguous() && numel > 2048 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = (start + chunk_size).min(numel);
+                let a_p = a_usize as *const f32;
+                let o_p = out_usize as *mut f32;
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        unsafe {
+                            let thresh = _mm256_set1_ps(threshold);
+                            let one = _mm256_set1_ps(1.0f32);
+                            let zero = _mm256_set1_ps(0.0f32);
+                            let mut i = start;
+                            while i + 8 <= end {
+                                let v = _mm256_loadu_ps(a_p.add(i));
+                                let mask = _mm256_cmp_ps(v, thresh, _CMP_GT_OQ);
+                                let r = _mm256_blendv_ps(zero, one, mask);
+                                _mm256_storeu_ps(o_p.add(i), r);
+                                i += 8;
+                            }
+                            for j in i..end {
+                                *o_p.add(j) = if *a_p.add(j) > threshold { 1.0 } else { 0.0 };
+                            }
+                            return;
+                        }
+                    }
+                }
+                for j in start..end {
+                    unsafe {
+                        *o_p.add(j) = if *a_p.add(j) > threshold { 1.0 } else { 0.0 };
+                    }
+                }
+            });
+        }
+    } else {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let thresh = _mm256_set1_ps(threshold);
+                    let one = _mm256_set1_ps(1.0f32);
+                    let zero = _mm256_set1_ps(0.0f32);
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let v = _mm256_loadu_ps(a_ptr.add(i));
+                        let mask = _mm256_cmp_ps(v, thresh, _CMP_GT_OQ);
+                        let r = _mm256_blendv_ps(zero, one, mask);
+                        _mm256_storeu_ps(out_ptr.add(i), r);
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *out_ptr.add(j) = if *a_ptr.add(j) > threshold { 1.0 } else { 0.0 };
+                    }
+                    return vec![output];
+                }
+            }
+        }
+        for idx in 0..numel {
+            unsafe {
+                *out_ptr.add(idx) = if *a_ptr.add(idx) > threshold {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
         }
     }
 
@@ -9629,16 +9977,43 @@ fn sign_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
-    for idx in 0..numel {
-        unsafe {
-            let val = *a_ptr.add(idx);
-            *out_ptr.add(idx) = if val > 0.0 {
-                1.0
-            } else if val < 0.0 {
-                -1.0
-            } else {
-                0.0
-            };
+    if a.is_contiguous() && numel > 2048 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = (start + chunk_size).min(numel);
+                for j in start..end {
+                    unsafe {
+                        let val = *(a_usize as *const f32).add(j);
+                        *(out_usize as *mut f32).add(j) = if val > 0.0 {
+                            1.0
+                        } else if val < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+            });
+        }
+    } else {
+        for idx in 0..numel {
+            unsafe {
+                let val = *a_ptr.add(idx);
+                *out_ptr.add(idx) = if val > 0.0 {
+                    1.0
+                } else if val < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+            }
         }
     }
 
