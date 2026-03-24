@@ -1518,7 +1518,50 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Tensor) -> Tensor {
-        // Determine dispatch key based on both tensors' devices
+        // Fast path: CPU contiguous same-shape add, skip dispatch overhead
+        if self.device() == Device::Cpu
+            && other.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && other.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && other.is_contiguous()
+            && self.inner.sizes == other.inner.sizes
+        {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let b_ptr = other.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                    }
+                }
+            }
+            // Attach autograd if needed
+            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+                let edges = {
+                    let mut edges = autograd::make_edge(self);
+                    edges.extend(autograd::make_edge(other));
+                    edges
+                };
+                let backward = autograd::AddBackward::new(vec![self.clone(), other.clone()], edges);
+                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                Arc::make_mut(&mut output.inner).autograd_meta =
+                    Some(Arc::new(std::sync::Mutex::new(meta)));
+            }
+            return output;
+        }
+
+        // General path: dispatch
         let dispatch_key = match (self.device(), other.device()) {
             (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
@@ -1994,6 +2037,48 @@ impl Tensor {
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
+        // Fast path: CPU contiguous same-shape mul, skip dispatch overhead
+        if self.device() == Device::Cpu
+            && other.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && other.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && other.is_contiguous()
+            && self.inner.sizes == other.inner.sizes
+        {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let b_ptr = other.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                    }
+                }
+            }
+            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+                let edges = {
+                    let mut edges = autograd::make_edge(self);
+                    edges.extend(autograd::make_edge(other));
+                    edges
+                };
+                let backward = autograd::MulBackward::new(vec![self.clone(), other.clone()], edges);
+                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                Arc::make_mut(&mut output.inner).autograd_meta =
+                    Some(Arc::new(std::sync::Mutex::new(meta)));
+            }
+            return output;
+        }
+
         let dispatch_key = match (self.device(), other.device()) {
             (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
@@ -2148,6 +2233,36 @@ impl Tensor {
     }
 
     pub fn relu(&self) -> Tensor {
+        // Fast path: contiguous CPU F32, skip dispatch
+        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = (*a_ptr.add(i)).max(0.0);
+                    }
+                }
+            }
+            if autograd::is_grad_enabled() && self.requires_grad() {
+                let edges = autograd::make_edge(self);
+                let backward = autograd::ReluBackward::new(self.clone(), edges);
+                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                Arc::make_mut(&mut output.inner).autograd_meta =
+                    Some(Arc::new(std::sync::Mutex::new(meta)));
+            }
+            return output;
+        }
+
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("relu", dispatch_key, &[self]);
         let output = result[0].clone();
@@ -2369,6 +2484,37 @@ impl Tensor {
     }
 
     pub fn sum(&self, dim: i32, keepdim: bool) -> Tensor {
+        // Fast path: contiguous CPU F32, last-dim sum, no keepdim
+        if self.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && !keepdim
+            && self.inner.ndim() >= 2
+        {
+            let ndim = self.inner.ndim() as i32;
+            let dim_normalized = if dim < 0 { ndim + dim } else { dim } as usize;
+            if dim_normalized == ndim as usize - 1 {
+                let shape = self.shape();
+                let dim_size = shape[dim_normalized] as usize;
+                let num_rows = self.inner.numel() as usize / dim_size;
+                // Direct SIMD sum
+                let output = crate::kernels::cpu::sum_last_dim_contiguous(self, dim_size, num_rows);
+                if autograd::is_grad_enabled() && self.requires_grad() {
+                    let mut output = output;
+                    let edges = autograd::make_edge(self);
+                    let backward =
+                        autograd::SumBackward::new(self.clone(), dim_normalized, keepdim, edges);
+                    let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+                    meta.grad_fn = Some(std::sync::Arc::new(backward));
+                    Arc::make_mut(&mut output.inner).autograd_meta =
+                        Some(Arc::new(std::sync::Mutex::new(meta)));
+                    return output;
+                }
+                return output;
+            }
+        }
+
+        // Fallback: dispatch
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch(
             "sum",
