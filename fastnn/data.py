@@ -69,6 +69,7 @@ class DataLoader:
 
 def stack(tensors, dim=0):
     import fastnn as fnn
+    import numpy as np
 
     if not tensors:
         raise ValueError("stack requires at least one tensor")
@@ -79,39 +80,28 @@ def stack(tensors, dim=0):
 
         # Handle 0-dimensional (scalar) tensors
         if first_data.ndim == 0:
-            # For scalars, just create a 1D tensor with the values
-            total_tensors = len(tensors)
-            result_data = [0.0] * total_tensors
-            for i, t in enumerate(tensors):
-                t_data = t.numpy()
-                result_data[i] = t_data.item() if t_data.ndim == 0 else t_data[0]
-            result = fnn.tensor(result_data, [total_tensors])
+            result_data = np.array(
+                [
+                    t.numpy().item() if t.numpy().ndim == 0 else t.numpy()[0]
+                    for t in tensors
+                ],
+                dtype=np.float32,
+            )
+            result = fnn.tensor(result_data.tolist(), [len(tensors)])
             if dim != 0:
                 result = result.transpose(dim, 0)
             return result
 
-        numel = len(first_data)
-        total_tensors = len(tensors)
-        result_data = [0.0] * (numel * total_tensors)
-
-        for i, t in enumerate(tensors):
-            if hasattr(t, "numpy"):
-                t_data = t.numpy()
-                for j in range(numel):
-                    result_data[i * numel + j] = t_data[j]
-
-        result_shape = [total_tensors] + list(first.shape)
-        result = fnn.tensor(result_data, result_shape)
+        # Fast path: use numpy concatenate instead of element-by-element Python loop
+        arrays = [np.array(t.numpy(), dtype=np.float32, copy=False) for t in tensors]
+        result_np = np.stack(arrays, axis=0)
+        result = fnn.tensor(result_np.flatten().tolist(), list(result_np.shape))
 
         if dim != 0:
             result = result.transpose(dim, 0)
 
         return result
     else:
-        import numpy as np
-
-        arrays = []
-        for t in tensors:
-            arrays.append(np.array(t))
+        arrays = [np.array(t) for t in tensors]
         result = np.stack(arrays, axis=dim)
         return fnn.tensor(result.flatten().tolist(), list(result.shape))
