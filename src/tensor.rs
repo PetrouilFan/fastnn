@@ -1539,9 +1539,76 @@ impl Tensor {
                 let a_ptr = self.data_ptr_f32();
                 let b_ptr = other.data_ptr_f32();
                 let out_ptr = out_data.as_mut_ptr() as *mut f32;
-                for i in 0..numel {
-                    unsafe {
-                        *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+
+                #[cfg(feature = "parallel")]
+                if numel > 2048 {
+                    use rayon::prelude::*;
+                    const CHUNK: usize = 4096;
+                    let num_chunks = numel.div_ceil(CHUNK);
+                    let a_usize = a_ptr as usize;
+                    let b_usize = b_ptr as usize;
+                    let out_usize = out_ptr as usize;
+                    (0..num_chunks).into_par_iter().for_each(|chunk| {
+                        let start = chunk * CHUNK;
+                        let end = (start + CHUNK).min(numel);
+                        let a_p = a_usize as *const f32;
+                        let b_p = b_usize as *const f32;
+                        let o_p = out_usize as *mut f32;
+                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                        {
+                            if is_x86_feature_detected!("avx2") {
+                                unsafe {
+                                    let mut i = start;
+                                    while i + 8 <= end {
+                                        let av = _mm256_loadu_ps(a_p.add(i));
+                                        let bv = _mm256_loadu_ps(b_p.add(i));
+                                        _mm256_storeu_ps(o_p.add(i), _mm256_add_ps(av, bv));
+                                        i += 8;
+                                    }
+                                    for j in i..end {
+                                        *o_p.add(j) = *a_p.add(j) + *b_p.add(j);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        for j in start..end {
+                            unsafe {
+                                *o_p.add(j) = *a_p.add(j) + *b_p.add(j);
+                            }
+                        }
+                    });
+                } else {
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        if is_x86_feature_detected!("avx2") && numel >= 8 {
+                            unsafe {
+                                let mut i = 0;
+                                while i + 8 <= numel {
+                                    let av = _mm256_loadu_ps(a_ptr.add(i));
+                                    let bv = _mm256_loadu_ps(b_ptr.add(i));
+                                    _mm256_storeu_ps(out_ptr.add(i), _mm256_add_ps(av, bv));
+                                    i += 8;
+                                }
+                                for j in i..numel {
+                                    *out_ptr.add(j) = *a_ptr.add(j) + *b_ptr.add(j);
+                                }
+                            }
+                        } else {
+                            for i in 0..numel {
+                                unsafe {
+                                    *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                    {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                            }
+                        }
                     }
                 }
             }
@@ -2058,9 +2125,76 @@ impl Tensor {
                 let a_ptr = self.data_ptr_f32();
                 let b_ptr = other.data_ptr_f32();
                 let out_ptr = out_data.as_mut_ptr() as *mut f32;
-                for i in 0..numel {
-                    unsafe {
-                        *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+
+                #[cfg(feature = "parallel")]
+                if numel > 2048 {
+                    use rayon::prelude::*;
+                    const CHUNK: usize = 4096;
+                    let num_chunks = numel.div_ceil(CHUNK);
+                    let a_usize = a_ptr as usize;
+                    let b_usize = b_ptr as usize;
+                    let out_usize = out_ptr as usize;
+                    (0..num_chunks).into_par_iter().for_each(|chunk| {
+                        let start = chunk * CHUNK;
+                        let end = (start + CHUNK).min(numel);
+                        let a_p = a_usize as *const f32;
+                        let b_p = b_usize as *const f32;
+                        let o_p = out_usize as *mut f32;
+                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                        {
+                            if is_x86_feature_detected!("avx2") {
+                                unsafe {
+                                    let mut i = start;
+                                    while i + 8 <= end {
+                                        let av = _mm256_loadu_ps(a_p.add(i));
+                                        let bv = _mm256_loadu_ps(b_p.add(i));
+                                        _mm256_storeu_ps(o_p.add(i), _mm256_mul_ps(av, bv));
+                                        i += 8;
+                                    }
+                                    for j in i..end {
+                                        *o_p.add(j) = *a_p.add(j) * *b_p.add(j);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        for j in start..end {
+                            unsafe {
+                                *o_p.add(j) = *a_p.add(j) * *b_p.add(j);
+                            }
+                        }
+                    });
+                } else {
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        if is_x86_feature_detected!("avx2") && numel >= 8 {
+                            unsafe {
+                                let mut i = 0;
+                                while i + 8 <= numel {
+                                    let av = _mm256_loadu_ps(a_ptr.add(i));
+                                    let bv = _mm256_loadu_ps(b_ptr.add(i));
+                                    _mm256_storeu_ps(out_ptr.add(i), _mm256_mul_ps(av, bv));
+                                    i += 8;
+                                }
+                                for j in i..numel {
+                                    *out_ptr.add(j) = *a_ptr.add(j) * *b_ptr.add(j);
+                                }
+                            }
+                        } else {
+                            for i in 0..numel {
+                                unsafe {
+                                    *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                    {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                            }
+                        }
                     }
                 }
             }
