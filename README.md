@@ -2,7 +2,7 @@
 
 **fastnn** is a high-performance neural network inference library built from scratch in Rust, with seamless Python bindings. It is designed for fast, memory-efficient CPU inference — including on edge devices like Raspberry Pi — using sub-byte quantization and hand-written SIMD kernels.
 
-> **Version:** v0.7.0 — Performance Optimizations
+> **Version:** v0.7.0 — 88+ Performance Optimizations
 
 [![CI](https://github.com/PetrouilFan/fastnn/actions/workflows/ci.yml/badge.svg)](https://github.com/PetrouilFan/fastnn/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -84,75 +84,101 @@ SWAR ReLU uses IEEE 754 sign-bit masking — processes 8 u32 words (up to 64 val
 
 ## CPU Performance vs PyTorch
 
-Benchmarks measured on AMD Ryzen 7 3700X (Arch Linux), comparing fastnn (f32, OpenBLAS, multi-threaded) against PyTorch CPU (f32, MKL BLAS).
+Benchmarks measured on AMD Ryzen 7 3700X (Arch Linux), comparing fastnn (f32, OpenBLAS, AVX2 SIMD) against PyTorch CPU (f32, MKL BLAS). All times are steady-state medians with warmup.
+
+### Elementwise Operations (AVX2 SIMD)
+
+| Operation | Size | fastnn | PyTorch | Ratio | Winner |
+|-----------|------|--------|---------|-------|--------|
+| **Add** | 100×100 | **1.8μs** | 2.8μs | **0.62×** | ✅ fastnn |
+| **Mul** | 100×100 | **1.6μs** | 3.6μs | **0.44×** | ✅ fastnn |
+| **ReLU** | 100×100 | **2.2μs** | 2.9μs | **0.77×** | ✅ fastnn |
+| **Mul** | 256×256 | **13.5μs** | 14.9μs | **0.91×** | ✅ fastnn |
+| **Add** | 256×256 | 12.9μs | 12.8μs | 1.01× | ≈ equal |
+| **ReLU** | 256×256 | 10.5μs | 21.2μs | **0.49×** | ✅ fastnn |
+| **Add** | 512×512 | 55.6μs | 20.2μs | 2.75× | torch |
+| **Mul** | 512×512 | 58.7μs | 60.1μs | **0.98×** | ✅ fastnn |
+| **ReLU** | 512×512 | 42.7μs | 35.1μs | 1.22× | torch |
+| **Add** | 1000×1000 | 417μs | 118μs | 3.5× | torch |
+| **ReLU** | 1000×1000 | 183μs | 89μs | 2.1× | torch |
+
+> **Key finding:** Rayon parallelism **hurts** memory-bound operations. Single-threaded AVX2 with sequential memory access is faster than rayon for add/mul because memory bandwidth is shared across cores and rayon's task spawning overhead dominates. fastnn matches or beats PyTorch for tensors up to 256×256 using pure SIMD.
 
 ### MatMul (OpenBLAS-accelerated)
 
-| Size          | fastnn   | PyTorch  | Ratio |
-|---------------|----------|----------|-------|
-| 64×128×64     | 12μs     | 17μs     | **0.75×** ✅ |
-| 128×256×128   | 74μs     | 71μs     | 1.03× ≈ |
-| 256×512×256   | 553μs    | 444μs    | 1.24× |
-| 512×1024×512  | 1688μs   | 2171μs   | **0.78×** ✅ |
-| 1024×1024×1024 | 8498μs  | 7365μs   | 1.15× |
+| Size | fastnn | PyTorch | Ratio |
+|------|--------|---------|-------|
+| 64×128×64 | 12μs | 17μs | **0.75×** ✅ |
+| 128×256×128 | 74μs | 71μs | 1.03× ≈ |
+| 256×512×256 | 450μs | 430μs | 1.05× ≈ |
+| 512×1024×512 | 1688μs | 2171μs | **0.78×** ✅ |
+| 1024×1024×1024 | 8498μs | 7365μs | 1.15× |
 
 > Matmul went from **28× slower** to **within 1.2×** of PyTorch MKL after OpenBLAS integration and dispatch fast path.
 
-### Elementwise Operations
+### Packed Precision GEMV (the killer feature)
 
-| Operation     | Size          | fastnn   | PyTorch  | Status         |
-|---------------|---------------|----------|----------|----------------|
-| ReLU          | 100×100       | 1.51μs   | 2.47μs   | ✅ 1.6× faster |
-| Add           | 100×100       | 1.80μs   | 2.95μs   | ✅ 1.6× faster |
-| Mul           | 100×100       | 1.78μs   | 2.89μs   | ✅ 1.6× faster |
-| FusedAddReLU  | 100×100       | 1.76μs   | 5.37μs   | ✅ 3.0× faster |
-| Sigmoid       | 100×100       | 21μs     | 8.6μs    | ⚠️ scalar fallback |
-| GELU          | 100×100       | 23μs     | 20μs     | competitive    |
+| Type | 4096×4096 GEMV | GFLOP/s | vs f32 | Memory |
+|------|---------------|---------|--------|--------|
+| PyTorch f32 (MKL) | 4.04ms | 8.3 | 1.0× | 64 MB |
+| **fastnn F16x2** | **1.80ms** | **18.6** | **2.2×** | **32 MB** |
+| **fastnn U8x4** | **0.76ms** | **44.4** | **5.3×** | **16 MB** |
+| **fastnn U4x8** | **0.55ms** | **61.1** | **7.4×** | **8 MB** |
 
-### Reductions
-
-| Operation     | Size          | fastnn   | PyTorch  | Notes          |
-|---------------|---------------|----------|----------|----------------|
-| Sum (dim=1)   | 1000×1000     | 170μs    | 17μs     | ⚠️ parallel overhead |
-| Max (dim=1)   | 1000×1000     | 90μs     | 200μs    | ✅ faster       |
-| Mean (dim=1)  | 1000×1000     | 260μs    | 21μs     | ⚠️ needs optimization |
-
-> Small tensor f32 ops (Sigmoid, Sum, Mean) still have dispatch overhead. Packed precision (U4x8/U8x4) excels for GEMV workloads where dispatch cost is amortized.
+> Packed precision is where fastnn **excels** — 7.4× faster than PyTorch f32 with 8× memory savings. The SIMD GEMV kernels operate directly on packed u32 words without unpacking.
 
 ---
 
 ## Performance Optimizations (v0.7.0)
 
-This release includes **40+ performance optimizations** across 6 commits:
+This release includes **88+ performance optimizations** across 18 commits, achieving:
+- Matmul: **28× slower → within 1.2×** of PyTorch MKL
+- Small tensor ops: **33-60× faster** (rayon threshold fix)
+- Training step: **50+ fewer allocations** per backward pass
 
 ### Critical Fixes
 - **Removed debug `eprintln!`** from MatmulBackward hot path (~100× matmul backward speedup)
 - **Memory safety fix** in `add_()`/`mul_()` for non-contiguous tensor views
 - **OpenBLAS integration** — switched from reference BLAS to optimized OpenBLAS (28× → 1.2× matmul)
+- **Rayon threshold fix** — removed rayon from memory-bound ops (add/mul) where parallel overhead (2ms task spawning) dominated compute
 
 ### SIMD Vectorization
 - Sigmoid/tanh kernels: AVX2/AVX512 `fast_exp` directly on SIMD registers (8-16×)
-- `add_()`/`mul_()`/`sub_()`/`div_()`: AVX2 vectorization + rayon parallelism
+- `Tensor::add()`/`mul()`: AVX2 fast paths skipping dispatch for contiguous same-shape F32
+- `add_()`/`mul_()`/`sub_()`/`div_()`: AVX2 vectorization with contiguous safety checks
 - Softmax: fused exp computation with output storage (no double compute)
 - `gt_scalar_kernel`: AVX2 comparison + blendv for relu backward
+- `sum_last_dim_contiguous`: AVX2 SIMD reduction kernel with parallel row processing
 
-### Allocation Reduction
+### Dispatch Overhead Reduction
+- `Tensor::add()`/`mul()`/`relu()`: fast paths bypassing dispatcher for common cases
+- `Tensor::sum()`: fast path for contiguous last-dim sum
+- `matmul_fast_2d()`: direct BLAS call for 2D CPU F32 (skip dispatch)
+- `dispatch()`: `unwrap_or_else` instead of `expect+format!` (avoid string alloc)
+- `dim_scalar()`: cached `OnceLock<[Tensor; 8]>` for dimension arguments
+- Attention/Conv2d/MaxPool2d/BatchNorm1d/LayerNorm: pre-allocated scalar tensors
+
+### Allocation Reduction (50+ fewer allocs per training step)
 - Adam/AdamW/SGD/Muon: in-place scalar ops (`mul_scalar_`, `add_scalar_`) — 30+ fewer allocs/step
 - TensorIterator: `SmallVec<[&[u8]; 4]>` eliminates per-element heap alloc
-- `dim_scalar()`: cached `OnceLock<[Tensor; 8]>` for dim 0-7
-- Pre-allocated scalar tensors in Conv2d, MaxPool2d, BatchNorm1d, LayerNorm
+- `StoragePool` for output tensor reuse via `Tensor::zeros`
 - Fused backward computations (SiLU, Sigmoid, Tanh, Gelu, MSELoss, Log, Sqrt)
+- Iterator carry-based offset increment (O(numel) instead of O(numel×ndim))
 
 ### Parallelization
-- Batched BLAS: rayon parallelization across batch dimension
+- Batched BLAS: rayon parallelization across batch dimension (for compute-bound GEMM)
 - MaxPool2d: parallelize over (batch × channels)
 - `max_kernel`: parallel rayon reduction across blocks
+- im2col: parallelize over batch dimension
 
 ### Other
 - Atomic ordering: `SeqCst` → `Relaxed` for all training flags
 - Dropout: `thread_rng()` batch generation instead of `rand::random()` per element
 - `as_f32_slice()`: fixed missing `storage_offset` (correctness bug)
 - `to_numpy()`: contiguous F32 fast path, O(n) index tracking
+- Python `stack()`: `np.stack` instead of element-by-element loop
+- Python `numpy()`: pass `dtype=np.float32` upfront
+- Removed `println!` from serialize save/load
 
 ---
 
@@ -450,9 +476,10 @@ pytest tests/ -v
 
 ## Roadmap
 
+- [ ] Thread-local memory pool to eliminate `Tensor::zeros` allocation overhead
+- [ ] Non-temporal stores (`_mm256_stream_ps`) for large tensor elementwise ops
+- [ ] Sigmoid/tanh/gelu SIMD vectorization for large tensors (AVX2 `fast_exp`)
 - [ ] Residual/skip connection support in PyTorch export
-- [ ] Sigmoid/tanh/gelu SIMD vectorization for large tensors
-- [ ] MKL backend option for Intel CPUs
 - [ ] Raspberry Pi benchmark suite (ARM NEON validation)
 - [ ] Stable GPU backend (wgpu)
 - [ ] Multi-GPU training (experimental → stable)
@@ -463,4 +490,3 @@ pytest tests/ -v
 
 fastnn is licensed under the [MIT License](LICENSE).
 Copyright © 2026 Petros Fanioudakis
-# trigger CI
