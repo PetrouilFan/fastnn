@@ -58,8 +58,11 @@ impl Adam {
 
 impl Optimizer for Adam {
     fn step(&mut self) {
-        let beta1 = self.betas.0;
-        let beta2 = self.betas.1;
+        let beta1 = self.betas.0 as f32;
+        let beta2 = self.betas.1 as f32;
+        let lr = self.lr as f32;
+        let eps = self.eps as f32;
+        let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
@@ -69,55 +72,75 @@ impl Optimizer for Adam {
             };
 
             self.step[i] += 1;
-            let t = self.step[i] as f64;
+            let t = self.step[i] as f32;
 
-            let m_update = grad.clone().mul(&Tensor::from_scalar(beta1 as f32));
-            self.m[i] = self.m[i]
-                .clone()
-                .mul(&Tensor::from_scalar(beta1 as f32))
-                .add(&m_update);
+            // m = beta1 * m + (1 - beta1) * grad
+            // Equivalent to: m = beta1 * m + grad * (1 - beta1)
+            // Rewrite as: m = beta1 * m + grad * beta1_complement
+            // Where beta1_complement = 1 - beta1
+            let beta1_c = 1.0 - beta1;
+            self.m[i].mul_scalar_(beta1);
+            // Create temp for (1-beta1)*grad to avoid clobbering grad
+            let mut grad_scaled = grad.clone();
+            grad_scaled.mul_scalar_(beta1_c);
+            self.m[i].add_(&grad_scaled);
 
-            let g_sq = grad.clone().mul(&grad.clone());
-            let v_update = g_sq.mul(&Tensor::from_scalar(beta2 as f32));
-            self.v[i] = self.v[i]
-                .clone()
-                .mul(&Tensor::from_scalar(beta2 as f32))
-                .add(&v_update);
+            // v = beta2 * v + (1 - beta2) * grad^2
+            let beta2_c = 1.0 - beta2;
+            self.v[i].mul_scalar_(beta2);
+            let mut grad_sq = grad.clone();
+            // grad_sq = grad * grad (element-wise square)
+            {
+                let numel = grad_sq.inner.numel() as usize;
+                let ptr = grad_sq.data_ptr_f32_mut();
+                for j in 0..numel {
+                    unsafe {
+                        let val = *ptr.add(j);
+                        *ptr.add(j) = val * val;
+                    }
+                }
+            }
+            grad_sq.mul_scalar_(beta2_c);
+            self.v[i].add_(&grad_sq);
 
             let bias_correction1 = 1.0 - beta1.powf(t);
             let bias_correction2 = 1.0 - beta2.powf(t);
 
-            let m_hat = self.m[i]
-                .clone()
-                .mul(&Tensor::from_scalar((1.0 / bias_correction1) as f32));
+            // m_hat = m / bias_correction1
+            let mut m_hat = self.m[i].clone();
+            m_hat.mul_scalar_(1.0 / bias_correction1);
 
-            let v_hat = if self.amsgrad {
+            // v_hat = v / bias_correction2 (with optional amsgrad)
+            let mut v_hat = if self.amsgrad {
                 self.v_hat[i] = self.v[i].clone();
-                self.v_hat[i]
-                    .clone()
-                    .mul(&Tensor::from_scalar((1.0 / bias_correction2) as f32))
+                self.v_hat[i].clone()
             } else {
-                self.v[i]
-                    .clone()
-                    .mul(&Tensor::from_scalar((1.0 / bias_correction2) as f32))
+                self.v[i].clone()
             };
+            v_hat.mul_scalar_(1.0 / bias_correction2);
 
-            let denom = v_hat.add(&Tensor::from_scalar(self.eps as f32)).sqrt();
-            let update = m_hat.div(&denom);
-
-            if self.weight_decay != 0.0 {
-                let weight_decay_term = param.mul(&Tensor::from_scalar(self.weight_decay as f32));
-                let lr = Tensor::from_scalar(self.lr as f32);
-                let _decay = lr.mul(&weight_decay_term);
+            // update = m_hat / (sqrt(v_hat) + eps)
+            // Compute sqrt in-place then add eps
+            {
+                let numel = v_hat.inner.numel() as usize;
+                let ptr = v_hat.data_ptr_f32_mut();
+                for j in 0..numel {
+                    unsafe {
+                        *ptr.add(j) = (*ptr.add(j)).sqrt() + eps;
+                    }
+                }
             }
+            // update = m_hat / v_hat (where v_hat is now sqrt(v_hat) + eps)
+            m_hat.div_(&v_hat);
 
-            let lr = Tensor::from_scalar(self.lr as f32);
-            let step_size = lr.mul(&update);
+            // param = param - lr * update
+            m_hat.mul_scalar_(lr);
+            param.sub_(&m_hat);
 
-            // Apply the update to parameters in-place
-            // param = param - step_size
-            let negative_step = step_size.neg();
-            param.add_(&negative_step);
+            // Weight decay: param = param - lr * weight_decay * param
+            if weight_decay != 0.0 {
+                param.mul_scalar_(1.0 - lr * weight_decay);
+            }
         }
     }
 

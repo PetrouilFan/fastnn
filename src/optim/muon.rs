@@ -43,8 +43,6 @@ impl Muon {
         let norm = norm_squared.sqrt();
         let norm_val = norm.item();
 
-        // Check if the input is essentially zero (e.g., initial momentum buffer)
-        // If so, return zero to avoid division by zero
         if norm_val < 1e-8 {
             return Tensor::zeros(a.shape(), a.dtype(), a.device());
         }
@@ -54,18 +52,14 @@ impl Muon {
 
         for _ in 0..num_iterations {
             // X = 1.5 * X - 0.5 * X * X^T * X
-            // X has shape [m, k]
-            // X^T has shape [k, m]
-            // X * X^T has shape [m, m]
-            // (X * X^T) * X has shape [m, k]
             let x_t = x.transpose(0, 1);
-            let x_x_t = x.matmul(&x_t); // [m, m]
-            let x_x_t_x = x_x_t.matmul(&x); // [m, k]
+            let x_x_t = x.matmul(&x_t);
+            let mut x_x_t_x = x_x_t.matmul(&x);
 
-            let three_half = Tensor::from_scalar(1.5f32);
-            let half = Tensor::from_scalar(0.5f32);
-
-            x = three_half.mul(&x).sub(&half.mul(&x_x_t_x));
+            // Fused: x = 1.5*x - 0.5*x_x_t_x without allocating scalar tensors
+            x_x_t_x.mul_scalar_(0.5);
+            x.mul_scalar_(1.5);
+            x.sub_(&x_x_t_x);
 
             // Re-normalize after each iteration for stability
             let x_norm_squared = x.mul(&x).sum(-1, false).sum(-1, false);
@@ -79,6 +73,10 @@ impl Muon {
 
 impl Optimizer for Muon {
     fn step(&mut self) {
+        let lr = self.lr as f32;
+        let momentum = self.momentum as f32;
+        let weight_decay = self.weight_decay as f32;
+
         for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
                 g
@@ -89,56 +87,47 @@ impl Optimizer for Muon {
             let shape = param.shape();
             let is_2d = shape.len() == 2;
 
-            // Apply weight decay
-            let effective_grad = if self.weight_decay != 0.0 {
-                grad.add(&param.mul(&Tensor::from_scalar(self.weight_decay as f32)))
+            // Apply weight decay: effective_grad = grad + weight_decay * param
+            let effective_grad = if weight_decay != 0.0 {
+                let mut wd = param.clone();
+                wd.mul_scalar_(weight_decay);
+                let mut eg = grad.clone();
+                eg.add_(&wd);
+                eg
             } else {
                 grad
             };
 
             if is_2d {
-                // Muon update for 2D matrices using Newton-Schulz iteration
                 // Standard momentum: m = momentum * m + grad
-                self.m[i] = self.m[i]
-                    .clone()
-                    .mul(&Tensor::from_scalar(self.momentum as f32))
-                    .add(&effective_grad);
+                self.m[i].mul_scalar_(momentum);
+                self.m[i].add_(&effective_grad);
 
                 // Orthogonalize the momentum
                 let ortho_momentum = Self::newton_schulz_iteration(&self.m[i], 5);
 
-                // For Nesterov, we use a lookahead approach
-                // Standard: update_dir = ortho_momentum
-                // Nesterov: update_dir = effective_grad + momentum * ortho_momentum
-                let update_dir = if self.nesterov {
-                    effective_grad
-                        .add(&ortho_momentum.mul(&Tensor::from_scalar(self.momentum as f32)))
+                // For Nesterov: update_dir = effective_grad + momentum * ortho_momentum
+                let mut update_dir = if self.nesterov {
+                    let mut mom_ortho = ortho_momentum;
+                    mom_ortho.mul_scalar_(momentum);
+                    let mut eg = effective_grad;
+                    eg.add_(&mom_ortho);
+                    eg
                 } else {
                     ortho_momentum
                 };
 
-                let lr = Tensor::from_scalar(self.lr as f32);
-                let step_size = lr.mul(&update_dir);
-
-                // Apply update (subtract for gradient descent)
-                let update = step_size.neg();
-
-                param.add_(&update);
-                param.increment_version();
+                // param = param - lr * update_dir
+                update_dir.mul_scalar_(lr);
+                param.sub_(&update_dir);
             } else {
-                // Fallback to AdamW-style update for 1D parameters (biases, LayerNorm)
-                // Simple SGD with momentum for 1D params
-                self.m[i] = self.m[i]
-                    .clone()
-                    .mul(&Tensor::from_scalar(self.momentum as f32))
-                    .add(&effective_grad);
+                // Fallback SGD with momentum for 1D params
+                self.m[i].mul_scalar_(momentum);
+                self.m[i].add_(&effective_grad);
 
-                let lr = Tensor::from_scalar(self.lr as f32);
-                let step_size = lr.mul(&self.m[i]);
-
-                // Apply update
-                param.add_(&step_size.neg());
-                param.increment_version();
+                let mut update = self.m[i].clone();
+                update.mul_scalar_(lr);
+                param.sub_(&update);
             }
         }
     }

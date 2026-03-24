@@ -125,7 +125,7 @@ impl Module for TransformerBlock {
     }
 
     fn train_mode(&self) {
-        self.training.store(true, Ordering::SeqCst);
+        self.training.store(true, Ordering::Relaxed);
         self.self_attn.train_mode();
         self.norm1.train_mode();
         self.norm2.train_mode();
@@ -134,7 +134,7 @@ impl Module for TransformerBlock {
     }
 
     fn eval_mode(&self) {
-        self.training.store(false, Ordering::SeqCst);
+        self.training.store(false, Ordering::Relaxed);
         self.self_attn.eval_mode();
         self.norm1.eval_mode();
         self.norm2.eval_mode();
@@ -143,7 +143,7 @@ impl Module for TransformerBlock {
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(Ordering::SeqCst)
+        self.training.load(Ordering::Relaxed)
     }
 }
 
@@ -299,7 +299,7 @@ impl Module for TransformerEncoder {
     }
 
     fn train_mode(&self) {
-        self.training.store(true, Ordering::SeqCst);
+        self.training.store(true, Ordering::Relaxed);
         self.embedding.train_mode();
         self.pos_embedding.train_mode();
         for layer in &self.layers {
@@ -310,7 +310,7 @@ impl Module for TransformerEncoder {
     }
 
     fn eval_mode(&self) {
-        self.training.store(false, Ordering::SeqCst);
+        self.training.store(false, Ordering::Relaxed);
         self.embedding.eval_mode();
         self.pos_embedding.eval_mode();
         for layer in &self.layers {
@@ -321,6 +321,6 @@ impl Module for TransformerEncoder {
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(Ordering::SeqCst)
+        self.training.load(Ordering::Relaxed)
     }
 }
