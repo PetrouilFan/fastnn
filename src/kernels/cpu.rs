@@ -4239,130 +4239,111 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
+    let numel = a.numel() as usize;
 
+    // Fast path: skip TensorIterator for contiguous tensors
+    if a.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(a.shape().to_vec(), a.dtype(), a.device());
+        {
+            let inner = Arc::make_mut(&mut output.inner);
+            let storage = Arc::make_mut(&mut inner.storage);
+            let Storage::Cpu(cpu_storage) = storage else {
+                panic!()
+            };
+            let out_data = Arc::make_mut(&mut cpu_storage.data);
+            let a_ptr = a.data_ptr() as *const f32;
+            let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                let chunk_size = CHUNK_MEMBOUND;
+                let num_chunks = numel.div_ceil(chunk_size);
+                let a_usize = a_ptr as usize;
+                let out_usize = out_ptr as usize;
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                    SimdLevel::Avx512 => {
+                        (0..num_chunks)
+                            .into_par_iter()
+                            .for_each(|chunk_idx| unsafe {
+                                relu_parallel_avx512(
+                                    chunk_idx, chunk_size, numel, a_usize, out_usize,
+                                );
+                            });
+                    }
+                    SimdLevel::Avx2 => {
+                        (0..num_chunks)
+                            .into_par_iter()
+                            .for_each(|chunk_idx| unsafe {
+                                relu_parallel_avx2(
+                                    chunk_idx, chunk_size, numel, a_usize, out_usize,
+                                );
+                            });
+                    }
+                    SimdLevel::Scalar => {
+                        (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                            relu_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                        });
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        relu_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
+                    });
+                }
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
+                        let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
+                        relu_simd(a_slice, out_slice);
+                    } else {
+                        for idx in 0..numel {
+                            unsafe {
+                                *out_ptr.add(idx) = (*a_ptr.add(idx)).max(0.0);
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for idx in 0..numel {
+                        unsafe {
+                            *out_ptr.add(idx) = (*a_ptr.add(idx)).max(0.0);
+                        }
+                    }
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback: use TensorIterator for non-contiguous tensors
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
-
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
-
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
+        panic!()
     };
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
-    if a.is_contiguous() && numel > 2048 {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            let chunk_size = CHUNK_MEMBOUND;
-            let num_chunks = numel.div_ceil(chunk_size);
-
-            let a_usize = a_ptr as usize;
-            let out_usize = out_ptr as usize;
-
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            match SIMD_LEVEL.get_or_init(detect_simd_level) {
-                SimdLevel::Avx512 => {
-                    (0..num_chunks)
-                        .into_par_iter()
-                        .for_each(|chunk_idx| unsafe {
-                            relu_parallel_avx512(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                        });
-                }
-                SimdLevel::Avx2 => {
-                    (0..num_chunks)
-                        .into_par_iter()
-                        .for_each(|chunk_idx| unsafe {
-                            relu_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                        });
-                }
-                SimdLevel::Scalar => {
-                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                        relu_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-                }
-            }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        relu_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
-            {
-                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
-                    relu_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                });
-            }
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            match SIMD_LEVEL.get_or_init(detect_simd_level) {
-                SimdLevel::Avx512 | SimdLevel::Avx2 => {
-                    let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-                    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-                    relu_simd(a_slice, out_slice);
-                }
-                SimdLevel::Scalar => {
-                    for idx in 0..numel {
-                        unsafe {
-                            let val = *a_ptr.add(idx);
-                            *out_ptr.add(idx) = val.max(0.0);
-                        }
-                    }
-                }
-            }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-                let zero = f32x4::ZERO;
-                let (chunks, remainder) = a_slice.as_chunks::<4>();
-                let (out_chunks, out_remainder) = out_slice.as_chunks_mut::<4>();
-                for (in_chunk, out_chunk) in chunks.iter().zip(out_chunks.iter_mut()) {
-                    let v = f32x4::from(*in_chunk);
-                    let result = v.max(zero);
-                    *out_chunk = result.into();
-                }
-
-                for (in_val, out_val) in remainder.iter().zip(out_remainder.iter_mut()) {
-                    *out_val = in_val.max(0.0);
-                }
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
-            {
-                for idx in 0..numel {
-                    unsafe {
-                        let val = *a_ptr.add(idx);
-                        *out_ptr.add(idx) = val.max(0.0);
-                    }
-                }
-            }
-        }
-    } else {
-        for idx in 0..numel {
-            unsafe {
-                let val = *a_ptr.add(idx);
-                *out_ptr.add(idx) = val.max(0.0);
-            }
+    for idx in 0..numel {
+        unsafe {
+            let val = *a_ptr.add(idx);
+            *out_ptr.add(idx) = val.max(0.0);
         }
     }
-
     vec![output]
 }
 
@@ -6669,6 +6650,110 @@ fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+/// Fast contiguous last-dim sum with SIMD
+pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> Tensor {
+    let a_ptr = a.data_ptr() as *const f32;
+    let mut output = Tensor::empty(vec![num_rows as i64], a.dtype(), a.device());
+    {
+        let inner = Arc::make_mut(&mut output.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let Storage::Cpu(cpu_storage) = storage else {
+            panic!()
+        };
+        let out_data = Arc::make_mut(&mut cpu_storage.data);
+        let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+        #[cfg(feature = "parallel")]
+        {
+            if num_rows > 64 {
+                use rayon::prelude::*;
+                let a_usize = a_ptr as usize;
+                let out_usize = out_ptr as usize;
+                (0..num_rows).into_par_iter().for_each(|row| {
+                    let row_ptr = unsafe { (a_usize as *const f32).add(row * dim_size) };
+                    let mut sum = 0.0f32;
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        if is_x86_feature_detected!("avx2") && dim_size >= 8 {
+                            unsafe {
+                                let mut acc = _mm256_setzero_ps();
+                                let mut j = 0;
+                                while j + 8 <= dim_size {
+                                    acc = _mm256_add_ps(acc, _mm256_loadu_ps(row_ptr.add(j)));
+                                    j += 8;
+                                }
+                                sum = hsum256_ps(acc);
+                                for k in j..dim_size {
+                                    sum += *row_ptr.add(k);
+                                }
+                            }
+                        } else {
+                            for j in 0..dim_size {
+                                unsafe {
+                                    sum += *row_ptr.add(j);
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                    {
+                        for j in 0..dim_size {
+                            unsafe {
+                                sum += *row_ptr.add(j);
+                            }
+                        }
+                    }
+                    unsafe {
+                        *(out_usize as *mut f32).add(row) = sum;
+                    }
+                });
+                return output;
+            }
+        }
+
+        // Non-parallel or small num_rows: SIMD inline
+        for row in 0..num_rows {
+            let row_ptr = unsafe { a_ptr.add(row * dim_size) };
+            let mut sum = 0.0f32;
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && dim_size >= 8 {
+                    unsafe {
+                        let mut acc = _mm256_setzero_ps();
+                        let mut j = 0;
+                        while j + 8 <= dim_size {
+                            acc = _mm256_add_ps(acc, _mm256_loadu_ps(row_ptr.add(j)));
+                            j += 8;
+                        }
+                        sum = hsum256_ps(acc);
+                        for k in j..dim_size {
+                            sum += *row_ptr.add(k);
+                        }
+                    }
+                } else {
+                    for j in 0..dim_size {
+                        unsafe {
+                            sum += *row_ptr.add(j);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for j in 0..dim_size {
+                    unsafe {
+                        sum += *row_ptr.add(j);
+                    }
+                }
+            }
+            unsafe {
+                *out_ptr.add(row) = sum;
+            }
+        }
+    }
+    output
+}
+
 fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
@@ -6729,6 +6814,15 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let total_blocks = (strides_before * strides_after) as usize;
     let a_numel = a.numel() as usize;
+
+    // Fast path: contiguous sum along last dimension
+    if dim == ndim - 1 && a.is_contiguous() && a.inner.storage_offset == 0 {
+        return vec![sum_last_dim_contiguous(
+            a,
+            dim_size,
+            strides_before as usize,
+        )];
+    }
 
     #[cfg(feature = "parallel")]
     {
@@ -7166,7 +7260,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                     }
                 }
 
-
                 // Fused pass: compute exp(x-max), store to output, and accumulate sum
                 let mut sum_exp = 0.0f32;
 
@@ -7188,7 +7281,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                             }
                             sum_exp = hsum256_ps(sum_vec);
                             for j2 in j..dim_size {
-
                                 let e = (x_row[j2] - max_val).exp();
                                 sum_exp += e;
                                 out_row[j2] = e;
@@ -7196,7 +7288,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                         }
                     } else {
                         for j in 0..dim_size {
-
                             let e = (x_row[j] - max_val).exp();
                             sum_exp += e;
                             out_row[j] = e;
@@ -7206,7 +7297,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for j in 0..dim_size {
-
                         let e = (x_row[j] - max_val).exp();
                         sum_exp += e;
                         out_row[j] = e;
@@ -7215,13 +7305,11 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
                 let inv_sum = 1.0 / sum_exp;
 
-
                 // Normalize: multiply stored exp values by inv_sum
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") {
                         unsafe {
-
                             let inv_vec = _mm256_set1_ps(inv_sum);
                             let mut j = 0;
                             while j + 8 <= dim_size {
@@ -7231,13 +7319,11 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                                 j += 8;
                             }
                             for j2 in j..dim_size {
-
                                 out_row[j2] *= inv_sum;
                             }
                         }
                     } else {
                         for j in 0..dim_size {
-
                             out_row[j] *= inv_sum;
                         }
                     }
@@ -7245,7 +7331,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for j in 0..dim_size {
-
                         out_row[j] *= inv_sum;
                     }
                 }
@@ -7319,7 +7404,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                         }
                         sum_exp = hsum256_ps(sum_vec);
                         for j2 in j..dim_size {
-
                             let e = (x_row[j2] - max_val).exp();
                             sum_exp += e;
                             out_row[j2] = e;
@@ -7327,7 +7411,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                     }
                 } else {
                     for j in 0..dim_size {
-
                         let e = (x_row[j] - max_val).exp();
                         sum_exp += e;
                         out_row[j] = e;
@@ -7337,7 +7420,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
             #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for j in 0..dim_size {
-
                     let e = (x_row[j] - max_val).exp();
                     sum_exp += e;
                     out_row[j] = e;
@@ -7346,13 +7428,11 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
             let inv_sum = 1.0 / sum_exp;
 
-
             // Normalize: multiply stored exp values by inv_sum
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") {
                     unsafe {
-
                         let inv_vec = _mm256_set1_ps(inv_sum);
                         let mut j = 0;
                         while j + 8 <= dim_size {
@@ -7362,13 +7442,11 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                             j += 8;
                         }
                         for j2 in j..dim_size {
-
                             out_row[j2] *= inv_sum;
                         }
                     }
                 } else {
                     for j in 0..dim_size {
-
                         out_row[j] *= inv_sum;
                     }
                 }
@@ -7376,7 +7454,6 @@ fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
             #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for j in 0..dim_size {
-
                     out_row[j] *= inv_sum;
                 }
             }
