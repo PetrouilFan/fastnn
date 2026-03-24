@@ -1541,7 +1541,7 @@ impl Tensor {
                 let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
                 #[cfg(feature = "parallel")]
-                if numel > 2048 {
+                if numel > 64 * 1024 {
                     use rayon::prelude::*;
                     const CHUNK: usize = 4096;
                     let num_chunks = numel.div_ceil(CHUNK);
@@ -1688,7 +1688,7 @@ impl Tensor {
                 // SIMD + parallel path for F32 gradient accumulation (hot path)
                 #[cfg(feature = "parallel")]
                 {
-                    if numel > 2048 {
+                    if numel > 64 * 1024 {
                         use rayon::prelude::*;
                         const CHUNK: usize = 4096;
                         let num_chunks = numel.div_ceil(CHUNK);
@@ -1831,7 +1831,7 @@ impl Tensor {
             DType::F32 => {
                 #[cfg(feature = "parallel")]
                 {
-                    if numel > 2048 {
+                    if numel > 64 * 1024 {
                         use rayon::prelude::*;
                         const CHUNK: usize = 4096;
                         let num_chunks = numel.div_ceil(CHUNK);
@@ -2127,7 +2127,7 @@ impl Tensor {
                 let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
                 #[cfg(feature = "parallel")]
-                if numel > 2048 {
+                if numel > 64 * 1024 {
                     use rayon::prelude::*;
                     const CHUNK: usize = 4096;
                     let num_chunks = numel.div_ceil(CHUNK);
