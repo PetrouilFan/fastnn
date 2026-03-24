@@ -1,5 +1,4 @@
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
-use crate::storage::Storage;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
@@ -64,16 +63,11 @@ impl AdamW {
 
 impl Optimizer for AdamW {
     fn step(&mut self) {
-        let beta1 = self.betas.0;
-        let beta2 = self.betas.1;
-
-        // Debug: print all param shapes
-        // if !self.step.is_empty() && self.step[0] >= 60 {
-        //     panic!(
-        //         "Debug: step >= 60. Param shapes: {:?}",
-        //         self.params.iter().map(|p| p.shape()).collect::<Vec<_>>()
-        //     );
-        // }
+        let beta1 = self.betas.0 as f32;
+        let beta2 = self.betas.1 as f32;
+        let lr = self.lr as f32;
+        let eps = self.eps as f32;
+        let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
             let grad = if let Some(g) = param.grad() {
@@ -81,83 +75,71 @@ impl Optimizer for AdamW {
             } else {
                 continue;
             };
-            // if grad.shape().len() == 3 {
-            //     panic!("grad.shape() = {:?}", grad.shape());
-            // }
-            if param.shape() != grad.shape() {
-                // panic!(
-                //     "Shape mismatch in AdamW::step: param.shape() = {:?}, grad.shape() = {:?}, param.id() = {}",
-                //     param.shape(),
-                //     grad.shape(),
-                //     param.id()
-                // );
-            }
 
             self.step[i] += 1;
-            let t = self.step[i] as f64;
+            let t = self.step[i] as f32;
 
-            let m_update = grad.clone().mul(&Tensor::from_scalar(beta1 as f32));
-            self.m[i] = self.m[i]
-                .clone()
-                .mul(&Tensor::from_scalar(beta1 as f32))
-                .add(&m_update);
+            // m = beta1 * m + (1 - beta1) * grad
+            let beta1_c = 1.0 - beta1;
+            self.m[i].mul_scalar_(beta1);
+            let mut grad_scaled = grad.clone();
+            grad_scaled.mul_scalar_(beta1_c);
+            self.m[i].add_(&grad_scaled);
 
-            let g_sq = grad.clone().mul(&grad.clone());
-            let v_update = g_sq.mul(&Tensor::from_scalar(beta2 as f32));
-            self.v[i] = self.v[i]
-                .clone()
-                .mul(&Tensor::from_scalar(beta2 as f32))
-                .add(&v_update);
+            // v = beta2 * v + (1 - beta2) * grad^2
+            let beta2_c = 1.0 - beta2;
+            self.v[i].mul_scalar_(beta2);
+            let mut grad_sq = grad.clone();
+            {
+                let numel = grad_sq.inner.numel() as usize;
+                let ptr = grad_sq.data_ptr_f32_mut();
+                for j in 0..numel {
+                    unsafe {
+                        let val = *ptr.add(j);
+                        *ptr.add(j) = val * val;
+                    }
+                }
+            }
+            grad_sq.mul_scalar_(beta2_c);
+            self.v[i].add_(&grad_sq);
 
             let bias_correction1 = 1.0 - beta1.powf(t);
             let bias_correction2 = 1.0 - beta2.powf(t);
 
-            let m_hat = self.m[i]
-                .clone()
-                .mul(&Tensor::from_scalar((1.0 / bias_correction1) as f32));
+            // m_hat = m / bias_correction1
+            let mut m_hat = self.m[i].clone();
+            m_hat.mul_scalar_(1.0 / bias_correction1);
 
-            let v_hat = if self.amsgrad {
+            // v_hat = v / bias_correction2 (with optional amsgrad)
+            let mut v_hat = if self.amsgrad {
                 let max_v = self.v[i].clone().max(0, false);
                 self.v_hat[i] = max_v;
-                self.v_hat[i]
-                    .clone()
-                    .mul(&Tensor::from_scalar((1.0 / bias_correction2) as f32))
+                self.v_hat[i].clone()
             } else {
-                self.v[i]
-                    .clone()
-                    .mul(&Tensor::from_scalar((1.0 / bias_correction2) as f32))
+                self.v[i].clone()
             };
+            v_hat.mul_scalar_(1.0 / bias_correction2);
 
-            let denom = v_hat.add(&Tensor::from_scalar(self.eps as f32)).sqrt();
-            let mut update = m_hat.div(&denom);
-
-            if self.weight_decay != 0.0 {
-                let weight_decay_term = param.mul(&Tensor::from_scalar(self.weight_decay as f32));
-                update = update.add(&weight_decay_term);
-            }
-
-            let lr = Tensor::from_scalar(self.lr as f32);
-            let step_size = lr.mul(&update);
-
-            // Apply the update to parameters in-place
-            // Use Arc::make_mut to ensure exclusive ownership before modifying
-            // This ensures we have unique access to the storage
-            let inner = Arc::make_mut(&mut param.inner);
-            let storage = Arc::make_mut(&mut inner.storage);
-            let Storage::Cpu(cpu_storage) = storage else {
-                panic!("Optimizer only supports CPU tensors");
-            };
-            let data = Arc::make_mut(&mut cpu_storage.data);
-            let ptr = data.as_mut_ptr() as *mut f32;
-            let numel = param.numel() as usize;
-
-            let update_slice = step_size.as_f32_slice();
-            for (j, update_val) in update_slice.iter().take(numel).enumerate() {
-                let param_val = unsafe { *ptr.add(j) };
-                unsafe {
-                    *ptr.add(j) = param_val - update_val;
+            // update = m_hat / (sqrt(v_hat) + eps)
+            {
+                let numel = v_hat.inner.numel() as usize;
+                let ptr = v_hat.data_ptr_f32_mut();
+                for j in 0..numel {
+                    unsafe {
+                        *ptr.add(j) = (*ptr.add(j)).sqrt() + eps;
+                    }
                 }
             }
+            m_hat.div_(&v_hat);
+
+            // AdamW: weight decay is applied directly to params (decoupled)
+            if weight_decay != 0.0 {
+                param.mul_scalar_(1.0 - lr * weight_decay);
+            }
+
+            // param = param - lr * update
+            m_hat.mul_scalar_(lr);
+            param.sub_(&m_hat);
         }
     }
 

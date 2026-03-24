@@ -10,6 +10,26 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use std::arch::x86_64::{
+    _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_storeu_ps, _mm256_sub_ps,
+};
+
+/// Cached scalar tensors for common dimension values (0-7)
+/// Avoids heap allocation on every softmax/sum/mean/max call
+fn dim_scalar(dim: i32) -> Tensor {
+    use std::sync::OnceLock;
+    static DIM_SCALARS: OnceLock<[Tensor; 8]> = OnceLock::new();
+    let scalars =
+        DIM_SCALARS.get_or_init(|| std::array::from_fn(|d| Tensor::from_scalar(d as f32)));
+    let idx = dim as usize;
+    if idx < scalars.len() {
+        scalars[idx].clone()
+    } else {
+        Tensor::from_scalar(dim as f32)
+    }
+}
+
 pub struct TensorImpl {
     pub storage: Arc<Storage>,
     pub sizes: SmallVec<[i64; 8]>,
@@ -498,11 +518,11 @@ impl TensorImpl {
     }
 
     pub fn increment_version(&self) {
-        self.version_counter.fetch_add(1, Ordering::SeqCst);
+        self.version_counter.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn version(&self) -> u64 {
-        self.version_counter.load(Ordering::SeqCst)
+        self.version_counter.load(Ordering::Relaxed)
     }
 
     #[track_caller]
@@ -579,6 +599,7 @@ impl TensorImpl {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => unsafe {
                 let ptr = cpu.data.as_ref().as_ptr() as *const f32;
+                let ptr = ptr.add(self.storage_offset as usize);
                 let numel = self.numel() as usize;
                 std::slice::from_raw_parts(ptr, numel)
             },
@@ -809,47 +830,33 @@ impl Tensor {
             panic!("Expected CPU storage for ones()");
         };
         let data = Arc::make_mut(&mut cpu_storage.data);
-        let ptr = data.as_mut_ptr();
         match dtype {
             DType::F32 => {
-                let f32_ptr = ptr as *mut f32;
-                for i in 0..numel {
-                    unsafe {
-                        *f32_ptr.add(i) = 1.0;
-                    }
-                }
+                let slice =
+                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f32, numel) };
+                slice.fill(1.0);
             }
             DType::F64 => {
-                let f64_ptr = ptr as *mut f64;
-                for i in 0..numel {
-                    unsafe {
-                        *f64_ptr.add(i) = 1.0;
-                    }
-                }
+                let slice =
+                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, numel) };
+                slice.fill(1.0);
             }
             DType::I32 => {
-                let i32_ptr = ptr as *mut i32;
-                for i in 0..numel {
-                    unsafe {
-                        *i32_ptr.add(i) = 1;
-                    }
-                }
+                let slice =
+                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i32, numel) };
+                slice.fill(1);
             }
             DType::BF16 => {
-                let bf16_ptr = ptr as *mut half::bf16;
-                for i in 0..numel {
-                    unsafe {
-                        *bf16_ptr.add(i) = half::bf16::from_f32(1.0);
-                    }
-                }
+                let slice = unsafe {
+                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut half::bf16, numel)
+                };
+                slice.fill(half::bf16::from_f32(1.0));
             }
             DType::F16 => {
-                let f16_ptr = ptr as *mut half::f16;
-                for i in 0..numel {
-                    unsafe {
-                        *f16_ptr.add(i) = half::f16::from_f32(1.0);
-                    }
-                }
+                let slice = unsafe {
+                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut half::f16, numel)
+                };
+                slice.fill(half::f16::from_f32(1.0));
             }
             _ => {}
         }
@@ -1161,140 +1168,148 @@ impl Tensor {
     pub fn to_numpy(&self) -> Vec<f32> {
         match &self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
+                // Fast path: contiguous F32 tensor - direct memory copy
+                if self.inner.dtype == DType::F32
+                    && self.inner.is_contiguous()
+                    && self.inner.storage_offset == 0
+                {
+                    let data = cpu.data.as_ref().as_ptr() as *const f32;
+                    let numel = self.inner.numel() as usize;
+                    return unsafe { std::slice::from_raw_parts(data, numel) }.to_vec();
+                }
+
                 match self.inner.dtype {
                     DType::F32 => {
-                        // Use stride-aware indexing
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const f32;
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
 
-                        // Create an iterator over all elements using strides
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        // Maintain running linear index and increment it
+                        // instead of recomputing from scratch each iteration
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            // Calculate linear index from multi-dimensional indices using strides
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(*data.add(linear_idx as usize));
                             }
 
-                            // Increment indices
-                            for dim in (0..self.inner.ndim()).rev() {
+                            // Increment indices and update linear_idx incrementally
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                // Wrap: subtract size * stride, reset to 0
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
                         result
                     }
                     DType::F64 => {
-                        // Similar for F64
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const f64;
-
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(*data.add(linear_idx as usize) as f32);
                             }
-
-                            for dim in (0..self.inner.ndim()).rev() {
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
                         result
                     }
                     DType::I32 => {
-                        // Similar for I32
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const i32;
-
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(*data.add(linear_idx as usize) as f32);
                             }
-
-                            for dim in (0..self.inner.ndim()).rev() {
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
                         result
                     }
                     DType::BF16 => {
-                        // Similar for BF16
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const half::bf16;
-
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(f32::from(*data.add(linear_idx as usize)));
                             }
-
-                            for dim in (0..self.inner.ndim()).rev() {
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
                         result
                     }
                     DType::F16 => {
-                        // Similar for F16
                         let mut result = Vec::with_capacity(self.inner.numel() as usize);
                         let data = cpu.data.as_ref().as_ptr() as *const half::f16;
-
-                        let mut indices = vec![0i64; self.inner.ndim()];
+                        let ndim = self.inner.ndim();
+                        let strides = &self.inner.strides;
+                        let sizes = &self.inner.sizes;
+                        let offset = self.inner.storage_offset;
+                        let mut linear_idx = offset;
+                        let mut indices = vec![0i64; ndim];
 
                         for _ in 0..self.inner.numel() {
-                            let mut linear_idx = self.inner.storage_offset;
-                            for (i, &stride) in self.inner.strides.iter().enumerate() {
-                                linear_idx += indices[i] * stride;
-                            }
-
                             unsafe {
                                 result.push(f32::from(*data.add(linear_idx as usize)));
                             }
-
-                            for dim in (0..self.inner.ndim()).rev() {
+                            for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                if indices[dim] < self.inner.sizes[dim] {
+                                linear_idx += strides[dim];
+                                if indices[dim] < sizes[dim] {
                                     break;
                                 }
+                                linear_idx -= sizes[dim] * strides[dim];
                                 indices[dim] = 0;
                             }
                         }
@@ -1532,21 +1547,25 @@ impl Tensor {
     /// In-place addition for gradient accumulation
     /// This is used internally by the autograd engine to accumulate gradients
     pub fn add_(&mut self, other: &Tensor) -> &mut Self {
-        // For GPU tensors, we need to use dispatch-based addition
-        if self.inner.is_gpu() || other.inner.is_gpu() {
-            // Perform addition using the dispatch system
-            // Use &*self to get &Tensor from &mut Tensor
+        // For GPU tensors or non-contiguous tensors, use dispatch-based addition
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
             let result = (self as &Tensor).add(other);
-            // Update self with the result
             *self = result;
             return self;
         }
 
-        // CPU path: direct memory manipulation
+        // CPU path: direct memory manipulation (requires contiguous self)
         let dtype = self.inner.dtype;
         let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
 
-        // Use data_ptr_f32_mut for in-place update (as per user's suggestion)
+        // If other is broadcast (e.g., expanded scalar), use general path
+        if other_numel != numel || !other.is_contiguous() {
+            let result = (self as &Tensor).add(other);
+            *self = result;
+            return self;
+        }
+
         let self_ptr = self.data_ptr_f32_mut();
         let other_ptr = other.data_ptr_f32();
 
@@ -1556,6 +1575,71 @@ impl Tensor {
 
         match dtype {
             DType::F32 => {
+                // SIMD + parallel path for F32 gradient accumulation (hot path)
+                #[cfg(feature = "parallel")]
+                {
+                    if numel > 2048 {
+                        use rayon::prelude::*;
+                        const CHUNK: usize = 4096;
+                        let num_chunks = numel.div_ceil(CHUNK);
+                        let self_usize = self_ptr as usize;
+                        let other_usize = other_ptr as usize;
+                        (0..num_chunks).into_par_iter().for_each(|chunk| {
+                            let start = chunk * CHUNK;
+                            let end = (start + CHUNK).min(numel);
+                            let s_ptr = self_usize as *mut f32;
+                            let o_ptr = other_usize as *const f32;
+
+                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                            {
+                                if is_x86_feature_detected!("avx2") {
+                                    unsafe {
+                                        let mut i = start;
+                                        while i + 8 <= end {
+                                            let sv = _mm256_loadu_ps(s_ptr.add(i));
+                                            let ov = _mm256_loadu_ps(o_ptr.add(i));
+                                            let r = _mm256_add_ps(sv, ov);
+                                            _mm256_storeu_ps(s_ptr.add(i), r);
+                                            i += 8;
+                                        }
+                                        for j in i..end {
+                                            *s_ptr.add(j) += *o_ptr.add(j);
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            // Scalar fallback for this chunk
+                            for i in start..end {
+                                unsafe {
+                                    *s_ptr.add(i) += *o_ptr.add(i);
+                                }
+                            }
+                        });
+                        return self;
+                    }
+                }
+                // Small tensor or non-parallel: SIMD inline or scalar
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                let ov = _mm256_loadu_ps(other_ptr.add(i));
+                                let r = _mm256_add_ps(sv, ov);
+                                _mm256_storeu_ps(self_ptr.add(i), r);
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *self_ptr.add(j) += *other_ptr.add(j);
+                            }
+                            return self;
+                        }
+                    }
+                }
+                // Scalar fallback
                 for i in 0..numel {
                     unsafe {
                         *self_ptr.add(i) += *other_ptr.add(i);
@@ -1613,7 +1697,15 @@ impl Tensor {
 
     /// In-place multiplication
     pub fn mul_(&mut self, other: &Tensor) -> &mut Self {
-        if self.inner.is_gpu() || other.inner.is_gpu() {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).mul(other);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
             let result = (self as &Tensor).mul(other);
             *self = result;
             return self;
@@ -1622,12 +1714,69 @@ impl Tensor {
         let dtype = self.inner.dtype;
         let numel = self.inner.numel() as usize;
 
-        // Use data_ptr_f32_mut for in-place update (as per user's suggestion)
         let self_ptr = self.data_ptr_f32_mut();
         let other_ptr = other.data_ptr_f32();
 
         match dtype {
             DType::F32 => {
+                #[cfg(feature = "parallel")]
+                {
+                    if numel > 2048 {
+                        use rayon::prelude::*;
+                        const CHUNK: usize = 4096;
+                        let num_chunks = numel.div_ceil(CHUNK);
+                        let self_usize = self_ptr as usize;
+                        let other_usize = other_ptr as usize;
+                        (0..num_chunks).into_par_iter().for_each(|chunk| {
+                            let start = chunk * CHUNK;
+                            let end = (start + CHUNK).min(numel);
+                            let s_p = self_usize as *mut f32;
+                            let o_p = other_usize as *const f32;
+                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                            {
+                                if is_x86_feature_detected!("avx2") {
+                                    unsafe {
+                                        let mut i = start;
+                                        while i + 8 <= end {
+                                            let sv = _mm256_loadu_ps(s_p.add(i));
+                                            let ov = _mm256_loadu_ps(o_p.add(i));
+                                            _mm256_storeu_ps(s_p.add(i), _mm256_mul_ps(sv, ov));
+                                            i += 8;
+                                        }
+                                        for j in i..end {
+                                            *s_p.add(j) *= *o_p.add(j);
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            for j in start..end {
+                                unsafe {
+                                    *s_p.add(j) *= *o_p.add(j);
+                                }
+                            }
+                        });
+                        return self;
+                    }
+                }
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                let ov = _mm256_loadu_ps(other_ptr.add(i));
+                                _mm256_storeu_ps(self_ptr.add(i), _mm256_mul_ps(sv, ov));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *self_ptr.add(j) *= *other_ptr.add(j);
+                            }
+                            return self;
+                        }
+                    }
+                }
                 for i in 0..numel {
                     unsafe {
                         *self_ptr.add(i) *= *other_ptr.add(i);
@@ -1679,6 +1828,141 @@ impl Tensor {
                 }
             }
             _ => unimplemented!("mul_ for dtype {:?}", dtype),
+        }
+        self
+    }
+
+    /// In-place scalar multiplication: self *= scalar
+    /// Avoids allocating a scalar tensor for optimizer hot paths.
+    pub fn mul_scalar_(&mut self, scalar: f32) -> &mut Self {
+        if self.inner.is_gpu() {
+            let scalar_t = Tensor::from_scalar(scalar);
+            let result = (self as &Tensor).mul(&scalar_t);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let self_ptr = self.data_ptr_f32_mut();
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) *= scalar;
+            }
+        }
+        self
+    }
+
+    /// Non-in-place scalar multiplication without creating a scalar tensor.
+    /// Avoids the 5-heap-alloc overhead of Tensor::from_scalar().
+    pub fn mul_scalar(&self, scalar: f32) -> Tensor {
+        let mut result = self.clone();
+        result.mul_scalar_(scalar);
+        result
+    }
+
+    /// In-place scalar addition: self += scalar
+    pub fn add_scalar_(&mut self, scalar: f32) -> &mut Self {
+        if self.inner.is_gpu() {
+            let scalar_t = Tensor::from_scalar(scalar);
+            let result = (self as &Tensor).add(&scalar_t);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let self_ptr = self.data_ptr_f32_mut();
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) += scalar;
+            }
+        }
+        self
+    }
+
+    /// In-place subtraction: self -= other
+    pub fn sub_(&mut self, other: &Tensor) -> &mut Self {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).sub(other);
+            *self = result;
+            return self;
+        }
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
+            let result = (self as &Tensor).sub(other);
+            *self = result;
+            return self;
+        }
+
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let sv = _mm256_loadu_ps(self_ptr.add(i));
+                        let ov = _mm256_loadu_ps(other_ptr.add(i));
+                        _mm256_storeu_ps(self_ptr.add(i), _mm256_sub_ps(sv, ov));
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *self_ptr.add(j) -= *other_ptr.add(j);
+                    }
+                    return self;
+                }
+            }
+        }
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) -= *other_ptr.add(i);
+            }
+        }
+        self
+    }
+
+    /// In-place division: self /= other
+    pub fn div_(&mut self, other: &Tensor) -> &mut Self {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).div(other);
+            *self = result;
+            return self;
+        }
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
+            let result = (self as &Tensor).div(other);
+            *self = result;
+            return self;
+        }
+
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let sv = _mm256_loadu_ps(self_ptr.add(i));
+                        let ov = _mm256_loadu_ps(other_ptr.add(i));
+                        _mm256_storeu_ps(self_ptr.add(i), _mm256_div_ps(sv, ov));
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *self_ptr.add(j) /= *other_ptr.add(j);
+                    }
+                    return self;
+                }
+            }
+        }
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) /= *other_ptr.add(i);
+            }
         }
         self
     }
@@ -1762,6 +2046,19 @@ impl Tensor {
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
+        // Fast path: 2D CPU matmul, skip dispatch overhead
+        if self.inner.ndim() == 2
+            && other.inner.ndim() == 2
+            && self.device() == Device::Cpu
+            && other.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && other.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && other.is_contiguous()
+        {
+            return self.matmul_fast_2d(other);
+        }
+
         let dispatch_key = match (self.device(), other.device()) {
             (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
@@ -1785,6 +2082,51 @@ impl Tensor {
         } else {
             output
         }
+    }
+
+    /// Fast 2D contiguous F32 matmul bypassing dispatch
+    fn matmul_fast_2d(&self, other: &Tensor) -> Tensor {
+        let a_shape = &self.inner.sizes;
+        let b_shape = &other.inner.sizes;
+        let m = a_shape[0] as usize;
+        let k = a_shape[1] as usize;
+        let n = b_shape[1] as usize;
+
+        // Allocate output directly
+        let mut output = Tensor::zeros(vec![m as i64, n as i64], DType::F32, Device::Cpu);
+        {
+            let output_inner = Arc::make_mut(&mut output.inner);
+            let output_storage = Arc::make_mut(&mut output_inner.storage);
+            let Storage::Cpu(cpu_storage) = output_storage else {
+                panic!()
+            };
+            let out_data = Arc::make_mut(&mut cpu_storage.data);
+
+            let a_ptr = self.data_ptr_f32();
+            let b_ptr = other.data_ptr_f32();
+            let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, m * k) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k * n) };
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, m * n) };
+
+            crate::kernels::blas::matmul_blas_into(a_slice, b_slice, out_slice, m, k, n);
+        }
+
+        // Attach autograd if needed
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = autograd::MatmulBackward::new(self.clone(), other.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+        output
     }
 
     pub fn neg(&self) -> Tensor {
@@ -1933,11 +2275,7 @@ impl Tensor {
 
     pub fn softmax(&self, dim: i32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch(
-            "softmax",
-            dispatch_key,
-            &[self, &Tensor::from_scalar(dim as f32)],
-        );
+        let result = dispatch("softmax", dispatch_key, &[self, &dim_scalar(dim)]);
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -2037,7 +2375,7 @@ impl Tensor {
             dispatch_key,
             &[
                 self,
-                &Tensor::from_scalar(dim as f32),
+                &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
         );
@@ -2063,7 +2401,7 @@ impl Tensor {
             dispatch_key,
             &[
                 self,
-                &Tensor::from_scalar(dim as f32),
+                &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
         );
@@ -2077,7 +2415,7 @@ impl Tensor {
             dispatch_key,
             &[
                 self,
-                &Tensor::from_scalar(dim as f32),
+                &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
         );

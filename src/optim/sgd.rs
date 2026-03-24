@@ -1,5 +1,4 @@
 use crate::optim::{Optimizer, OptimizerState, ParamGroup};
-use crate::storage::Storage;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
@@ -44,6 +43,10 @@ impl SGD {
 impl Optimizer for SGD {
     #[allow(clippy::needless_range_loop)]
     fn step(&mut self) {
+        let lr = self.lr as f32;
+        let momentum = self.momentum as f32;
+        let weight_decay = self.weight_decay as f32;
+
         for (i, param) in self.params.iter_mut().enumerate() {
             let mut grad = if let Some(g) = param.grad() {
                 g
@@ -51,43 +54,33 @@ impl Optimizer for SGD {
                 continue;
             };
 
-            if self.weight_decay != 0.0 {
-                let weight_decay_term = param.mul(&Tensor::from_scalar(self.weight_decay as f32));
-                grad = grad.add(&weight_decay_term);
+            if weight_decay != 0.0 {
+                // grad = grad + weight_decay * param
+                let mut wd_term = param.clone();
+                wd_term.mul_scalar_(weight_decay);
+                grad.add_(&wd_term);
             }
 
-            if self.momentum != 0.0 {
+            if momentum != 0.0 {
                 let velocity = &mut self.velocity[i];
-                // Use in-place operations to avoid allocation
-                velocity.mul_(&Tensor::from_scalar(self.momentum as f32));
+                // velocity = momentum * velocity + grad
+                velocity.mul_scalar_(momentum);
                 velocity.add_(&grad);
 
                 if self.nesterov {
-                    let mom = Tensor::from_scalar(self.momentum as f32);
-                    grad = grad.add(&velocity.clone().mul(&mom));
+                    // grad = grad + momentum * velocity
+                    let mut mom_v = velocity.clone();
+                    mom_v.mul_scalar_(momentum);
+                    grad.add_(&mom_v);
                 } else {
+                    // grad = velocity (move, not clone)
                     grad = velocity.clone();
                 }
             }
 
-            let update = grad.mul(&Tensor::from_scalar(self.lr as f32));
-
-            let inner = Arc::make_mut(&mut param.inner);
-            let storage = Arc::make_mut(&mut inner.storage);
-            let Storage::Cpu(cpu_storage) = storage else {
-                panic!("Optimizer only supports CPU tensors");
-            };
-            let data = Arc::make_mut(&mut cpu_storage.data);
-            let ptr = data.as_mut_ptr() as *mut f32;
-            let numel = param.numel() as usize;
-
-            let update_slice = update.as_f32_slice();
-            for j in 0..numel {
-                unsafe {
-                    let param_val = *ptr.add(j);
-                    *ptr.add(j) = param_val - update_slice[j];
-                }
-            }
+            // param = param - lr * grad  (in-place)
+            grad.mul_scalar_(lr);
+            param.sub_(&grad);
         }
     }
 

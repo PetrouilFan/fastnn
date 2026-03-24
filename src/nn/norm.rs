@@ -11,6 +11,7 @@ pub struct LayerNorm {
     pub bias: Option<Tensor>,
     pub eps: f64,
     training: std::sync::atomic::AtomicBool,
+    eps_scalar: Tensor,
 }
 
 impl LayerNorm {
@@ -27,6 +28,7 @@ impl LayerNorm {
             normalized_shape,
             eps,
             training: std::sync::atomic::AtomicBool::new(true),
+            eps_scalar: Tensor::from_scalar(eps as f32),
         }
     }
 }
@@ -49,7 +51,7 @@ impl Module for LayerNorm {
         let result = dispatch(
             "layer_norm",
             DispatchKey::Cpu,
-            &[x, x, weight, bias, &Tensor::from_scalar(self.eps as f32)],
+            &[x, x, weight, bias, &self.eps_scalar],
         );
 
         let output = result[0].clone();
@@ -127,22 +129,23 @@ impl Module for LayerNorm {
 
     fn train_mode(&self) {
         self.training
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn eval_mode(&self) {
         self.training
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::SeqCst)
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
 pub struct BatchNorm1d {
     #[allow(dead_code)]
     pub num_features: i64,
+    #[allow(dead_code)]
     pub eps: f64,
     #[allow(dead_code)]
     pub momentum: f64,
@@ -153,6 +156,10 @@ pub struct BatchNorm1d {
     pub training: std::sync::atomic::AtomicBool,
     #[allow(dead_code)]
     pub track_running_stats: bool,
+    // Pre-allocated scalar tensors
+    eps_scalar: Tensor,
+    training_true_scalar: Tensor,
+    training_false_scalar: Tensor,
 }
 
 impl BatchNorm1d {
@@ -179,36 +186,68 @@ impl BatchNorm1d {
             running_var: Arc::new(RwLock::new(running_var)),
             training: std::sync::atomic::AtomicBool::new(true),
             track_running_stats: true,
+            eps_scalar: Tensor::from_scalar(eps as f32),
+            training_true_scalar: Tensor::from_scalar(1.0),
+            training_false_scalar: Tensor::from_scalar(0.0),
         }
     }
 }
 
 impl Module for BatchNorm1d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let weight = self
-            .weight
-            .clone()
-            .unwrap_or_else(|| Tensor::from_scalar(1.0));
-        let bias = self
-            .bias
-            .clone()
-            .unwrap_or_else(|| Tensor::from_scalar(0.0));
+        // Use references instead of cloning weight/bias
+        let default_weight;
+        let default_bias;
+        let weight_ref = match &self.weight {
+            Some(w) => w,
+            None => {
+                default_weight = Tensor::from_scalar(1.0);
+                &default_weight
+            }
+        };
+        let bias_ref = match &self.bias {
+            Some(b) => b,
+            None => {
+                default_bias = Tensor::from_scalar(0.0);
+                &default_bias
+            }
+        };
+
+        let is_training = self.training.load(std::sync::atomic::Ordering::Relaxed);
+
+        let training_flag = if is_training {
+            &self.training_true_scalar
+        } else {
+            &self.training_false_scalar
+        };
+
+        // In eval mode, running stats are read-only - hold RwLock guards to avoid clone
+        // In training mode, we must clone since we update them after forward
+        let running_mean_guard;
+        let running_var_guard;
+        let running_mean_clone;
+        let running_var_clone;
+        let (running_mean_ref, running_var_ref) = if is_training {
+            running_mean_clone = self.running_mean.read().clone();
+            running_var_clone = self.running_var.read().clone();
+            (&running_mean_clone, &running_var_clone)
+        } else {
+            running_mean_guard = self.running_mean.read();
+            running_var_guard = self.running_var.read();
+            (&*running_mean_guard, &*running_var_guard)
+        };
 
         let result = dispatch(
             "batch_norm",
             DispatchKey::Cpu,
             &[
                 x,
-                &weight,
-                &bias,
-                &self.running_mean.read().clone(),
-                &self.running_var.read().clone(),
-                &Tensor::from_scalar(if self.training.load(std::sync::atomic::Ordering::SeqCst) {
-                    1.0
-                } else {
-                    0.0
-                }),
-                &Tensor::from_scalar(self.eps as f32),
+                weight_ref,
+                bias_ref,
+                running_mean_ref,
+                running_var_ref,
+                training_flag,
+                &self.eps_scalar,
             ],
         );
 
@@ -256,15 +295,15 @@ impl Module for BatchNorm1d {
 
     fn train_mode(&self) {
         self.training
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn eval_mode(&self) {
         self.training
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::SeqCst)
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
