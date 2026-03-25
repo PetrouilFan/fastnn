@@ -122,7 +122,7 @@ def main():
         try:
             ms_q, gflops = bench_int8_dynamic(m, k)
             print(f"{m}×{k:<7} {ms_q:>10.3f} {gflops:>10.2f} {ms_f32 / ms_q:>7.1f}x")
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError) as e:
             print(f"{m}×{k:<7} {'ERROR':>10} {str(e)[:40]}")
 
     print()
