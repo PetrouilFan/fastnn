@@ -8,13 +8,15 @@ import torch
 import torch.nn as nn
 import time
 import subprocess
+import gc
 import os  # noqa: F401
 
 
 def bench_fn(fn, warmup=20, iters=500):
     """Benchmark, return min of 3 median measurements."""
     medians = []
-    for trial in range(3):
+    for _trial in range(3):
+        gc.collect()  # Ensure clean state between trials
         for _ in range(warmup):
             fn()
         times = []
