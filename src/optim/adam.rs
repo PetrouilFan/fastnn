@@ -13,6 +13,8 @@ pub struct Adam {
     pub v: Vec<Tensor>,
     pub v_hat: Vec<Tensor>,
     pub step: Vec<u64>,
+    // Track which parameters should skip weight decay (e.g., biases, LayerNorm)
+    pub no_decay: Vec<bool>,
 }
 
 impl Adam {
@@ -24,6 +26,7 @@ impl Adam {
         weight_decay: f64,
         amsgrad: bool,
     ) -> Self {
+        let n = params.len();
         let m: Vec<Tensor> = params
             .iter()
             .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
@@ -39,7 +42,9 @@ impl Adam {
             .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
             .collect();
 
-        let step: Vec<u64> = vec![0; params.len()];
+        let step: Vec<u64> = vec![0; n];
+        // By default, all parameters get weight decay
+        let no_decay = vec![false; n];
 
         Adam {
             params,
@@ -52,6 +57,25 @@ impl Adam {
             v,
             v_hat,
             step,
+            no_decay,
+        }
+    }
+
+    /// Add parameters that should skip weight decay (e.g., biases, LayerNorm weights)
+    pub fn add_no_decay(&mut self, indices: &[usize]) {
+        for &idx in indices {
+            if idx < self.no_decay.len() {
+                self.no_decay[idx] = true;
+            }
+        }
+    }
+
+    /// Mark all 1D parameters (biases) to skip weight decay
+    pub fn mark_biases_no_decay(&mut self) {
+        for (i, param) in self.params.iter().enumerate() {
+            if param.ndim() == 1 {
+                self.no_decay[i] = true;
+            }
         }
     }
 }
@@ -72,7 +96,7 @@ impl Optimizer for Adam {
             };
 
             self.step[i] += 1;
-            let t = self.step[i] as f32;
+            let t = self.step[i] as f64;
 
             // m = beta1 * m + (1 - beta1) * grad
             // Equivalent to: m = beta1 * m + grad * (1 - beta1)
@@ -103,12 +127,12 @@ impl Optimizer for Adam {
             grad_sq.mul_scalar_(beta2_c);
             self.v[i].add_(&grad_sq);
 
-            let bias_correction1 = 1.0 - beta1.powf(t);
-            let bias_correction2 = 1.0 - beta2.powf(t);
+            let bias_correction1 = (1.0 - beta1.powf(t as f32)) as f64;
+            let bias_correction2 = (1.0 - beta2.powf(t as f32)) as f64;
 
             // m_hat = m / bias_correction1
             let mut m_hat = self.m[i].clone();
-            m_hat.mul_scalar_(1.0 / bias_correction1);
+            m_hat.mul_scalar_((1.0 / bias_correction1) as f32);
 
             // v_hat = v / bias_correction2 (with optional amsgrad)
             let mut v_hat = if self.amsgrad {
@@ -117,7 +141,7 @@ impl Optimizer for Adam {
             } else {
                 self.v[i].clone()
             };
-            v_hat.mul_scalar_(1.0 / bias_correction2);
+            v_hat.mul_scalar_((1.0 / bias_correction2) as f32);
 
             // update = m_hat / (sqrt(v_hat) + eps)
             // Compute sqrt in-place then add eps
@@ -138,7 +162,8 @@ impl Optimizer for Adam {
             param.sub_(&m_hat);
 
             // Weight decay: param = param - lr * weight_decay * param
-            if weight_decay != 0.0 {
+            // Skip weight decay for parameters marked as no_decay (e.g., biases)
+            if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
                 param.mul_scalar_(1.0 - lr * weight_decay);
             }
         }
@@ -175,6 +200,8 @@ impl Optimizer for Adam {
         self.v.extend(v);
         self.v_hat.extend(v_hat);
         self.step.extend(vec![0u64; params.len()]);
+        // New params default to not skipping weight decay
+        self.no_decay.extend(vec![false; params.len()]);
         self.params.extend(params);
     }
 
