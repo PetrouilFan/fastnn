@@ -5,7 +5,6 @@ Ensures the framework handles VRAM exhaustion gracefully.
 """
 
 import sys
-import gc
 
 sys.path.insert(0, "/home/petrouil/Projects/github/fastnn")
 

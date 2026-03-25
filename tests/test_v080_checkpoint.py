@@ -7,7 +7,6 @@ Guarantees serialization fidelity.
 import sys
 import os
 import tempfile
-import numpy as np
 
 sys.path.insert(0, "/home/petrouil/Projects/github/fastnn")
 
@@ -23,7 +22,7 @@ def test_checkpoint_roundtrip_linear():
     x = fastnn.randn([4, 64])
 
     # Forward pass with original model
-    out_a = linear(x).numpy()
+    _ = linear(x).numpy()
 
     # Save checkpoint using the actual API
     with tempfile.NamedTemporaryFile(suffix=".fnn", delete=False) as f:
