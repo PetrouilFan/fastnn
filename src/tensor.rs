@@ -131,7 +131,9 @@ impl TensorImpl {
 
         // Preserve autograd metadata but without grad_fn (contiguous creates a copy)
         if let Some(meta) = &self.autograd_meta {
-            let meta_lock = meta.lock().unwrap();
+            let Ok(meta_lock) = meta.lock() else {
+                return new_tensor;
+            };
             if meta_lock.requires_grad {
                 let new_meta = AutogradMeta::new_non_leaf(true);
                 // Don't clone grad_fn - contiguous creates a copy, so it's a leaf
@@ -440,7 +442,8 @@ impl TensorImpl {
     pub fn requires_grad(&self) -> bool {
         self.autograd_meta
             .as_ref()
-            .map(|m| m.lock().unwrap().requires_grad)
+            .and_then(|m| m.lock().ok())
+            .map(|m| m.requires_grad)
             .unwrap_or(false)
     }
 
@@ -465,7 +468,7 @@ impl TensorImpl {
     }
 
     pub fn grad(&self) -> Option<Tensor> {
-        self.autograd_meta.as_ref()?.lock().unwrap().grad.clone()
+        self.autograd_meta.as_ref()?.lock().ok()?.grad.clone()
     }
 
     pub fn set_grad(&mut self, grad: Option<Tensor>) {
@@ -487,12 +490,13 @@ impl TensorImpl {
     pub fn is_leaf(&self) -> bool {
         self.autograd_meta
             .as_ref()
-            .map(|m| m.lock().unwrap().is_leaf)
+            .and_then(|m| m.lock().ok())
+            .map(|m| m.is_leaf)
             .unwrap_or(true)
     }
 
     pub fn grad_fn(&self) -> Option<Arc<dyn autograd::Node>> {
-        self.autograd_meta.as_ref()?.lock().unwrap().grad_fn.clone()
+        self.autograd_meta.as_ref()?.lock().ok()?.grad_fn.clone()
     }
 
     pub fn detach(&self) -> Tensor {
@@ -601,6 +605,16 @@ impl TensorImpl {
                 let ptr = cpu.data.as_ref().as_ptr() as *const f32;
                 let ptr = ptr.add(self.storage_offset as usize);
                 let numel = self.numel() as usize;
+                // Unconditional bounds validation to prevent UB in release builds
+                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
+                assert!(
+                    self.storage_offset as usize + numel <= storage_len,
+                    "as_f32_slice: offset + numel exceeds storage bounds. \
+                     offset={}, numel={}, storage_len={}",
+                    self.storage_offset,
+                    numel,
+                    storage_len
+                );
                 std::slice::from_raw_parts(ptr, numel)
             },
             Storage::Wgpu(_) => {
@@ -612,7 +626,21 @@ impl TensorImpl {
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
         let ptr = self.data_ptr_f32_mut();
         let numel = self.numel() as usize;
-        unsafe { std::slice::from_raw_parts_mut(ptr, numel) }
+        unsafe {
+            // Unconditional bounds validation to prevent UB in release builds
+            if let Storage::Cpu(cpu) = self.storage.as_ref() {
+                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
+                assert!(
+                    self.storage_offset as usize + numel <= storage_len,
+                    "as_f32_slice_mut: offset + numel exceeds storage bounds. \
+                     offset={}, numel={}, storage_len={}",
+                    self.storage_offset,
+                    numel,
+                    storage_len
+                );
+            }
+            std::slice::from_raw_parts_mut(ptr, numel)
+        }
     }
 
     /// Check if storage is on GPU
@@ -1459,13 +1487,16 @@ impl Tensor {
             Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),
             Storage::Wgpu(gpu) => {
                 // Tensor is on a different GPU device, need to move it
-                // First read from the source GPU, then write to target GPU
                 use crate::kernels::gpu::get_context;
                 let src_ctx = get_context(gpu.device_id);
                 let f32_data = src_ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
                 let byte_data = bytemuck::cast_slice(&f32_data);
 
-                let dst_ctx = get_context(device_id);
+                let Some(dst_ctx) = crate::kernels::gpu::try_get_context(device_id) else {
+                    // Target GPU unavailable, return data on CPU
+                    let cpu_data: Vec<f32> = bytemuck::cast_slice(&f32_data).to_vec();
+                    return Tensor::from_vec(cpu_data, self.shape().to_vec());
+                };
                 let buffer = dst_ctx.create_gpu_buffer_from_bytes(byte_data, "to_gpu");
 
                 let storage = Arc::new(Storage::Wgpu(GpuStorage {
@@ -1491,9 +1522,10 @@ impl Tensor {
                 let cpu_data = self.as_f32_slice().to_vec();
                 let dtype = self.inner.dtype;
 
-                // Create GPU tensor
-                use crate::kernels::gpu::get_context;
-                let ctx = get_context(device_id);
+                // Try to create GPU tensor; fall back to CPU if unavailable
+                let Some(ctx) = crate::kernels::gpu::try_get_context(device_id) else {
+                    return self.clone();
+                };
                 let buffer = ctx.create_gpu_buffer_from_data(&cpu_data, "to_gpu");
 
                 let storage = Arc::new(Storage::Wgpu(GpuStorage {
@@ -1533,7 +1565,7 @@ impl Tensor {
                 let inner = Arc::make_mut(&mut output.inner);
                 let storage = Arc::make_mut(&mut inner.storage);
                 let Storage::Cpu(cpu_storage) = storage else {
-                    panic!()
+                    unreachable!("add fast path only runs when both tensors are on CPU")
                 };
                 let out_data = Arc::make_mut(&mut cpu_storage.data);
                 let a_ptr = self.data_ptr_f32();
@@ -2080,7 +2112,7 @@ impl Tensor {
                 let inner = Arc::make_mut(&mut output.inner);
                 let storage = Arc::make_mut(&mut inner.storage);
                 let Storage::Cpu(cpu_storage) = storage else {
-                    panic!()
+                    unreachable!("mul fast path only runs when both tensors are on CPU")
                 };
                 let out_data = Arc::make_mut(&mut cpu_storage.data);
                 let a_ptr = self.data_ptr_f32();
@@ -2239,7 +2271,7 @@ impl Tensor {
             let output_inner = Arc::make_mut(&mut output.inner);
             let output_storage = Arc::make_mut(&mut output_inner.storage);
             let Storage::Cpu(cpu_storage) = output_storage else {
-                panic!()
+                unreachable!("matmul_fast_2d always allocates CPU output")
             };
             let out_data = Arc::make_mut(&mut cpu_storage.data);
 
