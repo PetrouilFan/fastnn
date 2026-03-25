@@ -25,11 +25,34 @@ pub fn get_context(device_id: usize) -> Arc<GpuContext> {
             return Arc::clone(ctx);
         }
     }
-    let ctx = Arc::new(GpuContext::new(device_id));
+    let ctx = GpuContext::new(device_id).unwrap_or_else(|e| {
+        panic!(
+            "Failed to initialize GPU device {}: {}. \
+             Ensure a compatible GPU driver (Vulkan/Metal/DX12) is installed. \
+             Use Device::Cpu for CPU-only inference.",
+            device_id, e
+        )
+    });
+    let ctx = Arc::new(ctx);
     get_gpu_contexts()
         .write()
         .insert(device_id, Arc::clone(&ctx));
     ctx
+}
+
+/// Try to get a GPU context, returning None if GPU is unavailable.
+pub fn try_get_context(device_id: usize) -> Option<Arc<GpuContext>> {
+    {
+        let contexts = get_gpu_contexts().read();
+        if let Some(ctx) = contexts.get(&device_id) {
+            return Some(Arc::clone(ctx));
+        }
+    }
+    let ctx = Arc::new(GpuContext::new(device_id).ok()?);
+    get_gpu_contexts()
+        .write()
+        .insert(device_id, Arc::clone(&ctx));
+    Some(ctx)
 }
 
 pub struct GpuContext {
@@ -48,7 +71,10 @@ pub struct GpuContext {
     staging_buffer_size: AtomicUsize,
     // WGSL shader compilation cache directory
     shader_cache_dir: PathBuf,
-    // Command buffer batching support (placeholder for future implementation)
+    // Bind group cache - Key: (pipeline_name, buffer_ids_hash), Value: bind group
+    // Limited to prevent unbounded memory growth
+    bind_group_cache: RwLock<HashMap<u64, wgpu::BindGroup>>,
+    bind_group_cache_max_size: usize,
 }
 
 impl Clone for GpuContext {
@@ -65,20 +91,26 @@ impl Clone for GpuContext {
             staging_buffer_gpu_to_cpu: RwLock::new(None),
             staging_buffer_size: AtomicUsize::new(0),
             shader_cache_dir: self.shader_cache_dir.clone(),
+            bind_group_cache: RwLock::new(HashMap::new()),
+            bind_group_cache_max_size: self.bind_group_cache_max_size,
         }
     }
 }
 
 #[allow(dead_code)]
 impl GpuContext {
-    fn new(device_id: usize) -> Self {
+    fn new(device_id: usize) -> Result<Self, String> {
         let instance = wgpu::Instance::default();
         let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
 
         let adapter = if device_id < adapters.len() {
             adapters.swap_remove(device_id)
         } else {
-            panic!("No GPU adapter found for device_id: {}", device_id);
+            return Err(format!(
+                "No GPU adapter found for device_id {}. Available adapters: {}",
+                device_id,
+                adapters.len()
+            ));
         };
 
         let (device, queue) = pollster::block_on(adapter.request_device(
@@ -90,13 +122,13 @@ impl GpuContext {
             },
             None,
         ))
-        .expect("Failed to request GPU device");
+        .map_err(|e| format!("Failed to request GPU device: {}. Ensure a valid WGPU backend (Vulkan/Metal/DX12) is available.", e))?;
 
         // Initialize shader cache directory
         let shader_cache_dir = Self::get_shader_cache_dir();
         fs::create_dir_all(&shader_cache_dir).ok();
 
-        Self {
+        Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
             device_id,
@@ -108,7 +140,9 @@ impl GpuContext {
             staging_buffer_gpu_to_cpu: RwLock::new(None),
             staging_buffer_size: AtomicUsize::new(0),
             shader_cache_dir,
-        }
+            bind_group_cache: RwLock::new(HashMap::new()),
+            bind_group_cache_max_size: 256,
+        })
     }
 
     /// Get a reference to the device.
@@ -129,12 +163,22 @@ impl GpuContext {
         aligned_size.trailing_zeros()
     }
 
-    /// Acquire a buffer - allocate new one
-    /// Pooling is disabled for now to avoid zeroing issues
+    /// Acquire a buffer - first try to reuse from pool, then allocate new
     pub fn acquire_buffer(&self, size: usize) -> wgpu::Buffer {
-        // Round up to power of 2 for better alignment
-        let aligned_size = size.next_power_of_two();
+        let bucket = Self::get_bucket_index(size);
+        let aligned_size = 1 << bucket;
 
+        // Try to get from pool first
+        {
+            let mut pool = self.buffer_pool.write();
+            if let Some(buffers) = pool.get_mut(&bucket) {
+                if let Some(buffer) = buffers.pop() {
+                    return buffer;
+                }
+            }
+        }
+
+        // Pool miss - allocate new buffer
         self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pooled_buffer"),
             size: aligned_size as u64,
@@ -171,6 +215,76 @@ impl GpuContext {
     pub fn clear_buffer_pool(&self) {
         let mut pool = self.buffer_pool.write();
         pool.clear();
+    }
+
+    /// Create a hash key for bind group caching
+    /// Combines pipeline name and buffer addresses into a single hash
+    fn create_bind_group_hash(pipeline_name: &str, entries: &[wgpu::BindGroupEntry<'_>]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pipeline_name.hash(&mut hasher);
+        // Hash the buffer pointers as unique identifiers
+        for entry in entries {
+            match &entry.resource {
+                wgpu::BindingResource::Buffer(buf) => {
+                    // Use the buffer reference address as a unique identifier
+                    let ptr = &*buf.buffer as *const _ as u64;
+                    ptr.hash(&mut hasher);
+                    buf.offset.hash(&mut hasher);
+                    buf.size.hash(&mut hasher);
+                }
+                _ => {}
+            }
+            entry.binding.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Get or create a cached bind group
+    /// This reduces the overhead of creating bind groups for repeated operations
+    pub fn get_or_create_bind_group(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        pipeline_name: &str,
+        entries: &[wgpu::BindGroupEntry<'_>],
+    ) -> wgpu::BindGroup {
+        let hash_key = Self::create_bind_group_hash(pipeline_name, entries);
+
+        // Check cache first
+        {
+            let cache = self.bind_group_cache.read();
+            if let Some(bind_group) = cache.get(&hash_key) {
+                return bind_group.clone();
+            }
+        }
+
+        // Cache miss - create new bind group
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(pipeline_name),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries,
+        });
+
+        // Store in cache (with size limit)
+        {
+            let mut cache = self.bind_group_cache.write();
+            if cache.len() >= self.bind_group_cache_max_size {
+                // Clear oldest entries (simple strategy: clear half)
+                let keys_to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+                for key in keys_to_remove {
+                    cache.remove(&key);
+                }
+            }
+            cache.insert(hash_key, bind_group.clone());
+        }
+
+        bind_group
+    }
+
+    /// Clear bind group cache
+    pub fn clear_bind_group_cache(&self) {
+        let mut cache = self.bind_group_cache.write();
+        cache.clear();
     }
 
     /// Ensure persistent staging buffer is large enough for given size
@@ -239,10 +353,10 @@ impl GpuContext {
         });
 
         self.device.poll(wgpu::Maintain::Wait);
-        receiver
+        let result = receiver
             .recv()
-            .unwrap()
-            .expect("Failed to map staging buffer for write");
+            .expect("GPU staging buffer mapping channel closed unexpectedly");
+        result.expect("Failed to map staging buffer for write - GPU VRAM may be exhausted. Consider reducing batch size or freeing unused tensors");
 
         // Copy data to staging buffer
         {
@@ -479,10 +593,10 @@ impl GpuContext {
         });
 
         self.device.poll(wgpu::Maintain::Wait);
-        receiver
+        let result = receiver
             .recv()
-            .unwrap()
-            .expect("Failed to map staging buffer");
+            .expect("GPU staging buffer mapping channel closed unexpectedly");
+        result.expect("Failed to map staging buffer for read - GPU VRAM may be exhausted. Consider reducing batch size or freeing unused tensors");
 
         let data = slice.get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
@@ -1084,10 +1198,11 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
 
     let pipeline = ctx.create_pipeline(name, shader, input.dtype());
 
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(name),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
+    // Use cached bind group for better performance
+    let bind_group = ctx.get_or_create_bind_group(
+        &pipeline,
+        name,
+        &[
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: input_buffer.as_entire_binding(),
@@ -1097,7 +1212,7 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
                 resource: gpu_output.buffer.as_entire_binding(),
             },
         ],
-    });
+    );
 
     let mut encoder = ctx
         .device
@@ -1171,10 +1286,11 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
 
     let pipeline = ctx.create_pipeline(name, shader, a.dtype());
 
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(name),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
+    // Use cached bind group for better performance
+    let bind_group = ctx.get_or_create_bind_group(
+        &pipeline,
+        name,
+        &[
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: a_buffer.as_entire_binding(),
@@ -1188,7 +1304,7 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
                 resource: gpu_output.buffer.as_entire_binding(),
             },
         ],
-    });
+    );
 
     let mut encoder = ctx
         .device

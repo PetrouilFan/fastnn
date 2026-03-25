@@ -20,6 +20,54 @@ pub fn no_grad_exit() {
     NO_GRAD_GLOBAL.store(false, Ordering::Release);
 }
 
+/// RAII guard for disabling gradient computation.
+/// When this guard is dropped, the previous gradient state is restored.
+/// This is useful for validation/inference to save memory and computation.
+///
+/// # Example
+/// ```ignore
+/// let _guard = NoGradGuard::new();
+/// // All tensor operations here won't build computation graph
+/// let output = model.forward(&input);
+/// ```
+pub struct NoGradGuard {
+    prev_state: bool,
+}
+
+impl NoGradGuard {
+    /// Create a new NoGradGuard that disables gradient computation.
+    /// The previous state is saved and will be restored when the guard is dropped.
+    pub fn new() -> Self {
+        let prev_state = is_grad_enabled();
+        no_grad_enter();
+        NoGradGuard { prev_state }
+    }
+}
+
+impl Drop for NoGradGuard {
+    fn drop(&mut self) {
+        if self.prev_state {
+            no_grad_exit();
+        }
+    }
+}
+
+/// Convenience function to run a closure with gradient computation disabled.
+///
+/// # Example
+/// ```ignore
+/// let output = no_grad(|| {
+///     model.forward(&input)
+/// });
+/// ```
+pub fn no_grad<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = NoGradGuard::new();
+    f()
+}
+
 pub struct AutogradMeta {
     pub requires_grad: bool,
     pub grad: Option<Tensor>,
@@ -71,7 +119,9 @@ pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
 
 #[allow(clippy::len_zero)]
 pub trait Node: Send + Sync {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>>;
+    /// Apply backward pass. Takes ownership of grad_outputs to avoid cloning.
+    /// Implementations should consume gradients instead of cloning them.
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>>;
     fn next_edges(&self) -> &[Edge];
     fn num_inputs(&self) -> usize;
     fn name(&self) -> &str;
@@ -100,8 +150,8 @@ impl LinearBackward {
 }
 
 impl Node for LinearBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad_output = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
 
         let input = &self.inputs[0];
         let weight = &self.inputs[1];
@@ -155,8 +205,8 @@ impl AddBackward {
 }
 
 impl Node for AddBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
@@ -247,8 +297,8 @@ impl UnsqueezeBackward {
 }
 
 impl Node for UnsqueezeBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let grad_squeezed = grad.squeeze(Some(self.dim));
         vec![Some(grad_squeezed)]
     }
@@ -283,8 +333,8 @@ impl SubBackward {
 }
 
 impl Node for SubBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let neg_grad = grad.neg();
         vec![Some(grad), Some(neg_grad)]
     }
@@ -319,8 +369,8 @@ impl MulBackward {
 }
 
 impl Node for MulBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
@@ -391,8 +441,8 @@ impl DivBackward {
 }
 
 impl Node for DivBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
@@ -434,8 +484,10 @@ impl NegBackward {
 }
 
 impl Node for NegBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![Some(grad_outputs[0].clone().unwrap().neg())]
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        vec![Some(
+            grad_outputs.into_iter().next().flatten().unwrap().neg(),
+        )]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -467,8 +519,8 @@ impl ReluBackward {
 }
 
 impl Node for ReluBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let mask = self.input.gt_scalar(0.0);
         let result = grad.mul(&mask);
         vec![Some(result)]
@@ -506,8 +558,8 @@ impl MatmulBackward {
 }
 
 impl Node for MatmulBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
@@ -574,8 +626,8 @@ impl SumBackward {
 }
 
 impl Node for SumBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = match grad_outputs[0].clone() {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = match grad_outputs.into_iter().next().flatten() {
             Some(g) => g,
             None => {
                 return vec![None];
@@ -636,15 +688,12 @@ impl MeanBackward {
 }
 
 impl Node for MeanBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let scale = 1.0 / self.numel as f32;
 
         let shape = self.input.shape();
-        let grad_shape = grad_outputs[0]
-            .as_ref()
-            .map(|g| g.shape())
-            .unwrap_or_default();
+        let grad_shape = grad.shape();
 
         let result = if grad_shape.is_empty() {
             // Scalar gradient: create ones and multiply
@@ -698,8 +747,8 @@ impl ExpBackward {
 }
 
 impl Node for ExpBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let exp_x = self.input.exp();
         vec![Some(grad.mul(&exp_x))]
     }
@@ -739,9 +788,13 @@ impl LogBackward {
 }
 
 impl Node for LogBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
-        let inv_x = self.one.div(&self.input);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+        // Clamp input to prevent ±inf gradients on dead ReLU -> log chains
+        // Use a small epsilon to avoid division by zero
+        let eps = Tensor::from_scalar(1e-8);
+        let input_clamped = self.input.add(&eps);
+        let inv_x = self.one.div(&input_clamped);
         vec![Some(grad.mul(&inv_x))]
     }
 
@@ -780,8 +833,8 @@ impl SqrtBackward {
 }
 
 impl Node for SqrtBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let inv_sqrt_x = self.half.div(&self.input.sqrt());
         vec![Some(grad.mul(&inv_sqrt_x))]
     }
@@ -816,8 +869,8 @@ impl AbsBackward {
 }
 
 impl Node for AbsBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let sign = self.input.sign();
         vec![Some(grad.mul(&sign))]
     }
@@ -865,8 +918,8 @@ impl GeluBackward {
 }
 
 impl Node for GeluBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let x = &self.input;
 
         let x2 = x.mul(x);
@@ -914,8 +967,8 @@ impl SigmoidBackward {
 }
 
 impl Node for SigmoidBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let sigmoid_x = self.input.sigmoid();
         // derivative = sigmoid * (1 - sigmoid)
         // Avoid allocating scalar tensor for 1.0: compute directly
@@ -968,8 +1021,8 @@ impl TanhBackward {
 }
 
 impl Node for TanhBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let tanh_x = self.input.tanh();
         // derivative = 1 - tanh^2
         // Avoid allocating scalar tensor for 1.0: compute directly
@@ -1022,8 +1075,8 @@ impl SiLUBackward {
 }
 
 impl Node for SiLUBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let x = &self.input;
         let s = x.sigmoid();
         // SiLU derivative = s * (1 + x * (1 - s))
@@ -1079,8 +1132,8 @@ impl SoftmaxBackward {
 }
 
 impl Node for SoftmaxBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let s = &self.output;
         let dim_i32 = self.dim as i32;
         let dot = grad.mul(s).sum(dim_i32, true);
@@ -1119,8 +1172,8 @@ impl LogSoftmaxBackward {
 }
 
 impl Node for LogSoftmaxBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let softmax = self.output.exp();
         let dim_i32 = self.dim as i32;
         let grad_sum = grad.sum(dim_i32, true);
@@ -1179,8 +1232,8 @@ impl Conv2dBackward {
 }
 
 impl Node for Conv2dBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let grad_input = grad.clone();
         let grad_weight = grad.clone();
         vec![Some(grad_input), Some(grad_weight)]
@@ -1237,8 +1290,8 @@ impl LayerNormBackward {
 }
 
 impl Node for LayerNormBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let input = &self.inputs[0];
         let weight = &self.inputs[1];
         let _bias = &self.inputs[2];
@@ -1320,8 +1373,8 @@ impl EmbeddingBackward {
 }
 
 impl Node for EmbeddingBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        vec![grad_outputs[0].clone()]
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        vec![grad_outputs.into_iter().next().flatten()]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -1360,8 +1413,8 @@ impl CrossEntropyBackward {
 }
 
 impl Node for CrossEntropyBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad_output_tensor = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad_output_tensor = grad_outputs.into_iter().next().flatten().unwrap();
         let grad_out = grad_output_tensor.item();
 
         let logits = &self.logits;
@@ -1439,8 +1492,8 @@ impl MSELossBackward {
 }
 
 impl Node for MSELossBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let diff = self.pred.sub(&self.target);
 
         let grad_loss = match self.reduction.as_str() {
@@ -1487,8 +1540,8 @@ impl ViewBackward {
 }
 
 impl Node for ViewBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let shape = self.input.shape();
         vec![Some(grad.reshape(shape))]
     }
@@ -1541,8 +1594,8 @@ impl SliceBackward {
 }
 
 impl Node for SliceBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
 
         let input_shape = self.input.shape();
         let mut grad_input = Tensor::zeros(
@@ -1658,7 +1711,7 @@ impl CheckpointNode {
 
 impl Node for CheckpointNode {
     #[allow(clippy::unused_async)]
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         // For checkpointing, we need to recompute the forward pass
         // to get the intermediate activations needed for backward
 
@@ -1676,7 +1729,7 @@ impl Node for CheckpointNode {
         // Return gradients for each input based on grad_outputs
         // Note: This is a simplified implementation. In a full implementation,
         // we would need to properly compute gradients through the recomputed graph.
-        grad_outputs.to_vec()
+        grad_outputs
     }
 
     fn next_edges(&self) -> &[Edge] {

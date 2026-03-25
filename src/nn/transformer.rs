@@ -38,9 +38,9 @@ impl TransformerBlock {
         // Fused attention has overhead for small d_model but benefits larger models
         let use_fused = use_fused_attention && d_model >= 128;
         let self_attn = if use_fused {
-            MultiHeadAttention::new_fused(d_model, num_heads, dropout_p)
+            MultiHeadAttention::new_fused(d_model, num_heads, dropout_p, false)
         } else {
-            MultiHeadAttention::new(d_model, num_heads, dropout_p)
+            MultiHeadAttention::new_unfused(d_model, num_heads, dropout_p, false)
         };
 
         let norm1 = LayerNorm::new(d_model, 1e-5);
