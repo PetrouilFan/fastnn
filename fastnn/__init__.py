@@ -13,21 +13,21 @@ OptimizerError = _core.OptimizerError
 IoError = _core.IoError
 CudaError = _core.CudaError
 
-from fastnn.core import (
+from fastnn.core import (  # noqa: E402
     no_grad,
     set_seed,
     set_num_threads,
     set_default_device,
     checkpoint,
 )
-from fastnn.data import DataLoader, Dataset, TensorDataset
-from fastnn.callbacks import (
+from fastnn.data import DataLoader, Dataset, TensorDataset  # noqa: E402
+from fastnn.callbacks import (  # noqa: E402
     EarlyStopping,
     ModelCheckpoint,
     LearningRateScheduler,
     CSVLogger,
 )
-from fastnn.parallel import DataParallel
+from fastnn.parallel import DataParallel  # noqa: E402
 
 __all__ = [
     "no_grad",
