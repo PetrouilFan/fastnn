@@ -1,23 +1,33 @@
 import numpy as np
 import fastnn._core as _core
 
-__version__ = "0.5.0"
+__version__ = "0.8.0"
 
-from fastnn.core import (
+# Exception hierarchy - imported from _core (Rust side)
+FastnnError = _core.FastnnError
+ShapeError = _core.ShapeError
+DtypeError = _core.DtypeError
+DeviceError = _core.DeviceError
+AutogradError = _core.AutogradError
+OptimizerError = _core.OptimizerError
+IoError = _core.IoError
+CudaError = _core.CudaError
+
+from fastnn.core import (  # noqa: E402
     no_grad,
     set_seed,
     set_num_threads,
     set_default_device,
     checkpoint,
 )
-from fastnn.data import DataLoader, Dataset, TensorDataset
-from fastnn.callbacks import (
+from fastnn.data import DataLoader, Dataset, TensorDataset  # noqa: E402
+from fastnn.callbacks import (  # noqa: E402
     EarlyStopping,
     ModelCheckpoint,
     LearningRateScheduler,
     CSVLogger,
 )
-from fastnn.parallel import DataParallel
+from fastnn.parallel import DataParallel  # noqa: E402
 
 __all__ = [
     "no_grad",
@@ -34,6 +44,15 @@ __all__ = [
     "CSVLogger",
     "DataParallel",
     "models",
+    # Exception hierarchy
+    "FastnnError",
+    "ShapeError",
+    "DtypeError",
+    "DeviceError",
+    "AutogradError",
+    "OptimizerError",
+    "IoError",
+    "CudaError",
 ]
 
 
@@ -43,6 +62,13 @@ def __getattr__(name):
 
         return fastnn.models
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Ensure 'models' is resolvable for 'from fastnn import *' across Python versions
+try:
+    import fastnn.models as models
+except ImportError:
+    pass
 
 
 def _flatten(nested):

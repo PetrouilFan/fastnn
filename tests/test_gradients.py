@@ -510,7 +510,7 @@ if __name__ == "__main__":
             test_fn()
             print(f"  PASS: {name}")
             passed += 1
-        except Exception as e:
+        except (AssertionError, ValueError, TypeError, RuntimeError) as e:
             print(f"  FAIL: {name} - {e}")
             failed += 1
 
