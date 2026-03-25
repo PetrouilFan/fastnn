@@ -1,8 +1,11 @@
 import torch
 import numpy as np
 import json
+import logging
 import struct
 from typing import Any, Tuple, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     from torchvision.models.resnet import BasicBlock
@@ -526,8 +529,11 @@ def export_pytorch_model(
             # Write raw data
             f.write(arr.tobytes())
 
-    print(
-        f"Exported PyTorch model to {path} with {len(layers)} layers and {len(parameters)} parameters."
+    logger.info(
+        "Exported PyTorch model to %s with %d layers and %d parameters.",
+        path,
+        len(layers),
+        len(parameters),
     )
 
 
