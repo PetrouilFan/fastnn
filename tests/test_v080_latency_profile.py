@@ -57,7 +57,7 @@ def profile_control_loop(
 
     Returns dict with latency statistics and pass/fail status.
     """
-    print(f"=== v0.8.0 Latency Profiling ===")
+    print("=== v0.8.0 Latency Profiling ===")
     print(f"  obs_dim={obs_dim}, action_dim={action_dim}")
     print(f"  device={device}, budget={control_budget_ms}ms")
     print(f"  iterations={num_iterations}, warmup={warmup_iterations}")
@@ -84,7 +84,7 @@ def profile_control_loop(
             # --- tight loop start ---
             obs_buf_np = np.from_dlpack(obs_buf)
             obs_buf_np[:] = get_sensor_reading(obs_dim)
-            action = run_policy(policy, obs_buf)
+            _ = run_policy(policy, obs_buf)
             # --- tight loop end ---
 
             t1 = time.perf_counter_ns()

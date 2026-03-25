@@ -27,8 +27,6 @@ def test_adamw_soak():
     opt = fastnn.PyAdamW([param1, param2, param3], lr=1e-3, weight_decay=0.01)
     opt.mark_biases_no_decay()
 
-    target = fastnn.zeros([64, 64])
-
     for step in range(10_000_000):
         # Simple loss: distance from zero
         loss = param1.sum() * 0.0001
