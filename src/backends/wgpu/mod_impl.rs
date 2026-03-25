@@ -240,10 +240,13 @@ impl WgpuContext {
         let buffer_slice = staging.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
+            let _ = sender.send(result);
         });
         self.device.poll(wgpu::Maintain::Wait);
-        receiver.recv().unwrap().unwrap();
+        let result = receiver
+            .recv()
+            .expect("GPU buffer mapping channel closed unexpectedly");
+        result.expect("Failed to map GPU buffer for read");
 
         let data = buffer_slice.get_mapped_range();
         data.to_vec()
@@ -461,7 +464,10 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
             let _ = sender.send(result);
         });
         ctx.device().poll(wgpu::Maintain::Wait);
-        receiver.recv().unwrap().expect("Failed to map staging buffer");
+        let result = receiver
+            .recv()
+            .expect("GPU staging buffer mapping channel closed unexpectedly");
+        result.expect("Failed to map staging buffer");
         let data = slice.get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
         drop(data);

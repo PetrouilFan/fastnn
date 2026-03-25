@@ -31,6 +31,7 @@ use dispatcher::list_registered_ops as dispatcher_list_ops;
 use nn::Module;
 use optim::Optimizer;
 use parking_lot::RwLock;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
@@ -39,6 +40,16 @@ use rand::Rng;
 use std::sync::{Arc, Mutex, OnceLock};
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
 use tensor::Tensor;
+
+// Custom exception hierarchy for fastnn
+pyo3::create_exception!(fastnn, FastnnError, PyRuntimeError, "Base exception for fastnn operations.");
+pyo3::create_exception!(fastnn, ShapeError, FastnnError, "Shape mismatch or invalid shape for operation.");
+pyo3::create_exception!(fastnn, DtypeError, FastnnError, "Data type mismatch or unsupported dtype.");
+pyo3::create_exception!(fastnn, DeviceError, FastnnError, "Device-related error (e.g., GPU unavailable).");
+pyo3::create_exception!(fastnn, AutogradError, FastnnError, "Error during autograd/backward pass.");
+pyo3::create_exception!(fastnn, OptimizerError, FastnnError, "Error in optimizer step.");
+pyo3::create_exception!(fastnn, IoError, FastnnError, "Error during serialization/deserialization.");
+pyo3::create_exception!(fastnn, CudaError, FastnnError, "CUDA/GPU computation error.");
 
 // Thread-local default device storage
 static DEFAULT_DEVICE: OnceLock<RwLock<Device>> = OnceLock::new();
@@ -64,6 +75,19 @@ fn set_default_device_internal(device: Device) {
 #[derive(Clone)]
 struct PyTensor {
     inner: Tensor,
+}
+
+/// Destructor for DLPack PyCapsule - called when the capsule is garbage collected
+unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+    use crate::io::dlpack::DLManagedTensor;
+    
+    let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, "dltensor\0".as_ptr() as *const i8);
+    if !ptr.is_null() {
+        let managed = ptr as *mut DLManagedTensor;
+        if let Some(deleter) = (*managed).deleter {
+            deleter(managed);
+        }
+    }
 }
 
 impl PyTensor {
@@ -126,6 +150,38 @@ impl PyTensor {
         self.inner.to_numpy()
     }
 
+    /// DLPack protocol for zero-copy array exchange with NumPy, PyTorch, etc.
+    /// Returns a PyCapsule wrapping a DLManagedTensor.
+    fn __dlpack__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use crate::io::dlpack::to_dlpack;
+        let ptr = to_dlpack(&self.inner);
+        // Create PyCapsule with the DLPack tensor
+        // The capsule name must be "dltensor" per DLPack spec
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                ptr as *mut std::ffi::c_void,
+                "dltensor\0".as_ptr() as *const i8,
+                Some(dlpack_capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Failed to create DLPack capsule",
+            ));
+        }
+        Ok(unsafe { Py::from_owned_ptr(py, capsule) })
+    }
+
+    /// DLPack device query protocol
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // (device_type, device_id) per DLPack spec
+        // 1 = kDLCPU
+        match self.inner.device() {
+            crate::storage::Device::Cpu => (1, 0),
+            crate::storage::Device::Wgpu(_) => (1, 0), // Report as CPU for DLPack compatibility
+        }
+    }
+
     fn debug_strides(&self) -> Vec<i64> {
         self.inner.strides()
     }
@@ -162,9 +218,10 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (grad=None))]
-    fn backward(&self, grad: Option<PyTensor>) {
+    fn backward(&self, py: Python<'_>, grad: Option<PyTensor>) {
+        let inner = self.inner.clone();
         let grad_tensor = grad.map(|g| g.inner);
-        crate::autograd::backward(&self.inner, grad_tensor);
+        py.detach(move || crate::autograd::backward(&inner, grad_tensor));
     }
 
     #[pyo3(signature = (grad))]
@@ -503,8 +560,10 @@ fn div(a: &PyTensor, b: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.matmul(&b.inner))
+fn matmul(py: Python<'_>, a: &PyTensor, b: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    let b_inner = b.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.matmul(&b_inner)))
 }
 
 #[pyfunction]
@@ -576,13 +635,15 @@ fn log(a: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn sqrt(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.sqrt())
+fn sqrt(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.sqrt()))
 }
 
 #[pyfunction]
-fn relu(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.relu())
+fn relu(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.relu()))
 }
 
 #[pyfunction]
@@ -618,28 +679,33 @@ fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyT
 }
 
 #[pyfunction]
-fn gelu(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.gelu())
+fn gelu(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.gelu()))
 }
 
 #[pyfunction]
-fn sigmoid(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.sigmoid())
+fn sigmoid(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.sigmoid()))
 }
 
 #[pyfunction]
-fn tanh(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.tanh())
+fn tanh(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.tanh()))
 }
 
 #[pyfunction]
-fn silu(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.silu())
+fn silu(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.silu()))
 }
 
 #[pyfunction]
-fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.softmax(dim))
+fn softmax(py: Python<'_>, a: &PyTensor, dim: i32) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.softmax(dim)))
 }
 
 #[pyfunction]
@@ -1395,7 +1461,7 @@ impl ReLU {
     }
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
-        relu(x)
+        PyTensor::from_tensor(x.inner.relu())
     }
 }
 
@@ -1410,7 +1476,7 @@ impl Gelu {
     }
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
-        gelu(x)
+        PyTensor::from_tensor(x.inner.gelu())
     }
 }
 
@@ -1425,7 +1491,7 @@ impl Sigmoid {
     }
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
-        sigmoid(x)
+        PyTensor::from_tensor(x.inner.sigmoid())
     }
 }
 
@@ -1440,7 +1506,7 @@ impl Tanh {
     }
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
-        tanh(x)
+        PyTensor::from_tensor(x.inner.tanh())
     }
 }
 
@@ -1455,7 +1521,7 @@ impl SiLU {
     }
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
-        silu(x)
+        PyTensor::from_tensor(x.inner.silu())
     }
 }
 
@@ -1721,6 +1787,17 @@ fn load_model(path: String, _model_class: Option<Py<PyAny>>) {
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
+
+    // Register exception hierarchy
+    m.add("FastnnError", py.get_type::<FastnnError>())?;
+    m.add("ShapeError", py.get_type::<ShapeError>())?;
+    m.add("DtypeError", py.get_type::<DtypeError>())?;
+    m.add("DeviceError", py.get_type::<DeviceError>())?;
+    m.add("AutogradError", py.get_type::<AutogradError>())?;
+    m.add("OptimizerError", py.get_type::<OptimizerError>())?;
+    m.add("IoError", py.get_type::<IoError>())?;
+    m.add("CudaError", py.get_type::<CudaError>())?;
+
     m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_factory, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_from_list, py)?)?;

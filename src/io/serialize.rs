@@ -5,6 +5,11 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::mem::size_of;
 
+// Magic bytes to identify fastnn checkpoint format
+const MAGIC_BYTES: [u8; 4] = [0x46, 0x4E, 0x4E, 0x00]; // "FNN\0"
+                                                       // Format version for forward compatibility
+const FORMAT_VERSION: u32 = 1;
+
 #[allow(dead_code)]
 pub fn save_model(model: &dyn Module, path: &str) -> Result<(), String> {
     let params = model.named_parameters();
@@ -12,6 +17,16 @@ pub fn save_model(model: &dyn Module, path: &str) -> Result<(), String> {
     // Open file for writing
     let file = File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
     let mut writer = BufWriter::new(file);
+
+    // Write magic bytes for format identification
+    writer
+        .write_all(&MAGIC_BYTES)
+        .map_err(|e| format!("Failed to write magic bytes: {}", e))?;
+
+    // Write format version
+    writer
+        .write_all(&FORMAT_VERSION.to_le_bytes())
+        .map_err(|e| format!("Failed to write format version: {}", e))?;
 
     // Write number of parameters
     let num_params = params.len() as u64;
@@ -74,6 +89,31 @@ pub fn load_model(
     let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
     let mut reader = BufReader::new(file);
 
+    // Read and validate magic bytes
+    let mut magic_bytes = [0u8; 4];
+    reader
+        .read_exact(&mut magic_bytes)
+        .map_err(|e| format!("Failed to read magic bytes: {}", e))?;
+    if magic_bytes != MAGIC_BYTES {
+        return Err(format!(
+            "Invalid file format: expected magic bytes {:?}, got {:?}",
+            MAGIC_BYTES, magic_bytes
+        ));
+    }
+
+    // Read format version
+    let mut version_bytes = [0u8; 4];
+    reader
+        .read_exact(&mut version_bytes)
+        .map_err(|e| format!("Failed to read format version: {}", e))?;
+    let version = u32::from_le_bytes(version_bytes);
+    if version > FORMAT_VERSION {
+        return Err(format!(
+            "Unsupported format version: {}. Maximum supported version is {}",
+            version, FORMAT_VERSION
+        ));
+    }
+
     // Read number of parameters
     let mut num_params_bytes = [0u8; 8];
     reader
@@ -118,6 +158,15 @@ pub fn load_model(
             .read_exact(&mut data_len_bytes)
             .map_err(|e| format!("Failed to read data length: {}", e))?;
         let data_len = u64::from_le_bytes(data_len_bytes) as usize;
+
+        // Validate shape matches data length
+        let expected_numel: usize = shape.iter().map(|&d| d as usize).product();
+        if expected_numel != data_len {
+            return Err(format!(
+                "Shape mismatch for parameter '{}': shape {:?} expects {} elements, but data has {} elements",
+                name, shape, expected_numel, data_len
+            ));
+        }
 
         let mut data_bytes = vec![0u8; data_len * size_of::<f32>()];
         reader
