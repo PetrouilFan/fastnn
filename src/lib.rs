@@ -80,8 +80,8 @@ struct PyTensor {
 /// Destructor for DLPack PyCapsule - called when the capsule is garbage collected
 unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
     use crate::io::dlpack::DLManagedTensor;
-    
-    let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, "dltensor\0".as_ptr() as *const i8);
+
+    let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, c"dltensor".as_ptr());
     if !ptr.is_null() {
         let managed = ptr as *mut DLManagedTensor;
         if let Some(deleter) = (*managed).deleter {
@@ -160,7 +160,7 @@ impl PyTensor {
         let capsule = unsafe {
             pyo3::ffi::PyCapsule_New(
                 ptr as *mut std::ffi::c_void,
-                "dltensor\0".as_ptr() as *const i8,
+                c"dltensor".as_ptr(),
                 Some(dlpack_capsule_destructor),
             )
         };
@@ -169,7 +169,7 @@ impl PyTensor {
                 "Failed to create DLPack capsule",
             ));
         }
-        Ok(unsafe { Py::from_owned_ptr(py, capsule) })
+        Ok(unsafe { pyo3::Bound::from_owned_ptr(py, capsule).unbind() })
     }
 
     /// DLPack device query protocol

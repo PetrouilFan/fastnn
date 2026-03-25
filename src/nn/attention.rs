@@ -11,6 +11,7 @@ pub struct MultiHeadAttention {
     pub num_heads: i64,
     pub head_dim: i64,
     pub d_model: i64,
+    #[allow(dead_code)]
     pub dropout_p: f32,
     pub causal: bool,
     training: AtomicBool,
@@ -21,6 +22,7 @@ pub struct MultiHeadAttention {
 }
 
 impl MultiHeadAttention {
+    #[allow(dead_code)]
     pub fn new(d_model: i64, num_heads: i64, dropout_p: f32) -> Self {
         Self::new_fused(d_model, num_heads, dropout_p, false)
     }

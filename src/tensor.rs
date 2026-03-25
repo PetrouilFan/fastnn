@@ -628,19 +628,16 @@ impl TensorImpl {
         let numel = self.numel() as usize;
         unsafe {
             // Unconditional bounds validation to prevent UB in release builds
-            match self.storage.as_ref() {
-                Storage::Cpu(cpu) => {
-                    let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
-                    assert!(
-                        self.storage_offset as usize + numel <= storage_len,
-                        "as_f32_slice_mut: offset + numel exceeds storage bounds. \
-                         offset={}, numel={}, storage_len={}",
-                        self.storage_offset,
-                        numel,
-                        storage_len
-                    );
-                }
-                _ => {}
+            if let Storage::Cpu(cpu) = self.storage.as_ref() {
+                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
+                assert!(
+                    self.storage_offset as usize + numel <= storage_len,
+                    "as_f32_slice_mut: offset + numel exceeds storage bounds. \
+                     offset={}, numel={}, storage_len={}",
+                    self.storage_offset,
+                    numel,
+                    storage_len
+                );
             }
             std::slice::from_raw_parts_mut(ptr, numel)
         }
