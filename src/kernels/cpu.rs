@@ -1,8 +1,3 @@
-#![allow(
-    clippy::too_many_arguments,
-    clippy::needless_range_loop,
-    clippy::wildcard_in_or_patterns
-)]
 #![allow(unused_imports)]
 
 use crate::autograd::{AutogradMeta, Edge, Node};
@@ -17,10 +12,54 @@ use crate::tensor::Tensor;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+/// Enable DAZ (Denormals-Are-Zero) and FTZ (Flush-To-Zero) for the current thread.
+/// Subnormal floats are treated as zero, preventing catastrophic throughput drops
+/// when weights approach zero during training. Thread-local since MXCSR is per-thread.
+///
+/// SAFETY: This changes floating-point behavior for denormal numbers on the current thread.
+/// Denormals will be flushed to zero, which is acceptable for ML workloads where the
+/// precision loss from subnormals is negligible compared to the performance gain.
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
+#[inline(always)]
+#[allow(deprecated)]
+unsafe fn enable_daz_ftz() {
+    use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+    // FTZ = bit 15, DAZ = bit 6 of MXCSR
+    const FTZ: u32 = 1 << 15;
+    const DAZ: u32 = 1 << 6;
+    let mxcsr = _mm_getcsr();
+    _mm_setcsr(mxcsr | FTZ | DAZ);
+}
+
+// Thread-local guard ensuring DAZ/FTZ is enabled once per thread.
+// Called at the start of SIMD hot paths to guarantee correct CPU state.
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
+thread_local! {
+    static DAZ_FTZ_INIT: () = {
+        // SAFETY: Called once per thread during TLS initialization.
+        // Only affects denormal float handling, not normal arithmetic.
+        unsafe { enable_daz_ftz(); }
+    };
+}
+
+/// Ensure DAZ/FTZ is enabled on the current thread (no-op on non-x86).
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
+#[inline(always)]
+fn ensure_daz_ftz() {
+    DAZ_FTZ_INIT.with(|_| {});
+}
+
+#[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86"))))]
+#[inline(always)]
+fn ensure_daz_ftz() {}
+
 // Thread-local reusable scratch buffer for conv2d operations.
 // Avoids per-call heap allocations for im2col and GEMM output buffers.
-// Safe because conv2d forward is called synchronously per thread; rayon
-// parallelism inside operates on slices extracted BEFORE the parallel section.
+// SAFETY with rayon: Each rayon worker thread gets its own independent
+// CONV_SCRATCH instance. The RefCell is only borrowed within a single thread.
+// rayon's par_chunks_mut guarantees non-overlapping mutable slices, so no
+// aliasing occurs even when the borrow spans a parallel section. The buffer
+// is never shared across threads.
 thread_local! {
     static CONV_SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -40,11 +79,16 @@ use wide::f32x4;
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 use wide::f32x8;
 
-// Memory-bound elementwise ops: 64KB working set
-const CHUNK_MEMBOUND: usize = 1024 * 16; // 16K f32 = 64KB (L1 cache fit)
+// Memory-bound elementwise ops: 128KB working set (L2 cache friendly)
+const CHUNK_MEMBOUND: usize = 1024 * 32; // 32K f32 = 128KB
 
-// Compute-bound transcendental ops: smaller for better load balancing
-const CHUNK_TRANSCENDENTAL: usize = 1024 * 4; // 4K f32 = 16KB
+// Compute-bound transcendental ops: 32KB for better load balancing
+const CHUNK_TRANSCENDENTAL: usize = 1024 * 8; // 8K f32 = 32KB
+
+// Rayon parallel threshold: only parallelize above this size
+// Prevents overhead from parallelization on small tensors
+#[allow(dead_code)]
+const PARALLEL_THRESHOLD: usize = 1024 * 32; // 32K elements
 
 // Matrix ops: larger chunks for better BLAS-level locality
 // SIMD-only threshold (non-parallel)
@@ -5750,6 +5794,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 #[cfg(feature = "parallel")]
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn parallel_matmul(
     a_ptr: *const f32,
     b_ptr: *const f32,
@@ -5817,6 +5862,7 @@ fn parallel_matmul(
 ///   B tile: 64 × 8 × 4 bytes = 2 KB
 ///   Still well within L1.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn blocked_row_matmul(
     a_ptr: *const f32,
     b_ptr: *const f32,
@@ -5972,6 +6018,7 @@ fn blocked_row_matmul(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn small_matrix_matmul(
     a_ptr: *const f32,
     b_ptr: *const f32,
@@ -6012,6 +6059,7 @@ fn small_matrix_matmul(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn single_threaded_matmul(
     a_ptr: *const f32,
     b_ptr: *const f32,
@@ -6684,17 +6732,23 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
                         }
                     } else {
                         for j in 0..dim_size {
-                            unsafe { sum += *row_ptr.add(j); }
+                            unsafe {
+                                sum += *row_ptr.add(j);
+                            }
                         }
                     }
                 }
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for j in 0..dim_size {
-                        unsafe { sum += *row_ptr.add(j); }
+                        unsafe {
+                            sum += *row_ptr.add(j);
+                        }
                     }
                 }
-                unsafe { *(out_usize as *mut f32).add(row) = sum; }
+                unsafe {
+                    *(out_usize as *mut f32).add(row) = sum;
+                }
             });
             return Tensor::from_vec(result_data, vec![num_rows as i64]);
         }
@@ -6721,14 +6775,18 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
                 }
             } else {
                 for j in 0..dim_size {
-                    unsafe { sum += *row_ptr.add(j); }
+                    unsafe {
+                        sum += *row_ptr.add(j);
+                    }
                 }
             }
         }
         #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
         {
             for j in 0..dim_size {
-                unsafe { sum += *row_ptr.add(j); }
+                unsafe {
+                    sum += *row_ptr.add(j);
+                }
             }
         }
         result_data[row] = sum;
@@ -7716,7 +7774,7 @@ fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let total_loss: f32 = losses.iter().sum();
             vec![Tensor::from_scalar(total_loss / batch_size as f32)]
         }
-        "sum" | _ => {
+        _ => {
             let total_loss: f32 = losses.iter().sum();
             vec![Tensor::from_scalar(total_loss)]
         }
@@ -7828,6 +7886,7 @@ pub fn cross_entropy_backward_f32(
 }
 
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn im2col_kernel(
     x: &Tensor,
     kernel_height: usize,
@@ -7882,10 +7941,8 @@ fn im2col_kernel(
                                             let x_idx = ((n * in_channels + ic) * in_height + x_ih)
                                                 * in_width
                                                 + x_iw;
-                                            unsafe {
-                                                *col_p.add(col_row * col_cols + col_col) =
-                                                    *x_p.add(x_idx);
-                                            }
+                                            *col_p.add(col_row * col_cols + col_col) =
+                                                *x_p.add(x_idx);
                                         }
                                     }
                                 }
@@ -7962,6 +8019,7 @@ fn im2col_kernel(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[inline]
 fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
+    ensure_daz_ftz();
     let mut sum = 0.0f32;
     let mut i = 0;
 
@@ -8029,17 +8087,19 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
                 }
 
                 let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-                let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
-                sum += acc_arr.assume_init().iter().sum::<f32>();
+                let mut acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                _mm256_storeu_ps(acc_arr.as_mut_ptr() as *mut f32, acc);
+                // SAFETY: All 8 lanes are initialized by _mm256_storeu_ps above.
+                sum += acc_arr.assume_init_ref().iter().sum::<f32>();
 
                 while i + 8 <= len {
                     let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
                     let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
                     let prod = _mm256_mul_ps(a_vec, b_vec);
-                    let prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                    _mm256_storeu_ps(prod_arr.as_ptr() as *mut f32, prod);
-                    sum += prod_arr.assume_init().iter().sum::<f32>();
+                    let mut prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                    _mm256_storeu_ps(prod_arr.as_mut_ptr() as *mut f32, prod);
+                    // SAFETY: All 8 lanes are initialized by _mm256_storeu_ps above.
+                    sum += prod_arr.assume_init_ref().iter().sum::<f32>();
                     i += 8;
                 }
             }
@@ -8074,17 +8134,19 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
                 }
 
                 let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-                let acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                _mm256_storeu_ps(acc_arr.as_ptr() as *mut f32, acc);
-                sum += acc_arr.assume_init().iter().sum::<f32>();
+                let mut acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                _mm256_storeu_ps(acc_arr.as_mut_ptr() as *mut f32, acc);
+                // SAFETY: All 8 lanes are initialized by _mm256_storeu_ps above.
+                sum += acc_arr.assume_init_ref().iter().sum::<f32>();
 
                 while i + 8 <= len {
                     let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
                     let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
                     let prod = _mm256_mul_ps(a_vec, b_vec);
-                    let prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                    _mm256_storeu_ps(prod_arr.as_ptr() as *mut f32, prod);
-                    sum += prod_arr.assume_init().iter().sum::<f32>();
+                    let mut prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+                    _mm256_storeu_ps(prod_arr.as_mut_ptr() as *mut f32, prod);
+                    // SAFETY: All 8 lanes are initialized by _mm256_storeu_ps above.
+                    sum += prod_arr.assume_init_ref().iter().sum::<f32>();
                     i += 8;
                 }
             }
@@ -8207,6 +8269,7 @@ fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     )]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn conv2d_1x1(
     x: &Tensor,
     w: &Tensor,
@@ -8300,6 +8363,7 @@ fn conv2d_1x1(
 // Winograd F(2x2, 3x3) is disabled for now due to overhead from transform operations
 // The im2col + BLAS approach is faster for current use cases
 
+#[allow(clippy::too_many_arguments)]
 fn depthwise_conv2d(
     x: &Tensor,
     w: &Tensor,
@@ -8327,9 +8391,6 @@ fn depthwise_conv2d(
         out_width as i64,
     ];
     let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
-
-    let x_ptr = x.data_ptr() as *const f32;
-    let w_ptr = w.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -8433,6 +8494,7 @@ fn depthwise_conv2d(
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 fn conv2d_im2col(
     x: &Tensor,
     w: &Tensor,
@@ -8946,6 +9008,7 @@ fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 /// Fused layer norm backward: computes dX, dW, dB without intermediate tensors.
 /// Parallelized over outer dimensions (rows) for dX computation.
+#[allow(clippy::too_many_arguments)]
 pub fn layer_norm_backward_f32(
     grad_data: &[f32],
     x_hat_data: &[f32],
@@ -9271,6 +9334,7 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         n: usize,
     ) -> (f32, f32) {
         use std::arch::x86_64::*;
+        ensure_daz_ftz();
 
         if is_x86_feature_detected!("avx2") && n >= 8 {
             // AVX2 SIMD path - process 8 elements at a time
@@ -9290,14 +9354,17 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 sum_sq = _mm256_fmadd_ps(v, v, sum_sq);
             }
 
-            // Horizontal sum
-            let sum_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-            _mm256_storeu_ps(sum_arr.as_ptr() as *mut f32, sum);
-            let mut total_sum: f32 = sum_arr.assume_init().iter().sum();
+            // Horizontal sum - use f64 accumulator to avoid catastrophic cancellation
+            let mut sum_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+            _mm256_storeu_ps(sum_arr.as_mut_ptr() as *mut f32, sum);
+            // SAFETY: All 8 lanes are initialized by _mm256_storeu_ps above.
+            let mut total_sum: f64 = sum_arr.assume_init_ref().iter().map(|&x| x as f64).sum();
 
-            let sum_sq_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-            _mm256_storeu_ps(sum_sq_arr.as_ptr() as *mut f32, sum_sq);
-            let mut total_sum_sq: f32 = sum_sq_arr.assume_init().iter().sum();
+            let mut sum_sq_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+            _mm256_storeu_ps(sum_sq_arr.as_mut_ptr() as *mut f32, sum_sq);
+            // SAFETY: All 8 lanes are initialized by _mm256_storeu_ps above.
+            let mut total_sum_sq: f64 =
+                sum_sq_arr.assume_init_ref().iter().map(|&x| x as f64).sum();
 
             // Handle remainder
             let _remainder = n % 8;
@@ -9305,12 +9372,12 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             for i in start..n {
                 let (b, s) = indices[i];
                 let val = *x_ptr.add(b + s);
-                total_sum += val;
-                total_sum_sq += val * val;
+                total_sum += val as f64;
+                total_sum_sq += (val as f64) * (val as f64);
             }
 
-            let mean = total_sum / n as f32;
-            let var = total_sum_sq / n as f32 - mean * mean;
+            let mean = (total_sum / n as f64) as f32;
+            let var = (total_sum_sq / n as f64) as f32 - mean * mean;
             (mean, var.max(0.0)) // Ensure non-negative variance
         } else {
             // Scalar fallback using Welford's algorithm
@@ -9553,8 +9620,14 @@ impl EmbeddingBackward {
 }
 
 impl Node for EmbeddingBackward {
-    fn apply(&self, grad_outputs: &[Option<Tensor>]) -> Vec<Option<Tensor>> {
-        let grad_output = grad_outputs[0].clone().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let Some(grad_output) = grad_outputs.into_iter().next().flatten() else {
+            return vec![Some(Tensor::zeros(
+                self.inputs[0].shape().clone(),
+                self.inputs[0].dtype(),
+                self.inputs[0].device(),
+            ))];
+        };
         let weight = &self.inputs[0];
         let indices = &self.inputs[1];
 

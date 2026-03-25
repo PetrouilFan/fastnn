@@ -43,12 +43,16 @@ impl Muon {
         let norm = norm_squared.sqrt();
         let norm_val = norm.item();
 
-        if norm_val < 1e-8 {
+        const EPSILON: f32 = 1e-8;
+
+        if norm_val < EPSILON {
             return Tensor::zeros(a.shape(), a.dtype(), a.device());
         }
 
         // Normalize by Frobenius norm to ensure numerical stability
-        let mut x = a.div(&norm);
+        // Add epsilon to prevent division by zero
+        let norm_safe = Tensor::from_scalar(norm_val + EPSILON);
+        let mut x = a.div(&norm_safe);
 
         for _ in 0..num_iterations {
             // X = 1.5 * X - 0.5 * X * X^T * X
@@ -64,7 +68,12 @@ impl Muon {
             // Re-normalize after each iteration for stability
             let x_norm_squared = x.mul(&x).sum(-1, false).sum(-1, false);
             let x_norm = x_norm_squared.sqrt();
-            x = x.div(&x_norm);
+            let x_norm_val = x_norm.item();
+            if x_norm_val < EPSILON {
+                return Tensor::zeros(a.shape(), a.dtype(), a.device());
+            }
+            let x_norm_safe = Tensor::from_scalar(x_norm_val + EPSILON);
+            x = x.div(&x_norm_safe);
         }
 
         x

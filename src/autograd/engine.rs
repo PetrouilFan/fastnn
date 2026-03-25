@@ -3,9 +3,55 @@ use crate::tensor::Tensor;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+/// Check for NaN or Inf in a tensor's data (debug builds only)
+#[cfg(debug_assertions)]
+fn check_gradient_validity(tensor: &Tensor, context: &str) {
+    if let Some(data) = tensor.inner.cpu_data() {
+        let f32_data: &[f32] = unsafe {
+            std::slice::from_raw_parts(
+                data.as_ptr() as *const f32,
+                data.len() / std::mem::size_of::<f32>(),
+            )
+        };
+        for (i, &val) in f32_data.iter().enumerate() {
+            if val.is_nan() {
+                eprintln!(
+                    "WARNING: NaN detected in gradient at index {} during {}. \
+                     This may indicate numerical instability.",
+                    i, context
+                );
+                break;
+            }
+            if val.is_infinite() {
+                eprintln!(
+                    "WARNING: Inf detected in gradient at index {} during {}. \
+                     This may indicate numerical instability.",
+                    i, context
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn check_gradient_validity(_tensor: &Tensor, _context: &str) {
+    // No-op in release builds
+}
+
 pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     if !root.requires_grad() {
         return;
+    }
+
+    // Warn if root has no grad_fn (no computation graph to backprop through)
+    if root.grad_fn().is_none() && !root.is_leaf() {
+        eprintln!(
+            "WARNING: backward() called on a non-leaf tensor without grad_fn. \
+             This means no computation graph was built during the forward pass. \
+             Gradients will not be computed for any parameters."
+        );
     }
 
     let grad_output = grad_output.unwrap_or_else(|| {
@@ -76,37 +122,55 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             continue;
         }
 
-        // Get the gradient for this node's output
-        let grad_output_for_node = grads.get(&tensor_id).cloned();
+        // Get the gradient for this node's output - remove from map (consumed by this node)
+        let grad_output_for_node = grads.remove(&tensor_id);
+
+        // Check gradient validity in debug builds
+        if let Some(ref grad) = grad_output_for_node {
+            check_gradient_validity(grad, &format!("backward pass for node {}", node.name()));
+        }
 
         // Apply backward to get gradients for inputs
-        let grad_inputs = node.apply(&[grad_output_for_node]);
+        let grad_inputs = node.apply(vec![grad_output_for_node]);
 
         // Get the input tensors for this node
         let input_tensors = node.inputs();
 
-        // Process each input gradient
-        for (input_tensor, grad_input_opt) in input_tensors.iter().zip(grad_inputs.iter()) {
+        // Process each input gradient - use into_iter on grad_inputs to avoid cloning
+        for (input_tensor, grad_input_opt) in input_tensors.iter().zip(grad_inputs.into_iter()) {
             if let Some(grad_input) = grad_input_opt {
                 if input_tensor.is_leaf() {
                     // Accumulate gradient for leaf tensor
                     if let Some(meta) = &input_tensor.inner.autograd_meta {
-                        if let Ok(mut lock) = meta.lock() {
-                            if let Some(existing_grad) = &mut lock.grad {
-                                // In-place addition for gradient accumulation
-                                existing_grad.add_(grad_input);
-                            } else {
-                                lock.grad = Some(grad_input.clone());
+                        match meta.lock() {
+                            Ok(mut lock) => {
+                                if let Some(existing_grad) = &mut lock.grad {
+                                    // In-place addition for gradient accumulation
+                                    existing_grad.add_(&grad_input);
+                                } else {
+                                    lock.grad = Some(grad_input);
+                                }
+                            }
+                            Err(_) => {
+                                eprintln!(
+                                    "WARNING: AutogradMeta lock poisoned for tensor {}. \
+                                     Gradient accumulation failed. This may indicate a panic \
+                                     occurred during a previous operation.",
+                                    input_tensor.id()
+                                );
                             }
                         }
                     }
                 } else {
                     // For non-leaf tensors, accumulate in grads map
                     let input_id = input_tensor.id();
-                    if let Some(existing_grad) = grads.get_mut(&input_id) {
-                        existing_grad.add_(grad_input);
-                    } else {
-                        grads.insert(input_id, grad_input.clone());
+                    match grads.get_mut(&input_id) {
+                        Some(existing_grad) => {
+                            existing_grad.add_(&grad_input);
+                        }
+                        None => {
+                            grads.insert(input_id, grad_input);
+                        }
                     }
 
                     // Add this tensor's grad_fn to queue if it hasn't been processed
