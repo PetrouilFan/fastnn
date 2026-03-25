@@ -225,15 +225,12 @@ impl GpuContext {
         pipeline_name.hash(&mut hasher);
         // Hash the buffer pointers as unique identifiers
         for entry in entries {
-            match &entry.resource {
-                wgpu::BindingResource::Buffer(buf) => {
-                    // Use the buffer reference address as a unique identifier
-                    let ptr = &*buf.buffer as *const _ as u64;
-                    ptr.hash(&mut hasher);
-                    buf.offset.hash(&mut hasher);
-                    buf.size.hash(&mut hasher);
-                }
-                _ => {}
+            if let wgpu::BindingResource::Buffer(buf) = &entry.resource {
+                // Use the buffer reference address as a unique identifier
+                let ptr = buf.buffer as *const _ as u64;
+                ptr.hash(&mut hasher);
+                buf.offset.hash(&mut hasher);
+                buf.size.hash(&mut hasher);
             }
             entry.binding.hash(&mut hasher);
         }

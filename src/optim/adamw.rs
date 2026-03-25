@@ -62,6 +62,7 @@ impl AdamW {
     }
 
     /// Add parameters that should skip weight decay (e.g., biases, LayerNorm weights)
+    #[allow(dead_code)]
     pub fn add_no_decay(&mut self, indices: &[usize]) {
         for &idx in indices {
             if idx < self.no_decay.len() {
@@ -71,6 +72,7 @@ impl AdamW {
     }
 
     /// Mark all 1D parameters (biases) to skip weight decay
+    #[allow(dead_code)]
     pub fn mark_biases_no_decay(&mut self) {
         for (i, param) in self.params.iter().enumerate() {
             if param.ndim() == 1 {
