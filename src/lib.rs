@@ -270,6 +270,18 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.squeeze(dim.map(|d| d as usize)))
     }
 
+    fn flip(&self, dim: i32) -> PyTensor {
+        PyTensor::from_tensor(self.inner.flip(dim))
+    }
+
+    fn maximum(&self, other: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.maximum(&other.inner))
+    }
+
+    fn log_softmax(&self, dim: i32) -> PyTensor {
+        PyTensor::from_tensor(self.inner.log_softmax(dim))
+    }
+
     fn __add__(&self, other: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.add(&other.inner))
     }
@@ -419,8 +431,11 @@ fn full(shape: Vec<i64>, value: f32, dtype: Option<String>, device: Option<Strin
 #[pyo3(signature = (start, end, step = None, device = None))]
 fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> PyTensor {
     let step = step.unwrap_or(1.0);
-    let numel = ((end - start) / step).ceil() as usize;
-    let values: Vec<f32> = (0..numel).map(|i| start + i as f32 * step).collect();
+    let start_f64 = start as f64;
+    let end_f64 = end as f64;
+    let step_f64 = step as f64;
+    let numel = ((end_f64 - start_f64) / step_f64).ceil() as usize;
+    let values: Vec<f32> = (0..numel).map(|i| (start_f64 + i as f64 * step_f64) as f32).collect();
     let device = device
         .as_ref()
         .and_then(|s| Device::from_str(s))
@@ -435,6 +450,12 @@ fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> Py
 #[pyfunction]
 #[pyo3(signature = (start, end, steps, device = None))]
 fn linspace(start: f32, end: f32, steps: usize, device: Option<String>) -> PyTensor {
+    if steps == 0 {
+        return PyTensor::from_tensor(Tensor::from_vec(vec![], vec![0]));
+    }
+    if steps == 1 {
+        return PyTensor::from_tensor(Tensor::from_vec(vec![start], vec![1]));
+    }
     let values: Vec<f32> = (0..steps)
         .map(|i| {
             let t = i as f32 / (steps - 1) as f32;
@@ -501,9 +522,17 @@ fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
 #[pyo3(signature = (shape, low, high, device = None))]
 fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyTensor {
     let numel: i64 = shape.iter().product();
-    let values: Vec<f32> = (0..numel as usize)
-        .map(|_| (rand::random::<i32>() % (high - low) + low) as f32)
-        .collect();
+    let range = (high - low) as u32;
+    let values: Vec<f32> = if range == 0 {
+        vec![low as f32; numel as usize]
+    } else {
+        use rand::distributions::{Distribution, Uniform};
+        let uniform = Uniform::new(0u32, range);
+        let mut rng = rand::thread_rng();
+        (0..numel as usize)
+            .map(|_| (uniform.sample(&mut rng) as i32 + low) as f32)
+            .collect()
+    };
     let device = device
         .as_ref()
         .and_then(|s| Device::from_str(s))
@@ -577,8 +606,8 @@ fn batched_mlp_forward(
         let w = &weights[i].inner;
         let b = biases.get(i).map(|b| &b.inner);
 
-        // fastnn Linear stores weight as [in_features, out_features], so x @ w works directly
-        x = x.matmul(w);
+        // PyTorch convention: weight is [out_features, in_features], so x @ w.T
+        x = x.matmul(&w.transpose(0, 1));
         if let Some(bias) = b {
             x = x.add(bias);
         }
@@ -1071,8 +1100,8 @@ impl Linear {
     #[classmethod]
     fn from_weights(_cls: &Bound<'_, PyType>, weight: PyTensor, bias: Option<PyTensor>) -> Self {
         let weight_shape = weight.inner.shape();
-        let in_features = weight_shape[0];
-        let out_features = weight_shape[1];
+        let out_features = weight_shape[0];
+        let in_features = weight_shape[1];
         let has_bias = bias.is_some();
         let mut inner = nn::linear::Linear::new(in_features, out_features, has_bias);
         inner.weight = weight.inner;
@@ -1536,17 +1565,16 @@ impl Sequential {
         Sequential { layers }
     }
 
-    fn __call__(&self, x: PyTensor) -> PyResult<PyTensor> {
-        self.forward(x)
+    fn __call__(&self, py: Python<'_>, x: PyTensor) -> PyResult<PyTensor> {
+        self.forward(py, x)
     }
 
-    fn forward(&self, x: PyTensor) -> PyResult<PyTensor> {
+    fn forward(&self, py: Python<'_>, x: PyTensor) -> PyResult<PyTensor> {
         let mut result = x;
         for layer in &self.layers {
-            let layer_obj = layer.as_ref();
-            let forward_method: &PyAny = layer_obj.getattr("forward")?;
-            let new_result = forward_method.call1((result,))?;
-            result = PyTensor::from(new_result.extract::<PyTensor>()?);
+            let forward_method: Py<PyAny> = layer.getattr(py, "forward")?;
+            let new_result = forward_method.call1(py, (result,))?;
+            result = new_result.extract::<PyTensor>(py)?;
         }
         Ok(result)
     }
