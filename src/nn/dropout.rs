@@ -37,7 +37,11 @@ impl Module for Dropout {
                 .collect();
 
             let shape = x.shape();
-            Tensor::from_vec(mask_data, shape)
+            let mut out = Tensor::from_vec(mask_data, shape);
+            if x.requires_grad() {
+                out = out.requires_grad_(true);
+            }
+            out
         } else {
             x.clone()
         }

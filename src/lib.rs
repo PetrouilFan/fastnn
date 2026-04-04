@@ -560,10 +560,8 @@ fn div(a: &PyTensor, b: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn matmul(py: Python<'_>, a: &PyTensor, b: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = b.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.matmul(&b_inner)))
+fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(a.inner.matmul(&b.inner))
 }
 
 #[pyfunction]
@@ -1539,11 +1537,18 @@ impl Sequential {
     }
 
     fn __call__(&self, x: PyTensor) -> PyResult<PyTensor> {
-        Ok(x)
+        self.forward(x)
     }
 
     fn forward(&self, x: PyTensor) -> PyResult<PyTensor> {
-        Ok(x)
+        let mut result = x;
+        for layer in &self.layers {
+            let layer_obj = layer.as_ref();
+            let forward_method: &PyAny = layer_obj.getattr("forward")?;
+            let new_result = forward_method.call1((result,))?;
+            result = PyTensor::from(new_result.extract::<PyTensor>()?);
+        }
+        Ok(result)
     }
 
     fn parameters(&self) -> Vec<PyTensor> {

@@ -411,7 +411,7 @@ impl TensorImpl {
         let start = if start < 0 { size + start } else { start };
         let end = if end < 0 { size + end } else { end };
         let start = start.max(0) as usize;
-        let end = (end.min(size) - 1) as usize;
+        let end = (end.min(size)) as usize;
 
         if start > end {
             panic!("slice: invalid range");
@@ -459,12 +459,13 @@ impl TensorImpl {
         }
     }
 
-    pub fn requires_grad_(&self, requires_grad: bool) -> Tensor {
-        let self_ptr = self as *const TensorImpl as *mut TensorImpl;
-        unsafe {
-            (*self_ptr).set_requires_grad(requires_grad);
+    pub fn requires_grad_(mut self, requires_grad: bool) -> Tensor {
+        if let Some(meta) = &mut self.autograd_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.requires_grad = requires_grad;
+            }
         }
-        Tensor::new(self.clone())
+        self
     }
 
     pub fn grad(&self) -> Option<Tensor> {
@@ -2655,10 +2656,10 @@ impl Tensor {
         );
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let numel: i64 = self.shape().iter().product();
+            let dim_size = self.shape()[dim as usize];
             let edges = autograd::make_edge(self);
             let backward =
-                autograd::MeanBackward::new(self.clone(), dim as usize, keepdim, numel, edges);
+                autograd::MeanBackward::new(self.clone(), dim as usize, keepdim, dim_size, edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();

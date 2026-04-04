@@ -107,6 +107,7 @@ impl Module for Conv2d {
             let backward = Conv2dBackward::new(
                 x.clone(),
                 self.weight.clone(),
+                self.bias.is_some(),
                 self.stride,
                 self.padding,
                 self.dilation,
