@@ -80,7 +80,7 @@ impl Optimizer for SGD {
                     param.sub_(&nesterov_grad);
                 } else {
                     // Standard SGD: param = param - lr * velocity
-                    let vel = velocity.clone();
+                    let mut vel = velocity.clone();
                     vel.mul_scalar_(lr);
                     param.sub_(&vel);
                 }

@@ -22,7 +22,7 @@ impl CrossEntropyLoss {
 impl LossFn for CrossEntropyLoss {
     fn compute(&self, pred: &Tensor, target: &Tensor) -> Tensor {
         let batch_size = pred.shape()[0];
-        let num_classes = pred.shape()[1];
+        let _num_classes = pred.shape()[1];
 
         let log_probs = pred.log_softmax(1);
 

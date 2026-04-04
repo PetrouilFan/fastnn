@@ -43,18 +43,20 @@ pub fn register(op: &'static str, key: DispatchKey, kernel: KernelFn) {
     guard.ops.insert((op, key), kernel);
 }
 
-pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Vec<Tensor> {
+pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Result<Vec<Tensor>, String> {
     let dispatcher = get_dispatcher();
     let guard = dispatcher.read();
 
-    // Use &str directly as key - no allocation needed since HashMap stores &'static str
-    // and we look up by borrowed &str which is compatible via Borrow
     let kernel = guard
         .ops
         .get(&(op, key))
-        .unwrap_or_else(|| panic!("No kernel registered for op '{}' with key {:?}", op, key));
+        .ok_or_else(|| format!("No kernel registered for op '{}' with key {:?}", op, key))?;
 
-    kernel(args)
+    Ok(kernel(args))
+}
+
+pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Vec<Tensor> {
+    try_dispatch(op, key, args).expect("dispatch failed")
 }
 
 pub fn list_registered_ops() -> Vec<String> {

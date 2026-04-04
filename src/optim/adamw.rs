@@ -136,7 +136,7 @@ impl Optimizer for AdamW {
                 // AMSGrad: v_hat = max(v_hat, v) element-wise
                 let v_hat_curr = &self.v_hat[i];
                 let v_curr = &self.v[i];
-                let max_v = v_hat_curr.max(&v_curr, false);
+                let max_v = v_hat_curr.maximum(v_curr);
                 self.v_hat[i] = max_v.clone();
                 max_v
             } else {

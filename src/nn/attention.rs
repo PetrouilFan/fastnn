@@ -194,7 +194,7 @@ impl MultiHeadAttention {
         let context = context.reshape(vec![batch, seq_len, self.d_model]);
 
         // 7. Output projection
-        self.out_proj.forward_impl(&context)
+        self.out_proj.forward(&context)
     }
 }
 
