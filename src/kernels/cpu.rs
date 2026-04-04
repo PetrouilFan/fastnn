@@ -5530,6 +5530,40 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let batch = batch_a.max(batch_b);
 
+    // Save original shapes for output reshape
+    let orig_a_shape = a_shape.clone();
+    let orig_b_shape = b_shape.clone();
+
+    // For N-D tensors (N > 3), flatten all batch dims into a single batch dim
+    // by reshaping to 3D. This avoids incorrect batch stride calculations.
+    let a_3d = if a_shape.len() > 3 {
+        let flat_batch: i64 = a_shape[..a_shape.len() - 2].iter().product();
+        a.reshape(vec![
+            flat_batch,
+            a_shape[a_shape.len() - 2],
+            a_shape[a_shape.len() - 1],
+        ])
+    } else {
+        a.clone()
+    };
+    let b_3d = if b_shape.len() > 3 {
+        let flat_batch: i64 = b_shape[..b_shape.len() - 2].iter().product();
+        b.reshape(vec![
+            flat_batch,
+            b_shape[b_shape.len() - 2],
+            b_shape[b_shape.len() - 1],
+        ])
+    } else {
+        b.clone()
+    };
+
+    let a = &a_3d;
+    let b = &b_3d;
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    let a_strides = a.strides();
+    let b_strides = b.strides();
+
     let mut output_shape: smallvec::SmallVec<[i64; 4]> =
         smallvec::SmallVec::with_capacity(a_shape.len());
     if a_shape.len() > 2 {

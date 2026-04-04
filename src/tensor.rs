@@ -184,8 +184,6 @@ impl TensorImpl {
             );
         }
 
-        
-
         TensorImpl {
             storage: Arc::clone(&self.storage),
             sizes: new_sizes.clone(),
@@ -449,7 +447,7 @@ impl TensorImpl {
         }
 
         let mut sizes = self.sizes.clone();
-        let numel = ((end - start) / step as usize) + 1;
+        let numel = ((end as i64 - start as i64 + step - 1) / step) as usize;
         sizes[dim] = numel as i64;
 
         let storage_offset = self.storage_offset + (start as i64) * self.strides[dim];
