@@ -221,9 +221,9 @@ impl Module for BatchNorm1d {
             &self.training_false_scalar
         };
 
-        // Read current running stats
-        let running_mean = self.running_mean.read().unwrap();
-        let running_var = self.running_var.read().unwrap();
+        // Read current running stats - clone tensors so guards are dropped before dispatch
+        let running_mean = self.running_mean.read().clone();
+        let running_var = self.running_var.read().clone();
 
         let result = dispatch(
             "batch_norm",
@@ -266,19 +266,17 @@ impl Module for BatchNorm1d {
             let inv_mom = 1.0 - mom;
 
             // Get mutable references and update
-            if let Ok(mut running_mean_lock) = self.running_mean.write() {
-                let new_mean = running_mean_lock
-                    .mul_scalar(mom)
-                    .add(&batch_mean.mul_scalar(inv_mom));
-                *running_mean_lock = new_mean;
-            }
+            let mut running_mean_lock = self.running_mean.write();
+            let new_mean = running_mean_lock
+                .mul_scalar(mom)
+                .add(&batch_mean.mul_scalar(inv_mom));
+            *running_mean_lock = new_mean;
 
-            if let Ok(mut running_var_lock) = self.running_var.write() {
-                let new_var = running_var_lock
-                    .mul_scalar(mom)
-                    .add(&batch_var.mul_scalar(inv_mom));
-                *running_var_lock = new_var;
-            }
+            let mut running_var_lock = self.running_var.write();
+            let new_var = running_var_lock
+                .mul_scalar(mom)
+                .add(&batch_var.mul_scalar(inv_mom));
+            *running_var_lock = new_var;
         }
 
         output

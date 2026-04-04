@@ -21,9 +21,10 @@ pub enum DType {
 impl DType {
     pub fn size(&self) -> usize {
         match self {
-            DType::F32 | DType::I32 | DType::Bool => 4,
+            DType::F32 | DType::I32 => 4,
             DType::F64 | DType::I64 => 8,
             DType::F16 | DType::BF16 => 2,
+            DType::Bool => 1,
         }
     }
 
@@ -275,28 +276,28 @@ impl AllocStats {
     }
 
     fn add_alloc(&self, nbytes: usize) {
-        self.total_allocated.fetch_add(nbytes, Ordering::SeqCst);
-        self.num_allocs.fetch_add(1, Ordering::SeqCst);
+        self.total_allocated.fetch_add(nbytes, Ordering::Relaxed);
+        self.num_allocs.fetch_add(1, Ordering::Relaxed);
     }
 
     fn add_freed(&self, nbytes: usize) {
-        self.total_freed.fetch_add(nbytes, Ordering::SeqCst);
+        self.total_freed.fetch_add(nbytes, Ordering::Relaxed);
     }
 
     pub fn total_allocated(&self) -> usize {
-        self.total_allocated.load(Ordering::SeqCst)
+        self.total_allocated.load(Ordering::Relaxed)
     }
 
     pub fn total_freed(&self) -> usize {
-        self.total_freed.load(Ordering::SeqCst)
+        self.total_freed.load(Ordering::Relaxed)
     }
 
     pub fn current_bytes(&self) -> usize {
-        self.total_allocated.load(Ordering::SeqCst) - self.total_freed.load(Ordering::SeqCst)
+        self.total_allocated.load(Ordering::Relaxed) - self.total_freed.load(Ordering::Relaxed)
     }
 
     pub fn num_allocs(&self) -> u64 {
-        self.num_allocs.load(Ordering::SeqCst)
+        self.num_allocs.load(Ordering::Relaxed)
     }
 }
 

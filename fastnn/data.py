@@ -16,6 +16,15 @@ class TensorDataset(Dataset):
             if not hasattr(t, "shape"):
                 raise ValueError("All tensors must have a shape attribute")
 
+        if len(tensors) > 1:
+            first_len = tensors[0].shape[0]
+            for i, t in enumerate(tensors[1:], 1):
+                if t.shape[0] != first_len:
+                    raise ValueError(
+                        f"TensorDataset tensors must have same first dimension: "
+                        f"tensor 0 has {first_len}, tensor {i} has {t.shape[0]}"
+                    )
+
         self.tensors = tensors
 
     def __len__(self):
@@ -54,7 +63,8 @@ class DataLoader:
         return math.ceil(n / self.batch_size)
 
     def __iter__(self):
-        # PERF-13: Shuffle in-place to avoid re-allocation
+        if len(self.indices) == 0:
+            return
         if self.shuffle:
             random.shuffle(self.indices)
         for start in range(0, len(self.indices), self.batch_size):
@@ -76,24 +86,7 @@ def stack(tensors, dim=0):
 
     first = tensors[0]
     if hasattr(first, "numpy"):
-        first_data = first.numpy()
-
-        # Handle 0-dimensional (scalar) tensors
-        if first_data.ndim == 0:
-            result_data = np.array(
-                [
-                    t.numpy().item() if t.numpy().ndim == 0 else t.numpy()[0]
-                    for t in tensors
-                ],
-                dtype=np.float32,
-            )
-            result = fnn.tensor(result_data.tolist(), [len(tensors)])
-            if dim != 0:
-                result = result.transpose(dim, 0)
-            return result
-
-        # Fast path: use numpy concatenate instead of element-by-element Python loop
-        arrays = [np.array(t.numpy(), dtype=np.float32, copy=False) for t in tensors]
+        arrays = [t.numpy() for t in tensors]
         result_np = np.stack(arrays, axis=0)
         result = fnn.tensor(result_np.flatten().tolist(), list(result_np.shape))
 

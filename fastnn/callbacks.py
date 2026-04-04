@@ -141,7 +141,6 @@ class CSVLogger:
 
     def on_epoch_begin(self, epoch, logs):
         self.epoch = epoch
-        # Clear file on first epoch
         if not self._initialized:
             with open(self.filepath, "w") as f:
                 self._initialized = True
@@ -150,19 +149,26 @@ class CSVLogger:
         if not self._initialized:
             return
 
-        # Determine field order
         if self.fields is None:
-            fields = list(logs.keys())
-            fields.sort()
+            field_order = [
+                "epoch",
+                "loss",
+                "val_loss",
+                "accuracy",
+                "val_accuracy",
+                "lr",
+            ]
+            fields = list(field_order)
+            extra_keys = sorted(set(logs.keys()) - set(field_order))
+            fields.extend(extra_keys)
+            self.fields = fields
         else:
             fields = self.fields
 
-        # Write header on first epoch
         if epoch == 0:
             with open(self.filepath, "w") as f:
                 f.write(",".join(fields) + "\n")
 
-        # Write values
         with open(self.filepath, "a") as f:
             values = [str(logs.get(field, "")) for field in fields]
             f.write(",".join(values) + "\n")

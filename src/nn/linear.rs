@@ -18,7 +18,7 @@ impl Linear {
         let weight_data: Vec<f32> = (0..in_features * out_features)
             .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
             .collect();
-        let weight = Tensor::from_vec(weight_data, vec![in_features, out_features]);
+        let weight = Tensor::from_vec(weight_data, vec![out_features, in_features]);
         let weight = weight.requires_grad_(true);
 
         let bias = if bias {
@@ -42,7 +42,7 @@ impl Linear {
 
 impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let output = x.matmul(&self.weight);
+        let output = x.matmul(&self.weight.transpose(0, 1));
 
         if let Some(b) = &self.bias {
             // Use unsqueeze to add bias with broadcasting

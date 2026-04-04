@@ -2291,6 +2291,9 @@ fn broadcast_shapes_simple(a: &[i64], b: &[i64]) -> Vec<i64> {
     for i in 0..ndim {
         let a_val = if i < offset_a { 1 } else { a[i - offset_a] };
         let b_val = if i < offset_b { 1 } else { b[i - offset_b] };
+        if a_val != b_val && a_val != 1 && b_val != 1 {
+            panic!("shapes {:?} and {:?} are not broadcast-compatible", a, b);
+        }
         result[i] = a_val.max(b_val);
     }
     result
@@ -6854,13 +6857,9 @@ fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let total_blocks = (strides_before * strides_after) as usize;
     let a_numel = a.numel() as usize;
 
-    // Fast path: contiguous sum along last dimension
-    if dim == ndim - 1 && a.is_contiguous() && a.inner.storage_offset == 0 {
-        return vec![sum_last_dim_contiguous(
-            a,
-            dim_size,
-            strides_before as usize,
-        )];
+    // Fast path: contiguous sum along last dimension (2D only)
+    if dim == ndim - 1 && ndim == 2 && a.is_contiguous() && a.inner.storage_offset == 0 {
+        return vec![sum_last_dim_contiguous(a, dim_size, a_shape[0] as usize)];
     }
 
     #[cfg(feature = "parallel")]
@@ -8538,6 +8537,9 @@ fn conv2d_im2col(
         }
         // Zero only the im2col portion. gemm_out is fully overwritten by BLAS.
         buf[..col_size].fill(0.0);
+        if gemm_size > 0 {
+            buf[col_size..col_size + gemm_size].fill(0.0);
+        }
 
         let (col_buf, gemm_buf) = buf.split_at_mut(col_size);
         let col_data: &mut [f32] = col_buf;
@@ -9723,12 +9725,18 @@ fn full_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 }
 
 fn arange_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let start = args[0].item();
-    let end = args[1].item();
-    let step = if args.len() > 2 { args[2].item() } else { 1.0 };
+    let start = args[0].item() as f64;
+    let end = args[1].item() as f64;
+    let step = if args.len() > 2 {
+        args[2].item() as f64
+    } else {
+        1.0
+    };
 
     let numel = ((end - start) / step).ceil() as usize;
-    let values: Vec<f32> = (0..numel).map(|i| start + i as f32 * step).collect();
+    let values: Vec<f32> = (0..numel)
+        .map(|i| (start + i as f64 * step) as f32)
+        .collect();
 
     vec![Tensor::from_vec(values, vec![numel as i64])]
 }
@@ -9737,6 +9745,13 @@ fn linspace_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let start = args[0].item();
     let end = args[1].item();
     let steps = args[2].item() as usize;
+
+    if steps == 0 {
+        return vec![Tensor::from_vec(vec![], vec![0i64])];
+    }
+    if steps == 1 {
+        return vec![Tensor::from_vec(vec![start], vec![1i64])];
+    }
 
     let values: Vec<f32> = (0..steps)
         .map(|i| {
@@ -9818,7 +9833,7 @@ fn randint_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut rng = rand::thread_rng();
     let numel: i64 = shape.iter().product();
     let values: Vec<f32> = (0..numel as usize)
-        .map(|_| (rng.gen::<i32>() % (high - low) + low) as f32)
+        .map(|_| rng.gen_range(low..high) as f32)
         .collect();
 
     vec![Tensor::from_vec(values, shape)]
@@ -10151,6 +10166,71 @@ fn sign_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+fn maximum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let b = args[1];
+    let out_shape = broadcast_shapes_simple(&a.shape(), &b.shape());
+    let numel = out_shape.iter().product::<i64>() as usize;
+    let mut output = Tensor::zeros(out_shape.clone(), a.dtype(), a.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+    let a_data = a.as_f32_slice();
+    let b_data = b.as_f32_slice();
+    let a_strides = &a.inner.strides;
+    let b_strides = &b.inner.strides;
+    let out_strides = &output.inner.strides;
+    let ndim = out_shape.len();
+    let a_offset = a.inner.storage_offset as usize;
+    let b_offset = b.inner.storage_offset as usize;
+    let mut indices = vec![0i64; ndim];
+    for _out_idx in 0..numel {
+        let mut a_idx: usize = a_offset;
+        let mut b_idx: usize = b_offset;
+        for d in 0..ndim {
+            let a_dim_idx = if d >= ndim - a.ndim() {
+                d - (ndim - a.ndim())
+            } else {
+                usize::MAX
+            };
+            let b_dim_idx = if d >= ndim - b.ndim() {
+                d - (ndim - b.ndim())
+            } else {
+                usize::MAX
+            };
+            if a_dim_idx != usize::MAX && a.shape()[a_dim_idx] != 1 {
+                a_idx +=
+                    (indices[d] % a.shape()[a_dim_idx]) as usize * a_strides[a_dim_idx] as usize;
+            }
+            if b_dim_idx != usize::MAX && b.shape()[b_dim_idx] != 1 {
+                b_idx +=
+                    (indices[d] % b.shape()[b_dim_idx]) as usize * b_strides[b_dim_idx] as usize;
+            }
+        }
+        let av = unsafe { *a_data.as_ptr().add(a_idx) };
+        let bv = unsafe { *b_data.as_ptr().add(b_idx) };
+        let mut out_linear: usize = 0;
+        for d in 0..ndim {
+            out_linear += indices[d] as usize * out_strides[d] as usize;
+        }
+        unsafe {
+            *out_ptr.add(out_linear) = if av > bv { av } else { bv };
+        }
+        for d in (0..ndim).rev() {
+            indices[d] += 1;
+            if indices[d] < out_shape[d] {
+                break;
+            }
+            indices[d] = 0;
+        }
+    }
+    vec![output]
+}
+
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Cpu, add_kernel as KernelFn);
@@ -10200,6 +10280,7 @@ fn register_kernels() {
     register("mean", DispatchKey::Cpu, mean_kernel as KernelFn);
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);
     register("min", DispatchKey::Cpu, min_kernel as KernelFn);
+    register("maximum", DispatchKey::Cpu, maximum_kernel as KernelFn);
     register("softmax", DispatchKey::Cpu, softmax_kernel as KernelFn);
     register(
         "log_softmax",

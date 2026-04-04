@@ -146,7 +146,36 @@ impl TensorImpl {
     }
 
     pub fn view(&self, sizes: SmallVec<[i64; 8]>) -> TensorImpl {
-        let numel: i64 = sizes.iter().product();
+        let mut new_sizes = sizes.clone();
+        let mut product: i64 = 1;
+        let mut minus_one_idx = None;
+
+        for (i, s) in new_sizes.iter().enumerate() {
+            if *s == -1 {
+                if minus_one_idx.is_some() {
+                    panic!("can only specify one unknown dimension in view");
+                }
+                minus_one_idx = Some(i);
+            } else {
+                product *= s;
+            }
+        }
+
+        if let Some(idx) = minus_one_idx {
+            if product == 0 {
+                panic!("view: cannot infer dimension with zero-sized dimensions");
+            }
+            if self.numel() % product != 0 {
+                panic!(
+                    "size mismatch: view cannot infer dimension because {} is not divisible by {}",
+                    self.numel(),
+                    product
+                );
+            }
+            new_sizes[idx] = self.numel() / product;
+        }
+
+        let numel: i64 = new_sizes.iter().product();
         if numel != self.numel() {
             panic!(
                 "size mismatch: view size {} != numel {}",
@@ -155,40 +184,21 @@ impl TensorImpl {
             );
         }
 
-        let mut new = TensorImpl {
+        
+
+        TensorImpl {
             storage: Arc::clone(&self.storage),
-            sizes: sizes.clone(),
-            strides: compute_strides(&sizes),
+            sizes: new_sizes.clone(),
+            strides: compute_strides(&new_sizes),
             storage_offset: self.storage_offset,
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: None,
-        };
-
-        if autograd::is_grad_enabled() {
-            if let Some(meta) = &self.autograd_meta {
-                if let Ok(lock) = meta.lock() {
-                    if lock.requires_grad {
-                        new.set_requires_grad(true);
-                    }
-                }
-            }
+            autograd_meta: self.autograd_meta.clone(),
         }
-
-        new
     }
 
     pub fn reshape(&self, sizes: SmallVec<[i64; 8]>) -> Tensor {
-        let numel: i64 = sizes.iter().product();
-        if numel != self.numel() {
-            panic!(
-                "size mismatch: reshape size {} != numel {}",
-                numel,
-                self.numel()
-            );
-        }
-
         let mut new_sizes = sizes.clone();
         let mut product: i64 = 1;
         let mut minus_one_idx = None;
@@ -199,14 +209,35 @@ impl TensorImpl {
                     panic!("can only specify one unknown dimension");
                 }
                 minus_one_idx = Some(i);
+            } else if *s < 0 {
+                panic!("reshape: negative size not allowed");
             } else {
                 product *= s;
             }
         }
 
         if let Some(idx) = minus_one_idx {
+            if product == 0 {
+                panic!("reshape: cannot infer dimension with zero-sized dimensions");
+            }
+            if self.numel() % product != 0 {
+                panic!(
+                    "size mismatch: reshape cannot infer dimension because {} is not divisible by {}",
+                    self.numel(),
+                    product
+                );
+            }
             let known: i64 = self.numel() / product;
             new_sizes[idx] = known;
+        } else {
+            let numel: i64 = sizes.iter().product();
+            if numel != self.numel() {
+                panic!(
+                    "size mismatch: reshape size {} != numel {}",
+                    numel,
+                    self.numel()
+                );
+            }
         }
 
         self.view(new_sizes).into()
@@ -232,7 +263,7 @@ impl TensorImpl {
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: None,
+            autograd_meta: self.autograd_meta.clone(),
         }
         .into()
     }
@@ -267,7 +298,7 @@ impl TensorImpl {
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: None,
+            autograd_meta: self.autograd_meta.clone(),
         }
         .into()
     }
@@ -279,7 +310,7 @@ impl TensorImpl {
         let mut sizes = self.sizes.clone();
         let mut strides = self.strides.clone();
         sizes.insert(dim, 1);
-        strides.insert(dim, if dim == ndim { self.numel() } else { 0 });
+        strides.insert(dim, if dim == ndim { 1 } else { self.strides[dim] });
 
         let input_tensor = Tensor::new(self.clone());
 
@@ -291,7 +322,7 @@ impl TensorImpl {
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: None,
+            autograd_meta: self.autograd_meta.clone(),
         };
 
         if self.requires_grad() {
@@ -465,7 +496,7 @@ impl TensorImpl {
                 lock.requires_grad = requires_grad;
             }
         }
-        self
+        self.into()
     }
 
     pub fn grad(&self) -> Option<Tensor> {
@@ -1550,7 +1581,39 @@ impl Tensor {
         }
     }
 
+    fn broadcast_shapes(a: &[i64], b: &[i64]) -> Result<Vec<i64>, String> {
+        let ndim = a.len().max(b.len());
+        let mut out = vec![1i64; ndim];
+        for i in 0..ndim {
+            let a_dim = if i < ndim - a.len() {
+                1
+            } else {
+                a[i - (ndim - a.len())]
+            };
+            let b_dim = if i < ndim - b.len() {
+                1
+            } else {
+                b[i - (ndim - b.len())]
+            };
+            if a_dim == b_dim {
+                out[i] = a_dim;
+            } else if a_dim == 1 {
+                out[i] = b_dim;
+            } else if b_dim == 1 {
+                out[i] = a_dim;
+            } else {
+                return Err(format!(
+                    "shapes {:?} and {:?} are not broadcast-compatible",
+                    a, b
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn add(&self, other: &Tensor) -> Tensor {
+        let _ = Self::broadcast_shapes(&self.shape(), &other.shape())
+            .unwrap_or_else(|e| panic!("{}", e));
         // Fast path: CPU contiguous same-shape add, skip dispatch overhead
         if self.device() == Device::Cpu
             && other.device() == Device::Cpu
@@ -2573,20 +2636,19 @@ impl Tensor {
     }
 
     pub fn sum(&self, dim: i32, keepdim: bool) -> Tensor {
-        // Fast path: contiguous CPU F32, last-dim sum, no keepdim
+        // Fast path: contiguous CPU F32, last-dim sum, no keepdim, 2D tensors only
         if self.device() == Device::Cpu
             && self.inner.dtype == DType::F32
             && self.is_contiguous()
             && !keepdim
-            && self.inner.ndim() >= 2
+            && self.inner.ndim() == 2
         {
             let ndim = self.inner.ndim() as i32;
             let dim_normalized = if dim < 0 { ndim + dim } else { dim } as usize;
             if dim_normalized == ndim as usize - 1 {
                 let shape = self.shape();
                 let dim_size = shape[dim_normalized] as usize;
-                let num_rows = self.inner.numel() as usize / dim_size;
-                // Direct SIMD sum
+                let num_rows = shape[0] as usize;
                 let output = crate::kernels::cpu::sum_last_dim_contiguous(self, dim_size, num_rows);
                 if autograd::is_grad_enabled() && self.requires_grad() {
                     let mut output = output;
@@ -2669,6 +2731,64 @@ impl Tensor {
         } else {
             output
         }
+    }
+
+    pub fn flip(&self, dim: i32) -> Tensor {
+        let ndim = self.ndim() as i32;
+        let dim = if dim < 0 { ndim + dim } else { dim } as usize;
+        if dim >= self.ndim() {
+            panic!("flip: dimension out of range");
+        }
+        let size = self.inner.sizes[dim];
+        let mut result_data = vec![0.0f32; self.numel() as usize];
+        let src = self.to_cpu();
+        let src_data = src.as_f32_slice();
+        let ndim = self.ndim();
+        let strides = &self.inner.strides;
+        let sizes = &self.inner.sizes;
+        let mut indices = vec![0i64; ndim];
+        for out_idx in 0..self.numel() as usize {
+            let mut lin = 0i64;
+            for d in 0..ndim {
+                let idx = if d == dim {
+                    size - 1 - indices[d]
+                } else {
+                    indices[d]
+                };
+                lin += idx * strides[d];
+            }
+            result_data[out_idx] = src_data[lin as usize];
+            for d in (0..ndim).rev() {
+                indices[d] += 1;
+                if indices[d] < sizes[d] {
+                    break;
+                }
+                indices[d] = 0;
+            }
+        }
+        Tensor::from_vec(result_data, self.inner.sizes.clone().into_vec())
+    }
+
+    pub fn maximum(&self, other: &Tensor) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("maximum", dispatch_key, &[self, other]);
+        result[0].clone()
+    }
+
+    pub fn log_softmax(&self, dim: i32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch(
+            "log_softmax",
+            dispatch_key,
+            &[self, &Tensor::from_scalar(dim as f32)],
+        );
+        result[0].clone()
+    }
+
+    pub fn as_i64_slice(&self) -> Vec<i64> {
+        let src = self.to_cpu();
+        let data = src.as_f32_slice();
+        data.iter().map(|&v| v as i64).collect()
     }
 }
 

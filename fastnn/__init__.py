@@ -92,7 +92,17 @@ def _patch_numpy(tensor_cls):
     def _new_numpy(self):
         data = _original_numpy(self)
         shape = self.shape
-        return np.array(data, dtype=np.float32).reshape(shape)
+        dtype_map = {
+            "f32": np.float32,
+            "f64": np.float64,
+            "i32": np.int32,
+            "i64": np.int64,
+            "bool": np.bool_,
+            "f16": np.float16,
+            "bf16": np.float32,
+        }
+        np_dtype = dtype_map.get(self.dtype, np.float32)
+        return np.array(data, dtype=np_dtype).reshape(shape)
 
     tensor_cls.numpy = _new_numpy
 
@@ -283,16 +293,18 @@ class Flatten:
         self.end_dim = end_dim
 
     def __call__(self, x):
-        # Flatten all dimensions except the first (batch dimension)
-        # For input [batch, channels, 1, 1], output should be [batch, channels]
-        # Compute the flattened size: batch_size * channels * 1 * 1
-        batch_size = x.shape[0]
+        shape = x.shape
+        ndim = len(shape)
+        start = self.start_dim if self.start_dim >= 0 else ndim + self.start_dim
+        end = self.end_dim if self.end_dim >= 0 else ndim + self.end_dim
+        end = end + 1
+        new_shape = list(shape[:start])
         flattened_size = 1
-        for dim in x.shape[1:]:
+        for dim in shape[start:end]:
             flattened_size *= dim
-
-        # Use view to reshape
-        return x.view([batch_size, flattened_size])
+        new_shape.append(flattened_size)
+        new_shape.extend(shape[end:])
+        return x.view(new_shape)
 
     def train(self):
         pass

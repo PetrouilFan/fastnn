@@ -1,7 +1,7 @@
 """Distributed Data Parallel (DDP) implementation for fastnn."""
 
 import fastnn._core as _core
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 
@@ -128,15 +128,11 @@ class DataParallel:
 
             gpu_times[i] = time.time() - gpu_start
 
-        # Execute concurrently using Python threads
-        threads = [
-            threading.Thread(target=worker, args=(i,))
-            for i in range(len(self.device_ids))
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        # Execute concurrently using thread pool
+        with ThreadPoolExecutor(max_workers=len(self.device_ids)) as executor:
+            futures = [executor.submit(worker, i) for i in range(len(self.device_ids))]
+            for f in futures:
+                f.result()
 
         # Update epoch times with measured GPU times
         self.epoch_times = gpu_times
