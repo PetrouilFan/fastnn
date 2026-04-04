@@ -63,21 +63,22 @@ impl TransformerBlock {
     }
 
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        // Layer 1: Self-attention with residual connection
+        // Layer 1: Self-attention with residual connection and dropout
         let x_norm1 = self.norm1.forward(x);
         let attn_output = self.self_attn.forward(&x_norm1);
-        let x = attn_output.add(x); // No clone needed, just use original x
+        let attn_dropped = self.dropout.forward(&attn_output);
+        let x = attn_dropped.add(x);
 
-        // Layer 2: Feed-forward with residual connection
+        // Layer 2: Feed-forward with residual connection and dropout
         let x_norm2 = self.norm2.forward(&x);
 
         // Fused feed-forward: linear -> gelu -> linear
-        // This avoids intermediate tensor allocations
         let ff_hidden = self.ff1.forward(&x_norm2);
         let ff_gelu = ff_hidden.gelu();
         let ff_out = self.ff2.forward(&ff_gelu);
+        let ff_dropped = self.dropout.forward(&ff_out);
 
-        ff_out.add(&x)
+        ff_dropped.add(&x)
     }
 }
 

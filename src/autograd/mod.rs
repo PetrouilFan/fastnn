@@ -192,9 +192,415 @@ impl Node for LinearBackward {
 }
 
 #[allow(dead_code)]
-pub struct AddBackward {
+pub struct Conv2dBackward {
     pub inputs: Vec<Tensor>,
+    pub has_bias: bool,
+    pub stride: i64,
+    pub padding: i64,
+    pub dilation: i64,
+    pub groups: i64,
     pub edges: Vec<Edge>,
+}
+
+impl Conv2dBackward {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        input: Tensor,
+        weight: Tensor,
+        has_bias: bool,
+        stride: i64,
+        padding: i64,
+        dilation: i64,
+        groups: i64,
+        edges: Vec<Edge>,
+    ) -> Self {
+        Conv2dBackward {
+            inputs: vec![input, weight],
+            has_bias,
+            stride,
+            padding,
+            dilation,
+            groups,
+            edges,
+        }
+    }
+}
+
+impl Node for Conv2dBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+
+        let input = &self.inputs[0];
+        let weight = &self.inputs[1];
+
+        let weight_shape = weight.shape();
+        let out_channels = weight_shape[0];
+        let in_channels_per_group = weight_shape[1];
+        let kernel_h = weight_shape[2];
+        let kernel_w = weight_shape[3];
+
+        let input_shape = input.shape();
+        let batch_size = input_shape[0];
+        let in_channels = input_shape[1];
+        let in_h = input_shape[2];
+        let in_w = input_shape[3];
+
+        let grad_shape = grad.shape();
+        let out_h = grad_shape[2];
+        let out_w = grad_shape[3];
+
+        let stride = self.stride;
+        let padding = self.padding;
+        let dilation = self.dilation;
+        let groups = self.groups;
+
+        let grad_input_padding_h = dilation * (kernel_h - 1) - padding;
+        let grad_input_padding_w = dilation * (kernel_w - 1) - padding;
+
+        let weight_rotated = weight.flip(2).flip(3);
+
+        let grad_input = if groups == 1 {
+            if stride == 1 {
+                dispatch(
+                    "conv2d",
+                    crate::dispatcher::DispatchKey::Cpu,
+                    &[
+                        &grad,
+                        &weight_rotated,
+                        &Tensor::from_scalar(0.0),
+                        &Tensor::from_scalar(1.0),
+                        &Tensor::from_scalar(grad_input_padding_h as f32),
+                        &Tensor::from_scalar(dilation as f32),
+                        &Tensor::from_scalar(1.0),
+                    ],
+                )[0]
+                .clone()
+            } else {
+                let out_channels_val = out_channels;
+                let dilated_h = out_h + (out_h - 1) * (stride - 1);
+                let dilated_w = out_w + (out_w - 1) * (stride - 1);
+
+                let mut dilated_grad_data = vec![
+                    0.0f32;
+                    batch_size as usize
+                        * out_channels_val as usize
+                        * dilated_h as usize
+                        * dilated_w as usize
+                ];
+                let grad_cpu = grad.to_cpu();
+                let grad_data = grad_cpu.as_f32_slice();
+
+                for b in 0..batch_size as usize {
+                    for c in 0..out_channels_val as usize {
+                        for oh in 0..out_h as usize {
+                            for ow in 0..out_w as usize {
+                                let src_idx = b
+                                    * (out_channels_val as usize * out_h as usize * out_w as usize)
+                                    + c * (out_h as usize * out_w as usize)
+                                    + oh * out_w as usize
+                                    + ow;
+                                let dst_idx = b
+                                    * (out_channels_val as usize
+                                        * dilated_h as usize
+                                        * dilated_w as usize)
+                                    + c * (dilated_h as usize * dilated_w as usize)
+                                    + (oh * stride as usize) * dilated_w as usize
+                                    + (ow * stride as usize);
+                                dilated_grad_data[dst_idx] = grad_data[src_idx];
+                            }
+                        }
+                    }
+                }
+
+                let dilated_grad = Tensor::from_vec(
+                    dilated_grad_data,
+                    vec![batch_size, out_channels_val, dilated_h, dilated_w],
+                );
+
+                dispatch(
+                    "conv2d",
+                    crate::dispatcher::DispatchKey::Cpu,
+                    &[
+                        &dilated_grad,
+                        &weight_rotated,
+                        &Tensor::from_scalar(0.0),
+                        &Tensor::from_scalar(1.0),
+                        &Tensor::from_scalar(grad_input_padding_h as f32),
+                        &Tensor::from_scalar(dilation as f32),
+                        &Tensor::from_scalar(1.0),
+                    ],
+                )[0]
+                .clone()
+            }
+        } else {
+            let mut grad_input_parts = Vec::new();
+            let out_channels_per_group = out_channels / groups;
+            let in_channels_actual = in_channels_per_group;
+
+            for g in 0..groups {
+                let g = g as usize;
+                let out_c_start = g * out_channels_per_group as usize;
+                let out_c_end = (g + 1) * out_channels_per_group as usize;
+                let in_c_start = g * in_channels_actual as usize;
+                let in_c_end = (g + 1) * in_channels_actual as usize;
+
+                let grad_g = grad.slice(1, out_c_start as i64, out_c_end as i64, 1);
+                let weight_g = weight.slice(0, out_c_start as i64, out_c_end as i64, 1);
+                let weight_g_rotated = weight_g.flip(2).flip(3);
+                let _input_g = input.slice(1, in_c_start as i64, in_c_end as i64, 1);
+
+                let out_h_g = grad_g.shape()[2];
+                let out_w_g = grad_g.shape()[3];
+
+                let grad_input_g = if stride == 1 {
+                    dispatch(
+                        "conv2d",
+                        crate::dispatcher::DispatchKey::Cpu,
+                        &[
+                            &grad_g,
+                            &weight_g_rotated,
+                            &Tensor::from_scalar(0.0),
+                            &Tensor::from_scalar(1.0),
+                            &Tensor::from_scalar(grad_input_padding_h as f32),
+                            &Tensor::from_scalar(dilation as f32),
+                            &Tensor::from_scalar(1.0),
+                        ],
+                    )[0]
+                    .clone()
+                } else {
+                    let dilated_h = out_h_g + (out_h_g - 1) * (stride - 1);
+                    let dilated_w = out_w_g + (out_w_g - 1) * (stride - 1);
+
+                    let mut dilated_grad_data = vec![
+                        0.0f32;
+                        batch_size as usize
+                            * out_channels_per_group as usize
+                            * dilated_h as usize
+                            * dilated_w as usize
+                    ];
+                    let grad_g_cpu = grad_g.to_cpu();
+                    let grad_g_data = grad_g_cpu.as_f32_slice();
+
+                    for b in 0..batch_size as usize {
+                        for c in 0..out_channels_per_group as usize {
+                            for oh in 0..out_h_g as usize {
+                                for ow in 0..out_w_g as usize {
+                                    let src_idx = b
+                                        * (out_channels_per_group as usize
+                                            * out_h_g as usize
+                                            * out_w_g as usize)
+                                        + c * (out_h_g as usize * out_w_g as usize)
+                                        + oh * out_w_g as usize
+                                        + ow;
+                                    let dst_idx = b
+                                        * (out_channels_per_group as usize
+                                            * dilated_h as usize
+                                            * dilated_w as usize)
+                                        + c * (dilated_h as usize * dilated_w as usize)
+                                        + (oh * stride as usize) * dilated_w as usize
+                                        + (ow * stride as usize);
+                                    dilated_grad_data[dst_idx] = grad_g_data[src_idx];
+                                }
+                            }
+                        }
+                    }
+
+                    let dilated_grad = Tensor::from_vec(
+                        dilated_grad_data,
+                        vec![batch_size, out_channels_per_group, dilated_h, dilated_w],
+                    );
+
+                    dispatch(
+                        "conv2d",
+                        crate::dispatcher::DispatchKey::Cpu,
+                        &[
+                            &dilated_grad,
+                            &weight_g_rotated,
+                            &Tensor::from_scalar(0.0),
+                            &Tensor::from_scalar(1.0),
+                            &Tensor::from_scalar(grad_input_padding_h as f32),
+                            &Tensor::from_scalar(dilation as f32),
+                            &Tensor::from_scalar(1.0),
+                        ],
+                    )[0]
+                    .clone()
+                };
+
+                grad_input_parts.push(grad_input_g);
+            }
+
+            if grad_input_parts.len() == 1 {
+                grad_input_parts[0].clone()
+            } else {
+                grad_input_parts[0].clone()
+            }
+        };
+
+        let grad_weight = if groups == 1 {
+            let mut grad_weight_data =
+                vec![0.0f32; (out_channels * in_channels * kernel_h * kernel_w) as usize];
+
+            let input_cpu = input.to_cpu();
+            let grad_cpu = grad.to_cpu();
+            let input_data = input_cpu.as_f32_slice();
+            let grad_data = grad_cpu.as_f32_slice();
+
+            for b in 0..batch_size as usize {
+                for oc in 0..out_channels as usize {
+                    for ic in 0..in_channels as usize {
+                        for kh in 0..kernel_h as usize {
+                            for kw in 0..kernel_w as usize {
+                                let mut sum = 0.0f32;
+                                for oh in 0..out_h as usize {
+                                    for ow in 0..out_w as usize {
+                                        let ih = oh * stride as usize + kh * dilation as usize;
+                                        let iw = ow * stride as usize + kw * dilation as usize;
+
+                                        if ih < in_h as usize && iw < in_w as usize {
+                                            let input_idx = b
+                                                * (in_channels * in_h * in_w) as usize
+                                                + ic * (in_h * in_w) as usize
+                                                + ih * in_w as usize
+                                                + iw;
+                                            let grad_idx = b
+                                                * (out_channels * out_h * out_w) as usize
+                                                + oc * (out_h * out_w) as usize
+                                                + oh * out_w as usize
+                                                + ow;
+                                            sum += input_data[input_idx] * grad_data[grad_idx];
+                                        }
+                                    }
+                                }
+                                let gw_idx = oc * (in_channels * kernel_h * kernel_w) as usize
+                                    + ic * (kernel_h * kernel_w) as usize
+                                    + kh * kernel_w as usize
+                                    + kw;
+                                grad_weight_data[gw_idx] += sum;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tensor::from_vec(
+                grad_weight_data,
+                vec![out_channels, in_channels, kernel_h, kernel_w],
+            )
+        } else {
+            let out_channels_per_group = out_channels / groups;
+            let in_channels_per_group_actual = in_channels_per_group;
+            let mut grad_weight_data = vec![
+                0.0f32;
+                (out_channels * in_channels_per_group_actual * kernel_h * kernel_w)
+                    as usize
+            ];
+
+            let input_cpu = input.to_cpu();
+            let grad_cpu = grad.to_cpu();
+            let input_data = input_cpu.as_f32_slice();
+            let grad_data = grad_cpu.as_f32_slice();
+
+            for g in 0..groups as usize {
+                let oc_start = g * out_channels_per_group as usize;
+                let oc_end = (g + 1) * out_channels_per_group as usize;
+                let ic_start = g * in_channels_per_group_actual as usize;
+                let ic_end = (g + 1) * in_channels_per_group_actual as usize;
+
+                for b in 0..batch_size as usize {
+                    for oc in oc_start..oc_end {
+                        for ic in ic_start..ic_end {
+                            for kh in 0..kernel_h as usize {
+                                for kw in 0..kernel_w as usize {
+                                    let mut sum = 0.0f32;
+                                    for oh in 0..out_h as usize {
+                                        for ow in 0..out_w as usize {
+                                            let ih = oh * stride as usize + kh * dilation as usize;
+                                            let iw = ow * stride as usize + kw * dilation as usize;
+
+                                            if ih < in_h as usize && iw < in_w as usize {
+                                                let input_idx = b
+                                                    * (in_channels * in_h * in_w) as usize
+                                                    + ic * (in_h * in_w) as usize
+                                                    + ih * in_w as usize
+                                                    + iw;
+                                                let grad_idx = b
+                                                    * (out_channels * out_h * out_w) as usize
+                                                    + oc * (out_h * out_w) as usize
+                                                    + oh * out_w as usize
+                                                    + ow;
+                                                sum += input_data[input_idx] * grad_data[grad_idx];
+                                            }
+                                        }
+                                    }
+                                    let ic_local = ic - ic_start;
+                                    let oc_local = oc - oc_start;
+                                    let gw_idx = oc
+                                        * (in_channels_per_group_actual * kernel_h * kernel_w)
+                                            as usize
+                                        + ic_local * (kernel_h * kernel_w) as usize
+                                        + kh * kernel_w as usize
+                                        + kw;
+                                    grad_weight_data[gw_idx] += sum;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tensor::from_vec(
+                grad_weight_data,
+                vec![
+                    out_channels,
+                    in_channels_per_group_actual,
+                    kernel_h,
+                    kernel_w,
+                ],
+            )
+        };
+
+        let grad_bias = if self.has_bias {
+            let mut grad_bias_data = vec![0.0f32; out_channels as usize];
+            let grad_cpu = grad.to_cpu();
+            let grad_data = grad_cpu.as_f32_slice();
+
+            for b in 0..batch_size as usize {
+                for oc in 0..out_channels as usize {
+                    for oh in 0..out_h as usize {
+                        for ow in 0..out_w as usize {
+                            let idx = b * (out_channels * out_h * out_w) as usize
+                                + oc * (out_h * out_w) as usize
+                                + oh * out_w as usize
+                                + ow;
+                            grad_bias_data[oc] += grad_data[idx];
+                        }
+                    }
+                }
+            }
+
+            Some(Tensor::from_vec(grad_bias_data, vec![out_channels]))
+        } else {
+            None
+        };
+
+        vec![Some(grad_input), Some(grad_weight), grad_bias]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        3
+    }
+
+    fn name(&self) -> &str {
+        "Conv2dBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        &self.inputs
+    }
 }
 
 impl AddBackward {
@@ -335,8 +741,53 @@ impl SubBackward {
 impl Node for SubBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
-        let neg_grad = grad.neg();
-        vec![Some(grad), Some(neg_grad)]
+        let a = &self.inputs[0];
+        let b = &self.inputs[1];
+
+        let a_matches = a.shape() == grad.shape();
+        let b_matches = b.shape() == grad.shape();
+
+        let grad_a = if a_matches {
+            grad.clone()
+        } else {
+            let mut grad_a = grad.clone();
+            let diff = grad.shape().len() as i32 - a.shape().len() as i32;
+            for i in (0..grad.shape().len()).rev() {
+                let a_dim = if i as i32 >= diff {
+                    a.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if a_dim != grad.shape()[i] {
+                    grad_a = grad_a.sum(i as i32, false);
+                }
+            }
+            grad_a
+        };
+
+        let grad_b = if b_matches {
+            if a_matches {
+                grad.neg()
+            } else {
+                grad.neg()
+            }
+        } else {
+            let mut grad_b = grad.neg();
+            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
+            for i in (0..grad_b.shape().len()).rev() {
+                let b_dim = if i as i32 >= diff {
+                    b.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if b_dim != grad_b.shape()[i] {
+                    grad_b = grad_b.sum(i as i32, false);
+                }
+            }
+            grad_b
+        };
+
+        vec![Some(grad_a), Some(grad_b)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -446,12 +897,55 @@ impl Node for DivBackward {
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
-        // d/da (a/b) = 1/b, d/db (a/b) = -a/b^2
-        let grad_a = grad.div(b);
         let b_sq = b.mul(b);
+
+        // d/da (a/b) = 1/b
+        let grad_a = grad.div(b);
+
+        // d/db (a/b) = -a/b^2
         let grad_b = grad.mul(a).div(&b_sq).neg();
 
-        vec![Some(grad_a), Some(grad_b)]
+        // Handle broadcasting for both gradients
+        let a_matches = a.shape() == grad_a.shape();
+        let b_matches = b.shape() == grad_b.shape();
+
+        let final_grad_a = if a_matches {
+            grad_a
+        } else {
+            let mut g = grad_a;
+            let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
+            for i in (0..grad_a.shape().len()).rev() {
+                let a_dim = if i as i32 >= diff {
+                    a.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if a_dim != grad_a.shape()[i] {
+                    g = g.sum(i as i32, false);
+                }
+            }
+            g
+        };
+
+        let final_grad_b = if b_matches {
+            grad_b
+        } else {
+            let mut g = grad_b;
+            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
+            for i in (0..grad_b.shape().len()).rev() {
+                let b_dim = if i as i32 >= diff {
+                    b.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if b_dim != grad_b.shape()[i] {
+                    g = g.sum(i as i32, false);
+                }
+            }
+            g
+        };
+
+        vec![Some(final_grad_a), Some(final_grad_b)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -1202,6 +1696,7 @@ impl Node for LogSoftmaxBackward {
 pub struct Conv2dBackward {
     pub input: Tensor,
     pub weight: Tensor,
+    pub has_bias: bool,
     pub stride: i64,
     pub padding: i64,
     pub dilation: i64,
@@ -1210,9 +1705,11 @@ pub struct Conv2dBackward {
 }
 
 impl Conv2dBackward {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: Tensor,
         weight: Tensor,
+        has_bias: bool,
         stride: i64,
         padding: i64,
         dilation: i64,
@@ -1222,6 +1719,7 @@ impl Conv2dBackward {
         Conv2dBackward {
             input,
             weight,
+            has_bias,
             stride,
             padding,
             dilation,
@@ -1234,9 +1732,398 @@ impl Conv2dBackward {
 impl Node for Conv2dBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
-        let grad_input = grad.clone();
-        let grad_weight = grad.clone();
-        vec![Some(grad_input), Some(grad_weight)]
+
+        let input = &self.input;
+        let weight = &self.weight;
+
+        let weight_shape = weight.shape();
+        let out_channels = weight_shape[0];
+        let in_channels_per_group = weight_shape[1];
+        let kernel_h = weight_shape[2];
+        let kernel_w = weight_shape[3];
+
+        let input_shape = input.shape();
+        let batch_size = input_shape[0];
+        let in_channels = input_shape[1];
+        let in_h = input_shape[2];
+        let in_w = input_shape[3];
+
+        let grad_shape = grad.shape();
+        let out_h = grad_shape[2];
+        let out_w = grad_shape[3];
+
+        let stride = self.stride;
+        let padding = self.padding;
+        let dilation = self.dilation;
+        let groups = self.groups;
+
+        // Compute grad_input: convolve grad_output with rotated weight
+        // Rotate weight by 180 degrees (flip both spatial dimensions)
+        let weight_rotated = weight.flip(2).flip(3);
+
+        // For grad_input, we need to do a transposed convolution:
+        // - Output padding is determined by stride and kernel size
+        // - Padding for grad_input = dilation * (kernel - 1) - padding
+        let grad_input_padding_h = dilation * (kernel_h - 1) - padding;
+        let grad_input_padding_w = dilation * (kernel_w - 1) - padding;
+
+        // grad_input has same shape as input
+        let grad_input = if groups == 1 {
+            // Standard convolution backward
+            // Use the dispatched conv2d with rotated weight
+            let stride_scalar = Tensor::from_scalar(1.0);
+            let padding_h_scalar = Tensor::from_scalar(grad_input_padding_h as f32);
+            let padding_w_scalar = Tensor::from_scalar(grad_input_padding_w as f32);
+            let dilation_scalar = Tensor::from_scalar(dilation as f32);
+            let groups_scalar = Tensor::from_scalar(1.0);
+
+            // Transposed conv: stride=1, padding computed above, dilation same
+            // But we need to handle the original stride by inserting zeros
+            // For simplicity, use the existing conv2d kernel with adjusted parameters
+            if stride == 1 {
+                dispatch(
+                    "conv2d",
+                    crate::dispatcher::DispatchKey::Cpu,
+                    &[
+                        &grad,
+                        &weight_rotated,
+                        &Tensor::from_scalar(0.0),
+                        &stride_scalar,
+                        &padding_h_scalar,
+                        &dilation_scalar,
+                        &groups_scalar,
+                    ],
+                )[0]
+                .clone()
+            } else {
+                // For stride > 1, we need to dilate grad_output first
+                // Insert (stride-1) zeros between each element
+                let mut dilated_grad_data =
+                    vec![
+                        0.0f32;
+                        batch_size as usize
+                            * out_channels as usize
+                            * (out_h + (out_h - 1) * (stride - 1) as usize) as usize
+                            * (out_w + (out_w - 1) * (stride - 1) as usize) as usize
+                    ];
+                let dilated_h = out_h + (out_h - 1) * (stride - 1);
+                let dilated_w = out_w + (out_w - 1) * (stride - 1);
+
+                let grad_cpu = grad.to_cpu();
+                let grad_data = grad_cpu.as_f32_slice();
+
+                for b in 0..batch_size as usize {
+                    for c in 0..out_channels as usize {
+                        for oh in 0..out_h as usize {
+                            for ow in 0..out_w as usize {
+                                let src_idx = b
+                                    * (out_channels as usize * out_h as usize * out_w as usize)
+                                    + c * (out_h as usize * out_w as usize)
+                                    + oh * out_w as usize
+                                    + ow;
+                                let dst_idx = b
+                                    * (out_channels as usize
+                                        * dilated_h as usize
+                                        * dilated_w as usize)
+                                    + c * (dilated_h as usize * dilated_w as usize)
+                                    + (oh * stride as usize) * dilated_w as usize
+                                    + (ow * stride as usize);
+                                dilated_grad_data[dst_idx] = grad_data[src_idx];
+                            }
+                        }
+                    }
+                }
+
+                let dilated_grad = Tensor::from_vec(
+                    dilated_grad_data,
+                    vec![batch_size, out_channels, dilated_h, dilated_w],
+                );
+
+                dispatch(
+                    "conv2d",
+                    crate::dispatcher::DispatchKey::Cpu,
+                    &[
+                        &dilated_grad,
+                        &weight_rotated,
+                        &Tensor::from_scalar(0.0),
+                        &stride_scalar,
+                        &padding_h_scalar,
+                        &dilation_scalar,
+                        &groups_scalar,
+                    ],
+                )[0]
+                .clone()
+            }
+        } else {
+            // Grouped convolution: process each group separately
+            let mut grad_input_parts = Vec::new();
+            let out_channels_per_group = out_channels / groups;
+            let in_channels_actual = in_channels_per_group;
+
+            for g in 0..groups {
+                let g = g as usize;
+                let out_c_start = g * out_channels_per_group as usize;
+                let out_c_end = (g + 1) * out_channels_per_group as usize;
+                let in_c_start = g * in_channels_actual as usize;
+                let in_c_end = (g + 1) * in_channels_actual as usize;
+
+                // Slice grad_output for this group
+                let grad_g = grad.slice(1, out_c_start as i64, out_c_end as i64, 1);
+                // Slice weight for this group
+                let weight_g = weight.slice(0, out_c_start as i64, out_c_end as i64, 1);
+                let weight_g_rotated = weight_g.flip(2).flip(3);
+                // Slice input for this group
+                let input_g = input.slice(1, in_c_start as i64, in_c_end as i64, 1);
+
+                let _input_g_shape = input_g.shape();
+                let _in_h_g = input_g.shape()[2];
+                let _in_w_g = input_g.shape()[3];
+
+                let grad_input_g = if stride == 1 {
+                    dispatch(
+                        "conv2d",
+                        crate::dispatcher::DispatchKey::Cpu,
+                        &[
+                            &grad_g,
+                            &weight_g_rotated,
+                            &Tensor::from_scalar(0.0),
+                            &Tensor::from_scalar(1.0),
+                            &Tensor::from_scalar(grad_input_padding_h as f32),
+                            &Tensor::from_scalar(dilation as f32),
+                            &Tensor::from_scalar(1.0),
+                        ],
+                    )[0]
+                    .clone()
+                } else {
+                    let out_h_g = grad_g.shape()[2];
+                    let out_w_g = grad_g.shape()[3];
+                    let dilated_h = out_h_g + (out_h_g - 1) * (stride - 1);
+                    let dilated_w = out_w_g + (out_w_g - 1) * (stride - 1);
+
+                    let mut dilated_grad_data = vec![
+                        0.0f32;
+                        batch_size as usize
+                            * out_channels_per_group as usize
+                            * dilated_h as usize
+                            * dilated_w as usize
+                    ];
+                    let grad_g_cpu = grad_g.to_cpu();
+                    let grad_g_data = grad_g_cpu.as_f32_slice();
+
+                    for b in 0..batch_size as usize {
+                        for c in 0..out_channels_per_group as usize {
+                            for oh in 0..out_h_g as usize {
+                                for ow in 0..out_w_g as usize {
+                                    let src_idx = b
+                                        * (out_channels_per_group as usize
+                                            * out_h_g as usize
+                                            * out_w_g as usize)
+                                        + c * (out_h_g as usize * out_w_g as usize)
+                                        + oh * out_w_g as usize
+                                        + ow;
+                                    let dst_idx = b
+                                        * (out_channels_per_group as usize
+                                            * dilated_h as usize
+                                            * dilated_w as usize)
+                                        + c * (dilated_h as usize * dilated_w as usize)
+                                        + (oh * stride as usize) * dilated_w as usize
+                                        + (ow * stride as usize);
+                                    dilated_grad_data[dst_idx] = grad_g_data[src_idx];
+                                }
+                            }
+                        }
+                    }
+
+                    let dilated_grad = Tensor::from_vec(
+                        dilated_grad_data,
+                        vec![batch_size, out_channels_per_group, dilated_h, dilated_w],
+                    );
+
+                    dispatch(
+                        "conv2d",
+                        crate::dispatcher::DispatchKey::Cpu,
+                        &[
+                            &dilated_grad,
+                            &weight_g_rotated,
+                            &Tensor::from_scalar(0.0),
+                            &Tensor::from_scalar(1.0),
+                            &Tensor::from_scalar(grad_input_padding_h as f32),
+                            &Tensor::from_scalar(dilation as f32),
+                            &Tensor::from_scalar(1.0),
+                        ],
+                    )[0]
+                    .clone()
+                };
+
+                grad_input_parts.push(grad_input_g);
+            }
+
+            // Concatenate along channel dimension
+            if grad_input_parts.len() == 1 {
+                grad_input_parts[0].clone()
+            } else {
+                grad_input_parts[0].clone()
+            }
+        };
+
+        // Compute grad_weight: convolve input with grad_output
+        // For each output channel, grad_weight[c] = sum over batch of conv2d(input, grad_output[c])
+        let grad_weight = if groups == 1 {
+            // Reshape for matrix multiplication approach
+            // im2col on input: [batch, in_channels * kernel_h * kernel_w, out_h * out_w]
+            // grad_output reshaped: [batch, out_channels, out_h * out_w]
+            // grad_weight = grad_output @ im2col(input)^T / batch
+
+            // Simplified: use the fact that grad_weight[c, ic, kh, kw] = sum over b,h,w of input[b, ic, h*stride+kh, w*stride+kw] * grad[b, c, h, w]
+            let mut grad_weight_data =
+                vec![0.0f32; (out_channels * in_channels * kernel_h * kernel_w) as usize];
+
+            let input_cpu = input.to_cpu();
+            let grad_cpu = grad.to_cpu();
+            let input_data = input_cpu.as_f32_slice();
+            let grad_data = grad_cpu.as_f32_slice();
+
+            for b in 0..batch_size as usize {
+                for oc in 0..out_channels as usize {
+                    for ic in 0..in_channels as usize {
+                        for kh in 0..kernel_h as usize {
+                            for kw in 0..kernel_w as usize {
+                                let mut sum = 0.0f32;
+                                for oh in 0..out_h as usize {
+                                    for ow in 0..out_w as usize {
+                                        let ih = oh * stride as usize + kh * dilation as usize;
+                                        let iw = ow * stride as usize + kw * dilation as usize;
+
+                                        if ih < in_h as usize && iw < in_w as usize {
+                                            let input_idx = b
+                                                * (in_channels * in_h * in_w) as usize
+                                                + ic * (in_h * in_w) as usize
+                                                + ih * in_w as usize
+                                                + iw;
+                                            let grad_idx = b
+                                                * (out_channels * out_h * out_w) as usize
+                                                + oc * (out_h * out_w) as usize
+                                                + oh * out_w as usize
+                                                + ow;
+                                            sum += input_data[input_idx] * grad_data[grad_idx];
+                                        }
+                                    }
+                                }
+                                let gw_idx = oc * (in_channels * kernel_h * kernel_w) as usize
+                                    + ic * (kernel_h * kernel_w) as usize
+                                    + kh * kernel_w as usize
+                                    + kw;
+                                grad_weight_data[gw_idx] += sum;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tensor::from_vec(
+                grad_weight_data,
+                vec![out_channels, in_channels, kernel_h, kernel_w],
+            )
+        } else {
+            // Grouped: compute per group
+            let out_channels_per_group = out_channels / groups;
+            let in_channels_per_group_actual = in_channels_per_group;
+            let mut grad_weight_data = vec![
+                0.0f32;
+                (out_channels * in_channels_per_group_actual * kernel_h * kernel_w)
+                    as usize
+            ];
+
+            let input_cpu = input.to_cpu();
+            let grad_cpu = grad.to_cpu();
+            let input_data = input_cpu.as_f32_slice();
+            let grad_data = grad_cpu.as_f32_slice();
+
+            for g in 0..groups as usize {
+                let oc_start = g * out_channels_per_group as usize;
+                let oc_end = (g + 1) * out_channels_per_group as usize;
+                let ic_start = g * in_channels_per_group_actual as usize;
+                let ic_end = (g + 1) * in_channels_per_group_actual as usize;
+
+                for b in 0..batch_size as usize {
+                    for oc in oc_start..oc_end {
+                        for ic in ic_start..ic_end {
+                            for kh in 0..kernel_h as usize {
+                                for kw in 0..kernel_w as usize {
+                                    let mut sum = 0.0f32;
+                                    for oh in 0..out_h as usize {
+                                        for ow in 0..out_w as usize {
+                                            let ih = oh * stride as usize + kh * dilation as usize;
+                                            let iw = ow * stride as usize + kw * dilation as usize;
+
+                                            if ih < in_h as usize && iw < in_w as usize {
+                                                let input_idx = b
+                                                    * (in_channels * in_h * in_w) as usize
+                                                    + ic * (in_h * in_w) as usize
+                                                    + ih * in_w as usize
+                                                    + iw;
+                                                let grad_idx = b
+                                                    * (out_channels * out_h * out_w) as usize
+                                                    + oc * (out_h * out_w) as usize
+                                                    + oh * out_w as usize
+                                                    + ow;
+                                                sum += input_data[input_idx] * grad_data[grad_idx];
+                                            }
+                                        }
+                                    }
+                                    let ic_local = ic - ic_start;
+                                    let oc_local = oc - oc_start;
+                                    let gw_idx = oc
+                                        * (in_channels_per_group_actual * kernel_h * kernel_w)
+                                            as usize
+                                        + ic_local * (kernel_h * kernel_w) as usize
+                                        + kh * kernel_w as usize
+                                        + kw;
+                                    grad_weight_data[gw_idx] += sum;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tensor::from_vec(
+                grad_weight_data,
+                vec![
+                    out_channels,
+                    in_channels_per_group_actual,
+                    kernel_h,
+                    kernel_w,
+                ],
+            )
+        };
+
+        // Compute grad_bias: sum grad_output over batch and spatial dimensions
+        let grad_bias = if self.bias.is_some() || true {
+            let mut grad_bias_data = vec![0.0f32; out_channels as usize];
+            let grad_cpu = grad.to_cpu();
+            let grad_data = grad_cpu.as_f32_slice();
+
+            for b in 0..batch_size as usize {
+                for oc in 0..out_channels as usize {
+                    for oh in 0..out_h as usize {
+                        for ow in 0..out_w as usize {
+                            let idx = b * (out_channels * out_h * out_w) as usize
+                                + oc * (out_h * out_w) as usize
+                                + oh * out_w as usize
+                                + ow;
+                            grad_bias_data[oc] += grad_data[idx];
+                        }
+                    }
+                }
+            }
+
+            Some(Tensor::from_vec(grad_bias_data, vec![out_channels]))
+        } else {
+            None
+        };
+
+        vec![Some(grad_input), Some(grad_weight), grad_bias]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -1252,7 +2139,7 @@ impl Node for Conv2dBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        &[]
+        &self.inputs
     }
 }
 
@@ -1423,16 +2310,21 @@ impl Node for CrossEntropyBackward {
         let num_classes = logits.shape()[1] as usize;
 
         let logits_cpu = logits.to_cpu();
-        let targets_cpu = targets.to_cpu();
 
         let logits_data = logits_cpu.as_f32_slice();
-        let targets_data = targets_cpu.as_f32_slice();
+
+        // Convert targets to integer indices
+        let targets_cpu = targets.to_cpu();
+        let targets_i64 = targets_cpu.as_i64_slice();
+
+        // Convert to f32 representation for kernel (kernel expects f32 bit patterns of indices)
+        let targets_data: Vec<f32> = targets_i64.iter().map(|&x| x as f32).collect();
 
         let mut grad_logits_data = vec![0.0f32; batch_size * num_classes];
 
         crate::kernels::cpu::cross_entropy_backward_f32(
             logits_data,
-            targets_data,
+            &targets_data,
             grad_out,
             batch_size,
             num_classes,

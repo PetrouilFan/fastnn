@@ -133,9 +133,12 @@ impl Optimizer for AdamW {
 
             // v_hat = v / bias_correction2 (with optional amsgrad)
             let mut v_hat = if self.amsgrad {
-                let max_v = self.v[i].clone().max(0, false);
-                self.v_hat[i] = max_v;
-                self.v_hat[i].clone()
+                // AMSGrad: v_hat = max(v_hat, v) element-wise
+                let v_hat_curr = &self.v_hat[i];
+                let v_curr = &self.v[i];
+                let max_v = v_hat_curr.max(&v_curr, false);
+                self.v_hat[i] = max_v.clone();
+                max_v
             } else {
                 self.v[i].clone()
             };

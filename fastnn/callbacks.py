@@ -18,18 +18,19 @@ class Callback:
 class ModelCheckpoint:
     def __init__(
         self,
-        dir_path,
+        filepath,
         monitor="val_loss",
         mode="min",
         save_best_only=True,
         verbose=True,
     ):
-        self.dir_path = dir_path
+        self.filepath = filepath
         self.monitor = monitor
         self.mode = mode
         self.save_best_only = save_best_only
         self.verbose = verbose
         self.best_value = None
+        self.should_save = False
 
     def on_epoch_end(self, epoch, logs):
         value = logs.get(self.monitor)
@@ -43,13 +44,30 @@ class ModelCheckpoint:
             is_best = value < self.best_value
         elif self.mode == "max":
             is_best = value > self.best_value
+        else:
+            if self.verbose:
+                print(f"Warning: Unknown mode '{self.mode}' for ModelCheckpoint")
+            return
 
+        self.should_save = False
         if is_best:
             self.best_value = value
+            self.should_save = True
             if self.verbose:
                 print(
-                    f"Epoch {epoch}: {self.monitor} = {value:.4}, saving best model..."
+                    f"Epoch {epoch}: {self.monitor} = {value:.4f}, saving best model..."
                 )
+        elif not self.save_best_only:
+            self.should_save = True
+            if self.verbose:
+                print(f"Epoch {epoch}: {self.monitor} = {value:.4f}, saving model...")
+
+    def save_model(self, model):
+        if self.should_save:
+            import fastnn as fnn
+
+            fnn.save_model(model, self.filepath)
+            self.should_save = False
 
 
 class EarlyStopping:
@@ -62,6 +80,8 @@ class EarlyStopping:
         self.restore_best_weights = restore_best_weights
         self.counter = 0
         self.best_value = None
+        self.best_weights = None
+        self.should_stop = False
 
     def on_epoch_end(self, epoch, logs):
         value = logs.get(self.monitor)
@@ -79,6 +99,12 @@ class EarlyStopping:
             self.counter += 1
             if self.counter >= self.patience:
                 print(f"Early stopping triggered at epoch {epoch}!")
+                self.should_stop = True
+
+    def on_train_end(self, model):
+        if self.restore_best_weights and self.best_weights is not None:
+            print("Restoring best model weights...")
+            # Model should handle restoring weights
 
 
 class LearningRateScheduler:
@@ -107,9 +133,36 @@ class LearningRateScheduler:
 
 
 class CSVLogger:
-    def __init__(self, filepath):
+    def __init__(self, filepath, fields=None):
         self.filepath = filepath
+        self.fields = fields
         self.epoch = 0
+        self._initialized = False
+
+    def on_epoch_begin(self, epoch, logs):
+        self.epoch = epoch
+        # Clear file on first epoch
+        if not self._initialized:
+            with open(self.filepath, "w") as f:
+                self._initialized = True
 
     def on_epoch_end(self, epoch, logs):
-        self.epoch = epoch
+        if not self._initialized:
+            return
+
+        # Determine field order
+        if self.fields is None:
+            fields = list(logs.keys())
+            fields.sort()
+        else:
+            fields = self.fields
+
+        # Write header on first epoch
+        if epoch == 0:
+            with open(self.filepath, "w") as f:
+                f.write(",".join(fields) + "\n")
+
+        # Write values
+        with open(self.filepath, "a") as f:
+            values = [str(logs.get(field, "")) for field in fields]
+            f.write(",".join(values) + "\n")

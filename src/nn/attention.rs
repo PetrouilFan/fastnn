@@ -88,7 +88,7 @@ impl MultiHeadAttention {
         }
     }
 
-    pub fn forward(&self, x: &Tensor) -> Tensor {
+    pub fn forward_impl(&self, x: &Tensor) -> Tensor {
         if x.ndim() < 3 {
             panic!(
                 "MultiHeadAttention expected input with at least 3 dimensions (batch, seq_len, d_model), got shape {:?}",
@@ -194,13 +194,13 @@ impl MultiHeadAttention {
         let context = context.reshape(vec![batch, seq_len, self.d_model]);
 
         // 7. Output projection
-        self.out_proj.forward(&context)
+        self.out_proj.forward_impl(&context)
     }
 }
 
 impl Module for MultiHeadAttention {
     fn forward(&self, x: &Tensor) -> Tensor {
-        self.forward(x)
+        self.forward_impl(x)
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -261,6 +261,9 @@ impl Module for MultiHeadAttention {
         if let Some(ref v_proj) = self.v_proj {
             v_proj.zero_grad();
         }
+        if let Some(ref qkv_proj) = self.qkv_proj {
+            qkv_proj.zero_grad();
+        }
         self.out_proj.zero_grad();
     }
 
@@ -275,6 +278,9 @@ impl Module for MultiHeadAttention {
         if let Some(ref v_proj) = self.v_proj {
             v_proj.train_mode();
         }
+        if let Some(ref qkv_proj) = self.qkv_proj {
+            qkv_proj.train_mode();
+        }
         self.out_proj.train_mode();
     }
 
@@ -288,6 +294,9 @@ impl Module for MultiHeadAttention {
         }
         if let Some(ref v_proj) = self.v_proj {
             v_proj.eval_mode();
+        }
+        if let Some(ref qkv_proj) = self.qkv_proj {
+            qkv_proj.eval_mode();
         }
         self.out_proj.eval_mode();
     }
