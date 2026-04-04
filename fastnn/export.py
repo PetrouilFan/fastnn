@@ -950,124 +950,143 @@ def load_fnn_model(path: str) -> Any:
                             bias_arr.flatten().tolist(), list(bias_arr.shape)
                         )
                         layer.set_bias(bias)
-            elif ltype == "Conv2d":
-                if param_name == "weight":
-                    weight = get_tensor("weight")
-                    if weight is not None:
-                        layer.set_weight(weight)
-                elif param_name == "bias":
-                    bias = get_tensor("bias")
-                    if bias is not None:
-                        layer.set_bias(bias)
-            elif ltype == "BatchNorm1d":
-                if param_name == "weight":
-                    weight = get_tensor("weight")
-                    if weight is not None:
-                        layer.set_weight(weight)
-                elif param_name == "bias":
-                    bias = get_tensor("bias")
-                    if bias is not None:
-                        layer.set_bias(bias)
-                elif param_name == "running_mean":
-                    running_mean = get_tensor("running_mean")
-                    if running_mean is not None:
-                        layer.set_running_mean(running_mean)
-                elif param_name == "running_var":
-                    running_var = get_tensor("running_var")
-                    if running_var is not None:
-                        layer.set_running_var(running_var)
-            elif ltype == "LayerNorm":
-                if param_name == "weight":
-                    weight = get_tensor("weight")
-                    if weight is not None:
-                        layer.set_weight(weight)
-                elif param_name == "bias":
-                    bias = get_tensor("bias")
-                    if bias is not None:
-                        layer.set_bias(bias)
-            elif ltype == "Embedding":
-                if param_name == "weight":
-                    weight = get_tensor("weight")
-                    if weight is not None:
-                        layer.set_weight(weight)
             elif ltype == "BasicBlock":
                 # Load parameters for all sub-layers of BasicBlock
                 # The layer is a BasicBlock instance with conv1, bn1, relu, conv2, bn2, downsample
-                layer_name = layer_info["name"]
+                # Use tensor_name pattern matching since param_name is just the last component
 
-                # Determine which sub-layer parameter to load based on param_name
-                if param_name == "conv1.weight":
-                    conv1_weight = tensors.get(f"{layer_name}.conv1.weight")
+                if tensor_name.endswith(".conv1.weight"):
+                    conv1_weight = tensors.get(tensor_name)
                     if conv1_weight is not None:
                         weight = fnn.tensor(
                             conv1_weight.flatten().tolist(), list(conv1_weight.shape)
                         )
                         layer.conv1.set_weight(weight)
-                elif param_name == "conv1.bias":
-                    conv1_bias = tensors.get(f"{layer_name}.conv1.bias")
+                elif tensor_name.endswith(".conv1.bias"):
+                    conv1_bias = tensors.get(tensor_name)
                     if conv1_bias is not None:
                         bias = fnn.tensor(
                             conv1_bias.flatten().tolist(), list(conv1_bias.shape)
                         )
                         layer.conv1.set_bias(bias)
-                elif param_name == "weight" and tensor_name.endswith(".bn1.weight"):
-                    bn1_weight = tensors.get(f"{layer_name}.bn1.weight")
+                elif tensor_name.endswith(".bn1.weight"):
+                    bn1_weight = tensors.get(tensor_name)
                     if bn1_weight is not None:
                         weight = fnn.tensor(
                             bn1_weight.flatten().tolist(), list(bn1_weight.shape)
                         )
                         layer.bn1.set_weight(weight)
-                elif param_name == "bias" and tensor_name.endswith(".bn1.bias"):
-                    bn1_bias = tensors.get(f"{layer_name}.bn1.bias")
+                elif tensor_name.endswith(".bn1.bias"):
+                    bn1_bias = tensors.get(tensor_name)
                     if bn1_bias is not None:
                         bias = fnn.tensor(
                             bn1_bias.flatten().tolist(), list(bn1_bias.shape)
                         )
                         layer.bn1.set_bias(bias)
-                elif param_name == "running_mean" and tensor_name.endswith(
-                    ".bn1.running_mean"
-                ):
-                    bn1_running_mean = tensors.get(f"{layer_name}.bn1.running_mean")
+                elif tensor_name.endswith(".bn1.running_mean"):
+                    bn1_running_mean = tensors.get(tensor_name)
                     if bn1_running_mean is not None:
                         running_mean = fnn.tensor(
                             bn1_running_mean.flatten().tolist(),
                             list(bn1_running_mean.shape),
                         )
                         layer.bn1.set_running_mean(running_mean)
-                elif param_name == "running_var" and tensor_name.endswith(
-                    ".bn1.running_var"
-                ):
-                    bn1_running_var = tensors.get(f"{layer_name}.bn1.running_var")
+                elif tensor_name.endswith(".bn1.running_var"):
+                    bn1_running_var = tensors.get(tensor_name)
                     if bn1_running_var is not None:
                         running_var = fnn.tensor(
                             bn1_running_var.flatten().tolist(),
                             list(bn1_running_var.shape),
                         )
                         layer.bn1.set_running_var(running_var)
-                elif param_name == "running_var" and tensor_name.endswith(
-                    ".bn1.running_var"
-                ):
-                    bn1_running_var = tensors.get(f"{layer_name}.bn1.running_var")
-                    if bn1_running_var is not None:
-                        running_var = fnn.tensor(
-                            bn1_running_var.flatten().tolist(),
-                            list(bn1_running_var.shape),
-                        )
-                        layer.bn1.set_running_var(running_var)
-                elif param_name == "conv2.weight":
-                    conv2_weight = tensors.get(f"{layer_name}.conv2.weight")
+                elif tensor_name.endswith(".bn1.num_batches_tracked"):
+                    # Skip batch tracking stats
+                    pass
+                elif tensor_name.endswith(".conv2.weight"):
+                    conv2_weight = tensors.get(tensor_name)
                     if conv2_weight is not None:
                         weight = fnn.tensor(
                             conv2_weight.flatten().tolist(), list(conv2_weight.shape)
                         )
                         layer.conv2.set_weight(weight)
-                elif param_name == "conv2.bias":
-                    conv2_bias = tensors.get(f"{layer_name}.conv2.bias")
+                elif tensor_name.endswith(".conv2.bias"):
+                    conv2_bias = tensors.get(tensor_name)
                     if conv2_bias is not None:
                         bias = fnn.tensor(
                             conv2_bias.flatten().tolist(), list(conv2_bias.shape)
                         )
                         layer.conv2.set_bias(bias)
+                elif tensor_name.endswith(".bn2.weight"):
+                    bn2_weight = tensors.get(tensor_name)
+                    if bn2_weight is not None:
+                        weight = fnn.tensor(
+                            bn2_weight.flatten().tolist(), list(bn2_weight.shape)
+                        )
+                        layer.bn2.set_weight(weight)
+                elif tensor_name.endswith(".bn2.bias"):
+                    bn2_bias = tensors.get(tensor_name)
+                    if bn2_bias is not None:
+                        bias = fnn.tensor(
+                            bn2_bias.flatten().tolist(), list(bn2_bias.shape)
+                        )
+                        layer.bn2.set_bias(bias)
+                elif tensor_name.endswith(".bn2.running_mean"):
+                    bn2_running_mean = tensors.get(tensor_name)
+                    if bn2_running_mean is not None:
+                        running_mean = fnn.tensor(
+                            bn2_running_mean.flatten().tolist(),
+                            list(bn2_running_mean.shape),
+                        )
+                        layer.bn2.set_running_mean(running_mean)
+                elif tensor_name.endswith(".bn2.running_var"):
+                    bn2_running_var = tensors.get(tensor_name)
+                    if bn2_running_var is not None:
+                        running_var = fnn.tensor(
+                            bn2_running_var.flatten().tolist(),
+                            list(bn2_running_var.shape),
+                        )
+                        layer.bn2.set_running_var(running_var)
+                elif tensor_name.endswith(".downsample.0.weight"):
+                    # downsample is a Sequential with first conv
+                    down_weight = tensors.get(tensor_name)
+                    if down_weight is not None:
+                        weight = fnn.tensor(
+                            down_weight.flatten().tolist(), list(down_weight.shape)
+                        )
+                        layer.downsample[0].set_weight(weight)
+                elif tensor_name.endswith(".downsample.1.weight"):
+                    down_weight = tensors.get(tensor_name)
+                    if down_weight is not None:
+                        weight = fnn.tensor(
+                            down_weight.flatten().tolist(), list(down_weight.shape)
+                        )
+                        layer.downsample[1].set_weight(weight)
+                elif tensor_name.endswith(".downsample.1.bias"):
+                    down_bias = tensors.get(tensor_name)
+                    if down_bias is not None:
+                        bias = fnn.tensor(
+                            down_bias.flatten().tolist(), list(down_bias.shape)
+                        )
+                        layer.downsample[1].set_bias(bias)
+                elif tensor_name.endswith(".downsample.1.running_mean"):
+                    down_run_mean = tensors.get(tensor_name)
+                    if down_run_mean is not None:
+                        running_mean = fnn.tensor(
+                            down_run_mean.flatten().tolist(),
+                            list(down_run_mean.shape),
+                        )
+                        layer.downsample[1].set_running_mean(running_mean)
+                elif tensor_name.endswith(".downsample.1.running_var"):
+                    down_run_var = tensors.get(tensor_name)
+                    if down_run_var is not None:
+                        running_var = fnn.tensor(
+                            down_run_var.flatten().tolist(),
+                            list(down_run_var.shape),
+                        )
+                        layer.downsample[1].set_running_var(running_var)
+                elif tensor_name.endswith(".downsample.1.num_batches_tracked"):
+                    # Skip batch tracking stats
+                    pass
                 elif param_name == "bn2.weight":
                     bn2_weight = tensors.get(f"{layer_name}.bn2.weight")
                     if bn2_weight is not None:

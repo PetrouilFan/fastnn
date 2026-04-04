@@ -71,7 +71,8 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     let root_id = root.id();
     grads.insert(root_id, grad_output);
 
-    // Build the graph and count dependencies
+    // Build the graph and count how many gradient contributions each node needs
+    // A node needs to wait for all its consumers (nodes that use its output) to send gradients
     let mut queue: VecDeque<(Arc<dyn Node>, usize)> = VecDeque::new();
     let mut visited: HashSet<usize> = HashSet::new();
 
@@ -79,7 +80,8 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         queue.push_back((grad_fn, root_id));
     }
 
-    // Traverse the graph to build dependency counts
+    // First pass: traverse graph to build dependency counts
+    // node_dependencies[node] = number of output edges from this node that lead to other nodes in the graph
     while let Some((node, tensor_id)) = queue.pop_front() {
         let node_ptr = (&*node) as *const _ as *const () as usize;
         if visited.contains(&node_ptr) {
@@ -91,25 +93,28 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         // Store node info
         node_info.insert(node_ptr, (node.clone(), tensor_id));
 
-        // Count inputs for this node
-        let num_inputs = node.num_inputs();
-        node_dependencies.insert(node_ptr, num_inputs);
-
-        // Add dependencies to queue
+        // Count how many of this node's output edges lead to unvisited nodes
+        // This determines how many gradient contributions this node needs to wait for
         let next_edges = node.next_edges();
+        let mut unvisited_edges = 0usize;
         for edge in next_edges.iter() {
             let Edge(next_node, _) = edge;
             let next_node_ptr = (&**next_node) as *const _ as *const () as usize;
             if !visited.contains(&next_node_ptr) {
                 queue.push_back((next_node.clone(), next_node.id()));
+                unvisited_edges += 1;
             }
         }
+        // The node needs to wait for gradients from all paths that lead to the root
+        // We count this as the number of incoming edges in the backward traversal
+        node_dependencies.insert(node_ptr, unvisited_edges);
     }
 
     // Reset visited for processing
     visited.clear();
 
-    // Process nodes: start from root and work backwards
+    // Second pass: process nodes in topological order
+    // Start from root and work backwards, only processing when all deps are satisfied
     queue.clear();
     if let Some(grad_fn) = root.grad_fn() {
         queue.push_back((grad_fn, root_id));
@@ -122,7 +127,17 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             continue;
         }
 
-        // Get the gradient for this node's output - remove from map (consumed by this node)
+        // Check if all gradient contributions have arrived
+        let deps = node_dependencies.get(&node_ptr).copied().unwrap_or(0);
+        if deps > 0 {
+            // Not all contributions arrived yet, re-queue
+            queue.push_back((node, tensor_id));
+            continue;
+        }
+
+        visited.insert(node_ptr);
+
+        // Get the accumulated gradient for this node's output
         let grad_output_for_node = grads.remove(&tensor_id);
 
         // Check gradient validity in debug builds
@@ -136,7 +151,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         // Get the input tensors for this node
         let input_tensors = node.inputs();
 
-        // Process each input gradient - use into_iter on grad_inputs to avoid cloning
+        // Propagate gradients to input tensors
         for (input_tensor, grad_input_opt) in input_tensors.iter().zip(grad_inputs.into_iter()) {
             if let Some(grad_input) = grad_input_opt {
                 if input_tensor.is_leaf() {
@@ -145,7 +160,6 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                         match meta.lock() {
                             Ok(mut lock) => {
                                 if let Some(existing_grad) = &mut lock.grad {
-                                    // In-place addition for gradient accumulation
                                     existing_grad.add_(&grad_input);
                                 } else {
                                     lock.grad = Some(grad_input);
@@ -154,8 +168,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                             Err(_) => {
                                 eprintln!(
                                     "WARNING: AutogradMeta lock poisoned for tensor {}. \
-                                     Gradient accumulation failed. This may indicate a panic \
-                                     occurred during a previous operation.",
+                                     Gradient accumulation failed.",
                                     input_tensor.id()
                                 );
                             }
@@ -173,17 +186,21 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                         }
                     }
 
-                    // Add this tensor's grad_fn to queue if it hasn't been processed
+                    // Add this tensor's grad_fn to queue if it exists
                     if let Some(input_grad_fn) = input_tensor.grad_fn() {
                         let input_node_ptr = (&*input_grad_fn) as *const _ as *const () as usize;
                         if !visited.contains(&input_node_ptr) {
+                            // Decrement dependency count - one more gradient contribution has arrived
+                            if let Some(deps) = node_dependencies.get_mut(&input_node_ptr) {
+                                if *deps > 0 {
+                                    *deps -= 1;
+                                }
+                            }
                             queue.push_back((input_grad_fn, input_id));
                         }
                     }
                 }
             }
         }
-
-        visited.insert(node_ptr);
     }
 }

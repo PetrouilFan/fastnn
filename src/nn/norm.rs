@@ -221,21 +221,9 @@ impl Module for BatchNorm1d {
             &self.training_false_scalar
         };
 
-        // In eval mode, running stats are read-only - hold RwLock guards to avoid clone
-        // In training mode, we must clone since we update them after forward
-        let running_mean_guard;
-        let running_var_guard;
-        let running_mean_clone;
-        let running_var_clone;
-        let (running_mean_ref, running_var_ref) = if is_training {
-            running_mean_clone = self.running_mean.read().clone();
-            running_var_clone = self.running_var.read().clone();
-            (&running_mean_clone, &running_var_clone)
-        } else {
-            running_mean_guard = self.running_mean.read();
-            running_var_guard = self.running_var.read();
-            (&*running_mean_guard, &*running_var_guard)
-        };
+        // Read current running stats
+        let running_mean = self.running_mean.read().unwrap();
+        let running_var = self.running_var.read().unwrap();
 
         let result = dispatch(
             "batch_norm",
@@ -244,14 +232,56 @@ impl Module for BatchNorm1d {
                 x,
                 weight_ref,
                 bias_ref,
-                running_mean_ref,
-                running_var_ref,
+                &running_mean,
+                &running_var,
                 training_flag,
                 &self.eps_scalar,
             ],
         );
 
-        result[0].clone()
+        let output = result[0].clone();
+
+        // In training mode, update the running stats
+        if is_training {
+            // Compute batch statistics for updating running stats
+            let x_shape = x.shape();
+            let batch_size = x_shape[0];
+            let num_features = x_shape[1];
+            let spatial_size: i64 = if x_shape.len() > 2 {
+                x_shape[2..].iter().product()
+            } else {
+                1
+            };
+
+            // Compute mean over batch and spatial dimensions
+            let x_reshaped = x.reshape(vec![batch_size, num_features, spatial_size]);
+            let batch_mean = x_reshaped.mean(2, false).mean(0, false);
+
+            // Compute variance over batch and spatial dimensions
+            let centered = x_reshaped.sub(&batch_mean.reshape(vec![1, num_features, 1]));
+            let batch_var = centered.mul(&centered).mean(2, false).mean(0, false);
+
+            // Update running stats: running = momentum * running + (1 - momentum) * batch
+            let mom = self.momentum as f32;
+            let inv_mom = 1.0 - mom;
+
+            // Get mutable references and update
+            if let Ok(mut running_mean_lock) = self.running_mean.write() {
+                let new_mean = running_mean_lock
+                    .mul_scalar(mom)
+                    .add(&batch_mean.mul_scalar(inv_mom));
+                *running_mean_lock = new_mean;
+            }
+
+            if let Ok(mut running_var_lock) = self.running_var.write() {
+                let new_var = running_var_lock
+                    .mul_scalar(mom)
+                    .add(&batch_var.mul_scalar(inv_mom));
+                *running_var_lock = new_var;
+            }
+        }
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {
