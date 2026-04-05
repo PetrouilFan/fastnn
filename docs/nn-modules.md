@@ -4,7 +4,7 @@ FastNN provides a variety of neural network layers (modules) for building neural
 
 ## Linear Layer
 
-Fully connected layer: `y = xW^T + b`
+Fully connected layer: `y = xW + b`
 
 ```python
 import fastnn as fnn
@@ -19,23 +19,82 @@ print(output.shape)  # (batch_size, 64)
 - `out_features`: Output dimension
 - `bias`: Whether to include bias (default: True)
 
-## Convolutional Layer
+## Convolutional Layers
+
+### Conv2d
 
 ```python
-# Conv2d: 2D convolution
 conv = fnn.Conv2d(
     in_channels=3,      # RGB image
     out_channels=64,    # Number of filters
     kernel_size=3,      # 3x3 kernel
-    stride=1,          # Convolution stride
-    padding=1,         # Zero padding
+    stride=1,
+    padding=1,
+    dilation=1,
+    groups=1,
     bias=True
 )
 
-# Input: (batch, channels, height, width)
-input_tensor = fnn.randn(8, 3, 32, 32)
+input_tensor = fnn.randn([8, 3, 32, 32])  # (batch, channels, height, width)
 output = conv(input_tensor)
 print(output.shape)  # (8, 64, 32, 32)
+```
+
+### Conv1d
+
+```python
+conv1d = fnn.Conv1d(
+    in_channels=128,
+    out_channels=256,
+    kernel_size=3,
+    stride=1,
+    padding=1,
+    dilation=1,
+    bias=True
+)
+
+# Input: (batch, channels, length)
+input_tensor = fnn.randn([8, 128, 64])
+output = conv1d(input_tensor)
+print(output.shape)  # (8, 256, 64)
+```
+
+### Conv3d
+
+```python
+conv3d = fnn.Conv3d(
+    in_channels=16,
+    out_channels=32,
+    kernel_size=3,
+    stride=1,
+    padding=1,
+    dilation=1,
+    bias=True
+)
+
+# Input: (batch, channels, depth, height, width)
+input_tensor = fnn.randn([2, 16, 8, 32, 32])
+output = conv3d(input_tensor)
+print(output.shape)  # (2, 32, 8, 32, 32)
+```
+
+### ConvTranspose2d
+
+Transposed convolution (upsampling convolution):
+
+```python
+conv_t = fnn.ConvTranspose2d(
+    in_channels=64,
+    out_channels=32,
+    kernel_size=3,
+    stride=2,
+    padding=1,
+    bias=True
+)
+
+input_tensor = fnn.randn([4, 64, 8, 8])
+output = conv_t(input_tensor)
+print(output.shape)  # (4, 32, 16, 16)
 ```
 
 ## Normalization Layers
@@ -54,41 +113,96 @@ bn.eval()
 output = bn(input_tensor)
 ```
 
+### BatchNorm2d
+
+```python
+bn2d = fnn.BatchNorm2d(num_features=64, momentum=0.1, eps=1e-5)
+
+input_tensor = fnn.randn([8, 64, 32, 32])
+output = bn2d(input_tensor)
+```
+
 ### LayerNorm
 
 ```python
 ln = fnn.LayerNorm(normalized_shape=64, eps=1e-5)
 
 # Normalizes over last dimension
-input_tensor = fnn.randn(8, 32, 64)
+input_tensor = fnn.randn([8, 32, 64])
 output = ln(input_tensor)  # Normalizes over dim 64
+```
+
+### RMSNorm
+
+RMS normalization (used in Llama/Mistral):
+
+```python
+rms = fnn.RMSNorm(normalized_shape=64, eps=1e-5)
+
+input_tensor = fnn.randn([8, 32, 64])
+output = rms(input_tensor)
+```
+
+### GroupNorm
+
+```python
+gn = fnn.GroupNorm(num_groups=8, num_channels=64, eps=1e-5)
+
+input_tensor = fnn.randn([8, 64, 32, 32])
+output = gn(input_tensor)
 ```
 
 ## Dropout
 
+### Dropout
+
 ```python
-dropout = fnn.Dropout(p=0.5)  # p = probability of zeroing
+dropout = fnn.Dropout(p=0.5)
 
 # Training mode: applies dropout
 dropout.train()
-output = dropout(input_tensor)  # ~50% values zeroed
+output = dropout(input_tensor)
 
 # Inference mode: no dropout
 dropout.eval()
-output = dropout(input_tensor)  # Identity operation
+output = dropout(input_tensor)
+```
+
+### Dropout2d
+
+Channel-wise dropout for 2D inputs:
+
+```python
+dropout2d = fnn.Dropout2d(p=0.5)
+
+# Input: (batch, channels, height, width)
+input_tensor = fnn.randn([8, 64, 32, 32])
+output = dropout2d(input_tensor)
+```
+
+## Upsample
+
+```python
+# Nearest neighbor upsampling
+up = fnn.Upsample(scale_factor=2.0, mode='nearest')
+input_tensor = fnn.randn([1, 2, 4, 4])
+output = up(input_tensor)
+print(output.shape)  # (1, 2, 8, 8)
+
+# Bilinear upsampling
+up2 = fnn.Upsample(scale_factor=2.0, mode='bilinear')
+output2 = up2(input_tensor)
 ```
 
 ## Embedding
 
 ```python
-# Word embeddings
 embedding = fnn.Embedding(
-    num_embeddings=10000,  # Vocabulary size
-    embedding_dim=256      # Embedding dimension
+    num_embeddings=10000,
+    embedding_dim=256
 )
 
-# Input: batch of token indices
-token_ids = fnn.tensor([[1, 2, 3], [4, 5, 6]])  # (batch, seq_len)
+token_ids = fnn.randint(low=0, high=10000, shape=[2, 3])
 embeddings = embedding(token_ids)
 print(embeddings.shape)  # (2, 3, 256)
 ```
@@ -103,6 +217,11 @@ gelu = fnn.GELU()
 sigmoid = fnn.Sigmoid()
 tanh = fnn.Tanh()
 silu = fnn.SiLU()
+leaky_relu = fnn.LeakyReLU(negative_slope=0.01)
+softplus = fnn.Softplus(beta=1.0, threshold=20.0)
+hardswish = fnn.Hardswish()
+elu = fnn.ELU(alpha=1.0)
+mish = fnn.Mish()
 
 output = relu(input_tensor)
 ```
@@ -115,11 +234,51 @@ output = input_tensor.gelu()
 output = input_tensor.sigmoid()
 output = input_tensor.tanh()
 output = input_tensor.silu()
+output = input_tensor.leaky_relu(0.01)
+output = input_tensor.elu(1.0)
+output = input_tensor.softmax(dim=-1)
+output = input_tensor.log_softmax(dim=-1)
+```
+
+## Pooling
+
+### MaxPool2d
+
+```python
+pool = fnn.MaxPool2d(kernel_size=2, stride=2)
+input_tensor = fnn.randn([8, 64, 32, 32])
+output = pool(input_tensor)
+print(output.shape)  # (8, 64, 16, 16)
+```
+
+### AdaptiveAvgPool2d
+
+```python
+pool = fnn.AdaptiveAvgPool2d(output_h=1, output_w=1)
+input_tensor = fnn.randn([8, 64, 32, 32])
+output = pool(input_tensor)
+print(output.shape)  # (8, 64, 1, 1)
+```
+
+## ResidualBlock
+
+Skip connection block for ResNet-style architectures:
+
+```python
+block = fnn.ResidualBlock(
+    conv1_in=64, conv1_out=64, conv1_kernel=3, conv1_stride=1, conv1_padding=1,
+    bn1_features=64,
+    conv2_in=64, conv2_out=64, conv2_kernel=3, conv2_stride=1, conv2_padding=1,
+    bn2_features=64,
+    downsample=None  # Or (ds_in, ds_out, ds_k, ds_s, ds_p, ds_bn) for stride > 1
+)
+
+input_tensor = fnn.randn([4, 64, 32, 32])
+output = block(input_tensor)
+print(output.shape)  # (4, 64, 32, 32)
 ```
 
 ## Sequential
-
-Combine layers in sequence:
 
 ```python
 model = fnn.Sequential([
@@ -135,8 +294,6 @@ output = model(input_tensor)
 
 ## ModuleList
 
-Store list of modules:
-
 ```python
 layers = fnn.ModuleList([
     fnn.Linear(10, 10),
@@ -144,37 +301,21 @@ layers = fnn.ModuleList([
     fnn.Linear(10, 1),
 ])
 
-# Access by index
-output = layers[0](input_tensor)
-
-# Iterate
 for layer in layers:
     input_tensor = layer(input_tensor)
 ```
 
 ## Accessing Parameters
 
-All modules with learnable parameters implement `parameters()`:
-
 ```python
-model = fnn.Sequential([
-    fnn.Linear(784, 256),
-    fnn.ReLU(),
-    fnn.Linear(256, 10),
-])
-
-# Get all parameters
 params = model.parameters()
 print(f"Number of parameter tensors: {len(params)}")
 
-# Get named parameters (if supported)
 for name, param in model.named_parameters():
     print(f"{name}: {param.shape}")
 ```
 
 ## Training/Evaluation Mode
-
-Some layers behave differently in training vs. eval mode:
 
 ```python
 model = fnn.Sequential([
@@ -183,9 +324,6 @@ model = fnn.Sequential([
     fnn.Dropout(0.5),
 ])
 
-# Training mode
-model.train()
-
-# Inference mode
-model.eval()
+model.train()  # Training mode
+model.eval()   # Inference mode
 ```
