@@ -10,6 +10,7 @@ mod storage;
 mod storage_pool;
 mod tensor;
 mod train;
+mod residual;
 
 // Native packed precision modules
 pub mod dtypes;
@@ -1415,6 +1416,77 @@ impl Conv3d {
 }
 
 #[pyclass]
+struct ResidualBlock {
+    inner: residual::ResidualBlock,
+}
+
+#[pymethods]
+impl ResidualBlock {
+    #[new]
+    #[pyo3(signature = (
+        conv1_in, conv1_out, conv1_kernel, conv1_stride, conv1_padding,
+        bn1_features,
+        conv2_in, conv2_out, conv2_kernel, conv2_stride, conv2_padding,
+        bn2_features,
+        downsample = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        conv1_in: i64,
+        conv1_out: i64,
+        conv1_kernel: i64,
+        conv1_stride: i64,
+        conv1_padding: i64,
+        bn1_features: i64,
+        conv2_in: i64,
+        conv2_out: i64,
+        conv2_kernel: i64,
+        conv2_stride: i64,
+        conv2_padding: i64,
+        bn2_features: i64,
+        downsample: Option<(i64, i64, i64, i64, i64, i64)>,
+    ) -> Self {
+        ResidualBlock {
+            inner: residual::ResidualBlock::new(
+                conv1_in, conv1_out, conv1_kernel, conv1_stride, conv1_padding,
+                bn1_features,
+                conv2_in, conv2_out, conv2_kernel, conv2_stride, conv2_padding,
+                bn2_features,
+                downsample,
+            ),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn forward(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&mut self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&mut self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
 struct LayerNorm {
     inner: nn::norm::LayerNorm,
 }
@@ -2390,6 +2462,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ConvTranspose2d>()?;
     m.add_class::<Conv1d>()?;
     m.add_class::<Conv3d>()?;
+    m.add_class::<ResidualBlock>()?;
     m.add_class::<LayerNorm>()?;
     m.add_class::<BatchNorm1d>()?;
     m.add_class::<RMSNorm>()?;

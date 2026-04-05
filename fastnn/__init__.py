@@ -452,6 +452,7 @@ Conv1d = _core.Conv1d
 Conv3d = _core.Conv3d
 einsum = _core.einsum
 flash_attention = _core.flash_attention
+ResidualBlock = _core.ResidualBlock
 
 
 def save_model(model, path):
