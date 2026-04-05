@@ -1996,16 +1996,16 @@ impl Hardswish {
 }
 
 #[pyclass]
-struct ELU {
+struct Elu {
     alpha: f64,
 }
 
 #[pymethods]
-impl ELU {
+impl Elu {
     #[new]
     #[pyo3(signature = (alpha = 1.0))]
     fn new(alpha: f64) -> Self {
-        ELU { alpha }
+        Elu { alpha }
     }
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
@@ -2660,7 +2660,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LeakyReLU>()?;
     m.add_class::<Softplus>()?;
     m.add_class::<Hardswish>()?;
-    m.add_class::<ELU>()?;
+    m.add_class::<Elu>()?;
     m.add_class::<Mish>()?;
     m.add_class::<AdaptiveAvgPool2d>()?;
     m.add_class::<Sequential>()?;
