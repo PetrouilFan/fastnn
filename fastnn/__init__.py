@@ -536,6 +536,76 @@ def save_state_dict(model, path):
                 f.write(struct.pack("<Q", 0))
 
 
+def save_optimizer(opt, path):
+    import struct
+
+    MAGIC = b"FNO\x00"
+    VERSION = 1
+    with open(path, "wb") as f:
+        f.write(MAGIC)
+        f.write(struct.pack("<I", VERSION))
+        lr = opt.lr if hasattr(opt, "lr") else 0.0
+        f.write(struct.pack("<d", lr))
+        betas = opt.betas if hasattr(opt, "betas") else (0.9, 0.999)
+        f.write(struct.pack("<d", betas[0]))
+        f.write(struct.pack("<d", betas[1]))
+        eps = opt.eps if hasattr(opt, "eps") else 1e-8
+        f.write(struct.pack("<d", eps))
+        wd = opt.weight_decay if hasattr(opt, "weight_decay") else 0.0
+        f.write(struct.pack("<d", wd))
+        n = len(opt.params) if hasattr(opt, "params") else 0
+        f.write(struct.pack("<Q", n))
+        for i in range(n):
+            for state_tensor_name in ["m", "v", "v_hat"]:
+                state_list = getattr(opt, state_tensor_name, None)
+                if state_list and i < len(state_list):
+                    data = state_list[i].numpy().astype(np.float32).flatten()
+                    f.write(struct.pack("<B", 1))
+                    f.write(struct.pack("<Q", len(data)))
+                    f.write(data.tobytes())
+                else:
+                    f.write(struct.pack("<B", 0))
+                    f.write(struct.pack("<Q", 0))
+        step_list = getattr(opt, "step", None)
+        if step_list:
+            for s in step_list:
+                f.write(struct.pack("<Q", s))
+
+
+def load_optimizer(opt, path):
+    import struct
+
+    MAGIC = b"FNO\x00"
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != MAGIC:
+            raise ValueError("Invalid optimizer state file")
+        version = struct.unpack("<I", f.read(4))[0]
+        opt.lr = struct.unpack("<d", f.read(8))[0]
+        b1 = struct.unpack("<d", f.read(8))[0]
+        b2 = struct.unpack("<d", f.read(8))[0]
+        if hasattr(opt, "betas"):
+            opt.betas = (b1, b2)
+        opt.eps = struct.unpack("<d", f.read(8))[0]
+        if hasattr(opt, "weight_decay"):
+            opt.weight_decay = struct.unpack("<d", f.read(8))[0]
+        n = struct.unpack("<Q", f.read(8))[0]
+        for i in range(n):
+            for state_tensor_name in ["m", "v", "v_hat"]:
+                state_list = getattr(opt, state_tensor_name, None)
+                has_data = struct.unpack("<B", f.read(1))[0]
+                data_len = struct.unpack("<Q", f.read(8))[0]
+                if has_data and state_list and i < len(state_list):
+                    data = np.frombuffer(f.read(data_len * 4), dtype=np.float32)
+                    state_list[i].copy_(tensor(data.copy(), list(state_list[i].shape)))
+                elif has_data:
+                    f.read(data_len * 4)
+        step_list = getattr(opt, "step", None)
+        if step_list:
+            for i in range(len(step_list)):
+                step_list[i] = struct.unpack("<Q", f.read(8))[0]
+
+
 allocator_stats = _core.allocator_stats
 list_registered_ops = _core.list_registered_ops
 batched_mlp_forward = _core.batched_mlp_forward
