@@ -335,3 +335,68 @@ impl Module for BatchNorm1d {
         self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
+
+pub struct RMSNorm {
+    pub weight: Tensor,
+    pub eps: f32,
+    pub normalized_shape: i64,
+}
+
+impl RMSNorm {
+    pub fn new(normalized_shape: i64, eps: f32) -> Self {
+        let weight = Tensor::ones(
+            vec![normalized_shape],
+            crate::storage::DType::F32,
+            crate::storage::Device::Cpu,
+        );
+        let mut w = weight.clone();
+        w.requires_grad_(true);
+        RMSNorm {
+            weight: w,
+            eps,
+            normalized_shape,
+        }
+    }
+}
+
+impl Module for RMSNorm {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        let x_sq = x.mul(x);
+        let ndim = x.ndim();
+        let norm_dim = ndim as i32 - 1;
+        let mean_sq = x_sq.mean(norm_dim, true);
+        let rms = mean_sq.add_scalar(self.eps).sqrt();
+        let x_norm = x.div(&rms);
+        let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
+        for _ in 0..ndim - 1 {
+            weight_shape.push(1);
+        }
+        weight_shape.push(self.normalized_shape);
+        let weight_reshaped = self.weight.reshape(weight_shape.into_vec());
+        x_norm.mul(&weight_reshaped)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        vec![self.weight.clone()]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![("weight".to_string(), self.weight.clone())]
+    }
+
+    fn zero_grad(&self) {
+        if let Some(meta) = &self.weight.inner.autograd_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.grad = None;
+            }
+        }
+    }
+
+    fn train_mode(&self) {}
+
+    fn eval_mode(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
+    }
+}
