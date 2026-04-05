@@ -2046,6 +2046,60 @@ impl PyMuon {
 }
 
 #[pyclass]
+struct PyLion {
+    inner: optim::lion::Lion,
+}
+
+#[pymethods]
+impl PyLion {
+    #[new]
+    #[pyo3(signature = (params, lr = 0.0001, betas = None, weight_decay = 0.0))]
+    fn new(
+        params: Vec<PyTensor>,
+        lr: f64,
+        betas: Option<(f64, f64)>,
+        weight_decay: f64,
+    ) -> Self {
+        let tensors: Vec<tensor::Tensor> = params.into_iter().map(|p| p.inner).collect();
+        let betas = betas.unwrap_or((0.95, 0.98));
+        PyLion {
+            inner: optim::lion::Lion::new(tensors, lr, betas, weight_decay),
+        }
+    }
+
+    fn step(&mut self) {
+        self.inner.step();
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn state_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use pyo3::types::{PyDict, PyList};
+        let dict = PyDict::new(py);
+        dict.set_item("lr", self.inner.lr)?;
+        dict.set_item("betas", self.inner.betas)?;
+        dict.set_item("weight_decay", self.inner.weight_decay)?;
+        let m_list = PyList::new(py, self.inner.m.iter().map(|t| PyTensor::from_tensor(t.clone())))?;
+        dict.set_item("m", m_list)?;
+        Ok(dict.into())
+    }
+
+    fn load_state_dict(&mut self, state: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner.lr = state.get_item("lr")?.extract()?;
+        self.inner.betas = state.get_item("betas")?.extract()?;
+        if let Ok(wd) = state.get_item("weight_decay")?.extract::<f64>() {
+            self.inner.weight_decay = wd;
+        }
+        if let Ok(m_list) = state.get_item("m")?.extract::<Vec<PyTensor>>() {
+            self.inner.m = m_list.into_iter().map(|p| p.inner).collect();
+        }
+        Ok(())
+    }
+}
+
+#[pyclass]
 struct PyTransformerEncoder {
     inner: nn::transformer::TransformerEncoder,
 }
@@ -2222,12 +2276,15 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAdam>()?;
     m.add_class::<PyAdamW>()?;
     m.add_class::<PyMuon>()?;
+    m.add_class::<PyLion>()?;
     m.add_class::<PyTransformerEncoder>()?;
 
     m.add_class::<PyTensor>()?;
 
     m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
     m.add_function(wrap_pyfunction!(cat, py)?)?;
+    m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
+    m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
 
     Ok(())
 }
@@ -2310,4 +2367,17 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
 fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
     let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     PyTensor::from_tensor(tensor::Tensor::cat(&tensors, dim))
+}
+
+#[pyfunction]
+fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyTensor {
+    let result = dispatcher::dispatch("bce_with_logits", dispatcher::DispatchKey::Cpu, &[&input.inner, &target.inner]);
+    PyTensor::from_tensor(result[0].clone())
+}
+
+#[pyfunction]
+fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyTensor {
+    let delta_t = tensor::Tensor::from_scalar(delta);
+    let result = dispatcher::dispatch("huber_loss", dispatcher::DispatchKey::Cpu, &[&input.inner, &target.inner, &delta_t]);
+    PyTensor::from_tensor(result[0].clone())
 }

@@ -10338,6 +10338,16 @@ fn register_kernels() {
     );
     register("mse_loss", DispatchKey::Cpu, mse_loss_kernel as KernelFn);
     register(
+        "bce_with_logits",
+        DispatchKey::Cpu,
+        bce_with_logits_kernel as KernelFn,
+    );
+    register(
+        "huber_loss",
+        DispatchKey::Cpu,
+        huber_loss_kernel as KernelFn,
+    );
+    register(
         "cross_entropy_loss",
         DispatchKey::Cpu,
         cross_entropy_loss_kernel as KernelFn,
@@ -11708,4 +11718,42 @@ fn logical_not_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         output_data[i] = if x_data[i] == 0.0 { 1.0 } else { 0.0 };
     }
     vec![Tensor::from_vec(output_data, x.shape())]
+}
+
+fn bce_with_logits_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let input = args[0];
+    let target = args[1];
+    let numel = input.inner.numel() as usize;
+    let input_data = input.as_f32_slice();
+    let target_data = target.as_f32_slice();
+    let mut loss = 0.0f32;
+    for i in 0..numel {
+        let x = input_data[i];
+        let t = target_data[i];
+        let max_val = if x > 0.0 { x } else { 0.0 };
+        loss += max_val - x * t + (1.0 + (-x.abs()).exp()).ln();
+    }
+    let avg_loss = loss / numel as f32;
+    vec![Tensor::from_vec(vec![avg_loss], vec![1])]
+}
+
+fn huber_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let input = args[0];
+    let target = args[1];
+    let delta = args[2].item() as f32;
+    let numel = input.inner.numel() as usize;
+    let input_data = input.as_f32_slice();
+    let target_data = target.as_f32_slice();
+    let mut loss = 0.0f32;
+    for i in 0..numel {
+        let diff = input_data[i] - target_data[i];
+        let abs_diff = diff.abs();
+        loss += if abs_diff < delta {
+            0.5 * diff * diff
+        } else {
+            delta * (abs_diff - 0.5 * delta)
+        };
+    }
+    let avg_loss = loss / numel as f32;
+    vec![Tensor::from_vec(vec![avg_loss], vec![1])]
 }
