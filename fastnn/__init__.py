@@ -455,6 +455,21 @@ flash_attention = _core.flash_attention
 ResidualBlock = _core.ResidualBlock
 
 
+def import_onnx(onnx_path: str, fnn_path: str):
+    """Import an ONNX model and save it in fastnn format.
+
+    Args:
+        onnx_path: Path to .onnx file
+        fnn_path: Path to output .fnn file
+
+    Returns:
+        Dictionary with model info (layers, input_shape, output_shape)
+    """
+    from fastnn.onnx_import import import_onnx as _import
+
+    return _import(onnx_path, fnn_path)
+
+
 def save_model(model, path):
     import struct
 
