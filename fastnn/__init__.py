@@ -455,6 +455,9 @@ flash_attention = _core.flash_attention
 ResidualBlock = _core.ResidualBlock
 clip_grad_norm_ = _core.clip_grad_norm_
 clip_grad_value_ = _core.clip_grad_value_
+Dropout2d = _core.Dropout2d
+Upsample = _core.Upsample
+RMSprop = _core.PyRMSprop
 
 
 def import_onnx(onnx_path: str, fnn_path: str):
