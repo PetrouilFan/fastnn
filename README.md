@@ -397,6 +397,15 @@ output = fnn_model(fnn.tensor(data, shape))
 | `fnn.save_optimizer(opt, path)`          | Save optimizer state |
 | `fnn.load_optimizer(opt, path)`          | Load optimizer state |
 
+### Attention
+
+| Function                                 | Description          |
+|------------------------------------------|----------------------|
+| `fnn.flash_attention(q, k, v)`           | Memory-efficient attention (O(N) memory) |
+| `fnn.flash_attention(q, k, v, causal=True)` | Causal FlashAttention |
+
+FlashAttention is mathematically equivalent to standard attention (max diff < 1e-7) but uses block-wise tiling with online softmax to avoid materializing the full N×N attention scores matrix.
+
 ---
 
 ## Build Flags
@@ -434,8 +443,8 @@ cargo bench --bench packed_bench
 - [ ] GPU training (backward pass on GPU storage)
 - [ ] Raspberry Pi benchmark suite (ARM NEON validation)
 - [ ] Multi-GPU training
-- [ ] FlashAttention kernel
 - [ ] ONNX model import
+- [ ] FlashAttention SIMD optimization (AVX2/AVX512 block kernels)
 
 ---
 
