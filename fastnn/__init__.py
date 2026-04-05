@@ -437,8 +437,105 @@ SGD = _core.PySGD
 Adam = _core.PyAdam
 AdamW = _core.PyAdamW
 Muon = _core.PyMuon
-save_model = _core.save_model
-load_model = _core.load_model
+
+
+def save_model(model, path):
+    import struct
+
+    MAGIC = b"FNN\x00"
+    VERSION = 1
+    params = model.parameters() if hasattr(model, "parameters") else []
+    named = model.named_parameters() if hasattr(model, "named_parameters") else []
+    if named:
+        param_list = named
+    else:
+        param_list = [(f"param_{i}", p) for i, p in enumerate(params)]
+    with open(path, "wb") as f:
+        f.write(MAGIC)
+        f.write(struct.pack("<I", VERSION))
+        f.write(struct.pack("<Q", len(param_list)))
+        for name, tensor in param_list:
+            name_bytes = name.encode("utf-8")
+            f.write(struct.pack("<Q", len(name_bytes)))
+            f.write(name_bytes)
+            shape = tensor.shape
+            f.write(struct.pack("<Q", len(shape)))
+            for d in shape:
+                f.write(struct.pack("<q", d))
+            data = tensor.numpy().astype(np.float32).flatten()
+            f.write(struct.pack("<Q", len(data)))
+            f.write(data.tobytes())
+
+
+def load_model(path):
+    import struct
+
+    MAGIC = b"FNN\x00"
+    result = {}
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != MAGIC:
+            raise ValueError(f"Invalid file format: expected FNN magic bytes")
+        version = struct.unpack("<I", f.read(4))[0]
+        if version > 1:
+            raise ValueError(f"Unsupported format version: {version}")
+        num_params = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(num_params):
+            name_len = struct.unpack("<Q", f.read(8))[0]
+            name = f.read(name_len).decode("utf-8")
+            shape_len = struct.unpack("<Q", f.read(8))[0]
+            shape = [struct.unpack("<q", f.read(8))[0] for _ in range(shape_len)]
+            data_len = struct.unpack("<Q", f.read(8))[0]
+            data = np.frombuffer(f.read(data_len * 4), dtype=np.float32)
+            result[name] = tensor(data.copy(), list(shape))
+    return result
+
+
+def load_state_dict(model, state_dict):
+    params = model.parameters()
+    loaded = list(state_dict.values())
+    if len(params) != len(loaded):
+        raise ValueError(
+            f"state_dict has {len(loaded)} params, model has {len(params)}"
+        )
+    for p, loaded_t in zip(params, loaded):
+        p.copy_(loaded_t)
+
+
+def save_state_dict(model, path):
+    import struct
+
+    MAGIC = b"FNN\x00"
+    VERSION = 1
+    named = model.named_parameters() if hasattr(model, "named_parameters") else []
+    params = model.parameters() if hasattr(model, "parameters") else []
+    if named:
+        param_list = named
+    else:
+        param_list = [(f"param_{i}", p) for i, p in enumerate(params)]
+    with open(path, "wb") as f:
+        f.write(MAGIC)
+        f.write(struct.pack("<I", VERSION))
+        f.write(struct.pack("<Q", len(param_list)))
+        for name, tensor in param_list:
+            name_bytes = name.encode("utf-8")
+            f.write(struct.pack("<Q", len(name_bytes)))
+            f.write(name_bytes)
+            shape = tensor.shape
+            f.write(struct.pack("<Q", len(shape)))
+            for d in shape:
+                f.write(struct.pack("<q", d))
+            grad = tensor.grad
+            if grad is not None:
+                f.write(struct.pack("<B", 1))
+                data = grad.numpy().astype(np.float32).flatten()
+                f.write(struct.pack("<Q", len(data)))
+                f.write(data.tobytes())
+            else:
+                f.write(struct.pack("<B", 0))
+                f.write(struct.pack("<Q", 0))
+
+
 allocator_stats = _core.allocator_stats
 list_registered_ops = _core.list_registered_ops
 batched_mlp_forward = _core.batched_mlp_forward

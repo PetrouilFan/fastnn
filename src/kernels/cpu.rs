@@ -5532,7 +5532,6 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Save original shapes for output reshape
     let orig_a_shape = a_shape.clone();
-    let orig_b_shape = b_shape.clone();
 
     // For N-D tensors (N > 3), flatten all batch dims into a single batch dim
     // by reshaping to 3D. This avoids incorrect batch stride calculations.
@@ -5824,6 +5823,14 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 );
             }
         }
+    }
+
+    // Reshape output back to original N-D shape if we flattened
+    if orig_a_shape.len() > 3 {
+        let mut final_shape: Vec<i64> = orig_a_shape[..orig_a_shape.len() - 2].to_vec();
+        final_shape.push(m as i64);
+        final_shape.push(n as i64);
+        output = output.reshape(final_shape);
     }
 
     vec![output]

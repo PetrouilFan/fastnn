@@ -84,7 +84,7 @@ impl TransformerBlock {
 
 impl Module for TransformerBlock {
     fn forward(&self, x: &Tensor) -> Tensor {
-        self.forward(x)
+        TransformerBlock::forward(self, x)
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -252,7 +252,7 @@ impl TransformerEncoder {
 
 impl Module for TransformerEncoder {
     fn forward(&self, x: &Tensor) -> Tensor {
-        self.forward(x)
+        TransformerEncoder::forward(self, x)
     }
 
     fn parameters(&self) -> Vec<Tensor> {
