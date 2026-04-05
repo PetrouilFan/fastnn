@@ -29,12 +29,11 @@ def test_checkpoint_roundtrip_linear():
         checkpoint_path = f.name
 
     try:
-        # The save_model function is a stub that prints - actual save would use io.serialize
-        # For now, just test that the API exists
         fastnn.save_model(linear, checkpoint_path)
-        fastnn.load_model(checkpoint_path, None)
-
-        print("  PASSED: Checkpoint API accessible")
+        state = fastnn.load_model(checkpoint_path)
+        assert isinstance(state, dict)
+        assert len(state) > 0
+        print(f"  PASSED: Checkpoint round-trip ({len(state)} tensors loaded)")
     finally:
         if os.path.exists(checkpoint_path):
             os.unlink(checkpoint_path)
