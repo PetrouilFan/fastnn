@@ -1055,9 +1055,7 @@ impl SigmoidBackward {
 impl Node for SigmoidBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
-        let input = self.input.to_cpu();
-        let grad = grad.to_cpu();
-        let sigmoid_x = input.sigmoid();
+        let sigmoid_x = self.input.sigmoid();
         let derivative = sigmoid_x.mul_scalar(1.0).sub(&sigmoid_x.pow(2.0));
         vec![Some(grad.mul(&derivative))]
     }
@@ -1093,9 +1091,7 @@ impl TanhBackward {
 impl Node for TanhBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
-        let input = self.input.to_cpu();
-        let grad = grad.to_cpu();
-        let tanh_x = input.tanh();
+        let tanh_x = self.input.tanh();
         let tanh_sq = tanh_x.pow(2.0);
         let one_minus_tanh_sq = tanh_sq.mul_scalar(-1.0).add_scalar(1.0);
         vec![Some(grad.mul(&one_minus_tanh_sq))]
@@ -1132,11 +1128,9 @@ impl SiLUBackward {
 impl Node for SiLUBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
-        let input = self.input.to_cpu();
-        let grad = grad.to_cpu();
-        let s = input.sigmoid();
+        let s = self.input.sigmoid();
         let one_minus_s = s.mul_scalar(1.0).sub(&s);
-        let derivative = s.mul(&input.mul(&one_minus_s).add_scalar(1.0));
+        let derivative = s.mul(&self.input.mul(&one_minus_s).add_scalar(1.0));
         vec![Some(grad.mul(&derivative))]
     }
 
