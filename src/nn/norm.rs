@@ -507,10 +507,26 @@ pub struct BatchNorm2d {
 
 impl BatchNorm2d {
     pub fn new(num_features: i64, eps: f32, momentum: f32) -> Self {
-        let weight = Tensor::ones(vec![num_features], crate::storage::DType::F32, crate::storage::Device::Cpu);
-        let bias = Tensor::zeros(vec![num_features], crate::storage::DType::F32, crate::storage::Device::Cpu);
-        let running_mean = Tensor::zeros(vec![num_features], crate::storage::DType::F32, crate::storage::Device::Cpu);
-        let running_var = Tensor::ones(vec![num_features], crate::storage::DType::F32, crate::storage::Device::Cpu);
+        let weight = Tensor::ones(
+            vec![num_features],
+            crate::storage::DType::F32,
+            crate::storage::Device::Cpu,
+        );
+        let bias = Tensor::zeros(
+            vec![num_features],
+            crate::storage::DType::F32,
+            crate::storage::Device::Cpu,
+        );
+        let running_mean = Tensor::zeros(
+            vec![num_features],
+            crate::storage::DType::F32,
+            crate::storage::Device::Cpu,
+        );
+        let running_var = Tensor::ones(
+            vec![num_features],
+            crate::storage::DType::F32,
+            crate::storage::Device::Cpu,
+        );
         let w = weight.clone();
         let b = bias.clone();
         w.requires_grad_(true);
@@ -537,7 +553,10 @@ impl Module for BatchNorm2d {
 
         let x_reshaped = x.reshape(vec![batch, channels, spatial]);
         let batch_mean = x_reshaped.mean(2, false).mean(0, false);
-        let batch_var = x_reshaped.mean(2, false).sub(&batch_mean.pow(2.0)).mean(0, false);
+        let batch_var = x_reshaped
+            .mean(2, false)
+            .sub(&batch_mean.pow(2.0))
+            .mean(0, false);
 
         let is_training = self.training.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -548,7 +567,9 @@ impl Module for BatchNorm2d {
             let batch_var_clone = batch_var.clone();
             {
                 let mut rm = self.running_mean.write();
-                let new_mean = rm.mul_scalar(mom).add(&batch_mean_clone.mul_scalar(inv_mom));
+                let new_mean = rm
+                    .mul_scalar(mom)
+                    .add(&batch_mean_clone.mul_scalar(inv_mom));
                 *rm = new_mean;
             }
             {
@@ -558,12 +579,17 @@ impl Module for BatchNorm2d {
             }
             (batch_mean, batch_var)
         } else {
-            (self.running_mean.read().clone(), self.running_var.read().clone())
+            (
+                self.running_mean.read().clone(),
+                self.running_var.read().clone(),
+            )
         };
 
         let mean_reshaped = mean.reshape(vec![1, channels, 1]);
         let var_reshaped = var.reshape(vec![1, channels, 1]);
-        let x_norm = x_reshaped.sub(&mean_reshaped).div(&var_reshaped.add_scalar(self.eps).sqrt());
+        let x_norm = x_reshaped
+            .sub(&mean_reshaped)
+            .div(&var_reshaped.add_scalar(self.eps).sqrt());
         let x_norm = x_norm.reshape(x_shape.clone());
 
         let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
@@ -584,7 +610,10 @@ impl Module for BatchNorm2d {
     }
 
     fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![("weight".to_string(), self.weight.clone()), ("bias".to_string(), self.bias.clone())]
+        vec![
+            ("weight".to_string(), self.weight.clone()),
+            ("bias".to_string(), self.bias.clone()),
+        ]
     }
 
     fn zero_grad(&self) {
@@ -598,11 +627,13 @@ impl Module for BatchNorm2d {
     }
 
     fn train_mode(&self) {
-        self.training.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.training
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn eval_mode(&self) {
-        self.training.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.training
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn is_training(&self) -> bool {

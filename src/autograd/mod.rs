@@ -2414,26 +2414,20 @@ impl Node for ConvTranspose2dBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
 
-        // For ConvTranspose2d, the backward is equivalent to Conv2d with swapped roles
-        // grad_input = conv2d(grad_output, weight_rotated_180, stride=1, padding=...)
-        // grad_weight = conv2d(input, grad_output, ...)
-        // grad_bias = sum(grad_output, [0, 2, 3])
-
         let in_shape = self.input.shape();
-        let out_shape = grad_output.shape();
         let _batch = in_shape[0];
         let _in_channels = in_shape[1];
-        let _h_in = in_shape[2];
-        let _w_in = in_shape[3];
-        let _out_channels = out_shape[1];
-        let _h_out = out_shape[2];
-        let _w_out = out_shape[3];
-        let _kernel_h = self.weight.shape()[2];
-        let _kernel_w = self.weight.shape()[3];
+        let h_in = in_shape[2];
+        let w_in = in_shape[3];
+        let _out_channels = self.weight.shape()[0];
+        let kernel_h = self.weight.shape()[2];
+        let kernel_w = self.weight.shape()[3];
 
-        // grad_input: conv2d(grad_output, weight_transposed)
-        // weight shape for conv_transpose: [in_channels, out_channels, kH, kW]
-        // For backward, we need to do a regular conv2d with the weight
+        let _h_out = (h_in - 1) * self.stride - 2 * self.padding + kernel_h;
+        let _w_out = (w_in - 1) * self.stride - 2 * self.padding + kernel_w;
+
+        // grad_input: conv2d(grad_output, weight, stride=1, padding=kernel_size-1-padding)
+        let pad_input = kernel_h - 1 - self.padding;
         let grad_input = dispatch(
             "conv2d",
             crate::dispatcher::DispatchKey::Cpu,
@@ -2441,14 +2435,16 @@ impl Node for ConvTranspose2dBackward {
                 &grad_output,
                 &self.weight,
                 &Tensor::from_scalar(1.0),
-                &Tensor::from_scalar((self.kernel_size - 1) as f32),
+                &Tensor::from_scalar(pad_input as f32),
                 &Tensor::from_scalar(0.0),
                 &Tensor::from_scalar(1.0),
             ],
         )[0]
         .clone();
 
-        // grad_weight: conv2d(input, grad_output)
+        // grad_weight: conv2d(input, grad_output) with appropriate padding
+        // Reshape for im2col-style: input [B, C_in, H_in, W_in], grad_output [B, C_out, H_out, W_out]
+        // grad_weight [C_in, C_out, kH, kW]
         let grad_weight = dispatch(
             "conv2d",
             crate::dispatcher::DispatchKey::Cpu,
@@ -2463,7 +2459,7 @@ impl Node for ConvTranspose2dBackward {
         )[0]
         .clone();
 
-        // grad_bias
+        // grad_bias: sum over batch, height, width dimensions
         let grad_bias = if self.bias.is_some() {
             Some(grad_output.sum(0, false).sum(1, false).sum(1, false))
         } else {
