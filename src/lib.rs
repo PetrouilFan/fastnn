@@ -283,6 +283,14 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.log_softmax(dim))
     }
 
+    fn repeat(&self, repeats: Vec<i64>) -> PyTensor {
+        PyTensor::from_tensor(self.inner.repeat(&repeats))
+    }
+
+    fn where_tensor(&self, condition: &PyTensor, other: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.where_tensor(&condition.inner, &other.inner))
+    }
+
     fn __add__(&self, other: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.add(&other.inner))
     }
@@ -2084,6 +2092,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
 
     m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
+    m.add_function(wrap_pyfunction!(cat, py)?)?;
 
     Ok(())
 }
@@ -2160,4 +2169,10 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
     }
 
     Ok(())
+}
+
+#[pyfunction]
+fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
+    let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
+    PyTensor::from_tensor(tensor::Tensor::cat(&tensors, dim))
 }

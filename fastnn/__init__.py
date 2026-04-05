@@ -440,6 +440,7 @@ Muon = _core.PyMuon
 LeakyReLU = _core.LeakyReLU
 Softplus = _core.Softplus
 Hardswish = _core.Hardswish
+cat = _core.cat
 
 
 def save_model(model, path):
