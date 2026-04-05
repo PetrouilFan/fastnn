@@ -32,26 +32,8 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_add(&a_gpu, &b_gpu, device_id);
     }
 
-    // Both are CPU
-    let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let b_data = b.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = unsafe { *a_data.add(i) + *b_data.add(i) };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("add", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -80,26 +62,8 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_sub(&a_gpu, &b_gpu, device_id);
     }
 
-    // Both are CPU
-    let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let b_data = b.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = unsafe { *a_data.add(i) - *b_data.add(i) };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("sub", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -128,26 +92,8 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_mul(&a_gpu, &b_gpu, device_id);
     }
 
-    // Both are CPU
-    let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let b_data = b.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = unsafe { *a_data.add(i) * *b_data.add(i) };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("mul", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -176,26 +122,8 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_div(&a_gpu, &b_gpu, device_id);
     }
 
-    // Both are CPU
-    let iter = crate::iterator::TensorIterator::build_for_binary(a, b);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let b_data = b.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = unsafe { *a_data.add(i) / *b_data.add(i) };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("div", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -205,24 +133,8 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_neg(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = -unsafe { *a_data.add(i) };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("neg", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -232,24 +144,8 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_abs(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = unsafe { (*a_data.add(i)).abs() };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("abs", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -259,24 +155,8 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_exp(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = unsafe { (*a_data.add(i)).exp() };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("exp", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -286,24 +166,8 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_log(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = unsafe { (*a_data.add(i)).ln() };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("log", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -313,24 +177,8 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_sqrt(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        output_data[i] = unsafe { (*a_data.add(i)).sqrt() };
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("sqrt", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -340,25 +188,8 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_relu(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        let val = unsafe { *a_data.add(i) };
-        output_data[i] = val.max(0.0);
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("relu", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -398,27 +229,8 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_gelu(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        let x = unsafe { *a_data.add(i) };
-        let x3 = x * x * x;
-        let t = (0.7978846 * (x + 0.044715 * x3)).tanh();
-        output_data[i] = 0.5 * x * (1.0 + t);
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("gelu", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -428,25 +240,8 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_sigmoid(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        let x = unsafe { *a_data.add(i) };
-        output_data[i] = 1.0 / (1.0 + (-x).exp());
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("sigmoid", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -456,25 +251,8 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_tanh(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        let x = unsafe { *a_data.add(i) };
-        output_data[i] = x.tanh();
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("tanh", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -484,25 +262,8 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_silu(a, device_id);
     }
 
-    let iter = crate::iterator::TensorIterator::build_for_unary(a);
-    let output_shape = iter.output_shape.to_vec();
-    let numel: i64 = output_shape.iter().product();
-
-    let a_data = a.data_ptr_f32();
-    let mut output_data = vec![0.0f32; numel as usize];
-
-    for i in 0..numel as usize {
-        let x = unsafe { *a_data.add(i) };
-        output_data[i] = x / (1.0 + (-x).exp());
-    }
-
-    let storage = Arc::new(Storage::from_vec(output_data, DType::F32, a.device()));
-    let output = Tensor::new(crate::tensor::TensorImpl::new(
-        storage,
-        output_shape.iter().copied().collect(),
-        DType::F32,
-    ));
-    vec![output]
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("silu", crate::dispatcher::DispatchKey::Cpu, args)
 }
 
 fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {

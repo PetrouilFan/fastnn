@@ -1702,8 +1702,8 @@ impl PyAdam {
         Ok(dict.into())
     }
 
-    fn load_state_dict(&mut self, py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<()> {
-        use pyo3::types::PyList;
+    fn load_state_dict(&mut self, _py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<()> {
+        
         self.inner.lr = state.get_item("lr")?.extract()?;
         self.inner.betas = state.get_item("betas")?.extract()?;
         self.inner.eps = state.get_item("eps")?.extract()?;
