@@ -9,6 +9,7 @@
 - **New Optimizer**: Lion (sign-based momentum optimizer)
 - **New Losses**: BCEWithLogitsLoss, HuberLoss
 - **New Tensor Ops**: `cat`, `repeat`, `where_tensor`, `einsum`, `flip`, `maximum`, `log_softmax`
+- **FlashAttention**: Memory-efficient attention kernel using online softmax algorithm (O(N) memory, mathematically equivalent to standard attention with max diff < 1e-7)
 - **Model I/O**: `save_model`, `load_model`, `save_optimizer`, `load_optimizer`
 - **Optimizer State**: Full `state_dict`/`load_state_dict` for Adam, AdamW, SGD, Muon, Lion
 - **Positional Encoding Cache**: Transformer reuses cached position tensors for same shapes
