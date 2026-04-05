@@ -1,6 +1,6 @@
 # Training
 
-FastNN provides utilities for building training pipelines: datasets, data loaders, and callbacks.
+FastNN provides utilities for building training pipelines: datasets, data loaders, optimizers, LR schedulers, and callbacks.
 
 ## Dataset
 
@@ -13,10 +13,10 @@ class MyDataset(fnn.Dataset):
     def __init__(self, data, labels):
         self.data = data
         self.labels = labels
-    
+
     def __len__(self):
         return len(self.data)
-    
+
     def __getitem__(self, idx):
         return self.data[idx], self.labels[idx]
 
@@ -33,8 +33,8 @@ Convenience class for tensor data:
 import fastnn as fnn
 
 # Create tensors
-X = fnn.randn(1000, 784)  # 1000 samples, 784 features
-y = fnn.randint(0, 10, (1000,))  # 1000 labels (0-9)
+X = fnn.randn([1000, 784])  # 1000 samples, 784 features
+y = fnn.randint(low=0, high=10, shape=[1000])  # 1000 labels (0-9)
 
 # Wrap in dataset
 dataset = fnn.TensorDataset(X, y)
@@ -46,7 +46,7 @@ print(len(dataset))  # 1000
 
 ## DataLoader
 
-Batches and shuffles data for training:
+Batches, shuffles, and prefetches data for training:
 
 ```python
 import fastnn as fnn
@@ -55,16 +55,16 @@ dataset = fnn.TensorDataset(X, y)
 
 loader = fnn.DataLoader(
     dataset,
-    batch_size=32,      # Samples per batch
-    shuffle=True,       # Random shuffle each epoch
-    drop_last=False,    # Drop incomplete final batch
-    num_workers=0       # Parallel data loading (0 = disabled)
+    batch_size=32,       # Samples per batch
+    shuffle=True,        # Random shuffle each epoch
+    drop_last=False,     # Drop incomplete final batch
+    prefetch_size=2,     # Number of batches to prefetch ahead
 )
 
 # Iterate
 for batch_x, batch_y in loader:
-    # batch_x: (batch_size, 784)
-    # batch_y: (batch_size,)
+    # batch_x: [batch_size, 784]
+    # batch_y: [batch_size]
     predictions = model(batch_x)
     # ... training code ...
 ```
@@ -74,126 +74,294 @@ for batch_x, batch_y in loader:
 - `batch_size`: Number of samples per batch
 - `shuffle`: Whether to shuffle each epoch
 - `drop_last`: Drop last incomplete batch
-- `num_workers`: Number of worker processes
+- `prefetch_size`: Number of batches to prefetch (default: 2)
+- `collate_fn`: Custom collation function (default: default_collate)
 
-## Training Loop
-
-Complete training loop example:
+### Samplers
 
 ```python
-import fastnn as fnn
-from fastnn.callbacks import EarlyStopping, ModelCheckpoint
+from fastnn.data import SequentialSampler, RandomSampler, SubsetRandomSampler, BatchSampler
 
-# Setup
-model = fnn.models.MLP(input_dim=784, hidden_dims=[256, 128], output_dim=10)
-optimizer = fnn.Adam(model.parameters(), lr=1e-3)
-loss_fn = fnn.cross_entropy_loss
+# Sequential
+sampler = SequentialSampler(dataset)
 
-# Callbacks
-early_stopping = EarlyStopping(
-    monitor="loss",
-    patience=5,
-    min_delta=0.001
+# Random with custom generator
+sampler = RandomSampler(dataset, generator=random.Random(42))
+
+# Subset
+sampler = SubsetRandomSampler([0, 10, 20, 30])
+
+# Batch sampler
+batch_sampler = BatchSampler(sampler, batch_size=32, drop_last=True)
+```
+
+### Resetting Sampler (New Epoch)
+
+```python
+for epoch in range(100):
+    loader.reset_sampler()  # Re-shuffle for new epoch
+    for batch_x, batch_y in loader:
+        ...
+```
+
+## Optimizers
+
+### Adam
+
+```python
+optimizer = fnn.Adam(
+    model.parameters(),
+    lr=0.001,
+    betas=(0.9, 0.999),
+    eps=1e-8,
+    weight_decay=0.0,
+)
+```
+
+### AdamW
+
+```python
+optimizer = fnn.AdamW(
+    model.parameters(),
+    lr=0.001,
+    betas=(0.9, 0.999),
+    eps=1e-8,
+    weight_decay=0.01,
+)
+```
+
+### SGD
+
+```python
+optimizer = fnn.SGD(
+    model.parameters(),
+    lr=0.01,
+    momentum=0.9,
+    weight_decay=0.0,
+    nesterov=False,
+)
+```
+
+### RMSprop
+
+```python
+optimizer = fnn.RMSprop(
+    model.parameters(),
+    lr=0.01,
+    alpha=0.99,
+    eps=1e-8,
+    weight_decay=0.0,
+    momentum=0.0,
+    centered=False,
+)
+```
+
+### Muon
+
+```python
+optimizer = fnn.Muon(
+    model.parameters(),
+    lr=0.025,
+    momentum=0.95,
+    weight_decay=0.0,
+    nesterov=True,
+)
+```
+
+### Lion
+
+```python
+optimizer = fnn.Lion(
+    model.parameters(),
+    lr=0.0001,
+    betas=(0.95, 0.98),
+    weight_decay=0.0,
+)
+```
+
+## Learning Rate Schedulers
+
+### StepLR
+
+Decays LR by gamma every step_size epochs:
+
+```python
+scheduler = fnn.StepLR(optimizer, step_size=30, gamma=0.1)
+
+for epoch in range(100):
+    for batch_x, batch_y in loader:
+        ...
+    scheduler.step()  # Updates optimizer LR
+```
+
+### CosineAnnealingLR
+
+```python
+scheduler = fnn.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+
+for epoch in range(100):
+    ...
+    scheduler.step()
+```
+
+### ExponentialLR
+
+```python
+scheduler = fnn.ExponentialLR(optimizer, gamma=0.95)
+```
+
+### ReduceLROnPlateau
+
+Reduces LR when a metric stops improving:
+
+```python
+scheduler = fnn.ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.1,
+    patience=10,
+    min_lr=1e-6,
 )
 
-# Training
-model.train()
 for epoch in range(100):
-    epoch_loss = 0
-    for batch_x, batch_y in loader:
-        # Forward
-        pred = model(batch_x)
-        loss = loss_fn(pred, batch_y)
-        
-        # Backward
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        epoch_loss += loss.item()
-    
-    avg_loss = epoch_loss / len(loader)
-    print(f"Epoch {epoch}: loss = {avg_loss:.4}")
-    
-    # Check early stopping
-    early_stopping.on_epoch_end(epoch, {"loss": avg_loss})
+    ...
+    val_loss = evaluate()
+    scheduler.step(val_loss)
+```
+
+## Gradient Clipping
+
+```python
+# Clip by norm
+fnn.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2.0)
+
+# Clip by value
+fnn.clip_grad_value_(model.parameters(), clip_value=0.1)
+```
+
+## Loss Functions
+
+```python
+# Mean squared error
+loss = fnn.mse_loss(pred, target)
+
+# Cross-entropy (with logits)
+loss = fnn.cross_entropy_loss(logits, target)
+
+# Binary cross-entropy with logits
+loss = fnn.bce_with_logits(logits, target)
+
+# Huber loss (smooth L1)
+loss = fnn.huber_loss(pred, target, delta=1.0)
 ```
 
 ## Callbacks
 
 ### EarlyStopping
 
-Stops training when monitored metric stops improving:
-
 ```python
-from fastnn.callbacks import EarlyStopping
-
-early_stop = EarlyStopping(
-    monitor="val_loss",           # Metric to monitor
-    patience=5,                   # Epochs to wait before stopping
-    min_delta=0.0,                # Minimum change to qualify as improvement
-    restore_best_weights=True    # Restore best model weights
+early_stop = fnn.EarlyStopping(
+    monitor='val_loss',
+    patience=10,
+    min_delta=0.001,
+    restore_best_weights=True,
 )
 ```
 
 ### ModelCheckpoint
 
-Saves model when monitored metric improves:
-
 ```python
-from fastnn.callbacks import ModelCheckpoint
-
-checkpoint = ModelCheckpoint(
-    dir_path="./checkpoints/",
-    monitor="val_loss",
-    mode="min",                   # "min" or "max"
+checkpoint = fnn.ModelCheckpoint(
+    dir_path='checkpoints/',
+    monitor='val_loss',
+    mode='min',
     save_best_only=True,
-    verbose=True
-)
-```
-
-### LearningRateScheduler
-
-Adjusts learning rate during training:
-
-```python
-from fastnn.callbacks import LearningRateScheduler
-
-# Step decay
-lr_scheduler = LearningRateScheduler(
-    schedule="step",
-    lr=0.01,
-    step_size=10,
-    gamma=0.1
-)
-
-# Or cosine annealing
-lr_scheduler = LearningRateScheduler(
-    schedule="cosine",
-    lr=0.01,
-    T_max=100,
-    eta_min=0.0001
+    verbose=True,
 )
 ```
 
 ### CSVLogger
 
-Logs metrics to CSV file:
-
 ```python
-from fastnn.callbacks import CSVLogger
-
-csv_logger = CSVLogger(filepath="./logs/training.csv")
+logger = fnn.CSVLogger(filepath='training_log.csv')
 ```
 
-## Loss Functions
+## Model I/O
+
+### Save/Load Model
 
 ```python
-# Mean Squared Error
-loss = fnn.mse_loss(predictions, targets)
+# Save
+fnn.save_model(model, 'model.fnn')
 
-# Cross Entropy (for classification)
-loss = fnn.cross_entropy_loss(logits, targets)
+# Load
+state_dict = fnn.load_model('model.fnn')
+```
+
+### Save/Load Optimizer
+
+```python
+# Save
+fnn.save_optimizer(optimizer, 'optimizer.fno')
+
+# Load
+fnn.load_optimizer(optimizer, 'optimizer.fno')
+```
+
+### State Dict
+
+```python
+# Save model parameters
+fnn.save_state_dict(model, 'weights.fnn')
+
+# Load model parameters
+state = fnn.load_model('weights.fnn')
+fnn.load_state_dict(model, state)
+```
+
+## Complete Training Example
+
+```python
+import fastnn as fnn
+
+# Create model
+model = fnn.models.MLP(input_dim=784, hidden_dims=[256, 128], output_dim=10)
+
+# Create optimizer
+optimizer = fnn.Adam(model.parameters(), lr=0.001)
+
+# Create LR scheduler
+scheduler = fnn.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
+
+# Create data loader
+ds = fnn.TensorDataset(x_train, y_train)
+loader = fnn.DataLoader(ds, batch_size=64, shuffle=True, prefetch_size=2)
+
+# Training loop
+for epoch in range(50):
+    loader.reset_sampler()  # Re-shuffle for new epoch
+    for batch_x, batch_y in loader:
+        # Forward
+        logits = model(batch_x)
+        loss = fnn.cross_entropy_loss(logits, batch_y)
+
+        # Backward
+        loss.backward()
+
+        # Gradient clipping
+        fnn.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+        # Update
+        optimizer.step()
+        optimizer.zero_grad()
+
+    # Update LR
+    scheduler.step()
+
+    # Save checkpoint
+    if epoch % 10 == 0:
+        fnn.save_model(model, f'checkpoint_epoch_{epoch}.fnn')
+        fnn.save_optimizer(optimizer, f'optimizer_epoch_{epoch}.fno')
 ```
 
 ## Inference
@@ -205,7 +373,7 @@ model.eval()  # Set to evaluation mode
 
 with fnn.no_grad():
     predictions = model(test_data)
-    
+
 # Or using context manager
 with fnn.no_grad():
     for sample in test_loader:
