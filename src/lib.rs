@@ -2418,6 +2418,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
     m.add_function(wrap_pyfunction!(cat, py)?)?;
+    m.add_function(wrap_pyfunction!(einsum, py)?)?;
     m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
     m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
 
@@ -2515,4 +2516,10 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyTensor {
     let delta_t = tensor::Tensor::from_scalar(delta);
     let result = dispatcher::dispatch("huber_loss", dispatcher::DispatchKey::Cpu, &[&input.inner, &target.inner, &delta_t]);
     PyTensor::from_tensor(result[0].clone())
+}
+
+#[pyfunction]
+fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
+    let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
+    PyTensor::from_tensor(tensor::einsum(equation, &tensors))
 }
