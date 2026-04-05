@@ -216,7 +216,7 @@ pub struct PReLU {
 impl PReLU {
     pub fn new(num_parameters: i64) -> Self {
         let weight = Tensor::full(vec![num_parameters], 0.25, crate::storage::DType::F32, crate::storage::Device::Cpu);
-        let mut w = weight.clone();
+        let w = weight.clone();
         w.requires_grad_(true);
         PReLU { weight: w }
     }
