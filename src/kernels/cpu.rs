@@ -12,6 +12,125 @@ use crate::tensor::Tensor;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+fn to_f32_data(tensor: &Tensor) -> Vec<f32> {
+    match tensor.inner.dtype {
+        DType::F32 => tensor.as_f32_slice().to_vec(),
+        DType::F16 => tensor
+            .as_f32_slice()
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let ptr = tensor.data_ptr_f32();
+                unsafe {
+                    let f16_ptr = ptr as *const half::f16;
+                    f32::from(*f16_ptr.add(i))
+                }
+            })
+            .collect(),
+        DType::BF16 => tensor
+            .as_f32_slice()
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let ptr = tensor.data_ptr_f32();
+                unsafe {
+                    let bf16_ptr = ptr as *const half::bf16;
+                    f32::from(*bf16_ptr.add(i))
+                }
+            })
+            .collect(),
+        DType::F64 => {
+            let data = tensor.as_f32_slice();
+            let ptr = data.as_ptr() as *const f64;
+            (0..tensor.inner.numel() as usize)
+                .map(|i| unsafe { *ptr.add(i) as f32 })
+                .collect()
+        }
+        DType::I32 => {
+            let data = tensor.as_f32_slice();
+            let ptr = data.as_ptr() as *const i32;
+            (0..tensor.inner.numel() as usize)
+                .map(|i| unsafe { *ptr.add(i) as f32 })
+                .collect()
+        }
+        DType::I64 => {
+            let data = tensor.as_f32_slice();
+            let ptr = data.as_ptr() as *const i64;
+            (0..tensor.inner.numel() as usize)
+                .map(|i| unsafe { *ptr.add(i) as f32 })
+                .collect()
+        }
+        DType::Bool => {
+            let data = tensor.as_f32_slice();
+            let ptr = data.as_ptr() as *const u8;
+            (0..tensor.inner.numel() as usize)
+                .map(|i| unsafe { *ptr.add(i) as f32 })
+                .collect()
+        }
+    }
+}
+
+fn from_f32_data(data: Vec<f32>, dtype: DType, device: Device) -> Tensor {
+    match dtype {
+        DType::F32 => Tensor::from_vec(data, vec![data.len() as i64]),
+        DType::F16 => {
+            let f16_data: Vec<half::f16> = data.iter().map(|&v| half::f16::from_f32(v)).collect();
+            let storage = Storage::from_vec(f16_data, DType::F16, device);
+            Tensor::new(crate::tensor::TensorImpl::new(
+                storage,
+                vec![data.len() as i64],
+                DType::F16,
+            ))
+        }
+        DType::BF16 => {
+            let bf16_data: Vec<half::bf16> =
+                data.iter().map(|&v| half::bf16::from_f32(v)).collect();
+            let storage = Storage::from_vec(bf16_data, DType::BF16, device);
+            Tensor::new(crate::tensor::TensorImpl::new(
+                storage,
+                vec![data.len() as i64],
+                DType::BF16,
+            ))
+        }
+        DType::F64 => {
+            let f64_data: Vec<f64> = data.iter().map(|&v| v as f64).collect();
+            let storage = Storage::from_vec(f64_data, DType::F64, device);
+            Tensor::new(crate::tensor::TensorImpl::new(
+                storage,
+                vec![data.len() as i64],
+                DType::F64,
+            ))
+        }
+        DType::I32 => {
+            let i32_data: Vec<i32> = data.iter().map(|&v| v as i32).collect();
+            let storage = Storage::from_vec(i32_data, DType::I32, device);
+            Tensor::new(crate::tensor::TensorImpl::new(
+                storage,
+                vec![data.len() as i64],
+                DType::I32,
+            ))
+        }
+        DType::I64 => {
+            let i64_data: Vec<i64> = data.iter().map(|&v| v as i64).collect();
+            let storage = Storage::from_vec(i64_data, DType::I64, device);
+            Tensor::new(crate::tensor::TensorImpl::new(
+                storage,
+                vec![data.len() as i64],
+                DType::I64,
+            ))
+        }
+        DType::Bool => {
+            let bool_data: Vec<u8> = data.iter().map(|&v| if v != 0.0 { 1 } else { 0 }).collect();
+            let storage = Storage::from_vec(bool_data, DType::Bool, device);
+            Tensor::new(crate::tensor::TensorImpl::new(
+                storage,
+                vec![data.len() as i64],
+                DType::Bool,
+            ))
+        }
+    }
+}
+
 /// Enable DAZ (Denormals-Are-Zero) and FTZ (Flush-To-Zero) for the current thread.
 /// Subnormal floats are treated as zero, preventing catastrophic throughput drops
 /// when weights approach zero during training. Thread-local since MXCSR is per-thread.
