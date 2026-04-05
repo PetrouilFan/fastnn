@@ -448,6 +448,8 @@ Lion = _core.PyLion
 bce_with_logits = _core.bce_with_logits
 huber_loss = _core.huber_loss
 ConvTranspose2d = _core.ConvTranspose2d
+Conv1d = _core.Conv1d
+Conv3d = _core.Conv3d
 
 
 def save_model(model, path):

@@ -1327,6 +1327,94 @@ impl ConvTranspose2d {
 }
 
 #[pyclass]
+struct Conv1d {
+    inner: nn::conv::Conv1d,
+}
+
+#[pymethods]
+impl Conv1d {
+    #[new]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, dilation = 1, bias = true))]
+    fn new(in_channels: i64, out_channels: i64, kernel_size: i64, stride: i64, padding: i64, dilation: i64, bias: bool) -> Self {
+        Conv1d {
+            inner: nn::conv::Conv1d::new(in_channels, out_channels, kernel_size, stride, padding, dilation, bias),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn forward(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&mut self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&mut self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
+struct Conv3d {
+    inner: nn::conv::Conv3d,
+}
+
+#[pymethods]
+impl Conv3d {
+    #[new]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, dilation = 1, bias = true))]
+    fn new(in_channels: i64, out_channels: i64, kernel_size: i64, stride: i64, padding: i64, dilation: i64, bias: bool) -> Self {
+        Conv3d {
+            inner: nn::conv::Conv3d::new(in_channels, out_channels, kernel_size, stride, padding, dilation, bias),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn forward(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&mut self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&mut self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
 struct LayerNorm {
     inner: nn::norm::LayerNorm,
 }
@@ -2300,6 +2388,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Conv2d>()?;
     m.add_class::<MaxPool2d>()?;
     m.add_class::<ConvTranspose2d>()?;
+    m.add_class::<Conv1d>()?;
+    m.add_class::<Conv3d>()?;
     m.add_class::<LayerNorm>()?;
     m.add_class::<BatchNorm1d>()?;
     m.add_class::<RMSNorm>()?;
