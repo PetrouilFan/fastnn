@@ -443,6 +443,7 @@ Hardswish = _core.Hardswish
 cat = _core.cat
 RMSNorm = _core.RMSNorm
 GroupNorm = _core.GroupNorm
+BatchNorm2d = _core.BatchNorm2d
 
 
 def save_model(model, path):
