@@ -433,6 +433,82 @@ fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     panic!("CPU min kernel not implemented in gpu/ops.rs");
 }
 
+fn gt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let scalar = args[1].item();
+    let device_id = match a.device() {
+        Device::Wgpu(id) => id,
+        _ => panic!("gt_scalar GPU kernel called with CPU tensor"),
+    };
+    gpu::gpu_gt_scalar(a, scalar, device_id)
+}
+
+fn lt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let scalar = args[1].item();
+    let device_id = match a.device() {
+        Device::Wgpu(id) => id,
+        _ => panic!("lt_scalar GPU kernel called with CPU tensor"),
+    };
+    gpu::gpu_lt_scalar(a, scalar, device_id)
+}
+
+fn logical_not_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let device_id = match a.device() {
+        Device::Wgpu(id) => id,
+        _ => panic!("logical_not GPU kernel called with CPU tensor"),
+    };
+    gpu::gpu_logical_not(a, device_id)
+}
+
+fn mul_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let scalar = args[1].item();
+    let device_id = match a.device() {
+        Device::Wgpu(id) => id,
+        _ => panic!("mul_scalar GPU kernel called with CPU tensor"),
+    };
+    gpu::gpu_mul_scalar(a, scalar, device_id)
+}
+
+fn add_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let scalar = args[1].item();
+    let device_id = match a.device() {
+        Device::Wgpu(id) => id,
+        _ => panic!("add_scalar GPU kernel called with CPU tensor"),
+    };
+    gpu::gpu_add_scalar(a, scalar, device_id)
+}
+
+fn sub_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let scalar = args[1].item();
+    let device_id = match a.device() {
+        Device::Wgpu(id) => id,
+        _ => panic!("sub_scalar GPU kernel called with CPU tensor"),
+    };
+    gpu::gpu_sub_scalar(a, scalar, device_id)
+}
+
+fn div_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let scalar = args[1].item();
+    let device_id = match a.device() {
+        Device::Wgpu(id) => id,
+        _ => panic!("div_scalar GPU kernel called with CPU tensor"),
+    };
+    gpu::gpu_div_scalar(a, scalar, device_id)
+}
+
+fn transpose_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let dim0 = args[1].item() as usize;
+    let dim1 = args[2].item() as usize;
+    vec![a.transpose(dim0, dim1)]
+}
+
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Wgpu, add_kernel as KernelFn);
@@ -459,4 +535,32 @@ fn register_kernels() {
     register("mean", DispatchKey::Wgpu, mean_kernel as KernelFn);
     register("max", DispatchKey::Wgpu, max_kernel as KernelFn);
     register("min", DispatchKey::Wgpu, min_kernel as KernelFn);
+    register("gt_scalar", DispatchKey::Wgpu, gt_scalar_kernel as KernelFn);
+    register("lt_scalar", DispatchKey::Wgpu, lt_scalar_kernel as KernelFn);
+    register(
+        "logical_not",
+        DispatchKey::Wgpu,
+        logical_not_kernel as KernelFn,
+    );
+    register(
+        "mul_scalar",
+        DispatchKey::Wgpu,
+        mul_scalar_kernel as KernelFn,
+    );
+    register(
+        "add_scalar",
+        DispatchKey::Wgpu,
+        add_scalar_kernel as KernelFn,
+    );
+    register(
+        "sub_scalar",
+        DispatchKey::Wgpu,
+        sub_scalar_kernel as KernelFn,
+    );
+    register(
+        "div_scalar",
+        DispatchKey::Wgpu,
+        div_scalar_kernel as KernelFn,
+    );
+    register("transpose", DispatchKey::Wgpu, transpose_kernel as KernelFn);
 }
