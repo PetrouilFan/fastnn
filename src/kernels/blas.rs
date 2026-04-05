@@ -123,6 +123,7 @@ pub fn matmul_blas_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usiz
 }
 
 #[cfg(not(all(feature = "blas", not(target_os = "windows"))))]
+#[allow(clippy::too_many_arguments)]
 pub fn matmul_blas_with_transpose_into(
     a: &[f32],
     b: &[f32],

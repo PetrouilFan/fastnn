@@ -142,7 +142,7 @@ class CSVLogger:
     def on_epoch_begin(self, epoch, logs):
         self.epoch = epoch
         if not self._initialized:
-            with open(self.filepath, "w") as f:
+            with open(self.filepath, "w"):
                 self._initialized = True
 
     def on_epoch_end(self, epoch, logs):

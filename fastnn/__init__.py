@@ -506,7 +506,7 @@ def load_model(path):
     with open(path, "rb") as f:
         magic = f.read(4)
         if magic != MAGIC:
-            raise ValueError(f"Invalid file format: expected FNN magic bytes")
+            raise ValueError("Invalid file format: expected FNN magic bytes")
         version = struct.unpack("<I", f.read(4))[0]
         if version > 1:
             raise ValueError(f"Unsupported format version: {version}")
@@ -611,7 +611,7 @@ def load_optimizer(opt, path):
         magic = f.read(4)
         if magic != MAGIC:
             raise ValueError("Invalid optimizer state file")
-        version = struct.unpack("<I", f.read(4))[0]
+        struct.unpack("<I", f.read(4))[0]
         opt.lr = struct.unpack("<d", f.read(8))[0]
         b1 = struct.unpack("<d", f.read(8))[0]
         b2 = struct.unpack("<d", f.read(8))[0]
