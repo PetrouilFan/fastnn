@@ -1,5 +1,78 @@
 # Changelog
 
+## v0.9.0 — GPU Training & Production-Ready
+
+### GPU Training
+
+- **GPU backward pass**: Gradients computed entirely on GPU — no CPU transfers
+- **GPU kernels**: `gt_scalar`, `lt_scalar`, `logical_not`, `mul_scalar`, `add_scalar`, `sub_scalar`, `div_scalar`, `transpose`
+- **Activation backward on GPU**: ReLU, Sigmoid, Tanh, SiLU gradients stay on GPU
+- **Tensor::ones()**: Now supports GPU device
+
+### New Layers
+
+- Conv1d, Conv3d, ConvTranspose2d
+- RMSNorm, GroupNorm, BatchNorm2d
+- ResidualBlock (skip connections for ResNet-style architectures)
+
+### New Activations
+
+- LeakyReLU, Softplus, Hardswish
+
+### New Losses
+
+- BCEWithLogitsLoss, HuberLoss
+
+### New Optimizer
+
+- Lion (sign-based momentum optimizer)
+
+### New Tensor Operations
+
+- `cat`, `repeat`, `where_tensor`, `einsum`, `flip`, `maximum`, `log_softmax`
+
+### ONNX Import
+
+- Convert ONNX models to fastnn native format
+- Supports Conv, Gemm/Linear, ReLU, BatchNorm, MaxPool, GlobalAvgPool
+
+### FlashAttention
+
+- Memory-efficient attention: O(N) memory instead of O(N²)
+- Mathematically equivalent to standard attention (max diff < 1e-7)
+- Supports causal masking
+
+### Performance
+
+- **Matmul**: 5.6 → 88.6 GFLOP/s at 1024×1024 (17× speedup via `matrixmultiply`)
+- **ReLU 1024×1024**: 0.30 ms
+
+### Model I/O
+
+- `save_model` / `load_model` — Save and load model weights
+- `save_optimizer` / `load_optimizer` — Save and load optimizer state
+- Full `state_dict` / `load_state_dict` for all optimizers
+
+### Bug Fixes
+
+- Fixed infinite recursion in TransformerBlock/TransformerEncoder
+- Fixed tanh gradient computation
+- Fixed view/transpose autograd_meta sharing
+- Fixed BatchNorm1d RwLock deadlock
+- Fixed sum kernel wrong output shape for N-D tensors
+- Fixed slice numel calculation for step > 1
+- Fixed reshape -1 validation
+- Fixed unsqueeze stride calculation
+
+### Code Quality
+
+- All ruff lint errors fixed
+- All clippy warnings fixed (-D warnings clean)
+- Added 11 Rust unit tests
+- CI/CD pipeline with Rust + Python tests
+
+---
+
 ## v0.8.0 — Full-Featured Training Library
 
 ### New Features
