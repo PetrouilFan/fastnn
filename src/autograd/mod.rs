@@ -1055,26 +1055,10 @@ impl SigmoidBackward {
 impl Node for SigmoidBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
-        let sigmoid_x = self.input.sigmoid();
-        // derivative = sigmoid * (1 - sigmoid)
-        // Avoid allocating scalar tensor for 1.0: compute directly
-        let mut derivative = sigmoid_x.clone();
-        // Ensure exclusive ownership before in-place modification
-        let inner = Arc::make_mut(&mut derivative.inner);
-        let storage = Arc::make_mut(&mut inner.storage);
-        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
-            panic!("Expected CPU storage");
-        };
-        let data = Arc::make_mut(&mut cpu_storage.data);
-        let ptr = data.as_mut_ptr() as *mut f32;
-        let sigmoid_ptr = sigmoid_x.data_ptr_f32();
-        let numel = sigmoid_x.inner.numel() as usize;
-        for i in 0..numel {
-            unsafe {
-                let s = *sigmoid_ptr.add(i);
-                *ptr.add(i) = s * (1.0 - s);
-            }
-        }
+        let input = self.input.to_cpu();
+        let grad = grad.to_cpu();
+        let sigmoid_x = input.sigmoid();
+        let derivative = sigmoid_x.mul_scalar(1.0).sub(&sigmoid_x.pow(2.0));
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -1109,27 +1093,11 @@ impl TanhBackward {
 impl Node for TanhBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
-        let tanh_x = self.input.tanh();
-        // derivative = 1 - tanh^2
-        // Avoid allocating scalar tensor for 1.0: compute directly
-        let mut derivative = tanh_x.clone();
-        // Ensure exclusive ownership before in-place modification
-        let inner = Arc::make_mut(&mut derivative.inner);
-        let storage = Arc::make_mut(&mut inner.storage);
-        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
-            panic!("Expected CPU storage");
-        };
-        let data = Arc::make_mut(&mut cpu_storage.data);
-        let ptr = data.as_mut_ptr() as *mut f32;
-        let tanh_ptr = tanh_x.data_ptr_f32();
-        let numel = tanh_x.inner.numel() as usize;
-        for i in 0..numel {
-            unsafe {
-                let t = *tanh_ptr.add(i);
-                *ptr.add(i) = 1.0 - t * t;
-            }
-        }
-        vec![Some(grad.mul(&derivative))]
+        let input = self.input.to_cpu();
+        let grad = grad.to_cpu();
+        let tanh_x = input.tanh();
+        let one_minus_tanh_sq = tanh_x.mul_scalar(1.0).sub(&tanh_x.pow(2.0));
+        vec![Some(grad.mul(&one_minus_tanh_sq))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -1163,27 +1131,11 @@ impl SiLUBackward {
 impl Node for SiLUBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
-        let x = &self.input;
-        let s = x.sigmoid();
-        // SiLU derivative = s * (1 + x * (1 - s))
-        // Avoid scalar tensor allocations: compute in single pass on owned copy
-        let mut derivative = s.clone();
-        let inner = Arc::make_mut(&mut derivative.inner);
-        let storage = Arc::make_mut(&mut inner.storage);
-        let crate::storage::Storage::Cpu(cpu_storage) = storage else {
-            panic!("Expected CPU storage");
-        };
-        let data = Arc::make_mut(&mut cpu_storage.data);
-        let ptr = data.as_mut_ptr() as *mut f32;
-        let numel = s.inner.numel() as usize;
-        let x_ptr = x.data_ptr_f32();
-        let s_ptr = s.data_ptr_f32();
-        for i in 0..numel {
-            unsafe {
-                let si = *s_ptr.add(i);
-                *ptr.add(i) = si * (1.0 + *x_ptr.add(i) * (1.0 - si));
-            }
-        }
+        let input = self.input.to_cpu();
+        let grad = grad.to_cpu();
+        let s = input.sigmoid();
+        let one_minus_s = s.mul_scalar(1.0).sub(&s);
+        let derivative = s.mul(&input.mul(&one_minus_s).add_scalar(1.0));
         vec![Some(grad.mul(&derivative))]
     }
 
