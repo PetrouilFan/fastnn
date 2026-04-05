@@ -1553,8 +1553,59 @@ impl SiLU {
     }
 }
 
+#[pyclass]
+struct LeakyReLU {
+    negative_slope: f64,
+}
+
+#[pymethods]
+impl LeakyReLU {
+    #[new]
+    #[pyo3(signature = (negative_slope = 0.01))]
+    fn new(negative_slope: f64) -> Self {
+        LeakyReLU { negative_slope }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(x.inner.leaky_relu(self.negative_slope as f32))
+    }
+}
+
+#[pyclass]
+struct Softplus {
+    beta: f64,
+    threshold: f64,
+}
+
+#[pymethods]
+impl Softplus {
+    #[new]
+    #[pyo3(signature = (beta = 1.0, threshold = 20.0))]
+    fn new(beta: f64, threshold: f64) -> Self {
+        Softplus { beta, threshold }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(x.inner.softplus(self.beta as f32, self.threshold as f32))
+    }
+}
+
+#[pyclass]
+struct Hardswish;
+
+#[pymethods]
+impl Hardswish {
+    #[new]
+    fn new() -> Self {
+        Hardswish
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(x.inner.hardswish())
+    }
+}
+
 #[pyclass(name = "Sequential_")]
-#[allow(dead_code)]
 struct Sequential {
     layers: Vec<Py<PyAny>>,
 }
@@ -1567,10 +1618,6 @@ impl Sequential {
     }
 
     fn __call__(&self, py: Python<'_>, x: PyTensor) -> PyResult<PyTensor> {
-        self.forward(py, x)
-    }
-
-    fn forward(&self, py: Python<'_>, x: PyTensor) -> PyResult<PyTensor> {
         let mut result = x;
         for layer in &self.layers {
             let forward_method: Py<PyAny> = layer.getattr(py, "forward")?;
@@ -1580,8 +1627,14 @@ impl Sequential {
         Ok(result)
     }
 
-    fn parameters(&self) -> Vec<PyTensor> {
-        vec![]
+    fn parameters(&self, py: Python<'_>) -> PyResult<Vec<PyTensor>> {
+        let mut params = Vec::new();
+        for layer in &self.layers {
+            let params_method: Py<PyAny> = layer.getattr(py, "parameters")?;
+            let layer_params: Vec<PyTensor> = params_method.call0(py)?.extract(py)?;
+            params.extend(layer_params);
+        }
+        Ok(params)
     }
 }
 
@@ -2017,6 +2070,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Sigmoid>()?;
     m.add_class::<Tanh>()?;
     m.add_class::<SiLU>()?;
+    m.add_class::<LeakyReLU>()?;
+    m.add_class::<Softplus>()?;
+    m.add_class::<Hardswish>()?;
     m.add_class::<Sequential>()?;
     m.add_class::<ModuleList>()?;
     m.add_class::<PySGD>()?;
