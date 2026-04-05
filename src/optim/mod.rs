@@ -1,5 +1,6 @@
 pub mod adam;
 pub mod adamw;
+pub mod lion;
 pub mod muon;
 pub mod sgd;
 
