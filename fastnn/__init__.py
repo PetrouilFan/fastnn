@@ -450,6 +450,7 @@ huber_loss = _core.huber_loss
 ConvTranspose2d = _core.ConvTranspose2d
 Conv1d = _core.Conv1d
 Conv3d = _core.Conv3d
+einsum = _core.einsum
 
 
 def save_model(model, path):

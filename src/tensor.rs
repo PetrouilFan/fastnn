@@ -3113,3 +3113,109 @@ impl Tensor {
         Tensor::from_vec(output_data, self.shape())
     }
 }
+
+pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
+    let parts: Vec<&str> = equation.split("->").collect();
+    let (input_str, output_str) = if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        (parts[0], "")
+    };
+    let input_tensors: Vec<&str> = input_str.split(',').map(|s| s.trim()).collect();
+    if input_tensors.len() != tensors.len() {
+        panic!(
+            "einsum: number of tensors ({}) doesn't match equation ({})",
+            tensors.len(),
+            input_tensors.len()
+        );
+    }
+    if input_tensors.len() != 2 {
+        panic!("einsum: only 2-tensor einsum is supported");
+    }
+
+    let a = &tensors[0];
+    let b = &tensors[1];
+    let a_chars: Vec<char> = input_tensors[0].chars().collect();
+    let b_chars: Vec<char> = input_tensors[1].chars().collect();
+    let out_chars: Vec<char> = output_str.chars().collect();
+
+    // Find contracted dims (appear in both inputs but not in output)
+    let mut contracted: std::collections::HashSet<char> = std::collections::HashSet::new();
+    for &c in &a_chars {
+        if b_chars.contains(&c) && !out_chars.contains(&c) {
+            contracted.insert(c);
+        }
+    }
+
+    // Build permutation for a: move contracted dims to the end
+    let mut a_perm: Vec<i64> = Vec::new();
+    for &c in &a_chars {
+        if !contracted.contains(&c) {
+            a_perm.push(a_chars.iter().position(|&x| x == c).unwrap() as i64);
+        }
+    }
+    for &c in &a_chars {
+        if contracted.contains(&c) {
+            a_perm.push(a_chars.iter().position(|&x| x == c).unwrap() as i64);
+        }
+    }
+    let a_permuted = if a_perm.iter().enumerate().all(|(i, &p)| p as usize == i) {
+        a.clone()
+    } else {
+        a.permute(a_perm)
+    };
+
+    // Build permutation for b: move contracted dims to the front
+    let mut b_perm: Vec<i64> = Vec::new();
+    for &c in &b_chars {
+        if contracted.contains(&c) {
+            b_perm.push(b_chars.iter().position(|&x| x == c).unwrap() as i64);
+        }
+    }
+    for &c in &b_chars {
+        if !contracted.contains(&c) {
+            b_perm.push(b_chars.iter().position(|&x| x == c).unwrap() as i64);
+        }
+    }
+    let b_permuted = if b_perm.iter().enumerate().all(|(i, &p)| p as usize == i) {
+        b.clone()
+    } else {
+        b.permute(b_perm)
+    };
+
+    // Reshape to 2D for matmul
+    let a_batch: i64 = a_permuted.shape()[..a_permuted.ndim() - contracted.len()]
+        .iter()
+        .product();
+    let a_contract: i64 = a_permuted.shape()[a_permuted.ndim() - contracted.len()..]
+        .iter()
+        .product();
+    let b_contract: i64 = b_permuted.shape()[..contracted.len()].iter().product();
+    let b_rest: i64 = b_permuted.shape()[contracted.len()..].iter().product();
+
+    if a_contract != b_contract {
+        panic!(
+            "einsum: contracted dimensions don't match: {} vs {}",
+            a_contract, b_contract
+        );
+    }
+
+    let a_2d = a_permuted.reshape(vec![a_batch, a_contract]);
+    let b_2d = b_permuted.reshape(vec![b_contract, b_rest]);
+    let result_2d = a_2d.matmul(&b_2d);
+
+    // Reshape to output shape
+    let mut out_shape: Vec<i64> = Vec::new();
+    for &c in &out_chars {
+        if let Some(pos) = a_chars.iter().position(|&x| x == c) {
+            out_shape.push(a.inner.sizes[pos]);
+        } else if let Some(pos) = b_chars.iter().position(|&x| x == c) {
+            out_shape.push(b.inner.sizes[pos]);
+        }
+    }
+    if out_shape.is_empty() {
+        result_2d.reshape(vec![])
+    } else {
+        result_2d.reshape(out_shape)
+    }
+}
