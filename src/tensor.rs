@@ -153,9 +153,11 @@ impl TensorImpl {
         for (i, s) in new_sizes.iter().enumerate() {
             if *s == -1 {
                 if minus_one_idx.is_some() {
-                    panic!("can only specify one unknown dimension in view");
+                    panic!("view: can only specify one unknown dimension (-1), got multiple");
                 }
                 minus_one_idx = Some(i);
+            } else if *s < 0 {
+                panic!("view: negative dimension size not allowed (got {})", s);
             } else {
                 product *= s;
             }
@@ -167,7 +169,9 @@ impl TensorImpl {
             }
             if self.numel() % product != 0 {
                 panic!(
-                    "size mismatch: view cannot infer dimension because {} is not divisible by {}",
+                    "view: size mismatch, cannot reshape tensor of {} elements into shape {:?} ({} is not divisible by {})",
+                    self.numel(),
+                    new_sizes,
                     self.numel(),
                     product
                 );
@@ -178,9 +182,10 @@ impl TensorImpl {
         let numel: i64 = new_sizes.iter().product();
         if numel != self.numel() {
             panic!(
-                "size mismatch: view size {} != numel {}",
-                numel,
-                self.numel()
+                "view: size mismatch, cannot reshape tensor of {} elements into shape {:?} (target has {} elements)",
+                self.numel(),
+                new_sizes,
+                numel
             );
         }
 
@@ -204,11 +209,11 @@ impl TensorImpl {
         for (i, s) in new_sizes.iter().enumerate() {
             if *s == -1 {
                 if minus_one_idx.is_some() {
-                    panic!("can only specify one unknown dimension");
+                    panic!("reshape: can only specify one unknown dimension (-1), got multiple");
                 }
                 minus_one_idx = Some(i);
             } else if *s < 0 {
-                panic!("reshape: negative size not allowed");
+                panic!("reshape: negative dimension size not allowed (got {})", s);
             } else {
                 product *= s;
             }
@@ -220,7 +225,9 @@ impl TensorImpl {
             }
             if self.numel() % product != 0 {
                 panic!(
-                    "size mismatch: reshape cannot infer dimension because {} is not divisible by {}",
+                    "reshape: size mismatch, cannot reshape tensor of {} elements into shape {:?} ({} is not divisible by {})",
+                    self.numel(),
+                    new_sizes,
                     self.numel(),
                     product
                 );
@@ -231,9 +238,10 @@ impl TensorImpl {
             let numel: i64 = sizes.iter().product();
             if numel != self.numel() {
                 panic!(
-                    "size mismatch: reshape size {} != numel {}",
-                    numel,
-                    self.numel()
+                    "reshape: size mismatch, cannot reshape tensor of {} elements into shape {:?} (target has {} elements)",
+                    self.numel(),
+                    sizes,
+                    numel
                 );
             }
         }
@@ -244,7 +252,10 @@ impl TensorImpl {
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
         let ndim = self.ndim();
         if dim0 >= ndim || dim1 >= ndim {
-            panic!("transpose: dimension out of range");
+            panic!(
+                "transpose: dimension {} or {} is out of range for {}-dimensional tensor",
+                dim0, dim1, ndim
+            );
         }
 
         let mut sizes = self.sizes.clone();
@@ -269,13 +280,20 @@ impl TensorImpl {
     pub fn permute(&self, dims: SmallVec<[i64; 8]>) -> Tensor {
         let ndim = self.ndim();
         if dims.len() != ndim {
-            panic!("permute: number of dimensions mismatch");
+            panic!(
+                "permute: number of dimensions mismatch (tensor has {} dims, got {} dims)",
+                ndim,
+                dims.len()
+            );
         }
 
         let mut seen = vec![false; ndim];
         for &d in &dims {
             if d < 0 || (d as usize) >= ndim || seen[d as usize] {
-                panic!("permute: invalid permutation");
+                panic!(
+                    "permute: invalid permutation {:?} for {}-dimensional tensor",
+                    dims, ndim
+                );
             }
             seen[d as usize] = true;
         }
@@ -392,7 +410,11 @@ impl TensorImpl {
 
     pub fn expand(&self, sizes: SmallVec<[i64; 8]>) -> Tensor {
         if sizes.len() < self.ndim() {
-            panic!("expand: not enough dimensions");
+            panic!(
+                "expand: target shape has {} dimensions but tensor has {} dimensions",
+                sizes.len(),
+                self.ndim()
+            );
         }
 
         let new_sizes = sizes.clone();
@@ -403,7 +425,7 @@ impl TensorImpl {
             let source = self.sizes[i];
             if target != source && source != 1 {
                 panic!(
-                    "expand: cannot expand dimension {} from {} to {}",
+                    "expand: cannot expand dimension {} from {} to {} (only size-1 dimensions can be expanded)",
                     i, source, target
                 );
             }
@@ -433,7 +455,11 @@ impl TensorImpl {
 
     pub fn slice(&self, dim: usize, start: i64, end: i64, step: i64) -> Tensor {
         if dim >= self.ndim() {
-            panic!("slice: dimension out of range");
+            panic!(
+                "slice: dimension {} is out of range for {}-dimensional tensor",
+                dim,
+                self.ndim()
+            );
         }
 
         let size = self.sizes[dim];
@@ -443,7 +469,10 @@ impl TensorImpl {
         let end = (end.min(size)) as usize;
 
         if start > end {
-            panic!("slice: invalid range");
+            panic!(
+                "slice: invalid range [{}, {}) for dimension {} of size {}",
+                start, end, dim, size
+            );
         }
 
         let mut sizes = self.sizes.clone();
