@@ -4,10 +4,6 @@ import fastnn as fnn
 from fastnn.data import DataLoader, TensorDataset
 
 
-@pytest.mark.skipif(
-    sys.platform in ("darwin", "linux", "win32"),
-    reason="Trainer tests crash on CI (PyO3 cleanup)",
-)
 def test_trainer_fit():
     model = fnn.models.MLP(input_dim=2, hidden_dims=[8], output_dim=1)
 
@@ -36,10 +32,6 @@ def test_trainer_fit():
     assert initial_loss is not None
 
 
-@pytest.mark.skipif(
-    sys.platform in ("darwin", "linux", "win32"),
-    reason="Trainer tests crash on CI (PyO3 cleanup)",
-)
 def test_trainer_evaluate():
     model = fnn.models.MLP(input_dim=2, hidden_dims=[8], output_dim=1)
 
@@ -63,10 +55,6 @@ def test_trainer_evaluate():
     assert "loss" in metrics
 
 
-@pytest.mark.skipif(
-    sys.platform in ("darwin", "linux", "win32"),
-    reason="Trainer tests crash on CI (PyO3 cleanup)",
-)
 def test_early_stopping():
     from fastnn import EarlyStopping
 
