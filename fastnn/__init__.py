@@ -432,7 +432,7 @@ clip_grad_value_ = _core.clip_grad_value_
 Dropout2d = _core.Dropout2d
 Upsample = _core.Upsample
 RMSprop = _core.PyRMSprop
-ELU = _core.ELU
+Elu = _core.Elu
 Mish = _core.Mish
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
 
