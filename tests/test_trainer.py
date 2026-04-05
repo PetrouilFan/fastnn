@@ -1,5 +1,3 @@
-import sys
-import pytest
 import fastnn as fnn
 from fastnn.data import DataLoader, TensorDataset
 

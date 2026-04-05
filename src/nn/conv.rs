@@ -172,6 +172,7 @@ impl Module for Conv2d {
     }
 }
 
+#[allow(dead_code)]
 pub struct ConvTranspose2d {
     pub weight: Tensor,
     pub bias: Option<Tensor>,
@@ -299,6 +300,7 @@ impl Module for ConvTranspose2d {
     }
 }
 
+#[allow(dead_code)]
 pub struct Conv1d {
     pub weight: Tensor,
     pub bias: Option<Tensor>,
@@ -311,26 +313,44 @@ pub struct Conv1d {
 }
 
 impl Conv1d {
-    pub fn new(in_channels: i64, out_channels: i64, kernel_size: i64, stride: i64, padding: i64, dilation: i64, bias: bool) -> Self {
+    pub fn new(
+        in_channels: i64,
+        out_channels: i64,
+        kernel_size: i64,
+        stride: i64,
+        padding: i64,
+        dilation: i64,
+        bias: bool,
+    ) -> Self {
         let k = kernel_size * in_channels;
         let scale = (2.0 / k as f32).sqrt();
-        let weight_data: Vec<f32> =
-            (0..out_channels * in_channels * kernel_size)
-                .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
-                .collect();
-        let weight = Tensor::from_vec(
-            weight_data,
-            vec![out_channels, in_channels, kernel_size],
-        ).requires_grad_(true);
+        let weight_data: Vec<f32> = (0..out_channels * in_channels * kernel_size)
+            .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
+            .collect();
+        let weight = Tensor::from_vec(weight_data, vec![out_channels, in_channels, kernel_size])
+            .requires_grad_(true);
         let bias = if bias {
-            let b = Tensor::zeros(vec![out_channels], crate::storage::DType::F32, crate::storage::Device::Cpu);
+            let b = Tensor::zeros(
+                vec![out_channels],
+                crate::storage::DType::F32,
+                crate::storage::Device::Cpu,
+            );
             let b = b;
             b.requires_grad_(true);
             Some(b)
         } else {
             None
         };
-        Conv1d { weight, bias, stride, padding, dilation, in_channels, out_channels, kernel_size }
+        Conv1d {
+            weight,
+            bias,
+            stride,
+            padding,
+            dilation,
+            in_channels,
+            out_channels,
+            kernel_size,
+        }
     }
 }
 
@@ -340,7 +360,13 @@ impl Module for Conv1d {
         let result = crate::dispatcher::dispatch(
             "conv1d",
             dispatch_key,
-            &[x, &self.weight, &Tensor::from_scalar(self.stride as f32), &Tensor::from_scalar(self.padding as f32), &Tensor::from_scalar(self.dilation as f32)],
+            &[
+                x,
+                &self.weight,
+                &Tensor::from_scalar(self.stride as f32),
+                &Tensor::from_scalar(self.padding as f32),
+                &Tensor::from_scalar(self.dilation as f32),
+            ],
         );
         let mut output = result[0].clone();
         if let Some(ref bias) = self.bias {
@@ -370,21 +396,28 @@ impl Module for Conv1d {
     fn zero_grad(&self) {
         for t in [&self.weight] {
             if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() { lock.grad = None; }
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
         if let Some(ref b) = self.bias {
             if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() { lock.grad = None; }
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }
 
     fn train_mode(&self) {}
     fn eval_mode(&self) {}
-    fn is_training(&self) -> bool { false }
+    fn is_training(&self) -> bool {
+        false
+    }
 }
 
+#[allow(dead_code)]
 pub struct Conv3d {
     pub weight: Tensor,
     pub bias: Option<Tensor>,
@@ -397,7 +430,15 @@ pub struct Conv3d {
 }
 
 impl Conv3d {
-    pub fn new(in_channels: i64, out_channels: i64, kernel_size: i64, stride: i64, padding: i64, dilation: i64, bias: bool) -> Self {
+    pub fn new(
+        in_channels: i64,
+        out_channels: i64,
+        kernel_size: i64,
+        stride: i64,
+        padding: i64,
+        dilation: i64,
+        bias: bool,
+    ) -> Self {
         let k = kernel_size * kernel_size * kernel_size * in_channels;
         let scale = (2.0 / k as f32).sqrt();
         let weight_data: Vec<f32> =
@@ -406,17 +447,37 @@ impl Conv3d {
                 .collect();
         let weight = Tensor::from_vec(
             weight_data,
-            vec![out_channels, in_channels, kernel_size, kernel_size, kernel_size],
-        ).requires_grad_(true);
+            vec![
+                out_channels,
+                in_channels,
+                kernel_size,
+                kernel_size,
+                kernel_size,
+            ],
+        )
+        .requires_grad_(true);
         let bias = if bias {
-            let b = Tensor::zeros(vec![out_channels], crate::storage::DType::F32, crate::storage::Device::Cpu);
+            let b = Tensor::zeros(
+                vec![out_channels],
+                crate::storage::DType::F32,
+                crate::storage::Device::Cpu,
+            );
             let b = b;
             b.requires_grad_(true);
             Some(b)
         } else {
             None
         };
-        Conv3d { weight, bias, stride, padding, dilation, in_channels, out_channels, kernel_size }
+        Conv3d {
+            weight,
+            bias,
+            stride,
+            padding,
+            dilation,
+            in_channels,
+            out_channels,
+            kernel_size,
+        }
     }
 }
 
@@ -426,7 +487,13 @@ impl Module for Conv3d {
         let result = crate::dispatcher::dispatch(
             "conv3d",
             dispatch_key,
-            &[x, &self.weight, &Tensor::from_scalar(self.stride as f32), &Tensor::from_scalar(self.padding as f32), &Tensor::from_scalar(self.dilation as f32)],
+            &[
+                x,
+                &self.weight,
+                &Tensor::from_scalar(self.stride as f32),
+                &Tensor::from_scalar(self.padding as f32),
+                &Tensor::from_scalar(self.dilation as f32),
+            ],
         );
         let mut output = result[0].clone();
         if let Some(ref bias) = self.bias {
@@ -456,17 +523,23 @@ impl Module for Conv3d {
     fn zero_grad(&self) {
         for t in [&self.weight] {
             if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() { lock.grad = None; }
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
         if let Some(ref b) = self.bias {
             if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() { lock.grad = None; }
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
             }
         }
     }
 
     fn train_mode(&self) {}
     fn eval_mode(&self) {}
-    fn is_training(&self) -> bool { false }
+    fn is_training(&self) -> bool {
+        false
+    }
 }

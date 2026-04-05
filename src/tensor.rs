@@ -934,9 +934,8 @@ impl Tensor {
                         slice.fill(1);
                     }
                     DType::Bool => {
-                        let slice = unsafe {
-                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, numel)
-                        };
+                        let slice =
+                            unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr(), numel) };
                         slice.fill(1);
                     }
                 }

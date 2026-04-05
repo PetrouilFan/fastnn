@@ -1805,6 +1805,7 @@ pub fn gpu_min(a: &Tensor, dim: usize, keepdim: bool, device_id: usize) -> Vec<T
 }
 
 // GPU training kernels
+#[allow(dead_code)]
 const TRANSPOSE_SHADER: &str = r#"
 struct Params {
     ndim: u32,

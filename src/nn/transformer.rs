@@ -9,8 +9,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-fn pos_encoding_cache() -> &'static Mutex<HashMap<(i64, i64, i64), Tensor>> {
-    static CACHE: OnceLock<Mutex<HashMap<(i64, i64, i64), Tensor>>> = OnceLock::new();
+type PosCacheKey = (i64, i64, i64);
+
+fn pos_encoding_cache() -> &'static Mutex<HashMap<PosCacheKey, Tensor>> {
+    static CACHE: OnceLock<Mutex<HashMap<PosCacheKey, Tensor>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
