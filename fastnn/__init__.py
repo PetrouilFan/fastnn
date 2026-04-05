@@ -447,6 +447,7 @@ BatchNorm2d = _core.BatchNorm2d
 Lion = _core.PyLion
 bce_with_logits = _core.bce_with_logits
 huber_loss = _core.huber_loss
+ConvTranspose2d = _core.ConvTranspose2d
 
 
 def save_model(model, path):

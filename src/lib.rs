@@ -1283,6 +1283,50 @@ impl MaxPool2d {
 }
 
 #[pyclass]
+struct ConvTranspose2d {
+    inner: nn::conv::ConvTranspose2d,
+}
+
+#[pymethods]
+impl ConvTranspose2d {
+    #[new]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, bias = true))]
+    fn new(in_channels: i64, out_channels: i64, kernel_size: i64, stride: i64, padding: i64, bias: bool) -> Self {
+        ConvTranspose2d {
+            inner: nn::conv::ConvTranspose2d::new(in_channels, out_channels, kernel_size, stride, padding, bias),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn forward(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&mut self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&mut self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
 struct LayerNorm {
     inner: nn::norm::LayerNorm,
 }
@@ -2255,6 +2299,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Linear>()?;
     m.add_class::<Conv2d>()?;
     m.add_class::<MaxPool2d>()?;
+    m.add_class::<ConvTranspose2d>()?;
     m.add_class::<LayerNorm>()?;
     m.add_class::<BatchNorm1d>()?;
     m.add_class::<RMSNorm>()?;
