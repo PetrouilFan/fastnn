@@ -171,3 +171,130 @@ impl Module for Conv2d {
         self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
+
+pub struct ConvTranspose2d {
+    pub weight: Tensor,
+    pub bias: Option<Tensor>,
+    pub stride: i64,
+    pub padding: i64,
+    pub out_channels: i64,
+    pub in_channels: i64,
+    pub kernel_size: i64,
+}
+
+impl ConvTranspose2d {
+    pub fn new(
+        in_channels: i64,
+        out_channels: i64,
+        kernel_size: i64,
+        stride: i64,
+        padding: i64,
+        bias: bool,
+    ) -> Self {
+        let k = kernel_size * kernel_size * in_channels;
+        let scale = (2.0 / k as f32).sqrt();
+        let weight_data: Vec<f32> = (0..in_channels * out_channels * kernel_size * kernel_size)
+            .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
+            .collect();
+        let weight = Tensor::from_vec(
+            weight_data,
+            vec![in_channels, out_channels, kernel_size, kernel_size],
+        )
+        .requires_grad_(true);
+        let bias = if bias {
+            let b = Tensor::zeros(
+                vec![out_channels],
+                crate::storage::DType::F32,
+                crate::storage::Device::Cpu,
+            );
+            let mut b = b;
+            b.requires_grad_(true);
+            Some(b)
+        } else {
+            None
+        };
+        ConvTranspose2d {
+            weight,
+            bias,
+            stride,
+            padding,
+            out_channels,
+            in_channels,
+            kernel_size,
+        }
+    }
+}
+
+impl Module for ConvTranspose2d {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        let x_shape = x.shape();
+        let batch = x_shape[0];
+        let h_in = x_shape[2];
+        let w_in = x_shape[3];
+        let h_out = (h_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
+        let w_out = (w_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
+
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+        let result = crate::dispatcher::dispatch(
+            "conv_transpose2d",
+            dispatch_key,
+            &[
+                x,
+                &self.weight,
+                &Tensor::from_scalar(self.stride as f32),
+                &Tensor::from_scalar(self.padding as f32),
+            ],
+        );
+        let mut output = result[0].clone();
+
+        if let Some(ref bias) = self.bias {
+            let mut bias_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
+            bias_shape.push(1);
+            bias_shape.push(self.out_channels);
+            bias_shape.push(1);
+            bias_shape.push(1);
+            let bias_reshaped = bias.reshape(bias_shape.into_vec());
+            output = output.add(&bias_reshaped);
+        }
+        output
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        let mut params = vec![self.weight.clone()];
+        if let Some(ref b) = self.bias {
+            params.push(b.clone());
+        }
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        let mut params = vec![("weight".to_string(), self.weight.clone())];
+        if let Some(ref b) = self.bias {
+            params.push(("bias".to_string(), b.clone()));
+        }
+        params
+    }
+
+    fn zero_grad(&self) {
+        for t in [&self.weight] {
+            if let Some(meta) = &t.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
+            }
+        }
+        if let Some(ref b) = self.bias {
+            if let Some(meta) = &b.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
+            }
+        }
+    }
+
+    fn train_mode(&self) {}
+    fn eval_mode(&self) {}
+    fn is_training(&self) -> bool {
+        false
+    }
+}

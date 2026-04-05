@@ -10380,6 +10380,11 @@ fn register_kernels() {
 
     register("conv2d", DispatchKey::Cpu, conv2d_kernel as KernelFn);
     register(
+        "conv_transpose2d",
+        DispatchKey::Cpu,
+        conv_transpose2d_kernel as KernelFn,
+    );
+    register(
         "layer_norm",
         DispatchKey::Cpu,
         layer_norm_kernel as KernelFn,
@@ -11756,4 +11761,71 @@ fn huber_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     }
     let avg_loss = loss / numel as f32;
     vec![Tensor::from_vec(vec![avg_loss], vec![1])]
+}
+
+fn conv_transpose2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let weight = args[1];
+    let stride = args[2].item() as i64;
+    let padding = args[3].item() as i64;
+
+    let x_shape = x.shape();
+    let w_shape = weight.shape();
+    let batch = x_shape[0];
+    let in_channels = x_shape[1];
+    let h_in = x_shape[2];
+    let w_in = x_shape[3];
+    let out_channels = w_shape[1];
+    let kernel_h = w_shape[2];
+    let kernel_w = w_shape[3];
+
+    let h_out = (h_in - 1) * stride - 2 * padding + kernel_h;
+    let w_out = (w_in - 1) * stride - 2 * padding + kernel_w;
+
+    let output_shape = vec![batch, out_channels, h_out, w_out];
+    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+
+    let x_data = x.as_f32_slice();
+    let w_data = weight.as_f32_slice();
+    let out_ptr = output.data_ptr_f32_mut();
+
+    for b in 0..batch as usize {
+        for ic in 0..in_channels as usize {
+            for oc in 0..out_channels as usize {
+                for hi in 0..h_in as usize {
+                    for wi in 0..w_in as usize {
+                        let x_val = x_data[b
+                            * (in_channels as usize * h_in as usize * w_in as usize)
+                            + ic * (h_in as usize * w_in as usize)
+                            + hi * w_in as usize
+                            + wi];
+                        for kh in 0..kernel_h as usize {
+                            for kw in 0..kernel_w as usize {
+                                let ho = hi as i64 * stride - padding + kh as i64;
+                                let wo = wi as i64 * stride - padding + kw as i64;
+                                if ho >= 0 && ho < h_out && wo >= 0 && wo < w_out {
+                                    let w_idx = ic
+                                        * (out_channels as usize
+                                            * kernel_h as usize
+                                            * kernel_w as usize)
+                                        + oc * (kernel_h as usize * kernel_w as usize)
+                                        + kh * kernel_w as usize
+                                        + kw;
+                                    let out_idx = b
+                                        * (out_channels as usize * h_out as usize * w_out as usize)
+                                        + oc * (h_out as usize * w_out as usize)
+                                        + ho as usize * w_out as usize
+                                        + wo as usize;
+                                    unsafe {
+                                        *out_ptr.add(out_idx) += x_val * w_data[w_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    vec![output]
 }
