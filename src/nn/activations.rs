@@ -323,17 +323,17 @@ impl Module for Hardswish {
     }
 }
 
-pub struct ELU {
+pub struct Elu {
     pub alpha: f64,
 }
 
-impl ELU {
+impl Elu {
     pub fn new(alpha: f64) -> Self {
-        ELU { alpha }
+        Elu { alpha }
     }
 }
 
-impl Module for ELU {
+impl Module for Elu {
     fn forward(&self, x: &Tensor) -> Tensor {
         let alpha_tensor = Tensor::from_scalar(self.alpha as f32);
         let result = dispatch("elu", DispatchKey::Cpu, &[x, &alpha_tensor]);

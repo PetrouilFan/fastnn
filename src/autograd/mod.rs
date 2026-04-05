@@ -2494,19 +2494,19 @@ impl Node for ConvTranspose2dBackward {
     }
 }
 
-pub struct ELUBackward {
+pub struct EluBackward {
     pub input: Tensor,
     pub alpha: f32,
     pub edges: Vec<Edge>,
 }
 
-impl ELUBackward {
+impl EluBackward {
     pub fn new(input: Tensor, alpha: f32, edges: Vec<Edge>) -> Self {
-        ELUBackward { input, alpha, edges }
+        EluBackward { input, alpha, edges }
     }
 }
 
-impl Node for ELUBackward {
+impl Node for EluBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
         // d/dx elu(x) = 1 if x > 0 else alpha * exp(x)
@@ -2527,7 +2527,7 @@ impl Node for ELUBackward {
     }
 
     fn name(&self) -> &str {
-        "ELUBackward"
+        "EluBackward"
     }
 
     fn inputs(&self) -> &[Tensor] {

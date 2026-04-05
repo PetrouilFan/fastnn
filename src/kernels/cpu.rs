@@ -12156,7 +12156,7 @@ fn flash_attention_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 fn elu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
-    let alpha = args[1].item() as f32;
+    let alpha = args[1].item();
     let numel = x.inner.numel() as usize;
     let x_data = x.as_f32_slice();
     let mut output_data = vec![0.0f32; numel];
