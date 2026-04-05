@@ -1487,6 +1487,50 @@ impl Embedding {
 }
 
 #[pyclass]
+struct RMSNorm {
+    inner: nn::norm::RMSNorm,
+}
+
+#[pymethods]
+impl RMSNorm {
+    #[new]
+    #[pyo3(signature = (normalized_shape, eps = 1e-5))]
+    fn new(normalized_shape: i64, eps: f32) -> Self {
+        RMSNorm {
+            inner: nn::norm::RMSNorm::new(normalized_shape, eps),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn forward(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&mut self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&mut self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
 struct ReLU;
 
 #[pymethods]
@@ -2071,6 +2115,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MaxPool2d>()?;
     m.add_class::<LayerNorm>()?;
     m.add_class::<BatchNorm1d>()?;
+    m.add_class::<RMSNorm>()?;
     m.add_class::<Dropout>()?;
     m.add_class::<Embedding>()?;
     m.add_class::<ReLU>()?;

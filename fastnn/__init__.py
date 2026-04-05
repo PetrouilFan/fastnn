@@ -441,6 +441,7 @@ LeakyReLU = _core.LeakyReLU
 Softplus = _core.Softplus
 Hardswish = _core.Hardswish
 cat = _core.cat
+RMSNorm = _core.RMSNorm
 
 
 def save_model(model, path):
