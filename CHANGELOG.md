@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.8.0 — Full-Featured Training Library
+
+### New Features
+
+- **New Layers**: Conv1d, Conv3d, ConvTranspose2d, RMSNorm, GroupNorm, BatchNorm2d
+- **New Activations**: LeakyReLU, Softplus, Hardswish (with autograd)
+- **New Optimizer**: Lion (sign-based momentum optimizer)
+- **New Losses**: BCEWithLogitsLoss, HuberLoss
+- **New Tensor Ops**: `cat`, `repeat`, `where_tensor`, `einsum`, `flip`, `maximum`, `log_softmax`
+- **Model I/O**: `save_model`, `load_model`, `save_optimizer`, `load_optimizer`
+- **Optimizer State**: Full `state_dict`/`load_state_dict` for Adam, AdamW, SGD, Muon, Lion
+- **Positional Encoding Cache**: Transformer reuses cached position tensors for same shapes
+
+### Performance
+
+- **Matmul**: 5.6 → 88.6 GFLOP/s (17× speedup) by switching from slow system BLAS to `matrixmultiply`
+- **GPU CPU fallbacks**: All elementwise ops now delegate to SIMD/parallel CPU kernels instead of serial loops
+- **GPU Autograd**: Fixed SigmoidBackward, TanhBackward, SiLUBackward to work with GPU storage tensors
+
+### Bug Fixes
+
+- Fixed infinite recursion in TransformerBlock/TransformerEncoder Module impl
+- Fixed tanh gradient (was computing tanh-tanh² instead of 1-tanh²)
+- Fixed view/transpose autograd_meta sharing (gradients now propagate correctly through view ops)
+- Fixed BatchNorm1d RwLock deadlock (cloned tensors before dispatch to avoid write lock contention)
+- Fixed sum kernel wrong output shape for N-D tensors
+- Fixed slice numel calculation for step > 1
+- Fixed reshape -1 validation (divisibility check)
+- Fixed unsqueeze stride calculation
+
+### Testing
+
+- 92 Rust unit tests pass
+- 63 Python tests pass (0 failures)
+- Added 11 new Rust unit tests for tensor operations
+
+---
+
 ## v0.6.0 — Native Multi-Precision Support
 
 ### New Features
