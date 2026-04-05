@@ -207,7 +207,7 @@ impl ConvTranspose2d {
                 crate::storage::DType::F32,
                 crate::storage::Device::Cpu,
             );
-            let mut b = b;
+            let b = b;
             b.requires_grad_(true);
             Some(b)
         } else {
@@ -228,11 +228,11 @@ impl ConvTranspose2d {
 impl Module for ConvTranspose2d {
     fn forward(&self, x: &Tensor) -> Tensor {
         let x_shape = x.shape();
-        let batch = x_shape[0];
+        let _batch = x_shape[0];
         let h_in = x_shape[2];
         let w_in = x_shape[3];
-        let h_out = (h_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
-        let w_out = (w_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
+        let _h_out = (h_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
+        let _w_out = (w_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
 
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(
@@ -324,7 +324,7 @@ impl Conv1d {
         ).requires_grad_(true);
         let bias = if bias {
             let b = Tensor::zeros(vec![out_channels], crate::storage::DType::F32, crate::storage::Device::Cpu);
-            let mut b = b;
+            let b = b;
             b.requires_grad_(true);
             Some(b)
         } else {
@@ -410,7 +410,7 @@ impl Conv3d {
         ).requires_grad_(true);
         let bias = if bias {
             let b = Tensor::zeros(vec![out_channels], crate::storage::DType::F32, crate::storage::Device::Cpu);
-            let mut b = b;
+            let b = b;
             b.requires_grad_(true);
             Some(b)
         } else {
