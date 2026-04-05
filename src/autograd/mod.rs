@@ -1096,7 +1096,8 @@ impl Node for TanhBackward {
         let input = self.input.to_cpu();
         let grad = grad.to_cpu();
         let tanh_x = input.tanh();
-        let one_minus_tanh_sq = tanh_x.mul_scalar(1.0).sub(&tanh_x.pow(2.0));
+        let tanh_sq = tanh_x.pow(2.0);
+        let one_minus_tanh_sq = tanh_sq.mul_scalar(-1.0).add_scalar(1.0);
         vec![Some(grad.mul(&one_minus_tanh_sq))]
     }
 
