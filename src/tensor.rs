@@ -880,45 +880,73 @@ impl Tensor {
     }
 
     pub fn ones(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
-        let mut t = Self::zeros(shape, dtype, device);
-        let numel = t.inner.numel() as usize;
-        let inner = Arc::make_mut(&mut t.inner);
-        let storage = Arc::make_mut(&mut inner.storage);
-        let Storage::Cpu(cpu_storage) = storage else {
-            panic!("Expected CPU storage for ones()");
-        };
-        let data = Arc::make_mut(&mut cpu_storage.data);
-        match dtype {
-            DType::F32 => {
-                let slice =
-                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f32, numel) };
-                slice.fill(1.0);
-            }
-            DType::F64 => {
-                let slice =
-                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, numel) };
-                slice.fill(1.0);
-            }
-            DType::I32 => {
-                let slice =
-                    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i32, numel) };
-                slice.fill(1);
-            }
-            DType::BF16 => {
-                let slice = unsafe {
-                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut half::bf16, numel)
+        match device {
+            Device::Cpu => {
+                let mut t = Self::zeros(shape, dtype, device);
+                let numel = t.inner.numel() as usize;
+                let inner = Arc::make_mut(&mut t.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!("Expected CPU storage for ones()");
                 };
-                slice.fill(half::bf16::from_f32(1.0));
+                let data = Arc::make_mut(&mut cpu_storage.data);
+                match dtype {
+                    DType::F32 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f32, numel)
+                        };
+                        slice.fill(1.0);
+                    }
+                    DType::F64 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, numel)
+                        };
+                        slice.fill(1.0);
+                    }
+                    DType::I32 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i32, numel)
+                        };
+                        slice.fill(1);
+                    }
+                    DType::BF16 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                data.as_mut_ptr() as *mut half::bf16,
+                                numel,
+                            )
+                        };
+                        slice.fill(half::bf16::from_f32(1.0));
+                    }
+                    DType::F16 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                data.as_mut_ptr() as *mut half::f16,
+                                numel,
+                            )
+                        };
+                        slice.fill(half::f16::from_f32(1.0));
+                    }
+                    DType::I64 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i64, numel)
+                        };
+                        slice.fill(1);
+                    }
+                    DType::Bool => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, numel)
+                        };
+                        slice.fill(1);
+                    }
+                }
+                t
             }
-            DType::F16 => {
-                let slice = unsafe {
-                    std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut half::f16, numel)
-                };
-                slice.fill(half::f16::from_f32(1.0));
+            Device::Wgpu(device_id) => {
+                let cpu_ones = Self::ones(shape.clone(), dtype, Device::Cpu);
+                cpu_ones.to_gpu(device_id)
             }
-            _ => {}
         }
-        t
     }
 
     pub fn full(shape: Vec<i64>, value: f32, dtype: DType, device: Device) -> Self {
