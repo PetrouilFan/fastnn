@@ -2992,4 +2992,124 @@ impl Tensor {
         let result = dispatch("logical_not", dispatch_key, &[self]);
         result[0].clone()
     }
+
+    pub fn cat(tensors: &[Tensor], dim: i32) -> Tensor {
+        if tensors.is_empty() {
+            panic!("cat: need at least one tensor");
+        }
+        let ndim = tensors[0].ndim();
+        let dim = if dim < 0 { ndim as i32 + dim } else { dim } as usize;
+        if dim >= ndim {
+            panic!("cat: dimension out of range");
+        }
+        let mut output_shape: SmallVec<[i64; 8]> = tensors[0].inner.sizes.clone();
+        let mut total_dim_size: i64 = 0;
+        for t in tensors {
+            if t.ndim() != ndim {
+                panic!("cat: tensors must have same number of dimensions");
+            }
+            total_dim_size += t.inner.sizes[dim];
+            for d in 0..ndim {
+                if d != dim && output_shape[d] != t.inner.sizes[d] {
+                    panic!("cat: tensor sizes mismatch at dimension {}", d);
+                }
+            }
+        }
+        output_shape[dim] = total_dim_size;
+        let numel: i64 = output_shape.iter().product();
+        let mut output_data = vec![0.0f32; numel as usize];
+        let mut out_strides: SmallVec<[i64; 8]> = SmallVec::new();
+        let mut s = 1i64;
+        for d in (0..ndim).rev() {
+            out_strides.push(s);
+            s *= output_shape[d];
+        }
+        out_strides.reverse();
+        let mut out_offset = 0i64;
+        for t in tensors {
+            let t_data = t.as_f32_slice();
+            let t_strides = &t.inner.strides;
+            let t_sizes = &t.inner.sizes;
+            let mut indices = vec![0i64; ndim];
+            let dim_size = t.inner.sizes[dim];
+            for _ in 0..t.numel() as usize {
+                let mut t_lin = t.inner.storage_offset;
+                let mut o_lin = out_offset;
+                for d in 0..ndim {
+                    t_lin += indices[d] * t_strides[d];
+                    o_lin += indices[d] * out_strides[d];
+                }
+                output_data[o_lin as usize] = t_data[t_lin as usize];
+                for d in (0..ndim).rev() {
+                    indices[d] += 1;
+                    if indices[d] < t_sizes[d] {
+                        break;
+                    }
+                    indices[d] = 0;
+                }
+            }
+            out_offset += dim_size * out_strides[dim];
+        }
+        Tensor::from_vec(output_data, output_shape.into_vec())
+    }
+
+    pub fn repeat(&self, repeats: &[i64]) -> Tensor {
+        if repeats.len() < self.ndim() {
+            panic!("repeat: number of repeats must be >= number of dimensions");
+        }
+        let mut new_shape: SmallVec<[i64; 8]> = SmallVec::new();
+        let mut total: i64 = 1;
+        for (i, &r) in repeats.iter().enumerate() {
+            let orig = if i < repeats.len() - self.ndim() {
+                1
+            } else {
+                self.inner.sizes[i - (repeats.len() - self.ndim())]
+            };
+            new_shape.push(orig * r);
+            total *= orig * r;
+        }
+        let mut output_data = vec![0.0f32; total as usize];
+        let src = self.to_cpu();
+        let src_data = src.as_f32_slice();
+        let src_strides = &self.inner.strides;
+        let src_sizes = &self.inner.sizes;
+        let ndim = self.ndim();
+        let offset = repeats.len() - ndim;
+        let mut src_indices = vec![0i64; ndim];
+        for out_idx in 0..total as usize {
+            let mut rep_indices: Vec<i64> = Vec::with_capacity(repeats.len());
+            let mut remaining = out_idx as i64;
+            for d in (0..repeats.len()).rev() {
+                let dim_size = new_shape[d];
+                rep_indices.push(remaining % dim_size);
+                remaining /= dim_size;
+            }
+            rep_indices.reverse();
+            for d in 0..ndim {
+                src_indices[d] = rep_indices[d + offset] % src_sizes[d];
+            }
+            let mut src_lin = self.inner.storage_offset;
+            for d in 0..ndim {
+                src_lin += src_indices[d] * src_strides[d];
+            }
+            output_data[out_idx] = src_data[src_lin as usize];
+        }
+        Tensor::from_vec(output_data, new_shape.into_vec())
+    }
+
+    pub fn where_tensor(&self, condition: &Tensor, other: &Tensor) -> Tensor {
+        let numel = self.numel() as usize;
+        let self_data = self.as_f32_slice();
+        let cond_data = condition.as_f32_slice();
+        let other_data = other.as_f32_slice();
+        let mut output_data = vec![0.0f32; numel];
+        for i in 0..numel {
+            output_data[i] = if cond_data[i] != 0.0 {
+                self_data[i]
+            } else {
+                other_data[i]
+            };
+        }
+        Tensor::from_vec(output_data, self.shape())
+    }
 }
