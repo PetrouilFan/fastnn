@@ -4,11 +4,10 @@ Provides Dataset, DataLoader, Sampler, and TensorDataset classes
 with support for shuffling, batching, prefetching, and multi-process loading.
 """
 
-import math
 import random
 import threading
 import queue
-from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Sequence
 
 
 class Dataset:

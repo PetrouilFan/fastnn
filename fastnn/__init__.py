@@ -1,6 +1,5 @@
 import numpy as np
 import fastnn._core as _core
-from math import cos, pi
 
 __version__ = "0.8.0"
 
@@ -185,32 +184,6 @@ Sigmoid = _core.Sigmoid
 Tanh = _core.Tanh
 SiLU = _core.SiLU
 Sequential = _core.Sequential_
-
-
-class AdaptiveAvgPool2d:
-    """Adaptive average pooling 2D (output size must be (1,1))."""
-
-    def __init__(self, output_size):
-        if isinstance(output_size, (list, tuple)):
-            output_size = tuple(output_size)
-        if output_size != (1, 1):
-            raise NotImplementedError("Only output size (1,1) is supported")
-        self.output_size = output_size
-        self._keepdim = True
-
-    def __call__(self, x):
-        # x shape: (batch, channels, height, width)
-        # First reduce over width (dim=3)
-        y = mean(x, dim=3, keepdim=self._keepdim)
-        # Then reduce over height (dim=2)
-        z = mean(y, dim=2, keepdim=self._keepdim)
-        return z
-
-    def train(self):
-        pass
-
-    def eval(self):
-        pass
 
 
 class MaxPool2d:
