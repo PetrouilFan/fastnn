@@ -10379,6 +10379,8 @@ fn register_kernels() {
     );
 
     register("conv2d", DispatchKey::Cpu, conv2d_kernel as KernelFn);
+    register("conv1d", DispatchKey::Cpu, conv1d_kernel as KernelFn);
+    register("conv3d", DispatchKey::Cpu, conv3d_kernel as KernelFn);
     register(
         "conv_transpose2d",
         DispatchKey::Cpu,
@@ -11818,6 +11820,159 @@ fn conv_transpose2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                                         + wo as usize;
                                     unsafe {
                                         *out_ptr.add(out_idx) += x_val * w_data[w_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    vec![output]
+}
+
+fn conv1d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let weight = args[1];
+    let stride = args[2].item() as i64;
+    let padding = args[3].item() as i64;
+    let dilation = args[4].item() as i64;
+
+    let x_shape = x.shape();
+    let w_shape = weight.shape();
+    let batch = x_shape[0];
+    let in_channels = x_shape[1];
+    let l_in = x_shape[2];
+    let out_channels = w_shape[0];
+    let kernel_l = w_shape[2];
+
+    let l_out = ((l_in + 2 * padding - dilation * (kernel_l - 1) - 1) / stride) + 1;
+    let output_shape = vec![batch, out_channels, l_out];
+    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+
+    let x_data = x.as_f32_slice();
+    let w_data = weight.as_f32_slice();
+    let out_ptr = output.data_ptr_f32_mut();
+
+    for b in 0..batch as usize {
+        for oc in 0..out_channels as usize {
+            for ic in 0..in_channels as usize {
+                for lo in 0..l_out as usize {
+                    for kl in 0..kernel_l as usize {
+                        let li = lo as i64 * stride - padding + kl as i64 * dilation;
+                        if li >= 0 && li < l_in {
+                            let x_idx = b * (in_channels as usize * l_in as usize)
+                                + ic * l_in as usize
+                                + li as usize;
+                            let w_idx = oc * (in_channels as usize * kernel_l as usize)
+                                + ic * kernel_l as usize
+                                + kl as usize;
+                            let out_idx = b * (out_channels as usize * l_out as usize)
+                                + oc * l_out as usize
+                                + lo;
+                            unsafe {
+                                *out_ptr.add(out_idx) += x_data[x_idx] * w_data[w_idx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    vec![output]
+}
+
+fn conv3d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let weight = args[1];
+    let stride = args[2].item() as i64;
+    let padding = args[3].item() as i64;
+    let dilation = args[4].item() as i64;
+
+    let x_shape = x.shape();
+    let w_shape = weight.shape();
+    let batch = x_shape[0];
+    let in_channels = x_shape[1];
+    let d_in = x_shape[2];
+    let h_in = x_shape[3];
+    let w_in = x_shape[4];
+    let out_channels = w_shape[0];
+    let kernel_d = w_shape[2];
+    let kernel_h = w_shape[3];
+    let kernel_w = w_shape[4];
+
+    let d_out = ((d_in + 2 * padding - dilation * (kernel_d - 1) - 1) / stride) + 1;
+    let h_out = ((h_in + 2 * padding - dilation * (kernel_h - 1) - 1) / stride) + 1;
+    let w_out = ((w_in + 2 * padding - dilation * (kernel_w - 1) - 1) / stride) + 1;
+
+    let output_shape = vec![batch, out_channels, d_out, h_out, w_out];
+    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+
+    let x_data = x.as_f32_slice();
+    let w_data = weight.as_f32_slice();
+    let out_ptr = output.data_ptr_f32_mut();
+
+    for b in 0..batch as usize {
+        for oc in 0..out_channels as usize {
+            for ic in 0..in_channels as usize {
+                for do_ in 0..d_out as usize {
+                    for ho in 0..h_out as usize {
+                        for wo in 0..w_out as usize {
+                            for kd in 0..kernel_d as usize {
+                                for kh in 0..kernel_h as usize {
+                                    for kw in 0..kernel_w as usize {
+                                        let di =
+                                            do_ as i64 * stride - padding + kd as i64 * dilation;
+                                        let hi =
+                                            ho as i64 * stride - padding + kh as i64 * dilation;
+                                        let wi =
+                                            wo as i64 * stride - padding + kw as i64 * dilation;
+                                        if di >= 0
+                                            && di < d_in
+                                            && hi >= 0
+                                            && hi < h_in
+                                            && wi >= 0
+                                            && wi < w_in
+                                        {
+                                            let x_idx = b
+                                                * (in_channels as usize
+                                                    * d_in as usize
+                                                    * h_in as usize
+                                                    * w_in as usize)
+                                                + ic * (d_in as usize
+                                                    * h_in as usize
+                                                    * w_in as usize)
+                                                + di as usize * (h_in as usize * w_in as usize)
+                                                + hi as usize * w_in as usize
+                                                + wi as usize;
+                                            let w_idx = oc
+                                                * (in_channels as usize
+                                                    * kernel_d as usize
+                                                    * kernel_h as usize
+                                                    * kernel_w as usize)
+                                                + ic * (kernel_d as usize
+                                                    * kernel_h as usize
+                                                    * kernel_w as usize)
+                                                + kd * (kernel_h as usize * kernel_w as usize)
+                                                + kh * kernel_w as usize
+                                                + kw;
+                                            let out_idx = b
+                                                * (out_channels as usize
+                                                    * d_out as usize
+                                                    * h_out as usize
+                                                    * w_out as usize)
+                                                + oc * (d_out as usize
+                                                    * h_out as usize
+                                                    * w_out as usize)
+                                                + do_ * (h_out as usize * w_out as usize)
+                                                + ho * w_out as usize
+                                                + wo;
+                                            unsafe {
+                                                *out_ptr.add(out_idx) +=
+                                                    x_data[x_idx] * w_data[w_idx];
+                                            }
+                                        }
                                     }
                                 }
                             }
