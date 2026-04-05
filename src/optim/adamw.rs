@@ -1,5 +1,6 @@
-use crate::optim::{Optimizer, OptimizerState, ParamGroup};
+use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState};
 use crate::tensor::Tensor;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct AdamW {
@@ -205,16 +206,45 @@ impl Optimizer for AdamW {
     }
 
     fn state_dict(&self) -> OptimizerState {
+        let mut state = HashMap::new();
+        for (i, _) in self.params.iter().enumerate() {
+            state.insert(
+                i,
+                ParamState {
+                    step: self.step[i],
+                    m: Some(self.m[i].clone()),
+                    v: Some(self.v[i].clone()),
+                    v_hat: Some(self.v_hat[i].clone()),
+                },
+            );
+        }
         OptimizerState {
             param_groups: vec![ParamGroup {
                 params: self.params.clone(),
             }],
+            state,
         }
     }
 
     fn load_state_dict(&mut self, state: OptimizerState) {
         if let Some(group) = state.param_groups.first() {
             self.params = group.params.clone();
+        }
+        for (i, param_state) in state.state {
+            if i < self.m.len() {
+                if let Some(m) = param_state.m {
+                    self.m[i] = m;
+                }
+                if let Some(v) = param_state.v {
+                    self.v[i] = v;
+                }
+                if let Some(v_hat) = param_state.v_hat {
+                    self.v_hat[i] = v_hat;
+                }
+                if i < self.step.len() {
+                    self.step[i] = param_state.step;
+                }
+            }
         }
     }
 }

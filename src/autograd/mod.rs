@@ -8,19 +8,24 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 thread_local! {
-    static NO_GRAD_TLS: Cell<bool> = const { Cell::new(false) };
+    static NO_GRAD_TLS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub fn is_grad_enabled() -> bool {
-    !NO_GRAD_TLS.with(|c| c.get())
+    NO_GRAD_TLS.with(|c| c.get() == 0)
 }
 
 pub fn no_grad_enter() {
-    NO_GRAD_TLS.with(|c| c.set(true));
+    NO_GRAD_TLS.with(|c| c.set(c.get() + 1));
 }
 
 pub fn no_grad_exit() {
-    NO_GRAD_TLS.with(|c| c.set(false));
+    NO_GRAD_TLS.with(|c| {
+        let count = c.get();
+        if count > 0 {
+            c.set(count - 1);
+        }
+    });
 }
 
 /// RAII guard for disabling gradient computation.
@@ -1498,7 +1503,11 @@ impl Node for Conv2dBackward {
             }
 
             // Concatenate along channel dimension
-            grad_input_parts[0].clone()
+            if grad_input_parts.len() == 1 {
+                grad_input_parts[0].clone()
+            } else {
+                Tensor::cat(&grad_input_parts, 1)
+            }
         };
 
         // Compute grad_weight: convolve input with grad_output
