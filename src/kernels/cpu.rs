@@ -10293,6 +10293,14 @@ fn register_kernels() {
     register("sigmoid", DispatchKey::Cpu, sigmoid_kernel as KernelFn);
     register("tanh", DispatchKey::Cpu, tanh_kernel as KernelFn);
     register("silu", DispatchKey::Cpu, silu_kernel as KernelFn);
+    register(
+        "leaky_relu",
+        DispatchKey::Cpu,
+        leaky_relu_kernel as KernelFn,
+    );
+    register("prelu", DispatchKey::Cpu, prelu_kernel as KernelFn);
+    register("softplus", DispatchKey::Cpu, softplus_kernel as KernelFn);
+    register("hardswish", DispatchKey::Cpu, hardswish_kernel as KernelFn);
     register("clamp", DispatchKey::Cpu, clamp_kernel as KernelFn);
     register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
     register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
@@ -10406,6 +10414,22 @@ fn register_kernels() {
         max_pool2d_kernel as KernelFn,
     );
     register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
+    register("lt_scalar", DispatchKey::Cpu, lt_scalar_kernel as KernelFn);
+    register(
+        "add_scalar",
+        DispatchKey::Cpu,
+        add_scalar_kernel as KernelFn,
+    );
+    register(
+        "div_scalar",
+        DispatchKey::Cpu,
+        div_scalar_kernel as KernelFn,
+    );
+    register(
+        "logical_not",
+        DispatchKey::Cpu,
+        logical_not_kernel as KernelFn,
+    );
 }
 
 #[cfg(test)]
@@ -11558,4 +11582,130 @@ mod tests {
             );
         }
     }
+}
+
+fn leaky_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let slope = args[1].item();
+    let mut output = x.clone();
+    let numel = output.inner.numel() as usize;
+    let ptr = output.data_ptr_f32_mut();
+    for i in 0..numel {
+        unsafe {
+            let v = *ptr.add(i);
+            *ptr.add(i) = if v > 0.0 { v } else { v * slope };
+        }
+    }
+    vec![output]
+}
+
+fn prelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let weight = args[1];
+    let w_data = weight.as_f32_slice();
+    let x_shape = x.shape();
+    let numel = x.inner.numel() as usize;
+    let ndim = x.ndim();
+    let w_numel = w_data.len();
+    let mut output = x.clone();
+    let ptr = output.data_ptr_f32_mut();
+    let mut indices = vec![0i64; ndim];
+    for i in 0..numel {
+        unsafe {
+            let v = *ptr.add(i);
+            let w_idx = if w_numel == 1 {
+                0
+            } else {
+                indices[1] as usize % w_numel
+            };
+            let w = *w_data.get_unchecked(w_idx);
+            *ptr.add(i) = if v > 0.0 { v } else { v * w };
+        }
+        for d in (0..ndim).rev() {
+            indices[d] += 1;
+            if indices[d] < x_shape[d] {
+                break;
+            }
+            indices[d] = 0;
+        }
+    }
+    vec![output]
+}
+
+fn softplus_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let beta = args[1].item() as f32;
+    let threshold = args[2].item() as f32;
+    let numel = x.inner.numel() as usize;
+    let mut output_data = vec![0.0f32; numel];
+    let x_data = x.as_f32_slice();
+    for i in 0..numel {
+        let bx = beta * x_data[i];
+        output_data[i] = if bx > threshold {
+            x_data[i]
+        } else {
+            (1.0 + (bx).exp()).ln() / beta
+        };
+    }
+    vec![Tensor::from_vec(output_data, x.shape())]
+}
+
+fn hardswish_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let numel = x.inner.numel() as usize;
+    let mut output_data = vec![0.0f32; numel];
+    let x_data = x.as_f32_slice();
+    for i in 0..numel {
+        let v = x_data[i];
+        let relu6 = (v + 3.0).max(0.0).min(6.0);
+        output_data[i] = v * relu6 / 6.0;
+    }
+    vec![Tensor::from_vec(output_data, x.shape())]
+}
+
+fn lt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let threshold = args[1].item();
+    let numel = x.inner.numel() as usize;
+    let x_data = x.as_f32_slice();
+    let mut output_data = vec![0.0f32; numel];
+    for i in 0..numel {
+        output_data[i] = if x_data[i] < threshold { 1.0 } else { 0.0 };
+    }
+    vec![Tensor::from_vec(output_data, x.shape())]
+}
+
+fn add_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let scalar = args[1].item();
+    let numel = x.inner.numel() as usize;
+    let x_data = x.as_f32_slice();
+    let mut output_data = vec![0.0f32; numel];
+    for i in 0..numel {
+        output_data[i] = x_data[i] + scalar;
+    }
+    vec![Tensor::from_vec(output_data, x.shape())]
+}
+
+fn div_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let scalar = args[1].item();
+    let numel = x.inner.numel() as usize;
+    let x_data = x.as_f32_slice();
+    let mut output_data = vec![0.0f32; numel];
+    for i in 0..numel {
+        output_data[i] = x_data[i] / scalar;
+    }
+    vec![Tensor::from_vec(output_data, x.shape())]
+}
+
+fn logical_not_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let numel = x.inner.numel() as usize;
+    let x_data = x.as_f32_slice();
+    let mut output_data = vec![0.0f32; numel];
+    for i in 0..numel {
+        output_data[i] = if x_data[i] == 0.0 { 1.0 } else { 0.0 };
+    }
+    vec![Tensor::from_vec(output_data, x.shape())]
 }

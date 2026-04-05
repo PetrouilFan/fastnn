@@ -2538,6 +2538,63 @@ impl Tensor {
         }
     }
 
+    pub fn leaky_relu(&self, negative_slope: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let slope_tensor = Tensor::from_scalar(negative_slope);
+        let result = dispatch("leaky_relu", dispatch_key, &[self, &slope_tensor]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::LeakyReLUBackward::new(self.clone(), negative_slope, edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+            output
+        } else {
+            output
+        }
+    }
+
+    pub fn softplus(&self, beta: f32, threshold: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let beta_t = Tensor::from_scalar(beta);
+        let threshold_t = Tensor::from_scalar(threshold);
+        let result = dispatch("softplus", dispatch_key, &[self, &beta_t, &threshold_t]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::SoftplusBackward::new(self.clone(), beta, threshold, edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+            output
+        } else {
+            output
+        }
+    }
+
+    pub fn hardswish(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("hardswish", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::HardswishBackward::new(self.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+            output
+        } else {
+            output
+        }
+    }
+
     pub fn softmax(&self, dim: i32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("softmax", dispatch_key, &[self, &dim_scalar(dim)]);
@@ -2897,6 +2954,42 @@ impl Tensor {
     pub fn sign(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("sign", dispatch_key, &[self]);
+        result[0].clone()
+    }
+
+    pub fn lt_scalar(&self, threshold: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch(
+            "lt_scalar",
+            dispatch_key,
+            &[self, &Tensor::from_scalar(threshold)],
+        );
+        result[0].clone()
+    }
+
+    pub fn add_scalar(&self, scalar: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch(
+            "add_scalar",
+            dispatch_key,
+            &[self, &Tensor::from_scalar(scalar)],
+        );
+        result[0].clone()
+    }
+
+    pub fn div_scalar(&self, scalar: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch(
+            "div_scalar",
+            dispatch_key,
+            &[self, &Tensor::from_scalar(scalar)],
+        );
+        result[0].clone()
+    }
+
+    pub fn logical_not(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("logical_not", dispatch_key, &[self]);
         result[0].clone()
     }
 }

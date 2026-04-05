@@ -437,6 +437,9 @@ SGD = _core.PySGD
 Adam = _core.PyAdam
 AdamW = _core.PyAdamW
 Muon = _core.PyMuon
+LeakyReLU = _core.LeakyReLU
+Softplus = _core.Softplus
+Hardswish = _core.Hardswish
 
 
 def save_model(model, path):
