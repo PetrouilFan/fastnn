@@ -2626,6 +2626,25 @@ impl Tensor {
         }
     }
 
+    pub fn elu(&self, alpha: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let alpha_tensor = Tensor::from_scalar(alpha);
+        let result = dispatch("elu", dispatch_key, &[self, &alpha_tensor]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = autograd::ELUBackward::new(self.clone(), alpha, edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            let mut output = output.clone();
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+            output
+        } else {
+            output
+        }
+    }
+
     pub fn softmax(&self, dim: i32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("softmax", dispatch_key, &[self, &dim_scalar(dim)]);

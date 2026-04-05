@@ -1995,6 +1995,62 @@ impl Hardswish {
     }
 }
 
+#[pyclass]
+struct ELU {
+    alpha: f64,
+}
+
+#[pymethods]
+impl ELU {
+    #[new]
+    #[pyo3(signature = (alpha = 1.0))]
+    fn new(alpha: f64) -> Self {
+        ELU { alpha }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(x.inner.elu(self.alpha as f32))
+    }
+}
+
+#[pyclass]
+struct Mish;
+
+#[pymethods]
+impl Mish {
+    #[new]
+    fn new() -> Self {
+        Mish
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        // mish(x) = x * tanh(softplus(x))
+        // softplus(x) = ln(1 + exp(x))
+        let sp = x.inner.add_scalar(1.0).exp().ln();
+        let tanh_sp = sp.tanh();
+        PyTensor::from_tensor(x.inner.mul(&tanh_sp))
+    }
+}
+
+#[pyclass]
+struct AdaptiveAvgPool2d {
+    inner: nn::activations::AdaptiveAvgPool2d,
+}
+
+#[pymethods]
+impl AdaptiveAvgPool2d {
+    #[new]
+    fn new(output_h: i64, output_w: i64) -> Self {
+        AdaptiveAvgPool2d {
+            inner: nn::activations::AdaptiveAvgPool2d::new((output_h, output_w)),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+}
+
 #[pyclass(name = "Sequential_")]
 struct Sequential {
     layers: Vec<Py<PyAny>>,
@@ -2604,6 +2660,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LeakyReLU>()?;
     m.add_class::<Softplus>()?;
     m.add_class::<Hardswish>()?;
+    m.add_class::<ELU>()?;
+    m.add_class::<Mish>()?;
+    m.add_class::<AdaptiveAvgPool2d>()?;
     m.add_class::<Sequential>()?;
     m.add_class::<ModuleList>()?;
     m.add_class::<PySGD>()?;

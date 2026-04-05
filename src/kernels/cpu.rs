@@ -10301,6 +10301,7 @@ fn register_kernels() {
     register("prelu", DispatchKey::Cpu, prelu_kernel as KernelFn);
     register("softplus", DispatchKey::Cpu, softplus_kernel as KernelFn);
     register("hardswish", DispatchKey::Cpu, hardswish_kernel as KernelFn);
+    register("elu", DispatchKey::Cpu, elu_kernel as KernelFn);
     register("clamp", DispatchKey::Cpu, clamp_kernel as KernelFn);
     register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
     register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
@@ -12151,4 +12152,20 @@ fn flash_attention_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         head_dim as i64,
     ];
     vec![Tensor::from_vec(output, output_shape)]
+}
+
+fn elu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let alpha = args[1].item() as f32;
+    let numel = x.inner.numel() as usize;
+    let x_data = x.as_f32_slice();
+    let mut output_data = vec![0.0f32; numel];
+    for i in 0..numel {
+        output_data[i] = if x_data[i] > 0.0 {
+            x_data[i]
+        } else {
+            alpha * (x_data[i].exp() - 1.0)
+        };
+    }
+    vec![Tensor::from_vec(output_data, x.shape())]
 }

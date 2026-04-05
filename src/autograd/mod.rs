@@ -2493,3 +2493,44 @@ impl Node for ConvTranspose2dBackward {
         std::slice::from_ref(&self.input)
     }
 }
+
+pub struct ELUBackward {
+    pub input: Tensor,
+    pub alpha: f32,
+    pub edges: Vec<Edge>,
+}
+
+impl ELUBackward {
+    pub fn new(input: Tensor, alpha: f32, edges: Vec<Edge>) -> Self {
+        ELUBackward { input, alpha, edges }
+    }
+}
+
+impl Node for ELUBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+        // d/dx elu(x) = 1 if x > 0 else alpha * exp(x)
+        let mask = self.input.gt_scalar(0.0);
+        let exp_x = self.input.exp();
+        let grad_input = mask
+            .mul(&grad_output)
+            .add(&mask.logical_not().mul(&exp_x).mul_scalar(self.alpha).mul(&grad_output));
+        vec![Some(grad_input)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "ELUBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
+}
