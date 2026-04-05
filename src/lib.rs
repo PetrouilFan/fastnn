@@ -2421,6 +2421,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(einsum, py)?)?;
     m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
     m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
+    m.add_function(wrap_pyfunction!(flash_attention, py)?)?;
 
     Ok(())
 }
@@ -2522,4 +2523,20 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyTensor {
 fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
     let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     PyTensor::from_tensor(tensor::einsum(equation, &tensors))
+}
+
+#[pyfunction]
+#[pyo3(signature = (q, k, v, scale = None, causal = None))]
+fn flash_attention(q: &PyTensor, k: &PyTensor, v: &PyTensor, scale: Option<f32>, causal: Option<bool>) -> PyTensor {
+    let scale = scale.unwrap_or((q.inner.shape()[3] as f32).sqrt().recip());
+    let causal = if causal.unwrap_or(false) { 1.0 } else { 0.0 };
+    let args = [
+        &q.inner,
+        &k.inner,
+        &v.inner,
+        &tensor::Tensor::from_scalar(scale),
+        &tensor::Tensor::from_scalar(causal),
+    ];
+    let result = dispatcher::dispatch("flash_attention", dispatcher::DispatchKey::Cpu, &args);
+    PyTensor::from_tensor(result[0].clone())
 }
