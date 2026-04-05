@@ -1803,3 +1803,433 @@ pub fn gpu_min(a: &Tensor, dim: usize, keepdim: bool, device_id: usize) -> Vec<T
         "min",
     )]
 }
+
+// GPU training kernels
+const TRANSPOSE_SHADER: &str = r#"
+struct Params {
+    ndim: u32,
+    numel: u32,
+    pad0: u32,
+    pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<storage, read> strides: array<u32>;
+@group(0) @binding(3) var<storage, read> new_strides: array<u32>;
+@group(0) @binding(4) var<storage, read> dims: array<u32>;
+@group(0) @binding(5) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.numel) { return; }
+
+    var remaining = idx;
+    var out_idx: u32 = 0u;
+    for (var d = 0u; d < params.ndim; d = d + 1u) {
+        let dim_size = dims[d];
+        let coord = remaining % dim_size;
+        remaining = remaining / dim_size;
+        out_idx = out_idx + coord * new_strides[d];
+    }
+
+    output[idx] = input[out_idx];
+}
+"#;
+
+const GT_SCALAR_SHADER: &str = r#"
+struct Params {
+    numel: u32,
+    scalar: f32,
+    pad0: u32,
+    pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.numel) { return; }
+    output[idx] = select(0.0, 1.0, input[idx] > params.scalar);
+}
+"#;
+
+const LT_SCALAR_SHADER: &str = r#"
+struct Params {
+    numel: u32,
+    scalar: f32,
+    pad0: u32,
+    pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.numel) { return; }
+    output[idx] = select(0.0, 1.0, input[idx] < params.scalar);
+}
+"#;
+
+const LOGICAL_NOT_SHADER: &str = r#"
+struct Params {
+    numel: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.numel) { return; }
+    output[idx] = select(1.0, 0.0, input[idx] != 0.0);
+}
+"#;
+
+const MUL_SCALAR_SHADER: &str = r#"
+struct Params {
+    numel: u32,
+    scalar: f32,
+    pad0: u32,
+    pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.numel) { return; }
+    let vec_idx = idx * 4u;
+    if (vec_idx + 3u < params.numel) {
+        let s = vec4<f32>(params.scalar, params.scalar, params.scalar, params.scalar);
+        let v = vec4<f32>(input[vec_idx], input[vec_idx+1u], input[vec_idx+2u], input[vec_idx+3u]);
+        let out = v * s;
+        output[vec_idx] = out.x;
+        output[vec_idx+1u] = out.y;
+        output[vec_idx+2u] = out.z;
+        output[vec_idx+3u] = out.w;
+    } else if (idx < params.numel) {
+        output[idx] = input[idx] * params.scalar;
+    }
+}
+"#;
+
+const ADD_SCALAR_SHADER: &str = r#"
+struct Params {
+    numel: u32,
+    scalar: f32,
+    pad0: u32,
+    pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.numel) { return; }
+    let vec_idx = idx * 4u;
+    if (vec_idx + 3u < params.numel) {
+        let s = vec4<f32>(params.scalar, params.scalar, params.scalar, params.scalar);
+        let v = vec4<f32>(input[vec_idx], input[vec_idx+1u], input[vec_idx+2u], input[vec_idx+3u]);
+        let out = v + s;
+        output[vec_idx] = out.x;
+        output[vec_idx+1u] = out.y;
+        output[vec_idx+2u] = out.z;
+        output[vec_idx+3u] = out.w;
+    } else if (idx < params.numel) {
+        output[idx] = input[idx] + params.scalar;
+    }
+}
+"#;
+
+const SUB_SCALAR_SHADER: &str = r#"
+struct Params {
+    numel: u32,
+    scalar: f32,
+    pad0: u32,
+    pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.numel) { return; }
+    let vec_idx = idx * 4u;
+    if (vec_idx + 3u < params.numel) {
+        let s = vec4<f32>(params.scalar, params.scalar, params.scalar, params.scalar);
+        let v = vec4<f32>(input[vec_idx], input[vec_idx+1u], input[vec_idx+2u], input[vec_idx+3u]);
+        let out = v - s;
+        output[vec_idx] = out.x;
+        output[vec_idx+1u] = out.y;
+        output[vec_idx+2u] = out.z;
+        output[vec_idx+3u] = out.w;
+    } else if (idx < params.numel) {
+        output[idx] = input[idx] - params.scalar;
+    }
+}
+"#;
+
+const DIV_SCALAR_SHADER: &str = r#"
+struct Params {
+    numel: u32,
+    scalar: f32,
+    pad0: u32,
+    pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= params.numel) { return; }
+    let vec_idx = idx * 4u;
+    if (vec_idx + 3u < params.numel) {
+        let s = vec4<f32>(params.scalar, params.scalar, params.scalar, params.scalar);
+        let v = vec4<f32>(input[vec_idx], input[vec_idx+1u], input[vec_idx+2u], input[vec_idx+3u]);
+        let out = v / s;
+        output[vec_idx] = out.x;
+        output[vec_idx+1u] = out.y;
+        output[vec_idx+2u] = out.z;
+        output[vec_idx+3u] = out.w;
+    } else if (idx < params.numel) {
+        output[idx] = input[idx] / params.scalar;
+    }
+}
+"#;
+
+fn run_scalar_kernel(
+    input: &Tensor,
+    scalar: f32,
+    shader: &str,
+    name: &str,
+    device_id: usize,
+) -> Tensor {
+    let ctx = get_context(device_id);
+    let shape = input.shape().to_vec();
+    let numel = shape.iter().product::<i64>() as usize;
+
+    let input_buffer = if let Some(buffer) = input.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
+        let input_data = get_tensor_data(input);
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&input_data, "input");
+        input
+            .inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
+
+    let gpu_output = ctx.create_buffer(numel * 4, "output");
+
+    let params_data: Vec<u32> = vec![numel as u32, scalar.to_bits(), 0, 0];
+    let params_buffer = ctx.create_uniform_buffer_u32(&params_data, "params");
+
+    let pipeline = ctx.create_pipeline(name, shader, input.dtype());
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(name),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: gpu_output.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buffer.buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(name) });
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(name),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(&pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        let num_workgroups = (numel as u64).div_ceil(256) as u32;
+        let x_groups = num_workgroups.min(65535);
+        compute_pass.dispatch_workgroups(x_groups, 1, 1);
+    }
+    ctx.queue.submit([encoder.finish()]);
+    ctx.device.poll(wgpu::Maintain::Wait);
+
+    let storage = Arc::new(Storage::Wgpu(GpuStorage {
+        buffer: gpu_output.buffer,
+        nbytes: numel * 4,
+        device_id,
+        staging: RwLock::new(None),
+    }));
+    Tensor::new(crate::tensor::TensorImpl::new(
+        storage,
+        shape.iter().copied().collect(),
+        DType::F32,
+    ))
+}
+
+pub fn gpu_gt_scalar(input: &Tensor, scalar: f32, device_id: usize) -> Vec<Tensor> {
+    vec![run_scalar_kernel(
+        input,
+        scalar,
+        GT_SCALAR_SHADER,
+        "gt_scalar",
+        device_id,
+    )]
+}
+
+pub fn gpu_lt_scalar(input: &Tensor, scalar: f32, device_id: usize) -> Vec<Tensor> {
+    vec![run_scalar_kernel(
+        input,
+        scalar,
+        LT_SCALAR_SHADER,
+        "lt_scalar",
+        device_id,
+    )]
+}
+
+pub fn gpu_logical_not(input: &Tensor, device_id: usize) -> Vec<Tensor> {
+    let ctx = get_context(device_id);
+    let shape = input.shape().to_vec();
+    let numel = shape.iter().product::<i64>() as usize;
+
+    let input_buffer = if let Some(buffer) = input.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
+        let input_data = get_tensor_data(input);
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&input_data, "input");
+        input
+            .inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
+
+    let gpu_output = ctx.create_buffer(numel * 4, "output");
+
+    let params_data: Vec<u32> = vec![numel as u32, 0, 0, 0];
+    let params_buffer = ctx.create_uniform_buffer_u32(&params_data, "params");
+
+    let pipeline = ctx.create_pipeline("logical_not", LOGICAL_NOT_SHADER, input.dtype());
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("logical_not"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: gpu_output.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buffer.buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("logical_not"),
+        });
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("logical_not"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(&pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        let num_workgroups = (numel as u64).div_ceil(256) as u32;
+        let x_groups = num_workgroups.min(65535);
+        compute_pass.dispatch_workgroups(x_groups, 1, 1);
+    }
+    ctx.queue.submit([encoder.finish()]);
+    ctx.device.poll(wgpu::Maintain::Wait);
+
+    let storage = Arc::new(Storage::Wgpu(GpuStorage {
+        buffer: gpu_output.buffer,
+        nbytes: numel * 4,
+        device_id,
+        staging: RwLock::new(None),
+    }));
+    vec![Tensor::new(crate::tensor::TensorImpl::new(
+        storage,
+        shape.iter().copied().collect(),
+        DType::F32,
+    ))]
+}
+
+pub fn gpu_mul_scalar(input: &Tensor, scalar: f32, device_id: usize) -> Vec<Tensor> {
+    vec![run_scalar_kernel(
+        input,
+        scalar,
+        MUL_SCALAR_SHADER,
+        "mul_scalar",
+        device_id,
+    )]
+}
+
+pub fn gpu_add_scalar(input: &Tensor, scalar: f32, device_id: usize) -> Vec<Tensor> {
+    vec![run_scalar_kernel(
+        input,
+        scalar,
+        ADD_SCALAR_SHADER,
+        "add_scalar",
+        device_id,
+    )]
+}
+
+pub fn gpu_sub_scalar(input: &Tensor, scalar: f32, device_id: usize) -> Vec<Tensor> {
+    vec![run_scalar_kernel(
+        input,
+        scalar,
+        SUB_SCALAR_SHADER,
+        "sub_scalar",
+        device_id,
+    )]
+}
+
+pub fn gpu_div_scalar(input: &Tensor, scalar: f32, device_id: usize) -> Vec<Tensor> {
+    vec![run_scalar_kernel(
+        input,
+        scalar,
+        DIV_SCALAR_SHADER,
+        "div_scalar",
+        device_id,
+    )]
+}
