@@ -8,7 +8,7 @@ import onnx
 import numpy as np
 import struct
 import logging
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,6 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             output_to_node[output] = node
 
     # Track which tensors have been consumed (to avoid duplicate layer exports)
-    consumed_tensors = set()
 
     for node in model.graph.node:
         op_type = node.op_type
@@ -106,7 +105,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             )
 
             out_channels, in_channels = weight.shape[:2]
-            kernel_h, kernel_w = weight.shape[2], weight.shape[3]
+            kernel_h, _kernel_w = weight.shape[2], weight.shape[3]
             stride = _get_attr(node, "strides", [1, 1])
             padding = _get_attr(node, "pads", [0, 0, 0, 0])
             dilation = _get_attr(node, "dilations", [1, 1])
@@ -133,9 +132,9 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 _get_initializer(model, node.input[2]) if len(node.input) > 2 else None
             )
 
-            alpha = _get_attr(node, "alpha", 1.0)
-            beta = _get_attr(node, "beta", 1.0)
-            trans_a = _get_attr(node, "transA", 0)
+            _get_attr(node, "alpha", 1.0)
+            _get_attr(node, "beta", 1.0)
+            _get_attr(node, "transA", 0)
             trans_b = _get_attr(node, "transB", 1)
 
             if trans_b:

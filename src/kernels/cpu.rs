@@ -11679,7 +11679,7 @@ fn hardswish_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x_data = x.as_f32_slice();
     for i in 0..numel {
         let v = x_data[i];
-        let relu6 = (v + 3.0).max(0.0).min(6.0);
+        let relu6 = v.clamp(0.0, 6.0);
         output_data[i] = v * relu6 / 6.0;
     }
     vec![Tensor::from_vec(output_data, x.shape())]
@@ -11999,11 +11999,7 @@ fn flash_attention_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let q = args[0];
     let k = args[1];
     let v = args[2];
-    let scale = if args.len() > 3 {
-        args[3].item() as f32
-    } else {
-        1.0
-    };
+    let scale = if args.len() > 3 { args[3].item() } else { 1.0 };
     let causal = if args.len() > 4 {
         args[4].item() as i64 != 0
     } else {
@@ -12021,7 +12017,7 @@ fn flash_attention_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let v_data = v.as_f32_slice();
 
     let block_size = 64.min(seq_len);
-    let num_blocks = (seq_len + block_size - 1) / block_size;
+    let num_blocks = seq_len.div_ceil(block_size);
 
     let mut output = vec![0.0f32; batch * num_heads * seq_len * head_dim];
     let mut l = vec![0.0f32; batch * num_heads * seq_len];
