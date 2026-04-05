@@ -5,7 +5,14 @@ use crate::nn::linear::Linear;
 use crate::nn::norm::LayerNorm;
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+fn pos_encoding_cache() -> &'static Mutex<HashMap<(i64, i64, i64), Tensor>> {
+    static CACHE: OnceLock<Mutex<HashMap<(i64, i64, i64), Tensor>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 pub struct TransformerBlock {
     pub self_attn: MultiHeadAttention,
@@ -222,14 +229,24 @@ impl TransformerEncoder {
 
         let x = self.embedding.forward(token_ids);
 
-        // Optimized positional encoding - create once and reuse for same seq_len
-        let positions: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
-        let mut repeated_positions = Vec::with_capacity(batch as usize * seq_len as usize);
-        for _ in 0..batch {
-            repeated_positions.extend_from_slice(&positions);
-        }
-        let positions_expanded =
-            Tensor::from_vec(repeated_positions, vec![batch, seq_len]).requires_grad_(false);
+        // Cached positional encoding - reuse for same (batch, seq_len, d_model)
+        let cache_key = (batch, seq_len, self.pos_embedding.weight.shape()[1]);
+        let positions_expanded = {
+            let mut cache = pos_encoding_cache().lock().unwrap();
+            if let Some(cached) = cache.get(&cache_key) {
+                cached.clone()
+            } else {
+                let positions: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
+                let mut repeated_positions = Vec::with_capacity(batch as usize * seq_len as usize);
+                for _ in 0..batch {
+                    repeated_positions.extend_from_slice(&positions);
+                }
+                let t = Tensor::from_vec(repeated_positions, vec![batch, seq_len])
+                    .requires_grad_(false);
+                cache.insert(cache_key, t.clone());
+                t
+            }
+        };
 
         let pos_emb = self.pos_embedding.forward(&positions_expanded);
         let x = x.add(&pos_emb);
