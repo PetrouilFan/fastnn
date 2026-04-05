@@ -2284,3 +2284,140 @@ where
 
     outputs
 }
+
+pub struct LeakyReLUBackward {
+    pub input: Tensor,
+    pub negative_slope: f32,
+    pub edges: Vec<Edge>,
+}
+
+impl LeakyReLUBackward {
+    pub fn new(input: Tensor, negative_slope: f32, edges: Vec<Edge>) -> Self {
+        LeakyReLUBackward {
+            input,
+            negative_slope,
+            edges,
+        }
+    }
+}
+
+impl Node for LeakyReLUBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+        let mask = self.input.gt_scalar(0.0);
+        let neg_slope_t = Tensor::from_scalar(self.negative_slope);
+        let grad_input = mask.mul(&grad_output).add(
+            &mask
+                .logical_not()
+                .mul(&grad_output)
+                .mul_scalar(self.negative_slope),
+        );
+        vec![Some(grad_input)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "LeakyReLUBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
+}
+
+pub struct SoftplusBackward {
+    pub input: Tensor,
+    pub beta: f32,
+    pub threshold: f32,
+    pub edges: Vec<Edge>,
+}
+
+impl SoftplusBackward {
+    pub fn new(input: Tensor, beta: f32, threshold: f32, edges: Vec<Edge>) -> Self {
+        SoftplusBackward {
+            input,
+            beta,
+            threshold,
+            edges,
+        }
+    }
+}
+
+impl Node for SoftplusBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+        let bx = self.input.mul_scalar(self.beta);
+        let mask = bx.gt_scalar(self.threshold);
+        let exp_bx = bx.exp();
+        let sigmoid_bx = exp_bx.div(&exp_bx.add_scalar(1.0));
+        let grad_input = mask
+            .mul(&grad_output)
+            .add(&mask.logical_not().mul(&sigmoid_bx).mul(&grad_output));
+        vec![Some(grad_input)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "SoftplusBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
+}
+
+pub struct HardswishBackward {
+    pub input: Tensor,
+    pub edges: Vec<Edge>,
+}
+
+impl HardswishBackward {
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        HardswishBackward { input, edges }
+    }
+}
+
+impl Node for HardswishBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+        let x_plus_3 = self.input.add_scalar(3.0);
+        let relu6 = x_plus_3.clamp(0.0, 6.0);
+        let lt_minus3 = self.input.lt_scalar(-3.0);
+        let gt_3 = self.input.gt_scalar(3.0);
+        let between = lt_minus3.logical_not().mul(&gt_3.logical_not());
+        let grad = between
+            .mul(&relu6.div_scalar(6.0).add(&self.input.div_scalar(6.0)))
+            .add(&gt_3.mul_scalar(1.0));
+        vec![Some(grad.mul(&grad_output))]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "HardswishBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
+}
