@@ -356,7 +356,7 @@ impl TensorImpl {
                     dtype: self.dtype,
                     device: self.device,
                     version_counter: Arc::clone(&self.version_counter),
-                    autograd_meta: None,
+                    autograd_meta: self.autograd_meta.clone(),
                 }
                 .into()
             }
@@ -383,7 +383,7 @@ impl TensorImpl {
                     dtype: self.dtype,
                     device: self.device,
                     version_counter: Arc::clone(&self.version_counter),
-                    autograd_meta: None,
+                    autograd_meta: self.autograd_meta.clone(),
                 }
                 .into()
             }
@@ -1194,8 +1194,12 @@ impl Tensor {
         self.inner.grad()
     }
 
-    pub fn set_grad(&self, _grad: Option<Tensor>) {
-        // Need mutable access - clone and modify
+    pub fn set_grad(&self, grad: Option<Tensor>) {
+        if let Some(meta) = &self.inner.autograd_meta {
+            if let Ok(mut lock) = meta.lock() {
+                lock.grad = grad;
+            }
+        }
     }
 
     pub fn is_leaf(&self) -> bool {
