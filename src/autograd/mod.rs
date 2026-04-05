@@ -2377,3 +2377,123 @@ impl Node for HardswishBackward {
         std::slice::from_ref(&self.input)
     }
 }
+
+pub struct ConvTranspose2dBackward {
+    pub input: Tensor,
+    pub weight: Tensor,
+    pub bias: Option<Tensor>,
+    pub stride: i64,
+    pub padding: i64,
+    pub kernel_size: i64,
+    pub edges: Vec<Edge>,
+}
+
+impl ConvTranspose2dBackward {
+    pub fn new(
+        input: Tensor,
+        weight: Tensor,
+        bias: Option<Tensor>,
+        stride: i64,
+        padding: i64,
+        kernel_size: i64,
+        edges: Vec<Edge>,
+    ) -> Self {
+        ConvTranspose2dBackward {
+            input,
+            weight,
+            bias,
+            stride,
+            padding,
+            kernel_size,
+            edges,
+        }
+    }
+}
+
+impl Node for ConvTranspose2dBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+
+        // For ConvTranspose2d, the backward is equivalent to Conv2d with swapped roles
+        // grad_input = conv2d(grad_output, weight_rotated_180, stride=1, padding=...)
+        // grad_weight = conv2d(input, grad_output, ...)
+        // grad_bias = sum(grad_output, [0, 2, 3])
+
+        let in_shape = self.input.shape();
+        let out_shape = grad_output.shape();
+        let _batch = in_shape[0];
+        let _in_channels = in_shape[1];
+        let _h_in = in_shape[2];
+        let _w_in = in_shape[3];
+        let _out_channels = out_shape[1];
+        let _h_out = out_shape[2];
+        let _w_out = out_shape[3];
+        let _kernel_h = self.weight.shape()[2];
+        let _kernel_w = self.weight.shape()[3];
+
+        // grad_input: conv2d(grad_output, weight_transposed)
+        // weight shape for conv_transpose: [in_channels, out_channels, kH, kW]
+        // For backward, we need to do a regular conv2d with the weight
+        let grad_input = dispatch(
+            "conv2d",
+            crate::dispatcher::DispatchKey::Cpu,
+            &[
+                &grad_output,
+                &self.weight,
+                &Tensor::from_scalar(1.0),
+                &Tensor::from_scalar((self.kernel_size - 1) as f32),
+                &Tensor::from_scalar(0.0),
+                &Tensor::from_scalar(1.0),
+            ],
+        )[0]
+        .clone();
+
+        // grad_weight: conv2d(input, grad_output)
+        let grad_weight = dispatch(
+            "conv2d",
+            crate::dispatcher::DispatchKey::Cpu,
+            &[
+                &self.input,
+                &grad_output,
+                &Tensor::from_scalar(1.0),
+                &Tensor::from_scalar(self.padding as f32),
+                &Tensor::from_scalar(0.0),
+                &Tensor::from_scalar(1.0),
+            ],
+        )[0]
+        .clone();
+
+        // grad_bias
+        let grad_bias = if self.bias.is_some() {
+            Some(grad_output.sum(0, false).sum(1, false).sum(1, false))
+        } else {
+            None
+        };
+
+        let mut grads = vec![Some(grad_input), Some(grad_weight)];
+        if grad_bias.is_some() {
+            grads.push(grad_bias);
+        }
+        grads
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        if self.bias.is_some() {
+            3
+        } else {
+            2
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ConvTranspose2dBackward"
+    }
+
+    fn inputs(&self) -> &[Tensor] {
+        std::slice::from_ref(&self.input)
+    }
+}
