@@ -1575,6 +1575,50 @@ impl GroupNorm {
 }
 
 #[pyclass]
+struct BatchNorm2d {
+    inner: nn::norm::BatchNorm2d,
+}
+
+#[pymethods]
+impl BatchNorm2d {
+    #[new]
+    #[pyo3(signature = (num_features, eps = 1e-5, momentum = 0.1))]
+    fn new(num_features: i64, eps: f32, momentum: f32) -> Self {
+        BatchNorm2d {
+            inner: nn::norm::BatchNorm2d::new(num_features, eps, momentum),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn forward(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&mut self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&mut self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
 struct ReLU;
 
 #[pymethods]
@@ -2161,6 +2205,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BatchNorm1d>()?;
     m.add_class::<RMSNorm>()?;
     m.add_class::<GroupNorm>()?;
+    m.add_class::<BatchNorm2d>()?;
     m.add_class::<Dropout>()?;
     m.add_class::<Embedding>()?;
     m.add_class::<ReLU>()?;
