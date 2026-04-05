@@ -400,3 +400,96 @@ impl Module for RMSNorm {
         false
     }
 }
+
+pub struct GroupNorm {
+    pub weight: Tensor,
+    pub bias: Tensor,
+    pub eps: f32,
+    pub num_groups: i64,
+    pub num_channels: i64,
+}
+
+impl GroupNorm {
+    pub fn new(num_groups: i64, num_channels: i64, eps: f32) -> Self {
+        assert!(
+            num_channels % num_groups == 0,
+            "num_channels must be divisible by num_groups"
+        );
+        let weight = Tensor::ones(
+            vec![num_channels],
+            crate::storage::DType::F32,
+            crate::storage::Device::Cpu,
+        );
+        let bias = Tensor::zeros(
+            vec![num_channels],
+            crate::storage::DType::F32,
+            crate::storage::Device::Cpu,
+        );
+        let mut w = weight.clone();
+        let mut b = bias.clone();
+        w.requires_grad_(true);
+        b.requires_grad_(true);
+        GroupNorm {
+            weight: w,
+            bias: b,
+            eps,
+            num_groups,
+            num_channels,
+        }
+    }
+}
+
+impl Module for GroupNorm {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        let x_shape = x.shape();
+        let batch = x_shape[0];
+        let channels = x_shape[1];
+        let spatial: i64 = x_shape[2..].iter().product();
+        let group_size = channels / self.num_groups;
+
+        let x_reshaped = x.reshape(vec![batch, self.num_groups, group_size, spatial]);
+        let mean = x_reshaped.mean(2, true).mean(3, true);
+        let var = x_reshaped.sub(&mean).pow(2.0).mean(2, true).mean(3, true);
+        let x_norm = x_reshaped.sub(&mean).div(&var.add_scalar(self.eps).sqrt());
+        let x_norm = x_norm.reshape(x_shape.clone());
+
+        let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
+        weight_shape.push(1);
+        weight_shape.push(self.num_channels);
+        for _ in 2..x_shape.len() {
+            weight_shape.push(1);
+        }
+        let w = self.weight.reshape(weight_shape.clone().into_vec());
+        let b = self.bias.reshape(weight_shape.into_vec());
+        x_norm.mul(&w).add(&b)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        vec![self.weight.clone(), self.bias.clone()]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![
+            ("weight".to_string(), self.weight.clone()),
+            ("bias".to_string(), self.bias.clone()),
+        ]
+    }
+
+    fn zero_grad(&self) {
+        for t in [&self.weight, &self.bias] {
+            if let Some(meta) = &t.inner.autograd_meta {
+                if let Ok(mut lock) = meta.lock() {
+                    lock.grad = None;
+                }
+            }
+        }
+    }
+
+    fn train_mode(&self) {}
+
+    fn eval_mode(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
+    }
+}
