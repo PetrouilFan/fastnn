@@ -15,10 +15,11 @@ impl Linear {
     pub fn new(in_features: i64, out_features: i64, bias: bool) -> Self {
         let scale = (2.0 / in_features as f32).sqrt();
 
+        // Store weight as [in_features, out_features] for direct matmul
         let weight_data: Vec<f32> = (0..in_features * out_features)
             .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
             .collect();
-        let weight = Tensor::from_vec(weight_data, vec![out_features, in_features]);
+        let weight = Tensor::from_vec(weight_data, vec![in_features, out_features]);
         let weight = weight.requires_grad_(true);
 
         let bias = if bias {
@@ -42,12 +43,11 @@ impl Linear {
 
 impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let output = x.matmul(&self.weight.transpose(0, 1));
+        // x: [batch, in_features], weight: [in_features, out_features]
+        // x @ weight = [batch, out_features]
+        let output = x.matmul(&self.weight);
 
         if let Some(b) = &self.bias {
-            // Use unsqueeze to add bias with broadcasting
-            // The unsqueeze creates a view with shape [1, out_features]
-            // which broadcasts over the batch dimension
             let bias_broadcast = b.unsqueeze(0);
             output.add(&bias_broadcast)
         } else {

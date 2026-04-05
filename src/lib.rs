@@ -1648,6 +1648,52 @@ impl Dropout {
 }
 
 #[pyclass]
+struct Dropout2d {
+    inner: nn::dropout::Dropout2d,
+}
+
+#[pymethods]
+impl Dropout2d {
+    #[new]
+    fn new(p: f64) -> Self {
+        Dropout2d {
+            inner: nn::dropout::Dropout2d::new(p),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn train(&self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
+struct Upsample {
+    inner: nn::upsample::Upsample,
+}
+
+#[pymethods]
+impl Upsample {
+    #[new]
+    fn new(scale_factor: f64, mode: String) -> Self {
+        Upsample {
+            inner: nn::upsample::Upsample::new(scale_factor, mode),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+}
+
+#[pyclass]
 struct Embedding {
     inner: nn::embedding::Embedding,
 }
@@ -2304,6 +2350,84 @@ impl PyLion {
 }
 
 #[pyclass]
+struct PyRMSprop {
+    inner: optim::rmsprop::RMSprop,
+}
+
+#[pymethods]
+impl PyRMSprop {
+    #[new]
+    #[pyo3(signature = (params, lr = 0.01, alpha = 0.99, eps = 1e-8, weight_decay = 0.0, momentum = 0.0, centered = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        params: Vec<PyTensor>,
+        lr: f64,
+        alpha: f64,
+        eps: f64,
+        weight_decay: f64,
+        momentum: f64,
+        centered: bool,
+    ) -> Self {
+        let tensors: Vec<tensor::Tensor> = params.into_iter().map(|p| p.inner).collect();
+        PyRMSprop {
+            inner: optim::rmsprop::RMSprop::new(tensors, lr, alpha, eps, weight_decay, momentum, centered),
+        }
+    }
+
+    fn step(&mut self) {
+        self.inner.step();
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad();
+    }
+
+    fn state_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use pyo3::types::{PyDict, PyList};
+        let dict = PyDict::new(py);
+        dict.set_item("lr", self.inner.lr)?;
+        dict.set_item("alpha", self.inner.alpha)?;
+        dict.set_item("eps", self.inner.eps)?;
+        dict.set_item("weight_decay", self.inner.weight_decay)?;
+        dict.set_item("momentum", self.inner.momentum)?;
+        dict.set_item("centered", self.inner.centered)?;
+        let sq_list = PyList::new(py, self.inner.square_avg.iter().map(|t| PyTensor::from_tensor(t.clone())))?;
+        dict.set_item("square_avg", sq_list)?;
+        if self.inner.centered {
+            let ga_list = PyList::new(py, self.inner.grad_avg.iter().map(|t| PyTensor::from_tensor(t.clone())))?;
+            dict.set_item("grad_avg", ga_list)?;
+        }
+        if self.inner.momentum != 0.0 {
+            let mb_list = PyList::new(py, self.inner.momentum_buf.iter().map(|t| PyTensor::from_tensor(t.clone())))?;
+            dict.set_item("momentum_buf", mb_list)?;
+        }
+        Ok(dict.into())
+    }
+
+    fn load_state_dict(&mut self, state: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner.lr = state.get_item("lr")?.extract()?;
+        self.inner.alpha = state.get_item("alpha")?.extract()?;
+        self.inner.eps = state.get_item("eps")?.extract()?;
+        if let Ok(wd) = state.get_item("weight_decay")?.extract::<f64>() {
+            self.inner.weight_decay = wd;
+        }
+        if let Ok(m) = state.get_item("momentum")?.extract::<f64>() {
+            self.inner.momentum = m;
+        }
+        if let Ok(sq_list) = state.get_item("square_avg")?.extract::<Vec<PyTensor>>() {
+            self.inner.square_avg = sq_list.into_iter().map(|p| p.inner).collect();
+        }
+        if let Ok(ga_list) = state.get_item("grad_avg")?.extract::<Vec<PyTensor>>() {
+            self.inner.grad_avg = ga_list.into_iter().map(|p| p.inner).collect();
+        }
+        if let Ok(mb_list) = state.get_item("momentum_buf")?.extract::<Vec<PyTensor>>() {
+            self.inner.momentum_buf = mb_list.into_iter().map(|p| p.inner).collect();
+        }
+        Ok(())
+    }
+}
+
+#[pyclass]
 struct PyTransformerEncoder {
     inner: nn::transformer::TransformerEncoder,
 }
@@ -2469,6 +2593,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GroupNorm>()?;
     m.add_class::<BatchNorm2d>()?;
     m.add_class::<Dropout>()?;
+    m.add_class::<Dropout2d>()?;
+    m.add_class::<Upsample>()?;
     m.add_class::<Embedding>()?;
     m.add_class::<ReLU>()?;
     m.add_class::<Gelu>()?;
@@ -2485,6 +2611,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAdamW>()?;
     m.add_class::<PyMuon>()?;
     m.add_class::<PyLion>()?;
+    m.add_class::<PyRMSprop>()?;
     m.add_class::<PyTransformerEncoder>()?;
 
     m.add_class::<PyTensor>()?;

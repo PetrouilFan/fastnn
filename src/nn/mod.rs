@@ -8,6 +8,7 @@ pub mod norm;
 pub mod pooling;
 pub mod sequential;
 pub mod transformer;
+pub mod upsample;
 
 use crate::tensor::Tensor;
 
