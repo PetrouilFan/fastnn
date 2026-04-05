@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.0 — GPU Training & Production-Ready
+## v1.0.0 — Production Release
 
 ### GPU Training
 
