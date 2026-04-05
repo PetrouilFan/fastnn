@@ -453,6 +453,8 @@ Conv3d = _core.Conv3d
 einsum = _core.einsum
 flash_attention = _core.flash_attention
 ResidualBlock = _core.ResidualBlock
+clip_grad_norm_ = _core.clip_grad_norm_
+clip_grad_value_ = _core.clip_grad_value_
 
 
 def import_onnx(onnx_path: str, fnn_path: str):

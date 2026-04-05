@@ -2495,6 +2495,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
     m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
     m.add_function(wrap_pyfunction!(flash_attention, py)?)?;
+    m.add_function(wrap_pyfunction!(clip_grad_norm_, py)?)?;
+    m.add_function(wrap_pyfunction!(clip_grad_value_, py)?)?;
 
     Ok(())
 }
@@ -2612,4 +2614,16 @@ fn flash_attention(q: &PyTensor, k: &PyTensor, v: &PyTensor, scale: Option<f32>,
     ];
     let result = dispatcher::dispatch("flash_attention", dispatcher::DispatchKey::Cpu, &args);
     PyTensor::from_tensor(result[0].clone())
+}
+
+#[pyfunction]
+fn clip_grad_norm_(tensors: Vec<PyTensor>, max_norm: f32, norm_type: f32) -> f32 {
+    let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
+    tensor::clip_grad_norm_(&tensors, max_norm, norm_type)
+}
+
+#[pyfunction]
+fn clip_grad_value_(tensors: Vec<PyTensor>, clip_value: f32) {
+    let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
+    tensor::clip_grad_value_(&tensors, clip_value);
 }
