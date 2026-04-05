@@ -10447,6 +10447,11 @@ fn register_kernels() {
         DispatchKey::Cpu,
         logical_not_kernel as KernelFn,
     );
+    register(
+        "flash_attention",
+        DispatchKey::Cpu,
+        flash_attention_kernel as KernelFn,
+    );
 }
 
 #[cfg(test)]
@@ -11983,4 +11988,171 @@ fn conv3d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
     vec![output]
+}
+
+/// FlashAttention-inspired kernel for memory-efficient attention.
+/// Computes softmax(Q @ K^T) @ V using block-wise tiling to avoid
+/// materializing the full N×N attention scores matrix.
+/// This is mathematically equivalent to standard attention but uses O(N) memory
+/// for the attention scores instead of O(N²).
+fn flash_attention_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let q = args[0];
+    let k = args[1];
+    let v = args[2];
+    let scale = if args.len() > 3 {
+        args[3].item() as f32
+    } else {
+        1.0
+    };
+    let causal = if args.len() > 4 {
+        args[4].item() as i64 != 0
+    } else {
+        false
+    };
+
+    let q_shape = q.shape();
+    let batch = q_shape[0] as usize;
+    let num_heads = q_shape[1] as usize;
+    let seq_len = q_shape[2] as usize;
+    let head_dim = q_shape[3] as usize;
+
+    let q_data = q.as_f32_slice();
+    let k_data = k.as_f32_slice();
+    let v_data = v.as_f32_slice();
+
+    let block_size = 64.min(seq_len);
+    let num_blocks = (seq_len + block_size - 1) / block_size;
+
+    let mut output = vec![0.0f32; batch * num_heads * seq_len * head_dim];
+    let mut l = vec![0.0f32; batch * num_heads * seq_len];
+    let mut m = vec![f32::NEG_INFINITY; batch * num_heads * seq_len];
+
+    for b in 0..batch {
+        for h in 0..num_heads {
+            for j in 0..num_blocks {
+                let j_start = j * block_size;
+                let j_end = (j * block_size + block_size).min(seq_len);
+                let block_j_len = j_end - j_start;
+
+                // Load K_j and V_j blocks into local buffers
+                let mut k_block = vec![0.0f32; block_j_len * head_dim];
+                let mut v_block = vec![0.0f32; block_j_len * head_dim];
+                for jj in 0..block_j_len {
+                    for d in 0..head_dim {
+                        let src = b * num_heads * seq_len * head_dim
+                            + h * seq_len * head_dim
+                            + (j_start + jj) * head_dim
+                            + d;
+                        k_block[jj * head_dim + d] = k_data[src];
+                        v_block[jj * head_dim + d] = v_data[src];
+                    }
+                }
+
+                for i in 0..num_blocks {
+                    let i_start = i * block_size;
+                    let i_end = (i * block_size + block_size).min(seq_len);
+                    let block_i_len = i_end - i_start;
+
+                    // Skip blocks above the diagonal for causal attention
+                    if causal && i_start > j_start {
+                        continue;
+                    }
+
+                    // Load Q_i block
+                    let mut q_block = vec![0.0f32; block_i_len * head_dim];
+                    for ii in 0..block_i_len {
+                        for d in 0..head_dim {
+                            let src = b * num_heads * seq_len * head_dim
+                                + h * seq_len * head_dim
+                                + (i_start + ii) * head_dim
+                                + d;
+                            q_block[ii * head_dim + d] = q_data[src];
+                        }
+                    }
+
+                    // Compute S_ij = Q_i @ K_j^T * scale
+                    let mut s_block = vec![0.0f32; block_i_len * block_j_len];
+                    for ii in 0..block_i_len {
+                        for jj in 0..block_j_len {
+                            // Apply causal mask within the block
+                            if causal && (i_start + ii) < (j_start + jj) {
+                                s_block[ii * block_j_len + jj] = f32::NEG_INFINITY;
+                                continue;
+                            }
+                            let mut sum = 0.0f32;
+                            for d in 0..head_dim {
+                                sum += q_block[ii * head_dim + d] * k_block[jj * head_dim + d];
+                            }
+                            s_block[ii * block_j_len + jj] = sum * scale;
+                        }
+                    }
+
+                    // Compute row-wise max of S_ij
+                    let mut m_block = vec![f32::NEG_INFINITY; block_i_len];
+                    for ii in 0..block_i_len {
+                        for jj in 0..block_j_len {
+                            let s = s_block[ii * block_j_len + jj];
+                            if s > m_block[ii] {
+                                m_block[ii] = s;
+                            }
+                        }
+                    }
+
+                    // Compute row-wise exp-sum of S_ij
+                    let mut l_block = vec![0.0f32; block_i_len];
+                    for ii in 0..block_i_len {
+                        let mut sum = 0.0f32;
+                        for jj in 0..block_j_len {
+                            let s = s_block[ii * block_j_len + jj];
+                            if s != f32::NEG_INFINITY {
+                                sum += (s - m_block[ii]).exp();
+                            }
+                        }
+                        l_block[ii] = sum;
+                    }
+
+                    // Update global max and exp-sum, then update output
+                    for ii in 0..block_i_len {
+                        let global_idx = b * num_heads * seq_len + h * seq_len + i_start + ii;
+                        let m_old = m[global_idx];
+                        let m_new = m_old.max(m_block[ii]);
+
+                        // Compute new exp-sum
+                        let l_new = (m_old - m_new).exp() * l[global_idx]
+                            + (m_block[ii] - m_new).exp() * l_block[ii];
+
+                        // Update output: O_new = (exp(m_old - m_new) * O_old + exp(m_block - m_new) * S_ij @ V_j) / l_new
+                        for d in 0..head_dim {
+                            let out_idx = b * num_heads * seq_len * head_dim
+                                + h * seq_len * head_dim
+                                + (i_start + ii) * head_dim
+                                + d;
+
+                            let old_val = output[out_idx] * (m_old - m_new).exp();
+                            let mut new_val = 0.0f32;
+                            for jj in 0..block_j_len {
+                                let s = s_block[ii * block_j_len + jj];
+                                if s != f32::NEG_INFINITY {
+                                    new_val += (s - m_block[ii]).exp() * v_block[jj * head_dim + d];
+                                }
+                            }
+                            output[out_idx] =
+                                (old_val + new_val * (m_block[ii] - m_new).exp()) / l_new;
+                        }
+
+                        m[global_idx] = m_new;
+                        l[global_idx] = l_new;
+                    }
+                }
+            }
+        }
+    }
+
+    let output_shape = vec![
+        batch as i64,
+        num_heads as i64,
+        seq_len as i64,
+        head_dim as i64,
+    ];
+    vec![Tensor::from_vec(output, output_shape)]
 }

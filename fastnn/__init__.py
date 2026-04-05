@@ -451,6 +451,7 @@ ConvTranspose2d = _core.ConvTranspose2d
 Conv1d = _core.Conv1d
 Conv3d = _core.Conv3d
 einsum = _core.einsum
+flash_attention = _core.flash_attention
 
 
 def save_model(model, path):
