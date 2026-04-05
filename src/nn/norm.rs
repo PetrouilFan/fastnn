@@ -349,7 +349,7 @@ impl RMSNorm {
             crate::storage::DType::F32,
             crate::storage::Device::Cpu,
         );
-        let mut w = weight.clone();
+        let w = weight.clone();
         w.requires_grad_(true);
         RMSNorm {
             weight: w,
@@ -425,8 +425,8 @@ impl GroupNorm {
             crate::storage::DType::F32,
             crate::storage::Device::Cpu,
         );
-        let mut w = weight.clone();
-        let mut b = bias.clone();
+        let w = weight.clone();
+        let b = bias.clone();
         w.requires_grad_(true);
         b.requires_grad_(true);
         GroupNorm {
@@ -511,8 +511,8 @@ impl BatchNorm2d {
         let bias = Tensor::zeros(vec![num_features], crate::storage::DType::F32, crate::storage::Device::Cpu);
         let running_mean = Tensor::zeros(vec![num_features], crate::storage::DType::F32, crate::storage::Device::Cpu);
         let running_var = Tensor::ones(vec![num_features], crate::storage::DType::F32, crate::storage::Device::Cpu);
-        let mut w = weight.clone();
-        let mut b = bias.clone();
+        let w = weight.clone();
+        let b = bias.clone();
         w.requires_grad_(true);
         b.requires_grad_(true);
         BatchNorm2d {

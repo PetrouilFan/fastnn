@@ -2258,7 +2258,7 @@ impl Node for LeakyReLUBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
         let mask = self.input.gt_scalar(0.0);
-        let neg_slope_t = Tensor::from_scalar(self.negative_slope);
+        let _neg_slope_t = Tensor::from_scalar(self.negative_slope);
         let grad_input = mask.mul(&grad_output).add(
             &mask
                 .logical_not()
