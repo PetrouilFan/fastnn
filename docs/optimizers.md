@@ -11,7 +11,8 @@ optimizer = fnn.SGD(
     parameters=model.parameters(),
     lr=0.01,              # Learning rate (required)
     momentum=0.0,         # Momentum factor
-    weight_decay=0.0     # L2 regularization
+    weight_decay=0.0,     # L2 regularization
+    nesterov=False        # Use Nesterov momentum
 )
 
 # Training loop
@@ -27,6 +28,7 @@ for batch in loader:
 - `lr`: Learning rate
 - `momentum`: Momentum factor (default: 0)
 - `weight_decay`: Weight decay/L2 regularization (default: 0)
+- `nesterov`: Use Nesterov momentum (default: False)
 
 ## Adam
 
@@ -38,7 +40,7 @@ optimizer = fnn.Adam(
     lr=0.001,             # Learning rate
     betas=(0.9, 0.999),   # Beta1, Beta2 for momentum
     eps=1e-8,             # Small constant for numerical stability
-    weight_decay=0.0     # L2 regularization
+    weight_decay=0.0      # L2 regularization
 )
 ```
 
@@ -51,7 +53,7 @@ optimizer = fnn.Adam(
 
 ## AdamW
 
-Adam optimizer with weight decay correction.
+Adam optimizer with decoupled weight decay.
 
 ```python
 optimizer = fnn.AdamW(
@@ -63,7 +65,72 @@ optimizer = fnn.AdamW(
 )
 ```
 
-**Note:** AdamW applies weight decay differently than Adam with `weight_decay`. It decouples weight decay from the gradient update, leading to better generalization.
+**Note:** AdamW applies weight decay differently than Adam. It decouples weight decay from the gradient update, leading to better generalization.
+
+## RMSprop
+
+Root Mean Square Propagation optimizer.
+
+```python
+optimizer = fnn.RMSprop(
+    parameters=model.parameters(),
+    lr=0.01,
+    alpha=0.99,           # Smoothing constant for squared gradient
+    eps=1e-8,
+    weight_decay=0.0,
+    momentum=0.0,         # Momentum factor
+    centered=False        # If True, use centered RMSprop
+)
+```
+
+**Parameters:**
+- `parameters`: Iterable of parameters to optimize
+- `lr`: Learning rate (default: 0.01)
+- `alpha`: Smoothing constant (default: 0.99)
+- `eps`: Term for numerical stability (default: 1e-8)
+- `weight_decay`: Weight decay (default: 0)
+- `momentum`: Momentum factor (default: 0)
+- `centered`: If True, compute centered RMSprop (default: False)
+
+## Muon
+
+Muon optimizer with orthogonalized momentum.
+
+```python
+optimizer = fnn.Muon(
+    parameters=model.parameters(),
+    lr=0.025,
+    momentum=0.95,
+    weight_decay=0.0,
+    nesterov=True
+)
+```
+
+**Parameters:**
+- `parameters`: Iterable of parameters to optimize
+- `lr`: Learning rate (default: 0.025)
+- `momentum`: Momentum factor (default: 0.95)
+- `weight_decay`: Weight decay (default: 0)
+- `nesterov`: Use Nesterov momentum (default: True)
+
+## Lion
+
+Sign-based momentum optimizer (efficient and memory-light).
+
+```python
+optimizer = fnn.Lion(
+    parameters=model.parameters(),
+    lr=0.0001,
+    betas=(0.95, 0.98),
+    weight_decay=0.0
+)
+```
+
+**Parameters:**
+- `parameters`: Iterable of parameters to optimize
+- `lr`: Learning rate (default: 0.0001)
+- `betas`: Coefficients for computing running averages (default: (0.95, 0.98))
+- `weight_decay`: Weight decay (default: 0)
 
 ## Training Loop Pattern
 
@@ -80,18 +147,21 @@ model.train()
 for epoch in range(num_epochs):
     for batch in dataloader:
         x, y = batch
-        
+
         # Forward pass
         pred = model(x)
         loss = loss_fn(pred, y)
-        
+
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
-        
+
+        # Gradient clipping
+        fnn.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         # Update
         optimizer.step()
-    
+
     # Print progress
     print(f"Epoch {epoch}: loss = {loss.item():.4}")
 ```
@@ -102,49 +172,51 @@ To prevent exploding gradients:
 
 ```python
 # Clip gradients by global norm
-max_norm = 1.0
-total_norm = 0.0
-for p in model.parameters():
-    if p.grad is not None:
-        param_norm = (p.grad ** 2).sum()
-        total_norm += param_norm.item()
-total_norm = total_norm ** 0.5
+fnn.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2.0)
 
-if total_norm > max_norm:
-    clip_factor = max_norm / total_norm
-    for p in model.parameters():
-        if p.grad is not None:
-            p.grad *= clip_factor
+# Clip gradients by value
+fnn.clip_grad_value_(model.parameters(), clip_value=0.1)
 ```
 
 ## Learning Rate Scheduling
 
-Adjust learning rate during training using callbacks:
+Adjust learning rate during training:
 
 ```python
-from fastnn.callbacks import LearningRateScheduler
-
 # Step decay
-lr_scheduler = LearningRateScheduler(
-    schedule="step",
-    lr=0.01,
-    step_size=10,
-    gamma=0.1  # Multiply lr by 0.1 every step_size epochs
-)
+scheduler = fnn.StepLR(optimizer, step_size=30, gamma=0.1)
 
-# Or cosine annealing
-lr_scheduler = LearningRateScheduler(
-    schedule="cosine",
-    lr=0.01,
-    T_max=100,
-    eta_min=0.0001
+# Cosine annealing
+scheduler = fnn.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+
+# Exponential decay
+scheduler = fnn.ExponentialLR(optimizer, gamma=0.95)
+
+# Reduce on plateau
+scheduler = fnn.ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.1,
+    patience=10,
+    min_lr=1e-6,
 )
 
 # In training loop
 for epoch in range(100):
     # ... training code ...
-    lr_scheduler.on_epoch_end(epoch, logs)
-    current_lr = logs.get("lr", optimizer.lr)
+    scheduler.step()  # or scheduler.step(val_loss) for ReduceLROnPlateau
+```
+
+## Optimizer State Dict
+
+Save and load optimizer state:
+
+```python
+# Save
+fnn.save_optimizer(optimizer, 'optimizer.fno')
+
+# Load
+fnn.load_optimizer(optimizer, 'optimizer.fno')
 ```
 
 ## Choosing an Optimizer
@@ -154,3 +226,6 @@ for epoch in range(100):
 | SGD | Simple baseline, often with momentum |
 | Adam | Default choice for most tasks |
 | AdamW | When weight decay is important (recommended for transformers) |
+| RMSprop | Good for RNNs and non-stationary objectives |
+| Muon | Orthogonalized momentum, good for large models |
+| Lion | Memory-efficient, sign-based updates |
