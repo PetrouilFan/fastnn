@@ -62,6 +62,10 @@ impl StoragePool {
             Device::Wgpu(_) => {}
         }
     }
+
+    pub fn clear(&self) {
+        self.buffers.clear();
+    }
 }
 
 // Use OnceLock to initialize the static pool

@@ -1027,6 +1027,13 @@ fn allocator_stats() -> String {
 }
 
 #[pyfunction]
+fn clear_storage_pool() -> String {
+    use crate::storage_pool::get_storage_pool;
+    get_storage_pool().clear();
+    "pool_cleared".to_string()
+}
+
+#[pyfunction]
 fn list_registered_ops() -> Vec<String> {
     dispatcher_list_ops()
 }
@@ -2632,6 +2639,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_get_num_threads, py)?)?;
     m.add_function(wrap_pyfunction!(_set_default_device, py)?)?;
     m.add_function(wrap_pyfunction!(allocator_stats, py)?)?;
+    m.add_function(wrap_pyfunction!(clear_storage_pool, py)?)?;
     m.add_function(wrap_pyfunction!(list_registered_ops, py)?)?;
     m.add_function(wrap_pyfunction!(save_model, py)?)?;
     m.add_function(wrap_pyfunction!(load_model, py)?)?;
