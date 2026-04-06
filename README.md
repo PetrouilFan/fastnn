@@ -32,7 +32,7 @@ fastnn is built for researchers and engineers who need efficient neural network 
 - **Native Autograd** — Built-in automatic differentiation engine with operation tracking, backward passes, and `no_grad` context support.
 - **Optimized Convolutions** — im2col-based Conv2d with specialized kernels for 1×1, depthwise, and 3×3 convolutions. Also Conv1d, Conv3d, and ConvTranspose2d.
 - **PyO3 Python Bindings** — Train and evaluate models from Python with a PyTorch-like API.
-- **Training Utilities** — Datasets, DataLoaders, and Keras-style Callbacks (EarlyStopping, ModelCheckpoint, LearningRateScheduler, CSVLogger).
+- **Smart Data Loading** — Multi-threaded parallel DataLoader with automatic resource tuning. Asymmetric scaling: fast scale-up when data-bound, conservative scale-down to avoid GPU starvation.
 - **GPU Acceleration** *(experimental)* — Cross-platform GPU compute via [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12). Basic elementwise ops and tiled matrix multiplication.
 
 ---
@@ -143,11 +143,10 @@ fastnn/
 │   ├── __init__.py             # Public API surface
 │   ├── parallel.py             # DataParallel / DDP (experimental)
 │   ├── models/                 # Pre-built models: MLP, Transformer
-│   ├── data.py                 # Dataset, TensorDataset, DataLoader
+│   ├── data.py                 # Dataset, TensorDataset, DataLoader, auto-tuning
 │   └── callbacks.py            # Training callbacks
-├── benches/
-│   └── packed_bench.rs         # Packed precision GEMV/ReLU benchmarks
-└── tests/                      # Python test suite
+├── tests/                      # Python test suite
+│   └── conftest.py             # Memory pool isolation fixture
 ```
 
 ---
@@ -230,7 +229,37 @@ for epoch in range(100):
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
+    loader.reset_sampler()  # Re-shuffle for next epoch
 ```
+
+### Parallel Data Loading
+
+The DataLoader supports multi-threaded parallel loading to overlap I/O with compute:
+
+```python
+# Explicit worker count (2 threads)
+loader = fnn.DataLoader(ds, batch_size=32, num_workers=2)
+
+# Auto-tuning: dynamically adjusts workers based on data loading speed
+loader = fnn.DataLoader(ds, batch_size=32, num_workers="auto")
+
+for epoch in range(100):
+    for batch_x, batch_y in loader:
+        # training logic
+        pass
+    loader.reset_sampler()  # Re-shuffle + auto-tune adjustment
+```
+
+| Mode | `num_workers` | Behavior |
+|------|---------------|----------|
+| Default | `0` | Single-threaded with prefetch |
+| Parallel | `> 0` | Thread pool with N workers |
+| Auto | `"auto"` | Asymmetric auto-tuning: fast scale-up, conservative scale-down |
+
+The auto-tuner starts at 1 worker and adjusts based on mean wait time:
+- **Scale up** immediately when mean wait > 30ms (prefetch first, then workers)
+- **Scale down** only after 2 consecutive epochs below 5ms (avoids GPU starvation)
+- Tunable via `up_threshold_ms`, `down_threshold_ms`, `scale_down_patience`
 
 ### Controlling Parallelism
 
@@ -445,6 +474,7 @@ cargo bench --bench packed_bench
 - [ ] Multi-GPU training
 - [ ] ONNX model import
 - [ ] FlashAttention SIMD optimization (AVX2/AVX512 block kernels)
+- [ ] True process-based multiprocessing for DataLoader (requires PyTensor pickle support or shared memory)
 
 ---
 
