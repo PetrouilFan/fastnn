@@ -10,10 +10,7 @@ import threading
 import time
 import queue
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Callable, Iterator, List, Optional, Sequence
-
-import numpy as np
 
 
 class Dataset:
@@ -88,30 +85,12 @@ def _worker_fetch_batch(
 
     This is a module-level function to ensure it can be pickled
     when using multiprocessing with ProcessPoolExecutor.
-
-    Converts fastnn tensors to numpy arrays to ensure pickling works
-    across process boundaries.
     """
-    import numpy as np
-
-    samples = []
-    for i in batch_indices:
-        sample = dataset[i]
-        # Convert any fastnn tensors to numpy for pickling
-        if isinstance(sample, tuple):
-            converted = tuple(
-                _convert_to_numpy(s) if hasattr(s, "numpy") else s for s in sample
-            )
-            samples.append(converted)
-        elif hasattr(sample, "numpy"):
-            samples.append(_convert_to_numpy(sample))
-        else:
-            samples.append(sample)
-
+    samples = [dataset[i] for i in batch_indices]
     return collate_fn(samples)
 
 
-def _convert_to_numpy(tensor) -> np.ndarray:
+def _convert_to_numpy(tensor):
     """Convert fastnn tensor to numpy array for pickling."""
     if hasattr(tensor, "numpy"):
         return tensor.numpy()
@@ -396,10 +375,8 @@ class _PrefetchIterator:
         self._batch_start_time = time.monotonic()
         try:
             for batch_idx in self.indices_iter:
-                batch_start = time.monotonic()
                 samples = [self.dataset[i] for i in batch_idx]
                 batch = self.collate_fn(samples)
-                batch_time = (time.monotonic() - batch_start) * 1000
                 self.queue.put(batch, timeout=60)
                 self._batch_start_time = time.monotonic()
         except Exception as e:
@@ -465,7 +442,7 @@ class _MultiProcessIterator:
         prefetch_size: int = 2,
         metrics: Optional[_Metrics] = None,
     ):
-        from concurrent.futures import ThreadPoolExecutor, Future
+        from concurrent.futures import ThreadPoolExecutor
 
         self.indices_iter = indices_iter
         self.dataset = dataset
