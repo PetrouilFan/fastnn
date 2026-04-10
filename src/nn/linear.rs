@@ -43,15 +43,36 @@ impl Linear {
 
 impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Tensor {
-        // x: [batch, in_features], weight: [in_features, out_features]
-        // x @ weight = [batch, out_features]
-        let output = x.matmul(&self.weight);
+        let x_shape = x.shape();
 
-        if let Some(b) = &self.bias {
-            let bias_broadcast = b.unsqueeze(0);
-            output.add(&bias_broadcast)
+        // Handle 2D: [batch, in_features]
+        if x_shape.len() == 2 {
+            let output = x.matmul(&self.weight);
+            if let Some(b) = &self.bias {
+                let bias_broadcast = b.unsqueeze(0);
+                output.add(&bias_broadcast)
+            } else {
+                output
+            }
+        }
+        // Handle 3D: [batch, seq, in_features] -> flatten to 2D, apply, reshape back
+        else if x_shape.len() == 3 {
+            let batch = x_shape[0];
+            let seq = x_shape[1];
+            let hidden = x_shape[2];
+
+            // Flatten: [batch, seq, hidden] -> [batch*seq, hidden]
+            let x_flat = x.reshape(vec![batch * seq, hidden]);
+
+            // Forward
+            let out_flat = x_flat.matmul(&self.weight);
+            let out_shape = out_flat.shape();
+            let out_features = out_shape[1];
+
+            // Reshape back: [batch*seq, out_features] -> [batch, seq, out_features]
+            out_flat.reshape(vec![batch, seq, out_features])
         } else {
-            output
+            panic!("Linear expects 2D or 3D input, got {}", x_shape.len())
         }
     }
 
