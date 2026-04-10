@@ -368,6 +368,11 @@ impl PyTensor {
     fn contiguous(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.contiguous())
     }
+
+    fn copy_(&mut self, other: &PyTensor) {
+        // Simply clone - works when shapes match
+        self.inner = other.inner.clone();
+    }
 }
 
 #[pyfunction]
@@ -383,10 +388,41 @@ fn tensor_from_data<'py>(
         .as_ref()
         .and_then(|s| Device::from_str(s))
         .unwrap_or_else(get_default_device);
-    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
+Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
         data, shape, device,
     )))
 }
+
+#[pyfunction]
+fn tensor_from_array<'py>(array: &Bound<'py, PyAny>) -> PyResult<PyTensor> {
+    use std::slice::from_raw_parts;
+    let py = array.py();
+    
+    // Get shape
+    let shape: Vec<i64> = array.getattr("shape")?.extract()?;
+    let total_elems: usize = shape.iter().map(|&s| s as usize).product();
+    
+    // Ensure float32 and C-contiguous using numpy function
+    let np = py.import("numpy")?;
+    let arr = np.call_method1("ascontiguousarray", (array, "float32"))?;
+    
+    // Get pointer via ctypes
+    let ctype = arr.getattr("ctypes")?;
+    let data_ptr = ctype.getattr("data")?.extract::<usize>()?;
+    
+    // Safe copy from numpy memory
+    let data: Vec<f32> = unsafe {
+        from_raw_parts(data_ptr as *const f32, total_elems).to_vec()
+    };
+    
+    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
+        data, shape, get_default_device(),
+    )))
+}
+
+
+
+
 
 #[pyfunction]
 fn tensor_factory(data: Vec<f32>, shape: Vec<i64>) -> PyTensor {
@@ -2587,6 +2623,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_factory, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_from_list, py)?)?;
+    m.add_function(wrap_pyfunction!(tensor_from_array, py)?)?;
     m.add_function(wrap_pyfunction!(zeros, py)?)?;
     m.add_function(wrap_pyfunction!(ones, py)?)?;
     m.add_function(wrap_pyfunction!(full, py)?)?;

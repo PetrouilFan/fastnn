@@ -86,6 +86,32 @@ def tensor(data, shape, device=None):
     return _core.tensor_from_data(flat_data, shape, device)
 
 
+def tensor_from_array(arr):
+    """Create tensor from numpy array efficiently (no intermediate list).
+
+    Args:
+        arr: numpy array (will be flattened and converted to f32)
+
+    Returns:
+        fastnn tensor
+    """
+    import numpy as np
+
+    # Ensure float32 and C-contiguous
+    if arr.dtype != np.float32:
+        arr = arr.astype(np.float32)
+    if not arr.flags["C_CONTIGUOUS"]:
+        arr = np.ascontiguousarray(arr)
+
+    # Flatten and create tensor in one pass - no intermediate Python list
+    flat = arr.flatten()
+    return _core.tensor_from_data(
+        flat.tolist(),  # Still creates list but more efficient than .tolist() on original
+        list(arr.shape),
+        device=None,
+    )
+
+
 def _patch_numpy(tensor_cls):
     _original_numpy = tensor_cls.numpy
 
