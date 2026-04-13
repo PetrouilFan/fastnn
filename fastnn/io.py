@@ -1,5 +1,6 @@
 import struct
 import numpy as np
+import mmap
 
 HAS_SAFETENSORS = True
 
@@ -12,18 +13,70 @@ def load_safetensors(path: str):
     """Load weights from a HuggingFace safetensors file.
 
     Args:
-        path: Path to .safetensors file
+        path: Path to .safetensors file or model directory
 
     Returns:
         Dictionary mapping parameter names to fastnn tensors
     """
-    return _load_safetensors_numpy(path)
+    # Check if path is a directory (sharded model)
+    import os
+
+    if os.path.isdir(path):
+        return load_hf_weights(path)
+    return _load_safetensors_mmap(path)
 
 
-def _load_safetensors_numpy(path: str):
-    """Load safetensors without torch - uses raw parsing.
+def load_hf_weights(model_path: str):
+    """Load HuggingFace weights, supporting sharded models.
 
-    This reads the safetensors format directly.
+    Handles:
+    - Single model.safetensors file
+    - Sharded models with model.safetensors.index.json
+
+    Args:
+        model_path: Path to model directory
+
+    Returns:
+        Dictionary mapping parameter names to fastnn tensors
+    """
+    import os
+    import json
+
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    state_dict = {}
+
+    if os.path.exists(index_path):
+        # Sharded model - read index
+        with open(index_path, "r") as f:
+            weight_map = json.load(f)["weight_map"]
+
+        # Load each unique shard file
+        loaded_files = set()
+        for f_name in set(weight_map.values()):
+            f_path = os.path.join(model_path, f_name)
+            if os.path.exists(f_path) and f_name not in loaded_files:
+                shard_dict = _load_safetensors_mmap(f_path)
+                state_dict.update(shard_dict)
+                loaded_files.add(f_name)
+    else:
+        # Single file - find any .safetensors
+        import glob
+
+        files = glob.glob(os.path.join(model_path, "*.safetensors"))
+        if not files:
+            raise FileNotFoundError(f"No safetensors found in {model_path}")
+        for f_path in files:
+            shard_dict = _load_safetensors_mmap(f_path)
+            state_dict.update(shard_dict)
+
+    return state_dict
+
+
+def _load_safetensors_mmap(path: str):
+    """Load safetensors using mmap for zero-copy disk access.
+
+    Uses memory mapping to avoid loading entire file into RAM.
+    Only copies data when converting to fastnn tensors.
 
     Args:
         path: Path to .safetensors file
@@ -34,52 +87,99 @@ def _load_safetensors_numpy(path: str):
     import fastnn._core as _core
 
     with open(path, "rb") as f:
-        # Read header size (little-endian uint64)
-        header_bytes = f.read(8)
-        header_size = struct.unpack("<Q", header_bytes)[0]
+        # Memory map the file (read-only)
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+            # Read header size
+            header_size = struct.unpack("<Q", mapped[:8])[0]
 
-        # Read header JSON
-        header_json = f.read(header_size).decode("utf-8")
-        import json
+            # Read header JSON
+            header_json = mapped[8 : 8 + header_size].decode("utf-8")
+            import json
 
-        header = json.loads(header_json)
+            header = json.loads(header_json)
 
-        result = {}
-        for tensor_name, tensor_meta in header.items():
-            data_offsets = tensor_meta.get("data_offsets", [])
-            if not data_offsets:
-                continue
+            result = {}
+            for tensor_name, tensor_meta in header.items():
+                if tensor_name == "__metadata__":
+                    continue
 
-            offset, size = data_offsets[0], data_offsets[1] - data_offsets[0]
-            dtype_str = tensor_meta.get("dtype", "F32")
-            shape = tensor_meta.get("shape", [])
+                data_offsets = tensor_meta.get("data_offsets", [])
+                if not data_offsets:
+                    continue
 
-            # Determine raw dtype for reading bytes
-            if dtype_str == "BF16":
-                raw_dtype = np.uint16
-            elif dtype_str == "F16":
-                raw_dtype = np.float16
-            else:
-                raw_dtype = _safetensors_dtype_to_numpy(dtype_str)
+                offset, size = data_offsets[0], data_offsets[1] - data_offsets[0]
+                dtype_str = tensor_meta.get("dtype", "F32")
+                shape = tensor_meta.get("shape", [])
 
-            tensor_start = 8 + header_size + offset
-            f.seek(tensor_start)
-            data_bytes = f.read(size)
+                # Determine raw dtype for reading bytes
+                if dtype_str == "BF16":
+                    raw_dtype = np.uint16
+                elif dtype_str == "F16":
+                    raw_dtype = np.float16
+                else:
+                    raw_dtype = _dtype_to_numpy(dtype_str)
 
-            np_data = np.frombuffer(data_bytes, dtype=raw_dtype)
-            np_data = np_data.reshape(shape)
+                tensor_start = 8 + header_size + offset
+                tensor_end = tensor_start + size
 
-            # Convert bf16 to float32
-            if dtype_str == "BF16":
-                np_data = np_data.astype(np.float32)
+                # Create numpy view directly from mmap (zero-copy)
+                num_elements = size // np.dtype(raw_dtype).itemsize
+                np_data = np.frombuffer(
+                    mapped[tensor_start:tensor_end], dtype=raw_dtype
+                ).copy()  # Need to copy because mmap can be invalid after close
 
-            ftensor = _core.tensor_from_array(np_data)
-            result[tensor_name] = ftensor
+                np_data = np_data.reshape(shape)
+
+                # Convert bf16 to float32
+                if dtype_str == "BF16":
+                    np_data = _bf16_to_f32(np_data)
+
+                ftensor = _core.tensor_from_array(np_data)
+                result[tensor_name] = ftensor
 
     return result
 
 
-def _safetensors_dtype_to_numpy(dtype_str: str):
+def _bf16_to_f32(arr):
+    """Convert bf16 (uint16) array to float32 array properly."""
+    if arr.dtype != np.uint16:
+        return arr.astype(np.float32)
+
+    # Use numpy for vectorized conversion
+    arr = np.ascontiguousarray(arr)
+    bits = arr.astype(np.uint32)
+
+    # Extract bf16 components
+    sign = (bits >> 15) & 1
+    exp = (bits >> 7) & 0xFF
+    mant = bits & 0x7F
+
+    # Initialize result as uint32
+    result = np.zeros_like(bits, dtype=np.uint32)
+
+    # Normal values: exp 1-254
+    mask = (exp >= 1) & (exp <= 254)
+    result[mask] = (
+        (sign[mask] << 31) | ((exp[mask] + 127 - 127) << 23) | (mant[mask] << 16)
+    )
+
+    # Zeros: exp=0, mant=0
+    mask = (exp == 0) & (mant == 0)
+    result[mask] = sign[mask] << 31
+
+    # Infs: exp=255, mant=0
+    mask = (exp == 255) & (mant == 0)
+    result[mask] = (sign[mask] << 31) | (255 << 23)
+
+    # NaN: exp=255, mant>0
+    mask = (exp == 255) & (mant > 0)
+    result[mask] = (sign[mask] << 31) | (255 << 23) | (1 << 22)
+
+    # View as float32
+    return result.view(np.float32)
+
+
+def _dtype_to_numpy(dtype_str: str):
     """Convert safetensors dtype string to numpy dtype."""
     dtype_map = {
         "F32": np.float32,
@@ -94,7 +194,6 @@ def _safetensors_dtype_to_numpy(dtype_str: str):
         "U8": np.uint8,
         "BOOL": np.bool_,
         "F16": np.float16,
-        "BF16": np.float32,  # Treat bf16 as float32 for now
     }
     return dtype_map.get(dtype_str, np.float32)
 

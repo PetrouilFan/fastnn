@@ -1,4 +1,11 @@
-from typing import TYPE_CHECKING, Literal, Union
+import sys
+
+if sys.version_info >= (3, 14):
+    from typing import Literal, Union
+
+    TYPE_CHECKING = True
+else:
+    from typing import TYPE_CHECKING, Literal, Union
 
 if TYPE_CHECKING:
     from fastnn._core import PyTensor
