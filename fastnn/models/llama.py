@@ -6,7 +6,8 @@ A complete Llama model implementation for running inference.
 import os
 import numpy as np
 import fastnn._core as _core
-from fastnn import Linear, Embedding, RMSNorm, LayerNorm, silu
+from fastnn import Linear, Embedding, RMSNorm, LayerNorm, silu, matmul
+from fastnn._core import softmax
 
 
 class LlamaConfig:
@@ -80,11 +81,10 @@ class LlamaRMSNorm:
         self.eps = eps
 
     def forward(self, x):
-        # x shape: [batch, seq_len, hidden_size]
-        # RMSNorm: x / sqrt(mean(x^2) * weight
         x_sq = x * x
-        mean_sq = _core.mean(x_sq, dim=-1, keepdim=True)
-        rms = _core.sqrt(mean_sq + self.eps)
+        mean_sq = _core.mean(x_sq, dim=2, keepdim=True)
+        eps_tensor = _core.full_like(mean_sq, self.eps)
+        rms = _core.sqrt(mean_sq + eps_tensor)
         return x / rms * self.weight
 
     def __call__(self, x):
@@ -115,31 +115,23 @@ class LlamaAttention:
         self.scale = 1.0 / (head_dim**0.5)
 
     def forward(self, x, position_ids=None, cos_cache=None, sin_cache=None):
-        """Forward pass.
-
-        Args:
-            x: [batch, seq_len, hidden_size]
-            position_ids: [seq_len] - positions for RoPE
-            cos_cache: Precomputed cos [seq_len, head_dim]
-            sin_cache: Precomputed sin [seq_len, head_dim]
-        """
         batch, seq_len, _ = x.shape
 
         # Project to Q, K, V
-        q = self.q_proj(x)  # [batch, seq_len, hidden_size]
-        k = self.k_proj(x)  # [batch, seq_len, kv_heads * head_dim]
-        v = self.v_proj(x)  # [batch, seq_len, kv_heads * head_dim]
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
 
         # Reshape to [batch, num_heads, seq_len, head_dim] for Q
         # and [batch, num_kv_heads, seq_len, head_dim] for K, V
         q = q.reshape([batch, seq_len, self.num_heads, self.head_dim])
-        q = q.permute([0, 2, 1, 3])  # [batch, num_heads, seq_len, head_dim]
+        q = q.permute([0, 2, 1, 3]).contiguous()
 
         k = k.reshape([batch, seq_len, self.num_kv_heads, self.head_dim])
-        k = k.permute([0, 2, 1, 3])  # [batch, num_kv_heads, seq_len, head_dim]
+        k = k.permute([0, 2, 1, 3]).contiguous()
 
         v = v.reshape([batch, seq_len, self.num_kv_heads, self.head_dim])
-        v = v.permute([0, 2, 1, 3])  # [batch, num_kv_heads, seq_len, head_dim]
+        v = v.permute([0, 2, 1, 3]).contiguous()
 
         # Apply RoPE if caches provided
         if cos_cache is not None and sin_cache is not None:
@@ -151,42 +143,111 @@ class LlamaAttention:
             k = self._repeat(k, repeat_factor)
             v = self._repeat(v, repeat_factor)
 
-        # Attention: Q @ K^T
-        k_t = k.permute([0, 1, 3, 2])  # [batch, num_kv_heads, head_dim, seq_len]
-        attn_scores = q.matmul(k_t)
-        attn_scores = attn_scores * self.scale
+        # Attention using numpy to avoid matmul issues
+        q_np = q.numpy()
+        k_np = k.numpy()
+        v_np = v.numpy()
 
-        # causal mask - upper triangle is -inf
-        mask = self._causal_mask(seq_len)
+        # Compute attention scores: Q @ K^T
+        attn_scores = np.einsum("bhqd,bhkd->bhqk", q_np, k_np) * self.scale
+
+        # causal mask
+        mask = np.triu(np.full((seq_len, seq_len), -np.inf, dtype=np.float32), k=1)
         attn_scores = attn_scores + mask
 
-        # Softmax
-        attn_weights = attn_scores.softmax(dim=-1)
+        # softmax using exp/sum
+        attn_weights = np.exp(attn_scores) / np.sum(
+            np.exp(attn_scores), axis=-1, keepdims=True
+        )
 
         # Apply to V
-        context = attn_weights.matmul(v)  # [batch, num_heads, seq_len, head_dim]
+        context_np = np.einsum("bhqk,bhkd->bhqd", attn_weights, v_np)
+
+        # Convert back to fastnn
+        context = _core.tensor_from_array(context_np)
 
         # Reshape back to [batch, seq_len, hidden_size]
-        context = context.permute([0, 2, 1, 3])  # [batch, seq_len, num_heads, head_dim]
+        context = context.permute([0, 2, 1, 3]).contiguous()
         context = context.reshape([batch, seq_len, self.hidden_size])
 
         return self.o_proj(context)
 
+    def __call__(self, x, position_ids=None, cos_cache=None, sin_cache=None):
+        return self.forward(x, position_ids, cos_cache, sin_cache)
+
     def _apply_rope(self, q, k, cos, sin):
-        """Apply rotary position embeddings."""
-        # cos, sin: [seq_len, head_dim]
-        # This is a simplified version - full implementation would be more efficient
-        # For now, skip RoPE and return as-is
+        """Apply rotary position embeddings using numpy.
+
+        Args:
+            q, k: [batch, heads, seq_len, head_dim]
+            cos, sin: [seq_len, half_head_dim] - only computed for half head_dim
+
+        RoPE only applies to the first half of head_dim - the second half (which would
+        be the "negative frequencies") are not stored explicitly but computed implicitly
+        by the rotation formula.
+        """
+        # Convert to numpy
+        q_np = q.numpy()
+        k_np = k.numpy()
+        cos_np = cos.numpy()  # [seq_len, half_head_dim]
+        sin_np = sin.numpy()  # [seq_len, half_head_dim]
+
+        # Expand to full head_dim by interleaving: [seq_len, half_head_dim] -> [seq_len, head_dim]
+        # Pattern: cos[0], cos[0], cos[1], cos[1], ...
+        seq_len, half_head = cos_np.shape
+        head_dim = half_head * 2
+
+        cos_full = np.zeros((seq_len, head_dim), dtype=np.float32)
+        sin_full = np.zeros((seq_len, head_dim), dtype=np.float32)
+        cos_full[:, ::2] = cos_np
+        cos_full[:, 1::2] = cos_np
+        sin_full[:, ::2] = sin_np
+        sin_full[:, 1::2] = sin_np
+
+        # Now expand for broadcasting: [1, 1, seq_len, head_dim]
+        cos_expanded = cos_full[np.newaxis, np.newaxis, :, :]
+        sin_expanded = sin_full[np.newaxis, np.newaxis, :, :]
+
+        # Apply RoPE to q
+        q_np = self._apply_rope_single_np(q_np, cos_expanded, sin_expanded)
+
+        # Apply RoPE to k
+        k_np = self._apply_rope_single_np(k_np, cos_expanded, sin_expanded)
+
+        # Convert back to fastnn
+        q = _core.tensor_from_array(q_np)
+        k = _core.tensor_from_array(k_np)
+
         return q, k
 
+    def _apply_rope_single_np(self, x, cos, sin):
+        """Apply RoPE to single numpy tensor.
+
+        x: [batch, heads, seq_len, head_dim]
+        cos, sin: [1, 1, seq_len, head_dim] (expanded)
+        """
+        # Split head dim in half
+        head_dim = x.shape[-1]
+        half_dim = head_dim // 2
+
+        x1 = x[..., :half_dim]
+        x2 = x[..., half_dim:]
+
+        # Rotate: [-x2, x1]
+        x_rotated = np.concatenate([x2 * -1, x1], axis=-1)
+
+        # Apply: x * cos + x_rotated * sin
+        return x * cos + x_rotated * sin
+
     def _repeat(self, x, repeat_factor):
-        """Repeat K/V heads for GQA."""
+        """Repeat K/V heads for GQA using numpy."""
         # x: [batch, num_kv_heads, seq_len, head_dim]
         # -> [batch, num_kv_heads * repeat, seq_len, head_dim]
-        batch, num_kv_heads, seq_len, head_dim = x.shape
-        x = x.reshape([batch, 1, num_kv_heads * repeat_factor, seq_len, head_dim])
-        x = x.permute([0, 1, 3, 2, 4])
-        return x.reshape([batch, num_kv_heads * repeat_factor, seq_len, head_dim])
+        x_np = x.numpy()
+        x_repeated = np.repeat(x_np, repeat_factor, axis=1)
+        return _core.tensor_from_data(
+            x_repeated.flatten().tolist(), list(x_repeated.shape)
+        )
 
     def _causal_mask(self, seq_len):
         """Create causal mask."""
@@ -233,6 +294,9 @@ class LlamaMLP:
         up = self.up_proj(x)
         hidden = gate * up
         return self.down_proj(hidden)
+
+    def __call__(self, x):
+        return self.forward(x)
 
     def parameters(self):
         return (
@@ -315,17 +379,58 @@ class LlamaModel:
         Returns:
             logits: [batch, seq_len, vocab_size]
         """
+        # Get seq_len
+        if hasattr(input_ids, "shape"):
+            seq_len = input_ids.shape[1]
+        else:
+            seq_len = len(input_ids[0]) if isinstance(input_ids, list) else 1
+
+        # Compute RoPE caches
+        cos, sin = self._compute_rope_cache(seq_len)
+
         x = self.embedding(input_ids)
 
         # Process layers
         for layer in self.layers:
-            x = layer.forward(x, position_ids)
+            x = layer.forward(x, position_ids, cos_cache=cos, sin_cache=sin)
 
         # Final norm and projection
         x = self.norm(x)
         logits = self.lm_head(x)
 
         return logits
+
+    def _compute_rope_cache(self, seq_len):
+        """Compute RoPE cos/sin caches.
+
+        Args:
+            seq_len: sequence length
+
+        Returns:
+            cos, sin: [seq_len, head_dim]
+        """
+        # Build frequency positions
+        head_dim = self.config.head_dim
+        positions = np.arange(seq_len, dtype=np.float32)
+
+        # Compute inv_freq: 1 / (rope_theta ^ (2i/d))
+        inv_freq = 1.0 / (
+            self.config.rope_theta
+            ** (np.arange(0, head_dim, 2, dtype=np.float32) / head_dim)
+        )
+
+        # Compute angles: positions * inv_freq
+        angles = positions[:, None] * inv_freq[None, :]
+
+        # Compute cos/sin
+        cos = np.cos(angles).astype(np.float32)
+        sin = np.sin(angles).astype(np.float32)
+
+        # Convert to fastnn tensors
+        cos_tensor = _core.tensor_from_array(cos)
+        sin_tensor = _core.tensor_from_array(sin)
+
+        return cos_tensor, sin_tensor
 
     def parameters(self):
         params = self.embedding.parameters()
