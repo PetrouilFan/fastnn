@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 
 use crate::autograd::{AutogradMeta, Edge, Node};
-use crate::dispatcher::{register, DispatchKey, KernelFn};
+use crate::dispatcher::{register, register_static, DispatchKey, KernelId, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
     matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
@@ -10274,25 +10274,35 @@ fn maximum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 #[ctor::ctor]
 fn register_kernels() {
-    register("add", DispatchKey::Cpu, add_kernel as KernelFn);
-    register("sub", DispatchKey::Cpu, sub_kernel as KernelFn);
-    register("mul", DispatchKey::Cpu, mul_kernel as KernelFn);
-    register("div", DispatchKey::Cpu, div_kernel as KernelFn);
+    // Use register_static for fast dispatch (array lookup instead of hashmap)
+    register_static(KernelId::Add, DispatchKey::Cpu, add_kernel as KernelFn);
+    register_static(KernelId::Sub, DispatchKey::Cpu, sub_kernel as KernelFn);
+    register_static(KernelId::Mul, DispatchKey::Cpu, mul_kernel as KernelFn);
+    register_static(KernelId::Div, DispatchKey::Cpu, div_kernel as KernelFn);
+    register_static(KernelId::ReLU, DispatchKey::Cpu, relu_kernel as KernelFn);
+    register_static(KernelId::GELU, DispatchKey::Cpu, gelu_kernel as KernelFn);
+    register_static(KernelId::SiLU, DispatchKey::Cpu, silu_kernel as KernelFn);
+    register_static(KernelId::Sigmoid, DispatchKey::Cpu, sigmoid_kernel as KernelFn);
+    register_static(KernelId::Tanh, DispatchKey::Cpu, tanh_kernel as KernelFn);
+    register_static(KernelId::Elu, DispatchKey::Cpu, elu_kernel as KernelFn);
+    register_static(KernelId::Softmax, DispatchKey::Cpu, softmax_kernel as KernelFn);
+    register_static(KernelId::MatMul, DispatchKey::Cpu, matmul_kernel as KernelFn);
+    register_static(KernelId::Conv2d, DispatchKey::Cpu, conv2d_kernel as KernelFn);
+    register_static(KernelId::Conv1d, DispatchKey::Cpu, conv1d_kernel as KernelFn);
+    register_static(KernelId::Conv3d, DispatchKey::Cpu, conv3d_kernel as KernelFn);
+    register_static(KernelId::ConvTranspose2d, DispatchKey::Cpu, conv_transpose2d_kernel as KernelFn);
+
+    // Register operations that don't have a KernelId yet using dynamic registration
     register("neg", DispatchKey::Cpu, neg_kernel as KernelFn);
     register("abs", DispatchKey::Cpu, abs_kernel as KernelFn);
     register("exp", DispatchKey::Cpu, exp_kernel as KernelFn);
     register("log", DispatchKey::Cpu, log_kernel as KernelFn);
     register("sqrt", DispatchKey::Cpu, sqrt_kernel as KernelFn);
-    register("relu", DispatchKey::Cpu, relu_kernel as KernelFn);
     register(
         "fused_add_relu",
         DispatchKey::Cpu,
         fused_add_relu_kernel as KernelFn,
     );
-    register("gelu", DispatchKey::Cpu, gelu_kernel as KernelFn);
-    register("sigmoid", DispatchKey::Cpu, sigmoid_kernel as KernelFn);
-    register("tanh", DispatchKey::Cpu, tanh_kernel as KernelFn);
-    register("silu", DispatchKey::Cpu, silu_kernel as KernelFn);
     register(
         "leaky_relu",
         DispatchKey::Cpu,
@@ -10301,10 +10311,8 @@ fn register_kernels() {
     register("prelu", DispatchKey::Cpu, prelu_kernel as KernelFn);
     register("softplus", DispatchKey::Cpu, softplus_kernel as KernelFn);
     register("hardswish", DispatchKey::Cpu, hardswish_kernel as KernelFn);
-    register("elu", DispatchKey::Cpu, elu_kernel as KernelFn);
     register("clamp", DispatchKey::Cpu, clamp_kernel as KernelFn);
     register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
-    register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
     register("linear", DispatchKey::Cpu, linear_kernel as KernelFn);
     register(
         "fused_linear_relu",
@@ -10331,7 +10339,6 @@ fn register_kernels() {
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);
     register("min", DispatchKey::Cpu, min_kernel as KernelFn);
     register("maximum", DispatchKey::Cpu, maximum_kernel as KernelFn);
-    register("softmax", DispatchKey::Cpu, softmax_kernel as KernelFn);
     register(
         "log_softmax",
         DispatchKey::Cpu,
@@ -10377,15 +10384,6 @@ fn register_kernels() {
         "cross_entropy_loss",
         DispatchKey::Wgpu,
         cross_entropy_loss_gpu_fallback as KernelFn,
-    );
-
-    register("conv2d", DispatchKey::Cpu, conv2d_kernel as KernelFn);
-    register("conv1d", DispatchKey::Cpu, conv1d_kernel as KernelFn);
-    register("conv3d", DispatchKey::Cpu, conv3d_kernel as KernelFn);
-    register(
-        "conv_transpose2d",
-        DispatchKey::Cpu,
-        conv_transpose2d_kernel as KernelFn,
     );
     register(
         "layer_norm",
