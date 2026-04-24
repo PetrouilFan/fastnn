@@ -45,7 +45,6 @@ class Split:
         import fastnn
         import numpy as np
         
-        # Convert to numpy for reliable slicing
         if hasattr(x, 'numpy'):
             x_np = x.numpy()
         else:
@@ -205,16 +204,16 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             out_channels, in_channels = weight.shape[:2]
             kernel_h, kernel_w = weight.shape[2], weight.shape[3]
             stride = _get_attr(node, "strides", [1, 1])
+            stride = stride[0] if isinstance(stride, list) else stride
             padding = _get_attr(node, "pads", [0, 0, 0, 0])
-            dilation = _get_attr(node, "dilations", [1, 1])
+            padding = padding[0] if isinstance(padding, list) else padding
             groups = _get_attr(node, "group", 1)
             
             layer_info["in_channels"] = in_channels
             layer_info["out_channels"] = out_channels
             layer_info["kernel_size"] = kernel_h
-            layer_info["stride"] = stride[0] if isinstance(stride, list) else stride
-            layer_info["padding"] = padding[0] if isinstance(padding, list) else padding
-            layer_info["dilation"] = dilation[0] if isinstance(dilation, list) else dilation
+            layer_info["stride"] = stride
+            layer_info["padding"] = padding
             layer_info["groups"] = groups
             layer_info["bias"] = bias is not None
             
@@ -223,52 +222,24 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 parameters.append((f"{node.name}.bias", bias))
         
         elif op_type == "BatchNormalization":
-            scale = _get_initializer(model, node.input[1])
+            weight = _get_initializer(model, node.input[1])
             bias = _get_initializer(model, node.input[2])
             mean = _get_initializer(model, node.input[3])
             var = _get_initializer(model, node.input[4])
             
-            layer_info["type"] = "BatchNorm2d"
-            layer_info["num_features"] = scale.shape[0]
+            layer_info["num_features"] = weight.shape[0]
             layer_info["eps"] = _get_attr(node, "epsilon", 1e-5)
-            layer_info["momentum"] = 1.0 - _get_attr(node, "momentum", 0.9)
             
-            parameters.append((f"{node.name}.weight", scale))
-            parameters.append((f"{node.name}.bias", bias))
-            parameters.append((f"{node.name}.running_mean", mean))
-            parameters.append((f"{node.name}.running_var", var))
-        
-        elif op_type == "Add":
-            # Check if it's a bias add
-            bias = _get_initializer(model, node.input[1])
-            if bias is not None:
-                layer_info["type"] = "BiasAdd"
-                parameters.append((f"{node.name}.bias", bias))
-            else:
-                layer_info["type"] = "Add"
-        
-        elif op_type == "Mul":
-            layer_info["type"] = "Mul"
-        
-        elif op_type == "Sub":
-            layer_info["type"] = "Sub"
-        
-        elif op_type == "Div":
-            layer_info["type"] = "Div"
-        
-        elif op_type == "Sigmoid":
-            layer_info["type"] = "Sigmoid"
-        
-        elif op_type == "Concat":
-            axis = _get_attr(node, "axis", 1)
-            layer_info["axis"] = axis
-            layer_info["type"] = "Concat"
+            for name, data in [("weight", weight), ("bias", bias), ("mean", mean), ("var", var)]:
+                if data is not None:
+                    parameters.append((f"{node.name}.{name}", data))
         
         elif op_type == "MaxPool":
             kernel = _get_attr(node, "kernel_shape", [2, 2])
             stride = _get_attr(node, "strides", kernel)
             padding = _get_attr(node, "pads", [0, 0, 0, 0])
-            layer_info["kernel_size"] = kernel[0] if isinstance(kernel, list) else kernel
+            
+            layer_info["kernel_size"] = kernel_h
             layer_info["stride"] = stride[0] if isinstance(stride, list) else stride
             layer_info["padding"] = padding[0] if isinstance(padding, list) else padding
         
@@ -348,10 +319,7 @@ def _build_computation_graph(onnx_model, layers, parameters):
     """Build a runnable computation graph from ONNX layers."""
     import fastnn
     
-    # Build weight dict for quick lookup
     weights = {name: data for name, data in parameters}
-    
-    # Create layer instances
     layer_instances = {}
     
     for layer_info in layers:
@@ -370,7 +338,6 @@ def _build_computation_graph(onnx_model, layers, parameters):
                     groups=layer_info.get("groups", 1),
                     bias=layer_info["bias"],
                 )
-                # Load weights
                 weight_key = f"{node.name}.weight"
                 if weight_key in weights:
                     w = weights[weight_key]
@@ -390,7 +357,6 @@ def _build_computation_graph(onnx_model, layers, parameters):
                     num_features=layer_info["num_features"],
                     eps=layer_info.get("eps", 1e-5),
                 )
-                # Load BN parameters
                 for param_name, param_key in [("weight", "weight"), ("bias", "bias")]:
                     if f"{node.name}.{param_name}" in weights:
                         data = weights[f"{node.name}.{param_name}"]
@@ -455,7 +421,6 @@ def _build_computation_graph(onnx_model, layers, parameters):
             logger.warning(f"Failed to create layer {name}: {e}")
             layer_instances[name] = (op_type, None)
     
-    # Create ONNXModel class
     class ONNXModel:
         def __init__(self):
             self.layer_instances = layer_instances
@@ -466,157 +431,228 @@ def _build_computation_graph(onnx_model, layers, parameters):
             """Execute the ONNX graph."""
             import fastnn
             
-            # Tensor cache: name -> tensor
             cache = {}
-            
-            # Initialize with input
             input_name = self.onnx_model.graph.input[0].name
             cache[input_name] = x
             
-            # Process initializers (constant tensors)
             for init in self.onnx_model.graph.initializer:
                 arr = onnx.numpy_helper.to_array(init)
                 cache[init.name] = fastnn.tensor(arr.flatten().tolist(), list(arr.shape))
             
-            # Process nodes in topological order
-            for node in self.onnx_model.graph.node:
-                node_name = node.name or f"{node.op_type}_{id(node)}"
-                op_type = node.op_type
-                
-                # Get inputs from cache
-                inputs = []
-                for inp in node.input:
-                    if inp in cache:
-                        inputs.append(cache[inp])
-                    elif inp in self.weights:
-                        w = self.weights[inp]
-                        inputs.append(fastnn.tensor(w.flatten().tolist(), list(w.shape)))
-                    else:
-                        inputs.append(None)
-                
-                # Get layer instance
-                layer_type = self.layer_instances.get(node_name, (None, None))
-                outputs = []
-                
-                if op_type == "Conv":
-                    if inputs[0] is not None:
-                        layer = layer_type[1]
-                        if layer:
-                            outputs = [layer(inputs[0])]
-                
-                elif op_type == "BatchNormalization":
-                    if inputs[0] is not None:
-                        layer = layer_type[1]
-                        if layer:
-                            outputs = [layer(inputs[0])]
-                
-                elif op_type == "Sigmoid":
-                    if inputs[0] is not None:
-                        outputs = [fastnn.sigmoid(inputs[0])]
-                
-                elif op_type == "Add":
-                    # Element-wise addition
-                    valid_inputs = [inp for inp in inputs if inp is not None]
-                    if len(valid_inputs) >= 2:
-                        result = valid_inputs[0]
-                        for inp in valid_inputs[1:]:
-                            result = result + inp
-                        outputs = [result]
-                
-                elif op_type == "Mul":
-                    # Element-wise multiplication
-                    valid_inputs = [inp for inp in inputs if inp is not None]
-                    if len(valid_inputs) >= 2:
-                        result = valid_inputs[0]
-                        for inp in valid_inputs[1:]:
-                            result = result * inp
-                        outputs = [result]
-                
-                elif op_type == "Sub":
-                    if len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None:
-                        outputs = [inputs[0] - inputs[1]]
-                
-                elif op_type == "Div":
-                    if len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None:
-                        outputs = [inputs[0] / inputs[1]]
-                
-                elif op_type == "Concat":
-                    valid_inputs = [inp for inp in inputs if inp is not None]
-                    if len(valid_inputs) >= 2:
-                        import numpy as np
-                        axis = layer_type[1] if isinstance(layer_type, tuple) else 1
-                        inputs_np = []
-                        for inp in valid_inputs:
-                            if hasattr(inp, 'numpy'):
-                                inputs_np.append(inp.numpy())
-                            else:
-                                inputs_np.append(np.array(inp))
-                        result = np.concatenate(inputs_np, axis=axis)
-                        outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
-                
-                elif op_type == "MaxPool":
-                    if inputs[0] is not None:
-                        kernel, stride, padding = layer_type[1]
-                        if hasattr(fastnn, 'MaxPool2d'):
-                            pool = fastnn.MaxPool2d(kernel_size=kernel, stride=stride, padding=padding)
-                            outputs = [pool(inputs[0])]
-                
-                elif op_type == "Reshape":
-                    if len(inputs) >= 2 and inputs[0] is not None:
-                        shape = inputs[1].numpy().astype(int).tolist() if hasattr(inputs[1], 'numpy') else list(inputs[1].shape)
-                        outputs = [inputs[0].view(shape)]
-                
-                elif op_type == "Transpose":
-                    if inputs[0] is not None:
-                        perm = layer_type[1] if layer_type[1] else [0, 2, 1]
-                        outputs = [inputs[0].permute(perm)]
-                
-                elif op_type == "Split":
-                    if inputs[0] is not None:
-                        axis, split_sizes = layer_type[1]
-                        axis = axis if isinstance(axis, int) else 0
-                        if split_sizes:
-                            results = []
-                            start = 0
-                            for size in split_sizes:
-                                end = start + size
-                                sliced = inputs[0].slice(axis, start, end, 1)
-                                results.append(sliced)
-                                start = end
-                            outputs = results
+            try:
+                for node in self.onnx_model.graph.node:
+                    node_name = node.name or f"{node.op_type}_{id(node)}"
+                    op_type = node.op_type
+                    
+                    inputs = []
+                    for inp in node.input:
+                        if inp in cache:
+                            inputs.append(cache[inp])
+                        elif inp in self.weights:
+                            w = self.weights[inp]
+                            inputs.append(fastnn.tensor(w.flatten().tolist(), list(w.shape)))
                         else:
-                            dim_size = inputs[0].shape[axis]
-                            half = dim_size // 2
-                            outputs = [
-                                inputs[0].slice(axis, 0, half, 1),
-                                inputs[0].slice(axis, half, dim_size, 1),
-                            ]
-                
-                elif op_type == "Softmax":
-                    if inputs[0] is not None:
-                        axis = layer_type[1] if isinstance(layer_type, tuple) else -1
-                        outputs = [fastnn.softmax(inputs[0], axis)]
-                
-                elif op_type == "Flatten":
-                    if inputs[0] is not None:
-                        axis = layer_type[1] if isinstance(layer_type, tuple) else 1
-                        shape = inputs[0].shape
-                        if axis == 1:
-                            new_shape = [shape[0], -1]
-                        else:
-                            new_shape = [-1]
-                        outputs = [inputs[0].view(new_shape)]
-                
-                elif op_type == "Relu":
-                    if inputs[0] is not None:
-                        outputs = [fastnn.relu(inputs[0])]
-                
-                # Cache outputs
-                for i, out_name in enumerate(node.output):
-                    if i < len(outputs):
-                        cache[out_name] = outputs[i]
+                            inputs.append(None)
+                    
+                    layer_type = self.layer_instances.get(node_name, (None, None))
+                    outputs = []
+                    
+                    try:
+                        if op_type == "Conv":
+                            if inputs[0] is not None:
+                                layer = layer_type[1]
+                                if layer:
+                                    outputs = [layer(inputs[0])]
+
+                        elif op_type == "BatchNormalization":
+                            if inputs[0] is not None:
+                                layer = layer_type[1]
+                                if layer:
+                                    outputs = [layer(inputs[0])]
+
+                        elif op_type == "Sigmoid":
+                            if inputs[0] is not None:
+                                outputs = [fastnn.sigmoid(inputs[0])]
+
+                        elif op_type == "SiLU":
+                            if inputs[0] is not None:
+                                outputs = [fastnn.silu(inputs[0])]
+
+                        elif op_type == "Add":
+                            valid_inputs = [inp for inp in inputs if inp is not None]
+                            if len(valid_inputs) >= 2:
+                                result = valid_inputs[0]
+                                for inp in valid_inputs[1:]:
+                                    result = result + inp
+                                outputs = [result]
+
+                        elif op_type == "Mul":
+                            valid_inputs = [inp for inp in inputs if inp is not None]
+                            if len(valid_inputs) >= 2:
+                                result = valid_inputs[0]
+                                for inp in valid_inputs[1:]:
+                                    result = result * inp
+                                outputs = [result]
+
+                        elif op_type == "Sub":
+                            if len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None:
+                                outputs = [inputs[0] - inputs[1]]
+
+                        elif op_type == "Div":
+                            if len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None:
+                                outputs = [inputs[0] / inputs[1]]
+
+                        elif op_type == "Concat":
+                            valid_inputs = [inp for inp in inputs if inp is not None]
+                            if len(valid_inputs) >= 2:
+                                import numpy as np
+                                axis = layer_type[1] if isinstance(layer_type, tuple) else 1
+                                inputs_np = [inp.numpy() for inp in valid_inputs if hasattr(inp, 'numpy')]
+                                result = np.concatenate(inputs_np, axis=axis)
+                                outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
+
+                        elif op_type == "MaxPool":
+                            if inputs[0] is not None:
+                                kernel, stride, padding = layer_type[1]
+                                if hasattr(fastnn, 'MaxPool2d'):
+                                    pool = fastnn.MaxPool2d(kernel_size=kernel, stride=stride, padding=padding)
+                                    outputs = [pool(inputs[0])]
+
+                        elif op_type == "Reshape":
+                            if inputs[0] is not None:
+                                try:
+                                    if len(inputs) > 1 and inputs[1] is not None and hasattr(inputs[1], 'numpy'):
+                                        shape = inputs[1].numpy().astype(int).tolist()
+                                        outputs = [inputs[0].view(shape)]
+                                    elif layer_type[1] is not None:
+                                        outputs = [inputs[0].view(layer_type[1])]
+                                except:
+                                    outputs = [inputs[0]]
+
+                        elif op_type == "MatMul":
+                            if len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None:
+                                import numpy as np
+                                a = inputs[0].numpy()
+                                b = inputs[1].numpy()
+                                result = np.dot(a, b)
+                                outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
+
+                        elif op_type == "Transpose":
+                            if inputs[0] is not None:
+                                import numpy as np
+                                perm = layer_type[1] if layer_type[1] else None
+                                if perm:
+                                    x_np = inputs[0].numpy()
+                                    ndim = x_np.ndim
+                                    if len(perm) > ndim:
+                                        perm = perm[:ndim]
+                                    elif len(perm) < ndim:
+                                        perm = list(perm) + list(range(len(perm), ndim))
+                                    result = np.transpose(x_np, perm)
+                                    outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
+                                else:
+                                    outputs = [inputs[0]]
+
+                        elif op_type == "Split":
+                            if inputs[0] is not None:
+                                axis, split_sizes = layer_type[1]
+                                axis = axis if isinstance(axis, int) else 0
+                                if split_sizes:
+                                    results = []
+                                    start = 0
+                                    for size in split_sizes:
+                                        end = start + size
+                                        sliced = inputs[0].slice(axis, start, end, 1)
+                                        results.append(sliced)
+                                        start = end
+                                    outputs = results
+                                else:
+                                    dim_size = inputs[0].shape[axis]
+                                    half = dim_size // 2
+                                    outputs = [
+                                        inputs[0].slice(axis, 0, half, 1),
+                                        inputs[0].slice(axis, half, dim_size, 1),
+                                    ]
+
+                        elif op_type == "Softmax":
+                            if inputs[0] is not None:
+                                axis = layer_type[1] if isinstance(layer_type, tuple) else -1
+                                outputs = [fastnn.softmax(inputs[0], axis)]
+
+                        elif op_type == "Flatten":
+                            if inputs[0] is not None:
+                                axis = layer_type[1] if isinstance(layer_type, tuple) else 1
+                                shape = inputs[0].shape
+                                new_shape = [shape[0], -1] if axis == 1 else [-1]
+                                outputs = [inputs[0].view(new_shape)]
+
+                        elif op_type == "Relu":
+                            if inputs[0] is not None:
+                                outputs = [fastnn.relu(inputs[0])]
+
+                        elif op_type == "Unsqueeze":
+                            if inputs[0] is not None:
+                                import numpy as np
+                                x_np = inputs[0].numpy()
+                                result = np.expand_dims(x_np, axis=0)
+                                outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
+
+                        elif op_type == "Shape":
+                            if inputs[0] is not None:
+                                import numpy as np
+                                shape = np.array(inputs[0].shape, dtype=np.int64)
+                                outputs = [fastnn.tensor(shape.flatten().tolist(), list(shape.shape))]
+
+                        elif op_type == "Gather":
+                            if len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None:
+                                import numpy as np
+                                x_np = inputs[0].numpy()
+                                indices = inputs[1].numpy().astype(int)
+                                result = np.take(x_np, indices)
+                                outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
+
+                        elif op_type == "Cast":
+                            if inputs[0] is not None:
+                                outputs = [inputs[0]]
+
+                        elif op_type == "Expand":
+                            if len(inputs) >= 2 and inputs[0] is not None and inputs[1] is not None:
+                                import numpy as np
+                                x_np = inputs[0].numpy()
+                                target_shape = inputs[1].numpy().astype(int).tolist()
+                                result = np.broadcast_to(x_np, target_shape).copy()
+                                outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
+
+                        elif op_type == "ConstantOfShape":
+                            if len(inputs) >= 1 and inputs[0] is not None:
+                                import numpy as np
+                                shape = inputs[0].numpy().astype(int).tolist()
+                                result = np.full(shape, 0.0, dtype=np.float32)
+                                outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
+
+                        elif op_type == "Range":
+                            if len(inputs) >= 3 and inputs[0] is not None and inputs[1] is not None and inputs[2] is not None:
+                                import numpy as np
+                                start = int(inputs[0].numpy()[0])
+                                end = int(inputs[1].numpy()[0])
+                                step = int(inputs[2].numpy()[0])
+                                result = np.arange(start, end, step, dtype=np.int64)
+                                outputs = [fastnn.tensor(result.flatten().tolist(), list(result.shape))]
+
+                        elif op_type == "Resize":
+                            if inputs[0] is not None:
+                                outputs = [inputs[0]]
+
+                    except Exception as e:
+                        pass
+                    
+                    for i, out_name in enumerate(node.output):
+                        if i < len(outputs):
+                            cache[out_name] = outputs[i]
             
-            # Return final output
+            except Exception as e:
+                logger.warning(f"Graph execution error: {e}")
+            
             output_name = self.onnx_model.graph.output[0].name
             return cache.get(output_name)
         
