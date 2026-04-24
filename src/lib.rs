@@ -30,6 +30,7 @@ pub use packed_train::MasterWeightOptimizer;
 use autograd::{no_grad_enter, no_grad_exit};
 use dispatcher::list_registered_ops as dispatcher_list_ops;
 use nn::Module;
+use num_cpus;
 use optim::Optimizer;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyRuntimeError;
@@ -42,6 +43,22 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use storage::{allocator_stats as storage_allocator_stats, DType, Device};
 use tensor::Tensor;
+
+// Initialize Rayon thread pool with optimal size based on physical CPU cores
+// Commented out to debug hang on import
+// #[ctor::ctor]
+// fn init_rayon_thread_pool() {
+//     #[cfg(feature = "parallel")]
+//     {
+//         // Use physical cores (not logical) for compute-bound workloads
+//         let physical_cores = num_cpus::get_physical();
+//         // Use half of physical cores to leave headroom for system tasks
+//         let optimal_threads = (physical_cores / 2).max(1);
+//         let _ = rayon::ThreadPoolBuilder::new()
+//             .num_threads(optimal_threads)
+//             .build_global();
+//     }
+// }
 
 // Custom exception hierarchy for fastnn
 pyo3::create_exception!(fastnn, FastnnError, PyRuntimeError, "Base exception for fastnn operations.");
