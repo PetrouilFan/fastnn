@@ -48,10 +48,6 @@ class Split:
     
     def forward(self, x):
         import fastnn
-        import numpy as np
-        
-        # Convert to numpy for slicing
-        x_np = x.numpy() if hasattr(x, 'numpy') else np.array(x)
         
         if self.split_sizes:
             # Split with specified sizes
@@ -59,27 +55,19 @@ class Split:
             start = 0
             for size in self.split_sizes:
                 end = start + int(size)
-                slices = [slice(None)] * len(x_np.shape)
-                slices[self.axis] = slice(start, end)
-                sliced = x_np[tuple(slices)]
-                results.append(fastnn.tensor(sliced.flatten().tolist(), list(sliced.shape)))
+                # Use fastnn's slice method
+                sliced = x.slice(self.axis, start, end, 1)
+                results.append(sliced)
                 start = end
             return results
         else:
             # Equal split - split into 2 equal parts
-            shape = x_np.shape
+            shape = x.shape
             dim_size = shape[self.axis]
             half = dim_size // 2
-            slices1 = [slice(None)] * len(shape)
-            slices1[self.axis] = slice(0, half)
-            slices2 = [slice(None)] * len(shape)
-            slices2[self.axis] = slice(half, dim_size)
-            r1 = x_np[tuple(slices1)]
-            r2 = x_np[tuple(slices2)]
-            return [
-                fastnn.tensor(r1.flatten().tolist(), list(r1.shape)),
-                fastnn.tensor(r2.flatten().tolist(), list(r2.shape))
-            ]
+            r1 = x.slice(self.axis, 0, half, 1)
+            r2 = x.slice(self.axis, half, dim_size, 1)
+            return [r1, r2]
     
     def parameters(self):
         return []
