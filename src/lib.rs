@@ -264,6 +264,10 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.permute(dims))
     }
 
+    fn slice(&self, dim: i64, start: i64, end: i64, step: i64) -> PyTensor {
+        PyTensor::from_tensor(self.inner.slice(dim as usize, start, end, step))
+    }
+
     fn unsqueeze(&self, dim: i64) -> PyTensor {
         PyTensor::from_tensor(self.inner.unsqueeze(dim as usize))
     }

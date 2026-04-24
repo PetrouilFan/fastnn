@@ -3097,38 +3097,18 @@ impl Tensor {
         output_shape[dim] = total_dim_size;
         let numel: i64 = output_shape.iter().product();
         let mut output_data = vec![0.0f32; numel as usize];
-        let mut out_strides: SmallVec<[i64; 8]> = SmallVec::new();
-        let mut s = 1i64;
-        for d in (0..ndim).rev() {
-            out_strides.push(s);
-            s *= output_shape[d];
-        }
-        out_strides.reverse();
-        let mut out_offset = 0i64;
+        
+        let mut offset = 0usize;
         for t in tensors {
-            let t_data = t.as_f32_slice();
-            let t_strides = &t.inner.strides;
-            let t_sizes = &t.inner.sizes;
-            let mut indices = vec![0i64; ndim];
-            let dim_size = t.inner.sizes[dim];
-            for _ in 0..t.numel() as usize {
-                let mut t_lin = t.inner.storage_offset;
-                let mut o_lin = out_offset;
-                for d in 0..ndim {
-                    t_lin += indices[d] * t_strides[d];
-                    o_lin += indices[d] * out_strides[d];
-                }
-                output_data[o_lin as usize] = t_data[t_lin as usize];
-                for d in (0..ndim).rev() {
-                    indices[d] += 1;
-                    if indices[d] < t_sizes[d] {
-                        break;
-                    }
-                    indices[d] = 0;
-                }
+            let t_contig = t.contiguous();
+            let t_flat = t_contig.to_numpy();
+            let copy_size = t.numel() as usize;
+            for j in 0..copy_size {
+                output_data[offset + j] = t_flat[j];
             }
-            out_offset += dim_size * out_strides[dim];
+            offset += copy_size;
         }
+        
         Tensor::from_vec(output_data, output_shape.into_vec())
     }
 

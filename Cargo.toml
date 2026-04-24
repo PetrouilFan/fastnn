@@ -8,7 +8,7 @@ name = "fastnn"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-pyo3          = { version = "0.28", features = ["extension-module", "abi3-py312"] }
+pyo3          = { version = "0.28", features = ["extension-module"] }
 rayon         = "1.8"
 smallvec      = { version = "1.11", features = ["union", "const_generics"] }
 safetensors   = "0.4"
