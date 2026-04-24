@@ -445,11 +445,17 @@ def import_onnx(onnx_path: str, fnn_path: str):
         fnn_path: Path to output .fnn file
 
     Returns:
-        Dictionary with model info (layers, input_shape, output_shape)
+        Dictionary with model info (layers, input_shape, output_shape, model).
+        The 'model' key contains a callable model if graph reconstruction succeeded.
     """
     from fastnn.onnx_import import import_onnx as _import
 
-    return _import(onnx_path, fnn_path)
+    result = _import(onnx_path, fnn_path)
+    
+    # If a model was built, return it as a separate attribute
+    if 'model' in result and result['model'] is not None:
+        return result['model'], result
+    return result
 
 
 def save_model(model, path):
