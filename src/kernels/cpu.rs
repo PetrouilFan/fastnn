@@ -8217,33 +8217,61 @@ fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
     sum
 }
 
+fn fused_conv_bn_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    // Args: [x, weight, bias, bn_weight, bn_bias, bn_running_mean, bn_running_var, stride, padding, dilation, groups, eps]
+    let x = args[0];
+    let weight = args[1];
+    let bias = args[2];
+    let bn_weight = args[3];
+    let bn_bias = args[4];
+    let bn_running_mean = args[5];
+    let bn_running_var = args[6];
+    let stride = args[7].item() as i64;
+    let padding = args[8].item() as i64;
+    let dilation = args[9].item() as i64;
+    let groups = args[10].item() as i64;
+    let eps = args[11].item() as f64;
+
+    // First do the conv2d
+    let conv_args = [x, weight, bias, &Tensor::from_scalar(stride as f32), &Tensor::from_scalar(padding as f32), &Tensor::from_scalar(dilation as f32), &Tensor::from_scalar(groups as f32)];
+    let conv_result = conv2d_kernel(&conv_args);
+    let conv_out = &conv_result[0];
+
+    // Then batch norm
+    let bn_args = [conv_out, bn_weight, bn_bias, bn_running_mean, bn_running_var, &Tensor::from_scalar(0.0), &Tensor::from_scalar(eps as f32)];
+    let bn_result = batch_norm_kernel(&bn_args);
+    let bn_out = &bn_result[0];
+
+    // Finally SiLU (x * sigmoid(x))
+    let sigmoid_args = [bn_out];
+    let sigmoid_result = silu_kernel(&sigmoid_args);
+    vec![sigmoid_result[0].clone()]
+}
+
 fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let w = args[1];
-    let bias = if args.len() > 2 && args[2].numel() > 0 {
-        Some(args[2])
+    // Determine parameter layout based on arg count
+    // With bias: [x, w, bias, stride, padding, dilation, groups] (len >= 7)
+    // Without bias: [x, w, stride, padding, dilation, groups] (len == 6)
+    let (bias, stride, padding, dilation, groups) = if args.len() >= 7 {
+        let bias = if args[2].numel() > 0 { Some(args[2]) } else { None };
+        let stride = args[3].item() as i64;
+        let padding = args[4].item() as i64;
+        let dilation = args[5].item() as i64;
+        let groups = args[6].item() as i64;
+        (bias, stride, padding, dilation, groups)
+    } else if args.len() == 6 {
+        // No bias: args[2] is stride, args[3] is padding, etc.
+        let stride = args[2].item() as i64;
+        let padding = args[3].item() as i64;
+        let dilation = args[4].item() as i64;
+        let groups = args[5].item() as i64;
+        (None, stride, padding, dilation, groups)
     } else {
-        None
-    };
-    let stride = if args.len() > 3 {
-        args[3].item() as i64
-    } else {
-        1
-    };
-    let padding = if args.len() > 4 {
-        args[4].item() as i64
-    } else {
-        0
-    };
-    let dilation = if args.len() > 5 {
-        args[5].item() as i64
-    } else {
-        1
-    };
-    let groups = if args.len() > 6 {
-        args[6].item() as i64
-    } else {
-        1
+        // Minimal args: [x, w] or [x, w, bias]
+        let bias = if args.len() > 2 && args[2].numel() > 0 { Some(args[2]) } else { None };
+        (bias, 1, 0, 1, 1)
     };
 
     let x_shape = x.shape();
@@ -8352,52 +8380,53 @@ fn conv2d_1x1(
     // Thread-local scratch: w_t [k*m] + x_t [n*k] + result [n*m]
     let total_scratch = k * m + n * k + n * m;
 
-    CONV_SCRATCH.with(|scratch| {
-        let mut buf = scratch.borrow_mut();
-        if buf.len() < total_scratch {
-            buf.resize(total_scratch, 0.0f32);
+    // Use thread-local scratch buffer
+    let mut guard = CONV_SCRATCH.with(|cell| cell.borrow_mut());
+    if guard.len() < total_scratch {
+        guard.resize(total_scratch, 0.0);
+    } else {
+        guard[..total_scratch].fill(0.0);
+    }
+    let buf = &mut guard[..total_scratch];
+    let (w_t_buf, rest) = buf.split_at_mut(k * m);
+    let (x_t_buf, result_buf) = rest.split_at_mut(n * k);
+
+    // Transpose weights: [out_ch, in_ch] -> [in_ch, out_ch]
+    for i in 0..k {
+        for j in 0..m {
+            w_t_buf[i * m + j] = w_data[j * k + i];
         }
+    }
 
-        let (w_t_buf, rest) = buf.split_at_mut(k * m);
-        let (x_t_buf, result_buf) = rest.split_at_mut(n * k);
-
-        // Transpose weights: [out_ch, in_ch] -> [in_ch, out_ch]
-        for i in 0..k {
-            for j in 0..m {
-                w_t_buf[i * m + j] = w_data[j * k + i];
+    // Transpose input: [batch, in_ch, h, w] -> [batch * h * w, in_ch]
+    let spatial_size = in_height * in_width;
+    for b in 0..batch_size {
+        for ic in 0..k {
+            for s in 0..spatial_size {
+                let src_idx = (b * k + ic) * spatial_size + s;
+                let dst_idx = b * spatial_size * k + s * k + ic;
+                x_t_buf[dst_idx] = unsafe { *x_ptr.add(src_idx) };
             }
         }
+    }
 
-        // Transpose input: [batch, in_ch, h, w] -> [batch * h * w, in_ch]
-        let spatial_size = in_height * in_width;
-        for b in 0..batch_size {
-            for ic in 0..k {
-                for s in 0..spatial_size {
-                    let src_idx = (b * k + ic) * spatial_size + s;
-                    let dst_idx = b * spatial_size * k + s * k + ic;
-                    x_t_buf[dst_idx] = unsafe { *x_ptr.add(src_idx) };
-                }
+    // Use BLAS for [n, k] @ [k, m] = [n, m]
+    let result_slice = &mut result_buf[..n * m];
+    matmul_blas_with_transpose_into(x_t_buf, w_t_buf, result_slice, n, k, m, false, false);
+
+    // Reshape result [n, m] -> [batch, out_ch, h, w] and add bias
+    for b in 0..batch_size {
+        for oc in 0..m {
+            let bval = bias_data.map_or(0.0, |b| b[oc]);
+            for s in 0..spatial_size {
+                let src_idx = b * spatial_size * m + s * m + oc;
+                let dst_idx = (b * m + oc) * spatial_size + s;
+                unsafe { *out_ptr.add(dst_idx) = result_slice[src_idx] + bval };
             }
         }
+    }
 
-        // Use BLAS for [n, k] @ [k, m] = [n, m]
-        let result_slice = &mut result_buf[..n * m];
-        matmul_blas_with_transpose_into(x_t_buf, w_t_buf, result_slice, n, k, m, false, false);
-
-        // Reshape result [n, m] -> [batch, out_ch, h, w] and add bias
-        for b in 0..batch_size {
-            for oc in 0..m {
-                let bval = bias_data.map_or(0.0, |b| b[oc]);
-                for s in 0..spatial_size {
-                    let src_idx = b * spatial_size * m + s * m + oc;
-                    let dst_idx = (b * m + oc) * spatial_size + s;
-                    unsafe { *out_ptr.add(dst_idx) = result_slice[src_idx] + bval };
-                }
-            }
-        }
-
-        output
-    })
+    output
 }
 
 // Winograd F(2x2, 3x3) is disabled for now due to overhead from transform operations
@@ -8570,99 +8599,100 @@ fn conv2d_im2col(
     let gemm_size = if use_gemm { col_rows * out_channels } else { 0 };
     let total_scratch = col_size + gemm_size;
 
-    // Borrow the thread-local scratch buffer, growing only on the cold path.
-    CONV_SCRATCH.with(|scratch| {
-        let mut buf = scratch.borrow_mut();
-        if buf.len() < total_scratch {
-            buf.resize(total_scratch, 0.0f32);
-        }
-        // Zero only the im2col portion. gemm_out is fully overwritten by BLAS.
-        buf[..col_size].fill(0.0);
-        if gemm_size > 0 {
-            buf[col_size..col_size + gemm_size].fill(0.0);
-        }
+    // Use thread-local scratch buffer to avoid per-call allocation
+    let mut guard = CONV_SCRATCH.with(|cell| cell.borrow_mut());
+    if guard.len() < total_scratch {
+        guard.resize(total_scratch, 0.0);
+    } else {
+        guard[..total_scratch].fill(0.0);
+    }
+    let buf = &mut guard[..total_scratch];
+    let (col_buf, gemm_buf) = buf.split_at_mut(col_size);
+    let col_data: &mut [f32] = col_buf;
 
-        let (col_buf, gemm_buf) = buf.split_at_mut(col_size);
-        let col_data: &mut [f32] = col_buf;
+    // --- im2col extraction ---
+    // Loop order: (ic, kh, kw) instead of (ic, kh, kw).
+    // ic is innermost so that col_data writes are sequential for each
+    // kernel position, and when stride==1 && dilation==1, contiguous
+    // kernel_w floats can be copied from x in one memcpy.
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
 
-        // --- im2col extraction ---
-        // Loop order: (ic, kh, kw) instead of (ic, kh, kw).
-        // ic is innermost so that col_data writes are sequential for each
-        // kernel position, and when stride==1 && dilation==1, contiguous
-        // kernel_w floats can be copied from x in one memcpy.
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
+        let x_usize = x_ptr as usize;
 
-            let x_usize = x_ptr as usize;
+        col_data
+            .par_chunks_mut(col_cols)
+            .enumerate()
+            .for_each(|(row, col_chunk)| {
+                let n = row / (out_height * out_width);
+                let rem = row % (out_height * out_width);
+                let oh = rem / out_width;
+                let ow = rem % out_width;
 
-            col_data
-                .par_chunks_mut(col_cols)
-                .enumerate()
-                .for_each(|(row, col_chunk)| {
-                    let n = row / (out_height * out_width);
-                    let rem = row % (out_height * out_width);
-                    let oh = rem / out_width;
-                    let ow = rem % out_width;
+                // Fast path: stride=1, dilation=1, entire kernel patch in-bounds.
+                // For fixed (n, oh, ow, kh), the kernel_w elements x[n,ic,ih,ow..ow+kw]
+                // are contiguous when stride=1, dilation=1. We can memcpy each row.
+                let fast_path = stride == 1 && dilation == 1;
 
-                    // Fast path: stride=1, dilation=1, entire kernel patch in-bounds.
-                    // For fixed (n, oh, ow, kh), the kernel_w elements x[n,ic,ih,ow..ow+kw]
-                    // are contiguous when stride=1, dilation=1. We can memcpy each row.
-                    let fast_path = stride == 1 && dilation == 1;
+                for ic in 0..in_channels {
+                    let col_base = ic * kernel_height * kernel_width;
 
-                    for ic in 0..in_channels {
-                        let col_base = ic * kernel_height * kernel_width;
+                    if fast_path {
+                        // Optimized path: stride=1, dilation=1
+                        for kh in 0..kernel_height {
+                            let ih = oh + kh;
 
-                        if fast_path {
-                            // Optimized path: stride=1, dilation=1
-                            for kh in 0..kernel_height {
-                                let ih = oh + kh;
-
-                                if ih >= padding && ih < padding + in_height {
-                                    let x_ih = ih - padding;
-                                    let x_row_base = (n * in_channels + ic) * in_height * in_width
+                            if ih >= padding && ih < padding + in_height {
+                                let x_ih = ih - padding;
+                                let x_row_base =
+                                    (n * in_channels + ic) * in_height * in_width
                                         + x_ih * in_width;
 
-                                    let iw_start = ow;
-                                    if iw_start >= padding
-                                        && iw_start + kernel_width <= padding + in_width
-                                    {
-                                        // Entire row in-bounds: use memcpy
-                                        let x_iw_start = iw_start - padding;
-                                        let x_src = x_row_base + x_iw_start;
-                                        let col_dst_base = col_base + kh * kernel_width;
-                                        unsafe {
-                                            std::ptr::copy_nonoverlapping(
-                                                (x_usize as *const f32).add(x_src),
-                                                col_chunk.as_mut_ptr().add(col_dst_base),
-                                                kernel_width,
-                                            );
-                                        }
-                                    } else {
-                                        // Boundary: per-element
-                                        for kw in 0..kernel_width {
-                                            let iw = ow + kw;
-                                            if iw >= padding && iw < padding + in_width {
-                                                let x_iw = iw - padding;
-                                                let col_col = col_base + kh * kernel_width + kw;
-                                                unsafe {
-                                                    col_chunk[col_col] = *((x_usize as *const f32)
-                                                        .add(x_row_base + x_iw));
-                                                }
+                                let iw_start = ow;
+                                if iw_start >= padding
+                                    && iw_start + kernel_width <= padding + in_width
+                                {
+                                    // Entire row in-bounds: use memcpy
+                                    let x_iw_start = iw_start - padding;
+                                    let x_src = x_row_base + x_iw_start;
+                                    let col_dst_base = col_base + kh * kernel_width;
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(
+                                            (x_usize as *const f32).add(x_src),
+                                            col_chunk.as_mut_ptr().add(col_dst_base),
+                                            kernel_width,
+                                        );
+                                    }
+                                } else {
+                                    // Boundary: per-element
+                                    for kw in 0..kernel_width {
+                                        let iw = ow + kw;
+                                        if iw >= padding && iw < padding + in_width {
+                                            let x_iw = iw - padding;
+                                            let col_col = col_base + kh * kernel_width + kw;
+                                            unsafe {
+                                                col_chunk[col_col] = *((x_usize as *const f32)
+                                                    .add(x_row_base + x_iw));
                                             }
                                         }
                                     }
                                 }
                             }
-                        } else {
-                            // General path: arbitrary stride/dilation
+                        }
+                    } else {
+                        // General path: arbitrary stride/dilation
+                        for ic in 0..in_channels {
+                            let col_base = ic * kernel_height * kernel_width;
+
                             for kh in 0..kernel_height {
                                 let ih = oh * stride + kh * dilation;
 
                                 if ih >= padding && ih < padding + in_height {
                                     let x_ih = ih - padding;
-                                    let x_row_base = (n * in_channels + ic) * in_height * in_width
-                                        + x_ih * in_width;
+                                    let x_row_base =
+                                        (n * in_channels + ic) * in_height * in_width
+                                            + x_ih * in_width;
 
                                     for kw in 0..kernel_width {
                                         let iw = ow * stride + kw * dilation;
@@ -8679,60 +8709,62 @@ fn conv2d_im2col(
                             }
                         }
                     }
-                });
-        }
+                }
+            });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for n in 0..batch_size {
+            for oh in 0..out_height {
+                for ow in 0..out_width {
+                    let col_row = (n * out_height + oh) * out_width + ow;
+                    let col_chunk = &mut col_data[col_row * col_cols..(col_row + 1) * col_cols];
 
-        #[cfg(not(feature = "parallel"))]
-        {
-            for n in 0..batch_size {
-                for oh in 0..out_height {
-                    for ow in 0..out_width {
-                        let col_row = (n * out_height + oh) * out_width + ow;
-                        let col_chunk = &mut col_data[col_row * col_cols..(col_row + 1) * col_cols];
+                    let fast_path = stride == 1 && dilation == 1;
 
-                        let fast_path = stride == 1 && dilation == 1;
+                    for ic in 0..in_channels {
+                        let col_base = ic * kernel_height * kernel_width;
 
-                        for ic in 0..in_channels {
-                            let col_base = ic * kernel_height * kernel_width;
+                        if fast_path {
+                            for kh in 0..kernel_height {
+                                let ih = oh + kh;
 
-                            if fast_path {
-                                for kh in 0..kernel_height {
-                                    let ih = oh + kh;
+                                if ih >= padding && ih < padding + in_height {
+                                    let x_ih = ih - padding;
+                                    let x_row_base =
+                                        (n * in_channels + ic) * in_height * in_width
+                                            + x_ih * in_width;
 
-                                    if ih >= padding && ih < padding + in_height {
-                                        let x_ih = ih - padding;
-                                        let x_row_base =
-                                            (n * in_channels + ic) * in_height * in_width
-                                                + x_ih * in_width;
-
-                                        let iw_start = ow;
-                                        if iw_start >= padding
-                                            && iw_start + kernel_width <= padding + in_width
-                                        {
-                                            let x_iw_start = iw_start - padding;
-                                            let x_src = x_row_base + x_iw_start;
-                                            let col_dst_base = col_base + kh * kernel_width;
-                                            unsafe {
-                                                std::ptr::copy_nonoverlapping(
-                                                    x_ptr.add(x_src),
-                                                    col_chunk.as_mut_ptr().add(col_dst_base),
-                                                    kernel_width,
-                                                );
-                                            }
-                                        } else {
-                                            for kw in 0..kernel_width {
-                                                let iw = ow + kw;
-                                                if iw >= padding && iw < padding + in_width {
-                                                    let x_iw = iw - padding;
-                                                    let col_col = col_base + kh * kernel_width + kw;
-                                                    col_chunk[col_col] =
-                                                        unsafe { *x_ptr.add(x_row_base + x_iw) };
+                                    if ow == 0 && ow + kernel_width <= in_width {
+                                        let x_iw_start = ow;
+                                        let x_src = x_row_base + x_iw_start;
+                                        let col_dst_base = col_base + kh * kernel_width;
+                                        unsafe {
+                                            std::ptr::copy_nonoverlapping(
+                                                (x_ptr as *const f32).add(x_src),
+                                                col_chunk.as_mut_ptr().add(col_dst_base),
+                                                kernel_width,
+                                            );
+                                        }
+                                    } else {
+                                        for kw in 0..kernel_width {
+                                            let iw = ow + kw;
+                                            if iw >= padding && iw < padding + in_width {
+                                                let x_iw = iw - padding;
+                                                let col_col = col_base + kh * kernel_width + kw;
+                                                unsafe {
+                                                    col_chunk[col_col] = *((x_ptr as *const f32)
+                                                        .add(x_row_base + x_iw));
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            } else {
+                            }
+                        } else {
+                            for ic in 0..in_channels {
+                                let col_base = ic * kernel_height * kernel_width;
+
                                 for kh in 0..kernel_height {
                                     let ih = oh * stride + kh * dilation;
 
@@ -8747,8 +8779,10 @@ fn conv2d_im2col(
                                             if iw >= padding && iw < padding + in_width {
                                                 let x_iw = iw - padding;
                                                 let col_col = col_base + kh * kernel_width + kw;
-                                                col_chunk[col_col] =
-                                                    unsafe { *x_ptr.add(x_row_base + x_iw) };
+                                                unsafe {
+                                                    col_chunk[col_col] = *((x_ptr as *const f32)
+                                                        .add(x_row_base + x_iw));
+                                                }
                                             }
                                         }
                                     }
@@ -8759,6 +8793,7 @@ fn conv2d_im2col(
                 }
             }
         }
+    }
 
         // Weight data: direct borrow, no copy. BLAS only reads from it.
         let w_data: &[f32] = unsafe {
@@ -8900,11 +8935,10 @@ fn conv2d_im2col(
                     let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
                     unsafe { *out_ptr.add(out_idx) = sum + bias_val };
                 }
-            }
         }
+    }
 
-        output
-    })
+    output
 }
 
 /// Fused layer norm forward: single-pass mean/variance, normalize, apply weight/bias.
@@ -10397,6 +10431,11 @@ fn register_kernels() {
         DispatchKey::Cpu,
         batch_norm_kernel as KernelFn,
     );
+    register(
+        "fused_conv_bn_silu",
+        DispatchKey::Cpu,
+        fused_conv_bn_silu_kernel as KernelFn,
+    );
     register("embedding", DispatchKey::Cpu, embedding_kernel as KernelFn);
     register("zeros", DispatchKey::Cpu, zeros_kernel as KernelFn);
     register("ones", DispatchKey::Cpu, ones_kernel as KernelFn);
@@ -10453,6 +10492,8 @@ fn register_kernels() {
         DispatchKey::Cpu,
         flash_attention_kernel as KernelFn,
     );
+    register("nms", DispatchKey::Cpu, nms_kernel as KernelFn);
+    register("gather", DispatchKey::Cpu, gather_kernel as KernelFn);
 }
 
 #[cfg(test)]
