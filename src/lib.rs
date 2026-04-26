@@ -12,6 +12,8 @@ mod tensor;
 mod train;
 mod residual;
 
+
+
 // Native packed precision modules
 pub mod dtypes;
 pub mod swar;
@@ -1383,6 +1385,78 @@ struct Conv3d {
     inner: nn::conv::Conv3d,
 }
 
+#[pyclass]
+struct PyFusedConvBnSilu {
+    inner: nn::fused::FusedConvBnSilu,
+}
+
+#[pymethods]
+impl PyFusedConvBnSilu {
+    #[new]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, eps=1e-5, bias=true))]
+    fn new(
+        in_channels: i64,
+        out_channels: i64,
+        kernel_size: i64,
+        stride: i64,
+        padding: i64,
+        dilation: i64,
+        groups: i64,
+        eps: f64,
+        bias: bool,
+    ) -> Self {
+        PyFusedConvBnSilu {
+            inner: nn::fused::FusedConvBnSilu::new(
+                in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
+            ),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner
+            .parameters()
+            .into_iter()
+            .map(PyTensor::from_tensor)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner
+            .named_parameters()
+            .into_iter()
+            .map(|(name, tensor)| (name, PyTensor::from_tensor(tensor)))
+            .collect()
+    }
+
+    fn set_conv_weight(&mut self, weight: PyTensor) {
+        self.inner.set_conv_weight(weight.inner);
+    }
+
+    fn set_conv_bias(&mut self, bias: PyTensor) {
+        self.inner.set_conv_bias(bias.inner);
+    }
+
+    fn set_bn_weight(&mut self, weight: PyTensor) {
+        self.inner.set_bn_weight(weight.inner);
+    }
+
+    fn set_bn_bias(&mut self, bias: PyTensor) {
+        self.inner.set_bn_bias(bias.inner);
+    }
+
+    fn set_bn_running_mean(&mut self, running_mean: PyTensor) {
+        self.inner.set_bn_running_mean(running_mean.inner);
+    }
+
+    fn set_bn_running_var(&mut self, running_var: PyTensor) {
+        self.inner.set_bn_running_var(running_var.inner);
+    }
+}
+
 #[pymethods]
 impl Conv3d {
     #[new]
@@ -2650,6 +2724,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ConvTranspose2d>()?;
     m.add_class::<Conv1d>()?;
     m.add_class::<Conv3d>()?;
+    m.add_class::<PyFusedConvBnSilu>()?;
     m.add_class::<ResidualBlock>()?;
     m.add_class::<LayerNorm>()?;
     m.add_class::<BatchNorm1d>()?;

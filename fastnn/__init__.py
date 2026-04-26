@@ -43,6 +43,7 @@ __all__ = [
     "LearningRateScheduler",
     "CSVLogger",
     "DataParallel",
+    "FusedConvBnSilu",
     "models",
     # Exception hierarchy
     "FastnnError",
@@ -435,6 +436,12 @@ RMSprop = _core.PyRMSprop
 Elu = _core.Elu
 Mish = _core.Mish
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
+
+# Import fused layers if available
+try:
+    FusedConvBnSilu = _core.PyFusedConvBnSilu
+except AttributeError:
+    FusedConvBnSilu = None
 
 
 def import_onnx(onnx_path: str, fnn_path: str):
