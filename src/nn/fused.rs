@@ -1,7 +1,11 @@
+use crate::autograd::{self, AutogradMeta, Edge, Node};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use std::sync::Arc;
 
+/// Fused Conv2d + BatchNorm2d + SiLU layer.
+/// **Note:** This layer is designed for inference only. Backward/autograd is not supported.
 pub struct FusedConvBnSilu {
     pub conv_weight: Tensor,
     pub conv_bias: Option<Tensor>,
@@ -117,6 +121,28 @@ impl FusedConvBnSilu {
     }
 }
 
+// Backward node for FusedConvBnSilu - panics because this layer is inference-only
+#[allow(dead_code)]
+struct FusedConvBnSiluBackward;
+
+impl Node for FusedConvBnSiluBackward {
+    fn apply(&self, _: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        panic!("FusedConvBnSilu does not support autograd; use separate Conv, BatchNorm, and activation layers for training");
+    }
+    fn next_edges(&self) -> &[Edge] {
+        &[]
+    }
+    fn num_inputs(&self) -> usize {
+        0
+    }
+    fn name(&self) -> &str {
+        "FusedConvBnSiluBackward"
+    }
+    fn inputs(&self) -> &[Tensor] {
+        &[]
+    }
+}
+
 impl Module for FusedConvBnSilu {
     fn forward(&self, x: &Tensor) -> Tensor {
         let default_bias = Tensor::from_scalar(0.0);
@@ -141,7 +167,18 @@ impl Module for FusedConvBnSilu {
             ],
         );
 
-        result[0].clone()
+        let output = result[0].clone();
+
+        // Attach a backward node that panics if gradient is requested.
+        // This layer is intended for inference only.
+        if self.conv_weight.requires_grad() || self.bn_weight.requires_grad() || self.bn_bias.requires_grad() || self.conv_bias.as_ref().map_or(false, |b| b.requires_grad()) {
+            let backward = Arc::new(FusedConvBnSiluBackward);
+            let mut meta = AutogradMeta::new_non_leaf(false);
+            meta.grad_fn = Some(backward);
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {

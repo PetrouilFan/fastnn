@@ -1,6 +1,8 @@
+use crate::autograd::{self, AutogradMeta};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use std::sync::Arc;
 
 pub struct MaxPool2d {
     #[allow(dead_code)]
@@ -46,7 +48,22 @@ impl Module for MaxPool2d {
                 &self.dilation_scalar,
             ],
         );
-        result[0].clone()
+        let output = result[0].clone();
+        let indices = result[1].clone();
+
+        if x.requires_grad() {
+            let edges = autograd::make_edge(x);
+            let backward = Arc::new(autograd::MaxPool2dBackward::new(
+                x.shape().clone(),
+                indices,
+                edges,
+            ));
+            let mut meta = AutogradMeta::new_non_leaf(false);
+            meta.grad_fn = Some(backward);
+            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {

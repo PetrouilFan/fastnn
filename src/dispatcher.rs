@@ -55,8 +55,8 @@ pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Result<Vec<
     Ok(kernel(args))
 }
 
-pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Vec<Tensor> {
-    try_dispatch(op, key, args).expect("dispatch failed")
+pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Result<Vec<Tensor>, FastnnError> {
+    try_dispatch(op, key, args).map_err(|e| FastnnError::Computation(e))
 }
 
 pub fn list_registered_ops() -> Vec<String> {

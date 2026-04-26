@@ -33,7 +33,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     }
 
     // Both are CPU - delegate to optimized CPU kernel
-    crate::dispatcher::dispatch("add", crate::dispatcher::DispatchKey::Cpu, args)
+    crate::dispatcher::dispatch("add", crate::dispatcher::DispatchKey::Cpu, args).unwrap()
 }
 
 fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
