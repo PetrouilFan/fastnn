@@ -42,16 +42,7 @@ thread_local! {
     };
 }
 
-/// Ensure DAZ/FTZ is enabled on the current thread (no-op on non-x86).
-#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
-#[inline(always)]
-fn ensure_daz_ftz() {
-    DAZ_FTZ_INIT.with(|_| {});
-}
 
-#[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86"))))]
-#[inline(always)]
-fn ensure_daz_ftz() {}
 
 // Thread-local reusable scratch buffer for conv2d operations.
 // Avoids per-call heap allocations for im2col and GEMM output buffers.
@@ -60,12 +51,7 @@ fn ensure_daz_ftz() {}
 // rayon's par_chunks_mut guarantees non-overlapping mutable slices, so no
 // aliasing occurs even when the borrow spans a parallel section. The buffer
 // is never shared across threads.
-thread_local! {
-    static CONV_SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
-}
 
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use std::arch::x86_64::*;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -4395,7 +4381,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 }
 
 #[inline]
-fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+pub fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
@@ -8059,7 +8045,7 @@ fn im2col_kernel(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[inline]
 fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
-    ensure_daz_ftz();
+    enable_daz_ftz();
     let mut sum = 0.0f32;
     let mut i = 0;
 
@@ -9245,8 +9231,16 @@ fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         x.device(),
     );
 
+    // Indices tensor: flat index into input (batch, channel, height, width) where max was found
+    let indices = Tensor::zeros(
+        vec![batch_size, channels, out_height, out_width],
+        DType::I64,
+        x.device(),
+    );
+
     let x_ptr = x.data_ptr() as *const f32;
     let out_ptr = output.data_ptr() as *mut f32;
+    let idx_ptr = indices.data_ptr() as *mut i64;
 
     let total_bc = batch_size as usize * channels as usize;
     let stride_usize = stride as usize;
@@ -9264,24 +9258,29 @@ fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         use rayon::prelude::*;
         let x_usize = x_ptr as usize;
         let out_usize = out_ptr as usize;
+        let idx_usize = idx_ptr as usize;
         (0..total_bc).into_par_iter().for_each(|bc| {
             let b = bc / channels_usize;
             let c = bc % channels_usize;
             let x_p = x_usize as *const f32;
             let o_p = out_usize as *mut f32;
+            let i_p = idx_usize as *mut i64;
             for oh in 0..out_h {
                 for ow in 0..out_w {
                     let mut max_val = f32::NEG_INFINITY;
+                    let mut max_idx: i64 = 0;
                     for kh in 0..kernel_size_usize {
                         for kw in 0..kernel_size_usize {
                             let h = (oh * stride_usize + kh * dilation_usize) as i64 - pad;
                             let w = (ow * stride_usize + kw * dilation_usize) as i64 - pad;
                             if h >= 0 && h < in_h as i64 && w >= 0 && w < in_w as i64 {
-                                let idx = ((b * channels_usize + c) * in_h + h as usize) * in_w
-                                    + w as usize;
+                                let h_usize = h as usize;
+                                let w_usize = w as usize;
+                                let idx = ((b * channels_usize + c) * in_h + h_usize) * in_w + w_usize;
                                 let val = unsafe { *x_p.add(idx) };
                                 if val > max_val {
                                     max_val = val;
+                                    max_idx = idx as i64;
                                 }
                             }
                         }
@@ -9289,6 +9288,7 @@ fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let out_idx = ((b * channels_usize + c) * out_h + oh) * out_w + ow;
                     unsafe {
                         *o_p.add(out_idx) = max_val;
+                        *i_p.add(out_idx) = max_idx;
                     }
                 }
             }
@@ -9302,6 +9302,7 @@ fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 for oh in 0..out_height as usize {
                     for ow in 0..out_width as usize {
                         let mut max_val = f32::NEG_INFINITY;
+                        let mut max_idx: i64 = 0;
 
                         for kh in 0..kernel_size as usize {
                             for kw in 0..kernel_size as usize {
@@ -9311,13 +9312,16 @@ fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                                     - padding;
 
                                 if h >= 0 && h < in_height && w >= 0 && w < in_width {
+                                    let h_usize = h as usize;
+                                    let w_usize = w as usize;
                                     let idx = ((b * channels as usize + c) * in_height as usize
-                                        + h as usize)
+                                        + h_usize)
                                         * in_width as usize
-                                        + w as usize;
+                                        + w_usize;
                                     let val = unsafe { *x_ptr.add(idx) };
                                     if val > max_val {
                                         max_val = val;
+                                        max_idx = idx as i64;
                                     }
                                 }
                             }
@@ -9326,14 +9330,17 @@ fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         let out_idx = ((b * channels as usize + c) * out_height as usize + oh)
                             * out_width as usize
                             + ow;
-                        unsafe { *out_ptr.add(out_idx) = max_val };
+                        unsafe {
+                            *out_ptr.add(out_idx) = max_val;
+                            *idx_ptr.add(out_idx) = max_idx;
+                        }
                     }
                 }
             }
         }
     }
 
-    vec![output]
+    vec![output, indices]
 }
 
 fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -9411,7 +9418,7 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         n: usize,
     ) -> (f32, f32) {
         use std::arch::x86_64::*;
-        ensure_daz_ftz();
+        enable_daz_ftz();
 
         if is_x86_feature_detected!("avx2") && n >= 8 {
             // AVX2 SIMD path - process 8 elements at a time
@@ -9628,7 +9635,7 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
-fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+pub fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let weight = args[0];
     let indices = args[1];
 
@@ -10492,6 +10499,20 @@ fn register_kernels() {
         DispatchKey::Cpu,
         flash_attention_kernel as KernelFn,
     );
+pub fn nms_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    // TODO: Implement proper NMS
+    // For now, return empty tensor as placeholder
+    vec![Tensor::zeros(vec![0], DType::F32, Device::Cpu)]
+}
+
+// Gather kernel
+pub fn gather_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    // TODO: Implement proper gather
+    // For now, return empty tensor as placeholder
+    vec![Tensor::zeros(vec![0], DType::F32, Device::Cpu)]
+}
+}
+
     register("nms", DispatchKey::Cpu, nms_kernel as KernelFn);
     register("gather", DispatchKey::Cpu, gather_kernel as KernelFn);
 }
@@ -12208,5 +12229,7 @@ fn elu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             alpha * (x_data[i].exp() - 1.0)
         };
     }
-    vec![Tensor::from_vec(output_data, x.shape())]
+    vec![Tensor::from_vec(output_data, x.shape())];
 }
+
+// Non-maximum suppression kernel

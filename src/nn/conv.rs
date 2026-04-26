@@ -398,20 +398,46 @@ impl Module for Conv1d {
             &[
                 &x_4d,
                 &self.weight,
+                &Tensor::from_scalar(0.0), // no bias in kernel
                 &Tensor::from_scalar(self.stride as f32),
                 &Tensor::from_scalar(self.padding as f32),
                 &Tensor::from_scalar(self.dilation as f32),
                 &Tensor::from_scalar(1.0), // groups
             ],
         );
-        let mut output = result[0].clone();
+        let conv_output = result[0].clone();
 
-        // Add bias
-        if let Some(ref bias) = self.bias {
+        // Attach Conv2dBackward to conv_output if any input requires grad
+        if x.requires_grad() || self.weight.requires_grad() {
+            let edges = {
+                let mut edges = autograd::make_edge(x);
+                edges.extend(autograd::make_edge(&self.weight));
+                edges
+            };
+            let backward = autograd::Conv2dBackward::new(
+                x.clone(),
+                self.weight.clone(),
+                false, // has_bias=false, bias is added separately
+                self.stride,
+                self.padding,
+                self.dilation,
+                1, // groups=1 for Conv1d
+                edges,
+            );
+            let mut meta = autograd::AutogradMeta::new_non_leaf(false);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut conv_output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+
+        // Add bias separately
+        let output = if let Some(ref bias) = self.bias {
             let bias_shape = vec![1, self.out_channels, 1, 1];
             let bias_reshaped = bias.reshape(bias_shape);
-            output = output.add(&bias_reshaped);
-        }
+            conv_output.add(&bias_reshaped)
+        } else {
+            conv_output
+        };
 
         // Reshape back to 3D: [B, C_out, 1, L_out] -> [B, C_out, L_out]
         let out_shape = output.shape();
@@ -545,20 +571,46 @@ impl Module for Conv3d {
             &[
                 &x_4d,
                 &self.weight,
+                &Tensor::from_scalar(0.0), // no bias in kernel
                 &Tensor::from_scalar(self.stride as f32),
                 &Tensor::from_scalar(self.padding as f32),
                 &Tensor::from_scalar(self.dilation as f32),
                 &Tensor::from_scalar(1.0), // groups
             ],
         );
-        let mut output = result[0].clone();
+        let conv_output = result[0].clone();
 
-        // Add bias
-        if let Some(ref bias) = self.bias {
+        // Attach Conv2dBackward to conv_output if any input requires grad
+        if x.requires_grad() || self.weight.requires_grad() {
+            let edges = {
+                let mut edges = autograd::make_edge(x);
+                edges.extend(autograd::make_edge(&self.weight));
+                edges
+            };
+            let backward = autograd::Conv2dBackward::new(
+                x.clone(),
+                self.weight.clone(),
+                false, // has_bias=false, bias is added separately
+                self.stride,
+                self.padding,
+                self.dilation,
+                1, // groups=1 for Conv3d
+                edges,
+            );
+            let mut meta = autograd::AutogradMeta::new_non_leaf(false);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut conv_output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+
+        // Add bias separately
+        let output = if let Some(ref bias) = self.bias {
             let bias_shape = vec![1, self.out_channels, 1, 1];
             let bias_reshaped = bias.reshape(bias_shape);
-            output = output.add(&bias_reshaped);
-        }
+            conv_output.add(&bias_reshaped)
+        } else {
+            conv_output
+        };
 
         // Reshape back to 5D: [B*D, C_out, H_out, W_out] -> [B, C_out, D, H_out, W_out]
         let out_shape = output.shape();

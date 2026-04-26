@@ -7,14 +7,7 @@ use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
-
-type PosCacheKey = (i64, i64, i64);
-
-fn pos_encoding_cache() -> &'static Mutex<HashMap<PosCacheKey, Tensor>> {
-    static CACHE: OnceLock<Mutex<HashMap<PosCacheKey, Tensor>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
+use std::sync::Mutex;
 
 pub struct TransformerBlock {
     pub self_attn: MultiHeadAttention,
@@ -170,6 +163,7 @@ pub struct TransformerEncoder {
     #[allow(dead_code)]
     pub num_classes: i64,
     training: AtomicBool,
+    positional_cache: Mutex<HashMap<(i64, i64), Tensor>>,
 }
 
 impl TransformerEncoder {
@@ -205,6 +199,7 @@ impl TransformerEncoder {
             max_seq_len,
             num_classes,
             training: AtomicBool::new(true),
+            positional_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -231,10 +226,10 @@ impl TransformerEncoder {
 
         let x = self.embedding.forward(token_ids);
 
-        // Cached positional encoding - reuse for same (batch, seq_len, d_model)
-        let cache_key = (batch, seq_len, self.pos_embedding.weight.shape()[1]);
+        // Cached positional encoding - reuse for same (batch, seq_len)
+        let cache_key = (batch, seq_len);
         let positions_expanded = {
-            let mut cache = pos_encoding_cache().lock().unwrap();
+            let mut cache = self.positional_cache.lock().unwrap();
             if let Some(cached) = cache.get(&cache_key) {
                 cached.clone()
             } else {
