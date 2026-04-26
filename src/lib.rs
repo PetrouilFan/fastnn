@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 mod autograd;
 mod dispatcher;
+mod error;
 mod io;
 mod iterator;
 mod kernels;
@@ -254,16 +255,16 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.view(shape))
     }
 
-    fn reshape(&self, shape: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.reshape(shape))
+    fn reshape(&self, shape: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.reshape(shape)?))
     }
 
-    fn transpose(&self, dim0: i64, dim1: i64) -> PyTensor {
-        PyTensor::from_tensor(self.inner.transpose(dim0 as usize, dim1 as usize))
+    fn transpose(&self, dim0: i64, dim1: i64) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.transpose(dim0 as usize, dim1 as usize)?))
     }
 
-    fn permute(&self, dims: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.permute(dims))
+    fn permute(&self, dims: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.permute(dims)?))
     }
 
     fn unsqueeze(&self, dim: i64) -> PyTensor {
@@ -274,8 +275,8 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.squeeze(dim.map(|d| d as usize)))
     }
 
-    fn flip(&self, dim: i32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.flip(dim))
+    fn flip(&self, dim: i32) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.flip(dim)?))
     }
 
     fn maximum(&self, other: &PyTensor) -> PyTensor {
@@ -286,8 +287,8 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.log_softmax(dim))
     }
 
-    fn repeat(&self, repeats: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.repeat(&repeats))
+    fn repeat(&self, repeats: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.repeat(&repeats)?))
     }
 
     fn where_tensor(&self, condition: &PyTensor, other: &PyTensor) -> PyTensor {
@@ -686,11 +687,17 @@ fn relu(py: Python<'_>, a: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
+fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
     use crate::dispatcher::{device_to_dispatch_key, dispatch};
-    let dispatch_key = device_to_dispatch_key(a.inner.device());
-    let result = dispatch("fused_add_relu", dispatch_key, &[&a.inner, &b.inner]);
-    PyTensor::from_tensor(result.into_iter().next().unwrap())
+    use crate::kernels::cpu;
+    if let Device::Cpu = a.inner.device() {
+        let result = cpu::fused_add_relu_kernel(&[&a.inner, &b.inner]);
+        Ok(PyTensor::from_tensor(result.into_iter().next().unwrap()))
+    } else {
+        let dispatch_key = device_to_dispatch_key(a.inner.device());
+        let result = dispatch("fused_add_relu", dispatch_key, &[&a.inner, &b.inner])?;
+        Ok(PyTensor::from_tensor(result.into_iter().next().unwrap()))
+    }
 }
 
 #[pyfunction]
@@ -748,49 +755,55 @@ fn softmax(py: Python<'_>, a: &PyTensor, dim: i32) -> PyTensor {
 }
 
 #[pyfunction]
-fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
+fn log_softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
     use dispatcher::dispatch;
     let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
     let result = dispatch(
         "log_softmax",
         dispatch_key,
         &[&a.inner, &Tensor::from_scalar(dim as f32)],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    )?;
+    Ok(PyTensor::from_tensor(result[0].clone()))
 }
 
 #[pyfunction]
-fn embedding(weight: &PyTensor, indices: &PyTensor) -> PyTensor {
+fn embedding(weight: &PyTensor, indices: &PyTensor) -> PyResult<PyTensor> {
     use dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(weight.inner.device());
-    let result = dispatch("embedding", dispatch_key, &[&weight.inner, &indices.inner]);
-    PyTensor::from_tensor(result[0].clone())
+    use crate::kernels::cpu;
+    if let Device::Cpu = weight.inner.device() {
+        let result = cpu::embedding_kernel(&[&weight.inner, &indices.inner]);
+        Ok(PyTensor::from_tensor(result[0].clone()))
+    } else {
+        let dispatch_key = dispatcher::device_to_dispatch_key(weight.inner.device());
+        let result = dispatch("embedding", dispatch_key, &[&weight.inner, &indices.inner])?;
+        Ok(PyTensor::from_tensor(result[0].clone()))
+    }
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
+fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
     let dim = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.sum(dim, keepdim))
+    Ok(PyTensor::from_tensor(a.inner.sum(dim, keepdim)))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
+fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
     let dim = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.mean(dim, keepdim))
+    Ok(PyTensor::from_tensor(a.inner.mean(dim, keepdim)))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
+fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
     let dim = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.max(dim, keepdim))
+    Ok(PyTensor::from_tensor(a.inner.max(dim, keepdim)))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
+fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
     let dim = dim.unwrap_or(0);
     use dispatcher::dispatch;
     let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
@@ -802,13 +815,13 @@ fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
             &Tensor::from_scalar(dim as f32),
             &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
         ],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    )?;
+    Ok(PyTensor::from_tensor(result[0].clone()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None))]
-fn argmax(a: &PyTensor, dim: Option<i32>) -> PyTensor {
+fn argmax(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
     let dim = dim.unwrap_or(0);
     use dispatcher::dispatch;
     let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
@@ -820,13 +833,13 @@ fn argmax(a: &PyTensor, dim: Option<i32>) -> PyTensor {
             &Tensor::from_scalar(dim as f32),
             &Tensor::from_scalar(1.0),
         ],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    )?;
+    Ok(PyTensor::from_tensor(result[0].clone()))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None))]
-fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
+fn argmin(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
     let dim = dim.unwrap_or(0);
     use dispatcher::dispatch;
     let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
@@ -838,8 +851,8 @@ fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
             &Tensor::from_scalar(dim as f32),
             &Tensor::from_scalar(1.0),
         ],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    )?;
+    Ok(PyTensor::from_tensor(result[0].clone()))
 }
 
 #[pyfunction]
@@ -2845,33 +2858,33 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
+fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
     let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    PyTensor::from_tensor(tensor::Tensor::cat(&tensors, dim))
+    Ok(PyTensor::from_tensor(tensor::Tensor::cat(&tensors, dim)?))
 }
 
 #[pyfunction]
-fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyTensor {
-    let result = dispatcher::dispatch("bce_with_logits", dispatcher::DispatchKey::Cpu, &[&input.inner, &target.inner]);
-    PyTensor::from_tensor(result[0].clone())
+fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyResult<PyTensor> {
+    let result = dispatcher::dispatch("bce_with_logits", dispatcher::DispatchKey::Cpu, &[&input.inner, &target.inner])?;
+    Ok(PyTensor::from_tensor(result[0].clone()))
 }
 
 #[pyfunction]
-fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyTensor {
+fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTensor> {
     let delta_t = tensor::Tensor::from_scalar(delta);
-    let result = dispatcher::dispatch("huber_loss", dispatcher::DispatchKey::Cpu, &[&input.inner, &target.inner, &delta_t]);
-    PyTensor::from_tensor(result[0].clone())
+    let result = dispatcher::dispatch("huber_loss", dispatcher::DispatchKey::Cpu, &[&input.inner, &target.inner, &delta_t])?;
+    Ok(PyTensor::from_tensor(result[0].clone()))
 }
 
 #[pyfunction]
-fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
+fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyResult<PyTensor> {
     let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    PyTensor::from_tensor(tensor::einsum(equation, &tensors))
+    Ok(PyTensor::from_tensor(tensor::einsum(equation, &tensors)?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (q, k, v, scale = None, causal = None))]
-fn flash_attention(q: &PyTensor, k: &PyTensor, v: &PyTensor, scale: Option<f32>, causal: Option<bool>) -> PyTensor {
+fn flash_attention(q: &PyTensor, k: &PyTensor, v: &PyTensor, scale: Option<f32>, causal: Option<bool>) -> PyResult<PyTensor> {
     let scale = scale.unwrap_or((q.inner.shape()[3] as f32).sqrt().recip());
     let causal = if causal.unwrap_or(false) { 1.0 } else { 0.0 };
     let args = [
@@ -2881,8 +2894,8 @@ fn flash_attention(q: &PyTensor, k: &PyTensor, v: &PyTensor, scale: Option<f32>,
         &tensor::Tensor::from_scalar(scale),
         &tensor::Tensor::from_scalar(causal),
     ];
-    let result = dispatcher::dispatch("flash_attention", dispatcher::DispatchKey::Cpu, &args);
-    PyTensor::from_tensor(result[0].clone())
+    let result = dispatcher::dispatch("flash_attention", dispatcher::DispatchKey::Cpu, &args)?;
+    Ok(PyTensor::from_tensor(result[0].clone()))
 }
 
 #[pyfunction]

@@ -1,7 +1,9 @@
 use crate::nn::linear::Linear;
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 pub struct MultiHeadAttention {
     pub q_proj: Option<Linear>,
@@ -19,6 +21,8 @@ pub struct MultiHeadAttention {
     pub qkv_proj: Option<Linear>,
     // Pre-allocated scale tensor to avoid per-forward allocation
     scale: f32,
+    // Causal mask cache
+    causal_mask: Mutex<HashMap<i64, Tensor>>,
 }
 
 impl MultiHeadAttention {
@@ -54,6 +58,7 @@ impl MultiHeadAttention {
             training: AtomicBool::new(true),
             qkv_proj: None,
             scale: 1.0 / (head_dim as f32).sqrt(),
+            causal_mask: Mutex::new(HashMap::new()),
         }
     }
 
@@ -85,6 +90,7 @@ impl MultiHeadAttention {
             training: AtomicBool::new(true),
             qkv_proj: Some(qkv_proj),
             scale: 1.0 / (head_dim as f32).sqrt(),
+            causal_mask: Mutex::new(HashMap::new()),
         }
     }
 
@@ -166,15 +172,22 @@ impl MultiHeadAttention {
 
         // 4. Apply causal mask if enabled
         if self.causal {
-            // Create upper triangular mask with -inf above the diagonal
-            let mut mask_data = vec![0.0f32; (seq_len * seq_len) as usize];
-            for i in 0..seq_len as usize {
-                for j in (i + 1)..seq_len as usize {
-                    mask_data[i * seq_len as usize + j] = f32::NEG_INFINITY;
+            let mut cache = self.causal_mask.lock().unwrap();
+            let mask = if let Some(m) = cache.get(&seq_len) {
+                m
+            } else {
+                // Create upper triangular mask with large negative value above diagonal
+                let mut mask_data = vec![0.0f32; (seq_len * seq_len) as usize];
+                for i in 0..seq_len as usize {
+                    for j in (i + 1)..seq_len as usize {
+                        mask_data[i * seq_len as usize + j] = -1e4_f32; // avoid NaN
+                    }
                 }
-            }
-            let mask = Tensor::from_vec(mask_data, vec![seq_len, seq_len]);
-            attn_scores = attn_scores.add(&mask);
+                let m = Tensor::from_vec(mask_data, vec![seq_len, seq_len]);
+                cache.insert(seq_len, m.clone());
+                m
+            };
+            attn_scores = attn_scores.add(mask);
         }
 
         // 5. Apply softmax along the last dimension (seq_len)

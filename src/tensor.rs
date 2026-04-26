@@ -851,7 +851,7 @@ impl Tensor {
         let nbytes = (numel * dtype.size() as i64) as usize;
 
         let storage = match device {
-            Device::Cpu => get_storage_pool().acquire(nbytes, device),
+            Device::Cpu => get_storage_pool().acquire(nbytes, device, dtype),
             Device::Wgpu(device_id) => {
                 use crate::kernels::gpu::get_context;
                 let ctx = get_context(device_id);
@@ -884,7 +884,7 @@ impl Tensor {
         let nbytes = (numel * dtype.size() as i64) as usize;
 
         let storage = match device {
-            Device::Cpu => get_storage_pool().acquire(nbytes, device),
+            Device::Cpu => get_storage_pool().acquire(nbytes, device, dtype),
             Device::Wgpu(device_id) => {
                 // For GPU empty, we create a new buffer (uninitialized)
                 // Note: GPU buffers are not zeroed by default
