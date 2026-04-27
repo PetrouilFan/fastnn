@@ -1,13 +1,9 @@
 import contextlib
 import fastnn._core as _core
-from typing import Any, List, Optional, Sequence, Tuple, Union
 
 # Expose classes from _core
 PyTransformerEncoder = _core.PyTransformerEncoder
 Linear = _core.Linear
-Sequential = _core.Sequential_
-ModuleList = _core.ModuleList
-MaxPool2d = _core.MaxPool2d
 Conv2d = _core.Conv2d
 LayerNorm = _core.LayerNorm
 BatchNorm1d = _core.BatchNorm1d
@@ -15,105 +11,9 @@ Dropout = _core.Dropout
 Embedding = _core.Embedding
 ReLU = _core.ReLU
 Gelu = _core.Gelu
-GELU = _core.Gelu
 Sigmoid = _core.Sigmoid
 Tanh = _core.Tanh
 SiLU = _core.SiLU
-
-# Re-export basic tensor operations from _core
-add = _core.add
-sub = _core.sub
-mul = _core.mul
-div = _core.div
-matmul = _core.matmul
-neg = _core.neg
-abs = _core.abs
-exp = _core.exp
-log = _core.log
-sqrt = _core.sqrt
-pow = _core.pow
-clamp = _core.clamp
-relu = _core.relu
-fused_add_relu = _core.fused_add_relu
-gelu = _core.gelu
-sigmoid = _core.sigmoid
-tanh = _core.tanh
-silu = _core.silu
-softmax = _core.softmax
-log_softmax = _core.log_softmax
-embedding = _core.embedding
-argmax = _core.argmax
-argmin = _core.argmin
-sum = _core.sum
-mean = _core.mean
-max = _core.max
-min = _core.min
-mse_loss = _core.mse_loss
-cross_entropy_loss = _core.cross_entropy_loss
-
-# Re-export additional layer classes from _core
-ConvTranspose2d = _core.ConvTranspose2d
-Conv1d = _core.Conv1d
-Conv3d = _core.Conv3d
-einsum = _core.einsum
-flash_attention = _core.flash_attention
-ResidualBlock = _core.ResidualBlock
-clip_grad_norm_ = _core.clip_grad_norm_
-clip_grad_value_ = _core.clip_grad_value_
-Dropout2d = _core.Dropout2d
-Upsample = _core.Upsample
-RMSNorm = _core.RMSNorm
-GroupNorm = _core.GroupNorm
-BatchNorm2d = _core.BatchNorm2d
-LeakyReLU = _core.LeakyReLU
-Softplus = _core.Softplus
-Hardswish = _core.Hardswish
-cat = _core.cat
-RMSprop = _core.PyRMSprop
-Elu = _core.Elu
-Mish = _core.Mish
-AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
-
-# Fused layers (if available)
-try:
-    FusedConvBnSilu = _core.PyFusedConvBnSilu
-except AttributeError:
-    FusedConvBnSilu = None
-
-def tensor(data: Union[List, Tuple, Any], shape: Optional[Sequence[int]] = None,
-           device: Optional[str] = None) -> Any:
-    """Create a tensor from nested list/tuple data.
-    
-    Args:
-        data: Nested list or tuple of numeric values.
-        shape: Optional explicit shape. If not provided, inferred from data.
-        device: Optional device string (e.g., "cpu", "gpu").
-    
-    Returns:
-        A new tensor.
-    
-    Examples:
-        >>> t = tensor([[1, 2], [3, 4]], shape=[2, 2])
-        >>> t.shape
-        [2, 2]
-    """
-    # Flatten data
-    def _flatten(nested):
-        result = []
-        for item in nested:
-            if isinstance(item, (list, tuple)):
-                result.extend(_flatten(item))
-            else:
-                result.append(item)
-        return result
-    
-    flat_data = _flatten(data)
-    if shape is None:
-        # Infer shape from data? Not possible without knowing nesting structure.
-        # Require shape argument for safety.
-        raise ValueError("shape argument is required for tensor()")
-    return _core.tensor_from_data(flat_data, list(shape), device)
-
 
 # Additional classes that may be needed
 # Note: MultiHeadAttention is in Rust but not exposed via PyO3 yet

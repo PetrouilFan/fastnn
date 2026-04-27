@@ -64,23 +64,28 @@ impl Optimizer for SGD {
 
             if momentum != 0.0 {
                 let velocity = &mut self.velocity[i];
-                // velocity = momentum * velocity + grad
-                velocity.mul_scalar_(momentum);
-                velocity.add_(&grad);
 
                 if self.nesterov {
                     // Nesterov: param -= lr * (grad + momentum * velocity)
-                    // where velocity is already updated
-                    // So we compute: grad + momentum * velocity
+                    // where velocity is the velocity BEFORE update
+                    // So we compute: grad + momentum * velocity (old)
                     let mut nesterov_grad = grad.clone();
                     let mom_v = velocity.mul_scalar(momentum);
                     nesterov_grad.add_(&mom_v);
+
+                    // Now update velocity: velocity = momentum * velocity + grad
+                    velocity.mul_scalar_(momentum);
+                    velocity.add_(&grad);
 
                     // param = param - lr * nesterov_grad
                     nesterov_grad.mul_scalar_(lr);
                     param.sub_(&nesterov_grad);
                 } else {
-                    // Standard SGD: param = param - lr * velocity
+                    // Standard SGD: velocity = momentum * velocity + grad
+                    velocity.mul_scalar_(momentum);
+                    velocity.add_(&grad);
+
+                    // param = param - lr * velocity
                     let mut vel = velocity.clone();
                     vel.mul_scalar_(lr);
                     param.sub_(&vel);

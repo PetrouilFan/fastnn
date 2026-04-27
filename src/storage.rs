@@ -92,8 +92,7 @@ pub struct CpuStorage {
     pub nbytes: usize,
     // Lazy GPU buffer cache: maps device_id -> GPU buffer
     // This avoids repeated CPU->GPU transfers for tensors used in multiple GPU ops
-    // Wrapped in Arc so clones of Storage share the same cache
-    pub gpu_buffer_cache: Arc<RwLock<HashMap<usize, Arc<wgpu::Buffer>>>>,
+    pub gpu_buffer_cache: RwLock<HashMap<usize, Arc<wgpu::Buffer>>>,
 }
 
 // GPU storage variant - keeps data on GPU
@@ -119,8 +118,7 @@ impl Clone for Storage {
             Storage::Cpu(cpu) => Storage::Cpu(CpuStorage {
                 data: cpu.data.clone(),
                 nbytes: cpu.nbytes,
-                // Share the GPU buffer cache across clones to avoid redundant allocations
-                gpu_buffer_cache: cpu.gpu_buffer_cache.clone(),
+                gpu_buffer_cache: RwLock::new(HashMap::new()),
             }),
             Storage::Wgpu(gpu) => Storage::Wgpu(GpuStorage {
                 buffer: gpu.buffer.clone(),
@@ -148,7 +146,7 @@ impl Storage {
         Storage::Cpu(CpuStorage {
             data,
             nbytes,
-            gpu_buffer_cache: Arc::new(RwLock::new(HashMap::new())),
+            gpu_buffer_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -168,44 +166,35 @@ impl Storage {
 
     pub fn from_vec<T: bytemuck::Pod>(data: Vec<T>, dtype: DType, device: Device) -> Self {
         let nbytes = std::mem::size_of::<T>() * data.len();
-        // Convert the Vec<T> into a Vec<u8> without copying the data
-        // SAFETY: T: Pod guarantees that the in-memory representation of T is
-        // equivalent to a [u8; size_of::<T>()], and that the layout is safe to reinterpret.
-        let (ptr, len, cap) = data.into_raw_parts();
-        let byte_len = len * std::mem::size_of::<T>();
-        let byte_cap = cap * std::mem::size_of::<T>();
-        let data = unsafe { Arc::new(Vec::from_raw_parts(ptr as *mut u8, byte_len, byte_cap)) };
-
-        if let Some(stats) = ALLOC_STATS.get() {
-            stats.add_alloc(nbytes);
-        }
-
         match device {
-            Device::Cpu => Storage::Cpu(CpuStorage {
-                data,
-                nbytes,
-                gpu_buffer_cache: Arc::new(RwLock::new(HashMap::new())),
-            }),
+            Device::Cpu => {
+                let mut storage = Storage::new_cpu(dtype, nbytes);
+                if let Storage::Cpu(cpu) = &mut storage {
+                    let ptr = Arc::make_mut(&mut cpu.data).as_mut_ptr() as *mut T;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+                    }
+                }
+                storage
+            }
             Device::Wgpu(_device_id) => {
-                // For GPU, create CPU storage first; actual GPU buffer will be created on-demand
-                Storage::Cpu(CpuStorage {
-                    data,
-                    nbytes,
-                    gpu_buffer_cache: Arc::new(RwLock::new(HashMap::new())),
-                })
+                // For GPU, create CPU storage first
+                // The actual GPU buffer will be created on-demand when needed
+                let mut cpu_storage = Storage::new_cpu(dtype, nbytes);
+                if let Storage::Cpu(cpu) = &mut cpu_storage {
+                    let ptr = Arc::make_mut(&mut cpu.data).as_mut_ptr() as *mut T;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+                    }
+                }
+                cpu_storage
             }
         }
     }
 
     pub fn as_ptr<T>(&self) -> *const T {
         match self {
-            Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr() as *const T;
-                debug_assert!(ptr as usize % std::mem::align_of::<T>() == 0,
-                    "Misaligned pointer: expected alignment of {} for type {}, got {:p}",
-                    std::mem::align_of::<T>(), std::any::type_name::<T>(), ptr);
-                ptr
-            }
+            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr() as *const T,
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use to_cpu() first.")
             }
@@ -216,11 +205,7 @@ impl Storage {
         match self {
             Storage::Cpu(cpu) => {
                 let data = Arc::make_mut(&mut cpu.data);
-                let ptr = data.as_mut_ptr() as *mut T;
-                debug_assert!(ptr as usize % std::mem::align_of::<T>() == 0,
-                    "Misaligned pointer: expected alignment of {} for type {}, got {:p}",
-                    std::mem::align_of::<T>(), std::any::type_name::<T>(), ptr);
-                ptr
+                data.as_mut_ptr() as *mut T
             }
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use to_cpu() first.")

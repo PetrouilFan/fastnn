@@ -350,16 +350,71 @@ class _PrefetchIterator:
         metrics: Optional _Metrics instance for tracking wait times.
     """
 
+    def __init__(
+        self,
+        indices_iter: Iterator[List[int]],
+        dataset: Dataset,
+        collate_fn: Callable,
+        prefetch_size: int = 2,
+        metrics: Optional[_Metrics] = None,
+    ):
+        self.indices_iter = indices_iter
+        self.dataset = dataset
+        self.collate_fn = collate_fn
+        self.prefetch_size = max(1, prefetch_size)
+        self.metrics = metrics
+        self.queue: queue.Queue = queue.Queue(maxsize=prefetch_size)
+        self.done = threading.Event()
+        self.error: Optional[Exception] = None
+        self.thread = threading.Thread(target=self._prefetch_worker, daemon=True)
+        self._batch_start_time = time.monotonic()
+        self.thread.start()
 
-
-
+    def _prefetch_worker(self) -> None:
+        """Background thread that prepares batches and puts them in the queue."""
+        self._batch_start_time = time.monotonic()
+        try:
+            for batch_idx in self.indices_iter:
+                samples = [self.dataset[i] for i in batch_idx]
+                batch = self.collate_fn(samples)
+                self.queue.put(batch, timeout=60)
+                self._batch_start_time = time.monotonic()
+        except Exception as e:
+            self.error = e
+        finally:
+            self.done.set()
 
     def __iter__(self) -> "_PrefetchIterator":
         return self
 
+    def __next__(self) -> tuple:
+        batch_start = time.monotonic()
 
+        if self.done.is_set() and self.queue.empty():
+            if self.error is not None:
+                raise self.error
+            raise StopIteration
 
+        try:
+            batch = self.queue.get(timeout=60)
+            wait_ms = (time.monotonic() - batch_start) * 1000
 
+            if self.metrics is not None:
+                self.metrics.record(wait_ms=wait_ms, batch_ms=wait_ms)
+
+            return batch
+        except queue.Empty:
+            if self.done.is_set() and self.queue.empty():
+                if self.error is not None:
+                    raise self.error
+                raise StopIteration
+            raise
+
+    def cleanup(self) -> None:
+        """Signal the prefetch thread to stop and wait for it."""
+        self.done.set()
+        if self.thread.is_alive():
+            self.thread.join(timeout=5)
 
 
 class _MultiProcessIterator:
@@ -396,16 +451,66 @@ class _MultiProcessIterator:
         self.prefetch_size = max(1, prefetch_size)
         self.metrics = metrics
 
+        self._executor = ThreadPoolExecutor(max_workers=num_workers)
+        self._result_queue: queue.Queue = queue.Queue(maxsize=prefetch_size)
+        self._done = threading.Event()
+        self._error: Optional[Exception] = None
+        self._started = False
+        self._batch_iter = None
 
+    def _start_workers(self) -> None:
+        """Start worker thread."""
+        if self._executor is None:
+            return
 
+        self._batch_iter = iter(self.indices_iter)
 
+        def worker_fn():
+            try:
+                for batch_indices in self._batch_iter:
+                    result = _worker_fetch_batch(
+                        self.dataset, batch_indices, self.collate_fn
+                    )
+                    self._result_queue.put(result, timeout=60)
+                self._done.set()
+            except Exception as e:
+                self._error = e
+                self._done.set()
+
+        self._thread = threading.Thread(target=worker_fn, daemon=True)
+        self._thread.start()
+        self._started = True
 
     def __iter__(self) -> "_MultiProcessIterator":
         return self
 
+    def __next__(self) -> tuple:
+        if not self._started:
+            self._start_workers()
 
+        batch_start = time.monotonic()
 
+        try:
+            result = self._result_queue.get(timeout=60)
+            wait_ms = (time.monotonic() - batch_start) * 1000
 
+            if self.metrics is not None:
+                self.metrics.record(wait_ms=wait_ms, batch_ms=wait_ms)
+
+            return result
+        except queue.Empty:
+            if self._done.is_set() and self._result_queue.empty():
+                if self._error is not None:
+                    raise self._error
+                raise StopIteration
+            raise
+
+    def cleanup(self) -> None:
+        """Shutdown the executor."""
+        self._done.set()
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None
 
 
 def _worker_fetch_batch(
