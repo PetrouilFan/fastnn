@@ -98,6 +98,7 @@ impl Optimizer for Muon {
             let is_2d = shape.len() == 2;
 
             // Apply weight decay: effective_grad = grad + weight_decay * param
+            // This is applied to both 2D and 1D parameters
             let effective_grad = if weight_decay != 0.0 {
                 let mut wd = param.clone();
                 wd.mul_scalar_(weight_decay);
