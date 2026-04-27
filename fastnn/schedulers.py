@@ -13,10 +13,8 @@ Examples:
 """
 
 import math
-import warnings
-from typing import Any, Optional
+from typing import Any
 
-import fastnn._core as _core
 
 
 class LRScheduler:

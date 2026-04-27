@@ -12,8 +12,7 @@ Examples:
     >>> optimizer.step()
 """
 
-import warnings
-from typing import Any, List, Optional, Union
+from typing import Any, List, Union
 
 import fastnn._core as _core
 
