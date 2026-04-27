@@ -4,12 +4,11 @@ Provides functions to save and load models, state dicts, and optimizer states.
 Supports versioned serialization format for backward and forward compatibility.
 """
 
-import warnings
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional
 import numpy as np
 
 from fastnn.core import tensor
-from fastnn._core import FastnnError, IoError
+from fastnn._core import IoError
 from fastnn.serialization_utils import (
     write_tensor,
     read_tensor,
@@ -173,7 +172,6 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
                         grad_tensor = tensor(grad_data.copy().flatten().tolist(), list(grad_data.shape))
                         # Store gradient in autograd metadata if available
                         if hasattr(result[name], 'inner') and hasattr(result[name].inner, 'autograd_meta'):
-                            from fastnn.autograd import AutogradMeta
                             meta = result[name].inner.autograd_meta
                             if meta is not None:
                                 meta.grad = grad_tensor

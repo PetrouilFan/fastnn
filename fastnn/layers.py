@@ -12,11 +12,9 @@ Examples:
     >>> y = layer(x)
 """
 
-import warnings
 from typing import Optional, Tuple, List, Any, Union
 
 import fastnn._core as _core
-from fastnn.core import no_grad, set_seed, set_num_threads, set_default_device, checkpoint
 
 # Re-export Rust layer classes with improved naming (remove 'Py' prefix)
 # We'll keep the original names but also provide aliases without 'Py' for consistency.
