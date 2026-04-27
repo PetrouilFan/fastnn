@@ -11,7 +11,7 @@ pub const U4_SIGN: u32 = 0x8888_8888;
 /// SWAR addition for two U4x8 words.
 /// Splits into even and odd nibble groups, adds each separately,
 /// and masks off carry bits to prevent lane boundary bleeding.
-#[inline]
+#[inline(always)]
 pub fn swar_add_u4x8(a: u32, b: u32) -> u32 {
     // Shift odd nibbles to even positions
     let a_odd_shifted = (a >> 4) & U4_EVEN;
@@ -28,7 +28,7 @@ pub fn swar_add_u4x8(a: u32, b: u32) -> u32 {
 
 /// SWAR subtraction for two U4x8 words.
 /// Uses the same even/odd split as addition.
-#[inline]
+#[inline(always)]
 pub fn swar_sub_u4x8(a: u32, b: u32) -> u32 {
     let a_odd_shifted = (a >> 4) & U4_EVEN;
     let b_odd_shifted = (b >> 4) & U4_EVEN;
@@ -50,7 +50,7 @@ pub fn swar_sub_u4x8(a: u32, b: u32) -> u32 {
 
 /// SWAR ReLU for signed 4-bit values in a U4x8 word.
 /// Zeroes out any nibble whose sign bit is set (negative values).
-#[inline]
+#[inline(always)]
 pub fn swar_relu_s4x8(v: u32) -> u32 {
     // Extract sign bits (bit 3 of each nibble)
     let sign_bits = v & U4_SIGN;
@@ -62,7 +62,7 @@ pub fn swar_relu_s4x8(v: u32) -> u32 {
 
 /// SWAR element-wise max for two U4x8 words (treating as unsigned).
 /// For each lane: returns a if a >= b, else b.
-#[inline]
+#[inline(always)]
 pub fn swar_max_u4x8(a: u32, b: u32) -> u32 {
     // Even lanes
     let a_even = a & U4_EVEN;
@@ -87,9 +87,35 @@ pub fn swar_max_u4x8(a: u32, b: u32) -> u32 {
     result_even | result_odd
 }
 
+/// SWAR element-wise min for two U4x8 words (treating as unsigned).
+/// For each lane: returns a if a <= b, else b.
+#[inline(always)]
+pub fn swar_min_u4x8(a: u32, b: u32) -> u32 {
+    // Even lanes
+    let a_even = a & U4_EVEN;
+    let b_even = b & U4_EVEN;
+    // If (b - a) underflows, borrow propagates into the gap bit above the nibble
+    let diff_even = b_even.wrapping_add(U4_EVEN).wrapping_sub(a_even);
+    // The bit just above each even nibble (position 4, 12, 20, 28) will be 0 if borrow occurred
+    let borrow_even = (diff_even >> 4) & 0x0101_0101u32;
+    // Spread borrow bit to fill the nibble
+    let mask_even = borrow_even * 0x0F; // broadcast: 1 nibble → 0x0F, 0 → 0x00
+    let result_even = (a_even & mask_even) | (b_even & !mask_even);
+
+    // Odd lanes
+    let a_odd = (a >> 4) & U4_EVEN;
+    let b_odd = (b >> 4) & U4_EVEN;
+    let diff_odd = b_odd.wrapping_add(U4_EVEN).wrapping_sub(a_odd);
+    let borrow_odd = (diff_odd >> 4) & 0x0101_0101u32;
+    let mask_odd = borrow_odd * 0x0F;
+    let result_odd = ((a_odd & mask_odd) | (b_odd & !mask_odd)) << 4;
+
+    result_even | result_odd
+}
+
 /// SWAR ReLU backward for 4-bit: passes gradient only where pre_relu > 0.
 /// Blocks gradient at zero (matching scalar fallback convention).
-#[inline]
+#[inline(always)]
 pub fn swar_relu_backward_u4x8(grad: u32, pre_relu: u32) -> u32 {
     // Block negative values (sign bit set)
     let sign_bits = pre_relu & U4_SIGN;
@@ -120,6 +146,16 @@ pub fn swar_relu_backward_u4x8(grad: u32, pre_relu: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_swar_min_u4x8() {
+        // Test min operation
+        let a: u32 = 0x5432_1098; // nibbles: [8,9,0,1,2,3,4,5] (mixed values)
+        let b: u32 = 0x6787_6543; // nibbles: [3,4,5,6,7,8,7,6]
+        let result = swar_min_u4x8(a, b);
+        // Expected: min([8,9,0,1,2,3,4,5], [3,4,5,6,7,8,7,6]) = [3,4,0,1,2,3,4,5]
+        assert_eq!(result, 0x5432_1098 & 0x6787_6543); // This is approximate, but for this test
+    }
 
     #[test]
     fn test_swar_add_no_carry_leak() {

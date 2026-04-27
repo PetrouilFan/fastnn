@@ -57,7 +57,9 @@ pub fn gemv_packed_tiled<T: PackedWord>(
     }
 
     // Allocate micro-kernel buffer once (outside K and M loops)
-    let mut row_bufs: MicroKernelBuf = Box::new([[0.0f32; KC]; MR]);
+    let mut row_bufs = MicroKernelBuf {
+        data: Box::new([[0.0f32; KC]; MR]),
+    };
 
     // Process K in cache blocks
     let mut k_offset = 0;
@@ -76,7 +78,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
                 k_offset,
                 k_end,
                 k_packed,
-                &mut row_bufs,
+                &mut row_bufs.data,
             );
             row += MR;
         }
@@ -111,7 +113,10 @@ pub fn gemv_packed_tiled<T: PackedWord>(
 
 /// Generic micro-kernel: unpack weights, then call type-specific FMA.
 /// Micro-kernel buffer passed by caller to avoid allocation in inner loop.
-type MicroKernelBuf = Box<[[f32; KC]; MR]>;
+#[repr(align(32))]
+struct MicroKernelBuf {
+    data: Box<[[f32; KC]; MR]>,
+}
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
@@ -236,8 +241,10 @@ pub fn gemv_u8x4_tiled(
         *o = 0.0;
     }
 
-    // Allocate buffer once (outside loops)
-    let mut row_bufs: Box<[[f32; KC]; MR]> = Box::new([[0.0f32; KC]; MR]);
+    // Allocate aligned buffer once (outside loops)
+    let mut row_bufs = MicroKernelBuf {
+        data: Box::new([[0.0f32; KC]; MR]),
+    };
 
     let mut k_offset = 0;
     while k_offset < k {
@@ -265,26 +272,26 @@ pub fn gemv_u8x4_tiled(
             {
                 if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                     unsafe {
-                        micro_kernel_avx2(
-                            &row_bufs,
-                            &activation[k_offset..k_end],
-                            &mut output[row..row + MR],
-                            k_end - k_offset,
-                        );
+            micro_kernel_avx2(
+                &row_bufs.data,
+                &activation[k_offset..k_end],
+                &mut output[row..row + MR],
+                k_end - k_offset,
+            );
                     }
                 } else {
-                    scalar_micro_kernel(
-                        &row_bufs,
-                        &activation[k_offset..k_end],
-                        &mut output[row..row + MR],
-                        k_end - k_offset,
-                    );
+                scalar_micro_kernel(
+                    &row_bufs.data,
+                    &activation[k_offset..k_end],
+                    &mut output[row..row + MR],
+                    k_end - k_offset,
+                );
                 }
             }
             #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 scalar_micro_kernel(
-                    &row_bufs,
+                    &row_bufs.data,
                     &activation[k_offset..k_end],
                     &mut output[row..row + MR],
                     k_end - k_offset,

@@ -16,6 +16,15 @@ pub struct Adam {
     pub step: Vec<u64>,
     // Track which parameters should skip weight decay (e.g., biases, LayerNorm)
     pub no_decay: Vec<bool>,
+    // Pre-allocated buffers to avoid clones
+    pub temp_grad_scaled: Vec<Tensor>,
+    pub temp_grad_sq: Vec<Tensor>,
+    pub temp_m_hat: Vec<Tensor>,
+    pub temp_v_hat: Vec<Tensor>,
+    pub temp_update: Vec<Tensor>,
+    // Fused bias corrections: bias_correction1 = 1 - beta1^t, etc.
+    pub bias_correction1: Vec<f64>,
+    pub bias_correction2: Vec<f64>,
 }
 
 impl Adam {
@@ -46,6 +55,30 @@ impl Adam {
         let step: Vec<u64> = vec![0; n];
         // By default, all parameters get weight decay
         let no_decay = vec![false; n];
+        // Pre-allocate buffers
+        let temp_grad_scaled: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_grad_sq: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_m_hat: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_v_hat: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_update: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        // Initialize bias corrections to 1.0 (at step 0)
+        let bias_correction1 = vec![1.0; n];
+        let bias_correction2 = vec![1.0; n];
 
         Adam {
             params,
@@ -59,6 +92,13 @@ impl Adam {
             v_hat,
             step,
             no_decay,
+            temp_grad_scaled,
+            temp_grad_sq,
+            temp_m_hat,
+            temp_v_hat,
+            temp_update,
+            bias_correction1,
+            bias_correction2,
         }
     }
 
@@ -99,27 +139,25 @@ impl Optimizer for Adam {
             };
 
             self.step[i] += 1;
-            let t = self.step[i] as f64;
+
+            // Update bias corrections incrementally
+            self.bias_correction1[i] = 1.0 - beta1 as f64 * (1.0 - self.bias_correction1[i]);
+            self.bias_correction2[i] = 1.0 - beta2 as f64 * (1.0 - self.bias_correction2[i]);
 
             // m = beta1 * m + (1 - beta1) * grad
-            // Equivalent to: m = beta1 * m + grad * (1 - beta1)
-            // Rewrite as: m = beta1 * m + grad * beta1_complement
-            // Where beta1_complement = 1 - beta1
             let beta1_c = 1.0 - beta1;
             self.m[i].mul_scalar_(beta1);
-            // Create temp for (1-beta1)*grad to avoid clobbering grad
-            let mut grad_scaled = grad.clone();
-            grad_scaled.mul_scalar_(beta1_c);
-            self.m[i].add_(&grad_scaled);
+            self.temp_grad_scaled[i].copy_from_(grad);
+            self.temp_grad_scaled[i].mul_scalar_(beta1_c);
+            self.m[i].add_(&self.temp_grad_scaled[i]);
 
             // v = beta2 * v + (1 - beta2) * grad^2
             let beta2_c = 1.0 - beta2;
             self.v[i].mul_scalar_(beta2);
-            let mut grad_sq = grad.clone();
-            // grad_sq = grad * grad (element-wise square)
+            self.temp_grad_sq[i].copy_from_(grad);
             {
-                let numel = grad_sq.inner.numel() as usize;
-                let ptr = grad_sq.data_ptr_f32_mut();
+                let numel = self.temp_grad_sq[i].inner.numel() as usize;
+                let ptr = self.temp_grad_sq[i].data_ptr_f32_mut();
                 for j in 0..numel {
                     unsafe {
                         let val = *ptr.add(j);
@@ -127,46 +165,34 @@ impl Optimizer for Adam {
                     }
                 }
             }
-            grad_sq.mul_scalar_(beta2_c);
-            self.v[i].add_(&grad_sq);
-
-            let bias_correction1 = (1.0 - beta1.powf(t as f32)) as f64;
-            let bias_correction2 = (1.0 - beta2.powf(t as f32)) as f64;
+            self.temp_grad_sq[i].mul_scalar_(beta2_c);
+            self.v[i].add_(&self.temp_grad_sq[i]);
 
             // m_hat = m / bias_correction1
-            let mut m_hat = self.m[i].clone();
-            m_hat.mul_scalar_((1.0 / bias_correction1) as f32);
+            self.temp_m_hat[i].copy_from_(&self.m[i]);
+            self.temp_m_hat[i].mul_scalar_((1.0 / self.bias_correction1[i]) as f32);
 
             // v_hat = v / bias_correction2 (with optional amsgrad)
-            let mut v_hat = if self.amsgrad {
-                // AMSGrad: v_hat = max(v_hat, v) element-wise
-                let v_hat_curr = &self.v_hat[i];
-                let v_curr = &self.v[i];
-                let max_v = v_hat_curr.maximum(v_curr);
-                self.v_hat[i] = max_v.clone();
-                max_v
+            if self.amsgrad {
+                self.temp_v_hat[i].copy_from_max(&self.v_hat[i], &self.v[i]);
+                self.v_hat[i].copy_from_(&self.temp_v_hat[i]);
             } else {
-                self.v[i].clone()
-            };
-            v_hat.mul_scalar_((1.0 / bias_correction2) as f32);
+                self.temp_v_hat[i].copy_from_(&self.v[i]);
+            }
+            self.temp_v_hat[i].mul_scalar_((1.0 / self.bias_correction2[i]) as f32);
 
             // update = m_hat / (sqrt(v_hat) + eps)
-            // Compute sqrt in-place then add eps
-            {
-                let numel = v_hat.inner.numel() as usize;
-                let ptr = v_hat.data_ptr_f32_mut();
-                for j in 0..numel {
-                    unsafe {
-                        *ptr.add(j) = (*ptr.add(j)).sqrt() + eps;
-                    }
-                }
-            }
-            // update = m_hat / v_hat (where v_hat is now sqrt(v_hat) + eps)
-            m_hat.div_(&v_hat);
+            self.temp_update[i].copy_from_(&self.temp_m_hat[i]);
+            self.temp_update[i].div_(&{
+                // Compute sqrt(v_hat) + eps in temp
+                self.temp_v_hat[i].sqrt_();
+                self.temp_v_hat[i].add_scalar_(eps);
+                &self.temp_v_hat[i]
+            });
 
             // param = param - lr * update
-            m_hat.mul_scalar_(lr);
-            param.sub_(&m_hat);
+            self.temp_update[i].mul_scalar_(lr);
+            param.sub_(&self.temp_update[i]);
 
             // Weight decay: param = param - lr * weight_decay * param
             // Skip weight decay for parameters marked as no_decay (e.g., biases)
@@ -203,12 +229,41 @@ impl Optimizer for Adam {
             .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
             .collect();
 
+        let temp_grad_scaled: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_grad_sq: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_m_hat: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_v_hat: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_update: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let bias_correction1 = vec![1.0; params.len()];
+        let bias_correction2 = vec![1.0; params.len()];
+
         self.m.extend(m);
         self.v.extend(v);
         self.v_hat.extend(v_hat);
         self.step.extend(vec![0u64; params.len()]);
-        // New params default to not skipping weight decay
         self.no_decay.extend(vec![false; params.len()]);
+        self.temp_grad_scaled.extend(temp_grad_scaled);
+        self.temp_grad_sq.extend(temp_grad_sq);
+        self.temp_m_hat.extend(temp_m_hat);
+        self.temp_v_hat.extend(temp_v_hat);
+        self.temp_update.extend(temp_update);
+        self.bias_correction1.extend(bias_correction1);
+        self.bias_correction2.extend(bias_correction2);
         self.params.extend(params);
     }
 
