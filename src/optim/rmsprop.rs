@@ -113,8 +113,7 @@ impl Optimizer for RMSprop {
             }
 
             // Update square average: avg = alpha * avg + (1 - alpha) * grad^2
-            self.temp_grad_sq[i].copy_from_(grad);
-            self.temp_grad_sq[i].pow_(2.0);
+            self.temp_grad_sq[i] = grad.pow(2.0);
             self.square_avg[i].mul_scalar_(alpha);
             self.temp_grad_sq[i].mul_scalar_(1.0 - alpha);
             self.square_avg[i].add_(&self.temp_grad_sq[i]);
@@ -123,32 +122,29 @@ impl Optimizer for RMSprop {
             if self.centered {
                 // Update grad average
                 self.grad_avg[i].mul_scalar_(alpha);
-                self.temp_update[i].copy_from_(grad);
+                self.temp_update[i] = grad.clone();
                 self.temp_update[i].mul_scalar_(1.0 - alpha);
                 self.grad_avg[i].add_(&self.temp_update[i]);
                 // denom = sqrt(avg - avg_grad^2) + eps
-                self.temp_grad_avg_sq[i].copy_from_(&self.grad_avg[i]);
-                self.temp_grad_avg_sq[i].pow_(2.0);
-                self.temp_denom[i].copy_from_(&self.square_avg[i]);
+                self.temp_grad_avg_sq[i] = self.grad_avg[i].pow(2.0);
+                self.temp_denom[i] = self.square_avg[i].clone();
                 self.temp_denom[i].sub_(&self.temp_grad_avg_sq[i]);
-                self.temp_denom[i].sqrt_();
-                self.temp_denom[i].add_scalar_(eps);
+                self.temp_denom[i] = self.temp_denom[i].sqrt();
+                self.temp_denom[i] = self.temp_denom[i].add_scalar(eps);
             } else {
-                self.temp_denom[i].copy_from_(&self.square_avg[i]);
-                self.temp_denom[i].sqrt_();
-                self.temp_denom[i].add_scalar_(eps);
-            };
+                self.temp_denom[i] = self.square_avg[i].sqrt();
+                self.temp_denom[i] = self.temp_denom[i].add_scalar(eps);
+            }
 
-            // Update with momentum
             if momentum != 0.0 {
                 self.momentum_buf[i].mul_scalar_(momentum);
-                self.temp_update[i].copy_from_(grad);
+                self.temp_update[i] = grad.clone();
                 self.temp_update[i].div_(&self.temp_denom[i]);
                 self.momentum_buf[i].add_(&self.temp_update[i]);
                 self.momentum_buf[i].mul_scalar_(lr);
                 param.sub_(&self.momentum_buf[i]);
             } else {
-                self.temp_update[i].copy_from_(grad);
+                self.temp_update[i] = grad.clone();
                 self.temp_update[i].div_(&self.temp_denom[i]);
                 self.temp_update[i].mul_scalar_(lr);
                 param.sub_(&self.temp_update[i]);

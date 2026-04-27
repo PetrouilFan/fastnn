@@ -78,7 +78,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
                 k_offset,
                 k_end,
                 k_packed,
-                &mut row_bufs.data,
+                &mut row_bufs,
             );
             row += MR;
         }
@@ -118,6 +118,19 @@ struct MicroKernelBuf {
     data: Box<[[f32; KC]; MR]>,
 }
 
+impl std::ops::Index<usize> for MicroKernelBuf {
+    type Output = [f32; KC];
+    fn index(&self, idx: usize) -> &Self::Output {
+        &self.data[idx]
+    }
+}
+
+impl std::ops::IndexMut<usize> for MicroKernelBuf {
+    fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
+        &mut self.data[idx]
+    }
+}
+
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn micro_kernel<T: PackedWord>(
@@ -153,7 +166,7 @@ fn micro_kernel<T: PackedWord>(
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             unsafe {
-                micro_kernel_avx2(row_bufs, activation, output, k_block);
+                micro_kernel_avx2(&row_bufs.data, activation, output, k_block);
             }
             return;
         }

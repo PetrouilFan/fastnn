@@ -35,7 +35,7 @@ blas-src     = { version = "0.10", features = ["openblas"], optional = true }
 libc = "0.2"
 
 [features]
-default = ["simd", "parallel", "simd_avx512"]
+default = ["simd", "parallel", "simd_avx512", "openblas"]
 openblas = ["blas-src/openblas"]
 blas = []
 parallel = []

@@ -75,37 +75,22 @@ impl Optimizer for Lion {
             // Update momentum: m = beta1 * m + (1 - beta1) * grad
             let beta1_c = 1.0 - beta1;
             self.m[i].mul_scalar_(beta1);
-            self.temp_grad_scaled[i].copy_from_(grad);
+            self.temp_grad_scaled[i] = grad.clone();
             self.temp_grad_scaled[i].mul_scalar_(beta1_c);
             self.m[i].add_(&self.temp_grad_scaled[i]);
 
             // Compute sign of (beta2 * m + (1 - beta2) * grad)
-            self.temp_update[i].copy_from_(&self.m[i]);
+            self.temp_update[i] = self.m[i].clone();
             self.temp_update[i].mul_scalar_(beta2);
-            self.temp_grad_scaled2[i].copy_from_(grad);
+            self.temp_grad_scaled2[i] = grad.clone();
             self.temp_grad_scaled2[i].mul_scalar_(1.0 - beta2);
             self.temp_update[i].add_(&self.temp_grad_scaled2[i]);
 
-            // sign(x) = 1 if x > 0, -1 if x < 0, 0 if x == 0
-            {
-                let numel = update.inner.numel() as usize;
-                let ptr = update.data_ptr_f32_mut();
-                for j in 0..numel {
-                    unsafe {
-                        let v = *ptr.add(j);
-                        *ptr.add(j) = if v > 0.0 {
-                            1.0
-                        } else if v < 0.0 {
-                            -1.0
-                        } else {
-                            0.0
-                        };
-                    }
-                }
-            }
+            // Apply sign: sign(x) = 1 if x > 0, -1 if x < 0, 0 if x == 0
+            let signed = self.temp_update[i].sign();
+            self.temp_update[i] = signed;
 
             // param = param - lr * sign(update)
-            self.temp_update[i].sign_();
             self.temp_update[i].mul_scalar_(lr);
             param.sub_(&self.temp_update[i]);
         }

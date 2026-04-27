@@ -82,7 +82,7 @@ impl Optimizer for SGD {
 
             if weight_decay != 0.0 {
                 // grad = grad + weight_decay * param
-                self.temp_wd[i].copy_from_(param);
+                self.temp_wd[i] = param.clone();
                 self.temp_wd[i].mul_scalar_(weight_decay);
                 grad.add_(&self.temp_wd[i]);
             }
@@ -92,14 +92,14 @@ impl Optimizer for SGD {
 
                 if self.nesterov {
                     // Nesterov: param -= lr * (grad + momentum * velocity)
-                    self.temp_nesterov_grad[i].copy_from_(grad);
-                    self.temp_mom_v[i].copy_from_(velocity);
+                    self.temp_nesterov_grad[i] = grad.clone();
+                    self.temp_mom_v[i] = velocity.clone();
                     self.temp_mom_v[i].mul_scalar_(momentum);
                     self.temp_nesterov_grad[i].add_(&self.temp_mom_v[i]);
 
                     // Now update velocity: velocity = momentum * velocity + grad
                     velocity.mul_scalar_(momentum);
-                    velocity.add_(grad);
+                    velocity.add_(&grad);
 
                     // param = param - lr * nesterov_grad
                     self.temp_nesterov_grad[i].mul_scalar_(lr);
@@ -107,17 +107,17 @@ impl Optimizer for SGD {
                 } else {
                     // Standard SGD: velocity = momentum * velocity + grad
                     velocity.mul_scalar_(momentum);
-                    velocity.add_(grad);
+                    velocity.add_(&grad);
 
                     // param = param - lr * velocity
-                    self.temp_vel[i].copy_from_(velocity);
+                    self.temp_vel[i] = velocity.clone();
                     self.temp_vel[i].mul_scalar_(lr);
                     param.sub_(&self.temp_vel[i]);
                 }
             } else {
                 // No momentum: simple update
                 grad.mul_scalar_(lr);
-                param.sub_(grad);
+                param.sub_(&grad);
             }
         }
     }
