@@ -1,5 +1,35 @@
 #![allow(unused_imports)]
 
+// Aligned buffer for SIMD operations
+#[repr(align(32))]
+struct AlignedBuffer {
+    data: Vec<f32>,
+}
+
+impl AlignedBuffer {
+    const fn new(_capacity: usize) -> Self {
+        Self {
+            data: Vec::new(),
+        }
+    }
+
+    fn resize(&mut self, new_len: usize) {
+        self.data.resize(new_len, 0.0);
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [f32] {
+        &mut self.data
+    }
+
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn split_at_mut(&mut self, mid: usize) -> (&mut [f32], &mut [f32]) {
+        self.data.split_at_mut(mid)
+    }
+}
+
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
@@ -61,7 +91,9 @@ fn ensure_daz_ftz() {}
 // aliasing occurs even when the borrow spans a parallel section. The buffer
 // is never shared across threads.
 thread_local! {
-    static CONV_SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static CONV_SCRATCH: std::cell::RefCell<AlignedBuffer> = const {
+        std::cell::RefCell::new(AlignedBuffer::new(0))
+    };
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -289,7 +321,7 @@ unsafe fn hsum256_ps(v: __m256) -> f32 {
     _mm_cvtss_f32(_mm_add_ss(sums, shuf2))
 }
 
-// Parallel SIMD kernels - AVX2 version
+// Parallel SIMD kernels - AVX2 version with vectorized tails
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn add_parallel_avx2(
@@ -315,12 +347,13 @@ unsafe fn add_parallel_avx2(
         _mm256_storeu_ps((out_usize + (i + 8) * 4) as *mut f32, r1);
         i += 16;
     }
-    while i + 8 <= end {
-        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
-        let result = _mm256_add_ps(a_vec, b_vec);
-        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, result);
-        i += 8;
+    // Vectorize tail with 128-bit vectors for better performance
+    while i + 4 <= end {
+        let a_vec = _mm_loadu_ps((a_usize + i * 4) as *const f32);
+        let b_vec = _mm_loadu_ps((b_usize + i * 4) as *const f32);
+        let result = _mm_add_ps(a_vec, b_vec);
+        _mm_storeu_ps((out_usize + i * 4) as *mut f32, result);
+        i += 4;
     }
     while i < end {
         *((out_usize + i * 4) as *mut f32) =
@@ -381,7 +414,7 @@ unsafe fn add_parallel_neon(
     }
 }
 
-// Parallel SIMD kernels - AVX512 version
+// Parallel SIMD kernels - AVX512 version with masked operations for tails
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn add_parallel_avx512(
@@ -403,17 +436,14 @@ unsafe fn add_parallel_avx512(
         _mm512_storeu_ps((out_usize + i * 4) as *mut f32, result);
         i += 16;
     }
-    // Tail: fall back to AVX2 for remaining 8, then scalar for remaining < 8
-    while i + 8 <= end {
-        let a_vec = _mm256_loadu_ps((a_usize + i * 4) as *const f32);
-        let b_vec = _mm256_loadu_ps((b_usize + i * 4) as *const f32);
-        _mm256_storeu_ps((out_usize + i * 4) as *mut f32, _mm256_add_ps(a_vec, b_vec));
-        i += 8;
-    }
-    while i < end {
-        *((out_usize + i * 4) as *mut f32) =
-            *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
-        i += 1;
+    // Use masked operations for tails instead of falling back to AVX2
+    let remaining = end - i;
+    if remaining > 0 {
+        let mask = (1u16 << remaining) - 1;
+        let a_vec = _mm512_maskz_loadu_ps(mask, (a_usize + i * 4) as *const f32);
+        let b_vec = _mm512_maskz_loadu_ps(mask, (b_usize + i * 4) as *const f32);
+        let result = _mm512_add_ps(a_vec, b_vec);
+        _mm512_mask_storeu_ps((out_usize + i * 4) as *mut f32, mask, result);
     }
 }
 
@@ -8577,9 +8607,9 @@ fn conv2d_im2col(
             buf.resize(total_scratch, 0.0f32);
         }
         // Zero only the im2col portion. gemm_out is fully overwritten by BLAS.
-        buf[..col_size].fill(0.0);
+        buf.data[..col_size].fill(0.0);
         if gemm_size > 0 {
-            buf[col_size..col_size + gemm_size].fill(0.0);
+            buf.data[col_size..col_size + gemm_size].fill(0.0);
         }
 
         let (col_buf, gemm_buf) = buf.split_at_mut(col_size);

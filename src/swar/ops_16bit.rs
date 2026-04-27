@@ -13,7 +13,7 @@ pub const U16_SIGN: u32 = 0x8000_8000;
 /// SWAR ReLU for F16x2 — zeroes negative values using IEEE 754 sign bits.
 /// F16 sign bit is bit 15 of each half-word. This is branch-free and
 /// ~10x faster than unpack→max→repack for large tensors.
-#[inline]
+#[inline(always)]
 pub fn swar_relu_f16x2(v: u32) -> u32 {
     // Extract sign bits: bit 15 of each half
     let sign_lo = (v >> 15) & 1;
@@ -26,7 +26,7 @@ pub fn swar_relu_f16x2(v: u32) -> u32 {
 }
 
 /// SWAR ReLU backward for F16x2 — blocks gradient where pre_relu ≤ 0.
-#[inline]
+#[inline(always)]
 pub fn swar_relu_backward_f16x2(grad: u32, pre_relu: u32) -> u32 {
     let sign_lo = (pre_relu >> 15) & 1;
     let sign_hi = pre_relu >> 31;
@@ -43,7 +43,7 @@ pub fn swar_relu_backward_f16x2(grad: u32, pre_relu: u32) -> u32 {
 
 /// SWAR element-wise max for two F16x2 words (treating bits as unsigned 16-bit).
 /// This is approximate — proper F16 max requires unpacking.
-#[inline]
+#[inline(always)]
 pub fn swar_max_u16x2(a: u32, b: u32) -> u32 {
     let a_lo = a & U16_LO;
     let b_lo = b & U16_LO;
@@ -54,16 +54,41 @@ pub fn swar_max_u16x2(a: u32, b: u32) -> u32 {
     // borrow_lo = 1 when a > b → mask = 0xFFFF → select a
     let result_lo = (a_lo & mask_lo) | (b_lo & !mask_lo);
 
-    // High halves
+    // High halves (branchless)
     let a_hi = a & U16_HI;
     let b_hi = b & U16_HI;
     let a_hi_shifted = a >> 16;
     let b_hi_shifted = b >> 16;
-    let result_hi = if a_hi_shifted >= b_hi_shifted {
-        a_hi
-    } else {
-        b_hi
-    };
+    let diff_hi = a_hi_shifted.wrapping_add(U16_LO).wrapping_sub(b_hi_shifted);
+    let borrow_hi = (diff_hi >> 16) & 1;
+    let mask_hi = 0u32.wrapping_sub(borrow_hi);
+    let result_hi = (a_hi & mask_hi) | (b_hi & !mask_hi);
+
+    result_lo | result_hi
+}
+
+/// SWAR element-wise min for two F16x2 words (treating bits as unsigned 16-bit).
+/// This is approximate — proper F16 min requires unpacking.
+#[inline(always)]
+pub fn swar_min_u16x2(a: u32, b: u32) -> u32 {
+    let a_lo = a & U16_LO;
+    let b_lo = b & U16_LO;
+    // Compare low halves: if a <= b, no borrow
+    let diff_lo = b_lo.wrapping_add(U16_LO).wrapping_sub(a_lo);
+    let borrow_lo = (diff_lo >> 16) & 1;
+    let mask_lo = 0u32.wrapping_sub(borrow_lo);
+    // borrow_lo = 1 when b > a → mask = 0xFFFF → select a
+    let result_lo = (a_lo & mask_lo) | (b_lo & !mask_lo);
+
+    // High halves (branchless)
+    let a_hi = a & U16_HI;
+    let b_hi = b & U16_HI;
+    let a_hi_shifted = a >> 16;
+    let b_hi_shifted = b >> 16;
+    let diff_hi = b_hi_shifted.wrapping_add(U16_LO).wrapping_sub(a_hi_shifted);
+    let borrow_hi = (diff_hi >> 16) & 1;
+    let mask_hi = 0u32.wrapping_sub(borrow_hi);
+    let result_hi = (a_hi & mask_hi) | (b_hi & !mask_hi);
 
     result_lo | result_hi
 }
@@ -129,5 +154,21 @@ mod tests {
 
         assert_eq!(result_lo, 0xFFFF); // positive, gradient passes
         assert_eq!(result_hi, 0x0000); // negative, gradient blocked
+    }
+
+    #[test]
+    fn test_swar_max_u16x2() {
+        let a = 0x0002_0001u32; // [1, 2]
+        let b = 0x0003_0000u32; // [0, 3]
+        let result = swar_max_u16x2(a, b);
+        assert_eq!(result, 0x0003_0001u32); // max([1,2], [0,3]) = [1,3]
+    }
+
+    #[test]
+    fn test_swar_min_u16x2() {
+        let a = 0x0002_0001u32; // [1, 2]
+        let b = 0x0003_0000u32; // [0, 3]
+        let result = swar_min_u16x2(a, b);
+        assert_eq!(result, 0x0000_0001u32); // min([1,2], [0,3]) = [0,1]
     }
 }
