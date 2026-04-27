@@ -16,6 +16,11 @@ def benchmark_conv_bn_silu(batch_size=1, in_channels=64, out_channels=128, heigh
     torch_silu = torch.nn.SiLU()
 
     x_torch = torch.randn(batch_size, in_channels, height, width)
+    x_torch.requires_grad_(False)
+    torch_conv.weight.requires_grad_(False)
+    torch_conv.bias.requires_grad_(False)
+    torch_bn.weight.requires_grad_(False)
+    torch_bn.bias.requires_grad_(False)
 
     # Warmup
     with torch.no_grad():
@@ -44,6 +49,14 @@ def benchmark_conv_bn_silu(batch_size=1, in_channels=64, out_channels=128, heigh
     fastnn_silu = fastnn.SiLU()
 
     x_fastnn = fastnn.randn([batch_size, in_channels, height, width])
+    x_fastnn.requires_grad_(False)
+    params = fastnn_conv.parameters()
+    params[0].requires_grad_(False)  # weight
+    if len(params) > 1:
+        params[1].requires_grad_(False)  # bias
+    params = fastnn_bn.parameters()
+    params[0].requires_grad_(False)  # weight
+    params[1].requires_grad_(False)  # bias
 
     # Warmup
     for _ in range(10):
