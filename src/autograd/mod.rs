@@ -2147,12 +2147,12 @@ impl CheckpointNode {
 
 impl Node for CheckpointNode {
     #[allow(clippy::unused_async)]
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+    fn apply(&self, _grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         // For checkpointing, we need to recompute the forward pass
         // to get the intermediate activations needed for backward
 
         // Recompute forward pass with gradients enabled
-        let outputs = (self.checkpoint_fn)(&self.inputs);
+        let _outputs = (self.checkpoint_fn)(&self.inputs);
 
         // The grad_outputs contain gradients from the output side.
         // We need to propagate these gradients back through the recomputed graph.
