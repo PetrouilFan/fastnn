@@ -33,7 +33,7 @@ Usage:
 import time
 import statistics
 from dataclasses import dataclass
-from typing import Callable, Optional, Dict, List
+from typing import Callable, Dict, List
 
 
 # ANSI color codes for terminal output
@@ -295,7 +295,7 @@ class CompareTimer:
             elif speedup < 1:
                 print(f"\n{names[0]} is {1/speedup:.2f}x faster than {names[1]}")
             else:
-                print(f"\nBoth implementations have equal performance")
+                print("\nBoth implementations have equal performance")
 
         print(f"{'=' * 70}\n")
         return results

@@ -6,7 +6,6 @@ setup, gradient checking, and numerical differentiation.
 """
 
 import numpy as np
-import pytest
 import fastnn
 
 
