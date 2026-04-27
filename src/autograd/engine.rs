@@ -137,7 +137,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         let input_tensors = node.inputs();
 
         // Propagate gradients to input tensors
-        for (input_tensor, grad_input_opt) in input_tensors.iter().zip(grad_inputs.into_iter()) {
+        for (input_tensor, grad_input_opt) in input_tensors.iter().zip(grad_inputs) {
             if let Some(grad_input) = grad_input_opt {
                 if input_tensor.is_leaf() {
                     // Accumulate gradient for leaf tensor

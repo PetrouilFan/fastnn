@@ -321,3 +321,81 @@ fn find_contiguous_inner_dim(shape: &[i64]) -> usize {
 
     inner_dim
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smallvec::smallvec;
+
+    #[test]
+    fn test_broadcast_shapes_same() {
+        let a = [3, 4];
+        let b = [3, 4];
+        let result = broadcast_shapes(&a, &b);
+        assert_eq!(result.as_slice(), &[3i64, 4][..]);
+    }
+
+    #[test]
+    fn test_broadcast_shapes_extra_dim() {
+        let a = [2, 3, 4];
+        let b = [3, 4];
+        let result = broadcast_shapes(&a, &b);
+        assert_eq!(result.as_slice(), &[2i64, 3, 4][..]);
+    }
+
+    #[test]
+    fn test_broadcast_shapes_scalar() {
+        let a = [];
+        let b = [2, 3, 4];
+        let result = broadcast_shapes(&a, &b);
+        assert_eq!(result.as_slice(), &[2i64, 3, 4][..]);
+    }
+
+    #[test]
+    fn test_broadcast_shapes_one_dim() {
+        let a = [4];
+        let b = [2, 3, 4];
+        let result = broadcast_shapes(&a, &b);
+        assert_eq!(result.as_slice(), &[2i64, 3, 4][..]);
+    }
+
+    #[test]
+    fn test_broadcast_shapes_one_in_shape() {
+        let a = [1, 4];
+        let b = [2, 3, 4];
+        let result = broadcast_shapes(&a, &b);
+        assert_eq!(result.as_slice(), &[2i64, 3, 4][..]);
+    }
+
+    #[test]
+    fn test_broadcast_shapes_both_ones() {
+        let a = [1, 4];
+        let b = [3, 1];
+        let result = broadcast_shapes(&a, &b);
+        assert_eq!(result.as_slice(), &[3i64, 4][..]);
+    }
+
+    #[test]
+    fn test_broadcast_shapes_empty() {
+        let a = [];
+        let b = [];
+        let result = broadcast_shapes(&a, &b);
+        assert_eq!(result.as_slice(), &[] as &[i64]);
+    }
+
+    #[test]
+    #[should_panic(expected = "broadcast: cannot broadcast shape")]
+    fn test_broadcast_shapes_incompatible() {
+        let a = [3, 4];
+        let b = [2, 3];
+        broadcast_shapes(&a, &b);
+    }
+
+    #[test]
+    fn test_broadcast_shapes_large_dims() {
+        let a = [1, 1, 5, 1, 7];
+        let b = [2, 3, 1, 1, 7];
+        let result = broadcast_shapes(&a, &b);
+        assert_eq!(result.as_slice(), &[2i64, 3, 5, 1, 7][..]);
+    }
+}

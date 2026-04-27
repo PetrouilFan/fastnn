@@ -5070,8 +5070,8 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                             unsafe {
                                 let x = *((a_usize + i * 4) as *const f32);
                                 let x3 = x * x * x;
-                                let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
-                                *((out_usize + i * 4) as *mut f32) = 0.5 * x * (1.0 + t);
+                                let t = (0.797_884_6_f32 * (x + 0.044715_f32 * x3)).tanh();
+                                *((out_usize + i * 4) as *mut f32) = 0.5_f32 * x * (1.0_f32 + t);
                             }
                         }
                     });
@@ -5139,8 +5139,8 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             unsafe {
                 let x = *a_ptr.add(idx);
                 let x3 = x * x * x;
-                let t = (0.797_884_6 * (x + 0.044715 * x3)).tanh();
-                *out_ptr.add(idx) = 0.5 * x * (1.0 + t);
+                let t = (0.797_884_6_f32 * (x + 0.044715_f32 * x3)).tanh();
+                *out_ptr.add(idx) = 0.5_f32 * x * (1.0_f32 + t);
             }
         }
     }
@@ -11667,7 +11667,7 @@ fn softplus_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         output_data[i] = if bx > threshold {
             x_data[i]
         } else {
-            (1.0 + (bx).exp()).ln() / beta
+            (1.0_f32 + (bx).exp()).ln() / beta
         };
     }
     vec![Tensor::from_vec(output_data, x.shape())]
@@ -11744,7 +11744,7 @@ fn bce_with_logits_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let x = input_data[i];
         let t = target_data[i];
         let max_val = if x > 0.0 { x } else { 0.0 };
-        loss += max_val - x * t + (1.0 + (-x.abs()).exp()).ln();
+        loss += max_val - x * t + (1.0_f32 + (-x.abs()).exp()).ln();
     }
     let avg_loss = loss / numel as f32;
     vec![Tensor::from_vec(vec![avg_loss], vec![1])]
