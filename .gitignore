@@ -76,3 +76,10 @@ tests/profile_*.py
 tests/test_alignment.py
 tests/test_memory.py
 tests/test_threading.py
+
+# Temporary analysis/documentation files
+*ARCHITECTURE_ANALYSIS.md
+*FINAL_REPORT.md
+*FIXES_SUMMARY.md
+*_SUMMARY.md
+*_REPORT.md

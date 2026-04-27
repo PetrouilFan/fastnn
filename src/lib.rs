@@ -2073,8 +2073,8 @@ impl Sequential {
     fn __call__(&self, py: Python<'_>, x: PyTensor) -> PyResult<PyTensor> {
         let mut result = x;
         for layer in &self.layers {
-            let forward_method: Py<PyAny> = layer.getattr(py, "forward")?;
-            let new_result = forward_method.call1(py, (result,))?;
+            // Call the layer using __call__ (which internally calls forward)
+            let new_result = layer.call1(py, (result,))?;
             result = new_result.extract::<PyTensor>(py)?;
         }
         Ok(result)
