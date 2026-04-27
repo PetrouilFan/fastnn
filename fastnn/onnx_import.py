@@ -6,26 +6,38 @@ Supports common operators: Conv, Gemm, Relu, BatchNormalization, MaxPool, etc.
 
 import onnx
 import numpy as np
-
+import struct
 import logging
 from typing import Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
 
-from fastnn.serialization_utils import (
-    write_tensor,
-    _pack_u32,
-    _pack_u64,
-)
-
 MAGIC = b"FNN\x00"
 VERSION = 1
+
+
+def _write_tensor(f, name: str, data: np.ndarray):
+    """Write a tensor to the .fnn file."""
+    name_bytes = name.encode("utf-8")
+    shape = list(data.shape)
+    data_f32 = data.astype(np.float32).flatten()
+    f.write(struct.pack("<Q", len(name_bytes)))
+    f.write(name_bytes)
+    f.write(struct.pack("<Q", len(shape)))
+    for d in shape:
+        f.write(struct.pack("<q", d))
+    f.write(struct.pack("<Q", len(data_f32)))
+    f.write(data_f32.tobytes())
+
+
 def _get_initializer(model: onnx.ModelProto, name: str) -> Optional[np.ndarray]:
     """Get initializer tensor by name."""
     for init in model.graph.initializer:
         if init.name == name:
             return onnx.numpy_helper.to_array(init)
     return None
+
+
 def _get_value_info(model: onnx.ModelProto, name: str) -> Optional[onnx.ValueInfoProto]:
     """Get value info by name."""
     for vi in model.graph.value_info:
@@ -38,6 +50,8 @@ def _get_value_info(model: onnx.ModelProto, name: str) -> Optional[onnx.ValueInf
         if out.name == name:
             return out
     return None
+
+
 def _get_attr(node: onnx.NodeProto, name: str, default=None):
     """Get attribute value from node."""
     for attr in node.attribute:
@@ -53,6 +67,8 @@ def _get_attr(node: onnx.NodeProto, name: str, default=None):
             elif attr.floats:
                 return list(attr.floats)
     return default
+
+
 def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
     """Import an ONNX model and save it in fastnn format.
 
@@ -253,10 +269,10 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
     # Write to .fnn file
     with open(fnn_path, "wb") as f:
         f.write(MAGIC)
-        f.write(_pack_u32(VERSION))
-        f.write(_pack_u64(len(parameters)))
+        f.write(struct.pack("<I", VERSION))
+        f.write(struct.pack("<Q", len(parameters)))
         for name, data in parameters:
-            write_tensor(f, name, data)
+            _write_tensor(f, name, data)
 
     # Get input/output shapes
     input_shape = None

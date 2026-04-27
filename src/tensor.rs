@@ -851,7 +851,7 @@ impl Tensor {
         let nbytes = (numel * dtype.size() as i64) as usize;
 
         let storage = match device {
-            Device::Cpu => get_storage_pool().acquire(nbytes, device, dtype),
+            Device::Cpu => get_storage_pool().acquire(nbytes, device),
             Device::Wgpu(device_id) => {
                 use crate::kernels::gpu::get_context;
                 let ctx = get_context(device_id);
@@ -884,7 +884,7 @@ impl Tensor {
         let nbytes = (numel * dtype.size() as i64) as usize;
 
         let storage = match device {
-            Device::Cpu => get_storage_pool().acquire(nbytes, device, dtype),
+            Device::Cpu => get_storage_pool().acquire(nbytes, device),
             Device::Wgpu(device_id) => {
                 // For GPU empty, we create a new buffer (uninitialized)
                 // Note: GPU buffers are not zeroed by default
@@ -1801,19 +1801,16 @@ impl Tensor {
         match dtype {
             DType::F32 => {
                 // SIMD + parallel path for F32 gradient accumulation (hot path)
+                // Using sequential chunks with SIMD to avoid data races from parallel in-place modification
                 #[cfg(feature = "parallel")]
                 {
                     if numel > 64 * 1024 {
-                        use rayon::prelude::*;
                         const CHUNK: usize = 4096;
                         let num_chunks = numel.div_ceil(CHUNK);
-                        let self_usize = self_ptr as usize;
-                        let other_usize = other_ptr as usize;
-                        (0..num_chunks).into_par_iter().for_each(|chunk| {
+                        // Process each chunk sequentially to avoid race conditions
+                        for chunk in 0..num_chunks {
                             let start = chunk * CHUNK;
                             let end = (start + CHUNK).min(numel);
-                            let s_ptr = self_usize as *mut f32;
-                            let o_ptr = other_usize as *const f32;
 
                             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                             {
@@ -1821,26 +1818,26 @@ impl Tensor {
                                     unsafe {
                                         let mut i = start;
                                         while i + 8 <= end {
-                                            let sv = _mm256_loadu_ps(s_ptr.add(i));
-                                            let ov = _mm256_loadu_ps(o_ptr.add(i));
+                                            let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                            let ov = _mm256_loadu_ps(other_ptr.add(i));
                                             let r = _mm256_add_ps(sv, ov);
-                                            _mm256_storeu_ps(s_ptr.add(i), r);
+                                            _mm256_storeu_ps(self_ptr.add(i), r);
                                             i += 8;
                                         }
                                         for j in i..end {
-                                            *s_ptr.add(j) += *o_ptr.add(j);
+                                            *self_ptr.add(j) += *other_ptr.add(j);
                                         }
-                                        return;
+                                        continue;
                                     }
                                 }
                             }
                             // Scalar fallback for this chunk
                             for i in start..end {
                                 unsafe {
-                                    *s_ptr.add(i) += *o_ptr.add(i);
+                                    *self_ptr.add(i) += *other_ptr.add(i);
                                 }
                             }
-                        });
+                        }
                         return self;
                     }
                 }

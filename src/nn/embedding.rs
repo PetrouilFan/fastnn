@@ -1,8 +1,6 @@
-use crate::autograd::{self, AutogradMeta};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
-use std::sync::Arc;
 
 pub struct Embedding {
     pub weight: Tensor,
@@ -41,35 +39,9 @@ impl Embedding {
 
 impl Module for Embedding {
     fn forward(&self, indices: &Tensor) -> Tensor {
-        // Validate indices are within [0, num_embeddings)
-        let indices_cpu = indices.to_cpu();
-        let indices_data = indices_cpu.as_i64_slice();
-        for &idx in indices_data {
-            if idx < 0 || idx >= self.num_embeddings {
-                panic!(
-                    "Embedding index out of range: got {}, expected 0 <= idx < {}",
-                    idx,
-                    self.num_embeddings
-                );
-            }
-        }
-
         let result = dispatch("embedding", DispatchKey::Cpu, &[&self.weight, indices]);
-        let mut output = result[0].clone();
 
-        if self.weight.requires_grad() {
-            let edges = autograd::make_edge(&self.weight);
-            let backward = Arc::new(autograd::EmbeddingBackward::new(
-                self.weight.clone(),
-                indices.clone(),
-                edges,
-            ));
-            let mut meta = AutogradMeta::new_non_leaf(false);
-            meta.grad_fn = Some(backward);
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
-
-        output
+        result[0].clone()
     }
 
     fn parameters(&self) -> Vec<Tensor> {

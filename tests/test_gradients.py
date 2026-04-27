@@ -1,19 +1,264 @@
 import numpy as np
 import fastnn as fnn
-from tests.test_utils import (
-    numerical_gradient as numerical_grad,
-    numerical_gradient_elementwise as numerical_grad_elementwise,
-    check_gradient as check_grad,
-    check_unary_gradient as check_unary_grad,
-    check_binary_gradient as check_binary_grad,
-    requires_grad,
-)
+
+
+def numerical_grad(f, x, eps=1e-3):
+    """Compute numerical gradient via central differences."""
+    grad = np.zeros_like(x.numpy())
+    grad_flat = grad.flat
+
+    for i in range(x.numel()):
+        x_plus = x.clone()
+        x_minus = x.clone()
+
+        x_plus_data = x_plus.numpy()
+        x_minus_data = x_minus.numpy()
+
+        x_plus_data.flat[i] += eps
+        x_minus_data.flat[i] -= eps
+
+        f_plus = f(fnn.tensor(x_plus_data.flatten(), x_plus_data.shape)).numpy()
+        f_minus = f(fnn.tensor(x_minus_data.flatten(), x_minus_data.shape)).numpy()
+
+        grad_flat[i] = (f_plus.flat[0] - f_minus.flat[0]) / (2 * eps)
+
+    return fnn.tensor(grad.flatten(), grad.shape)
+
+
+def numerical_grad_elementwise(f, x, eps=1e-3):
+    """Compute numerical gradient for elementwise operations (each output depends on each input)."""
+    grad = np.zeros_like(x.numpy())
+    x_data = x.numpy()
+
+    for i in range(x.numel()):
+        x_plus = x_data.copy()
+        x_minus = x_data.copy()
+
+        x_plus.flat[i] += eps
+        x_minus.flat[i] -= eps
+
+        f_plus = f(fnn.tensor(x_plus.flatten(), x_plus.shape)).numpy()
+        f_minus = f(fnn.tensor(x_minus.flatten(), x_minus.shape)).numpy()
+
+        grad.flat[i] = (f_plus.flat[0] - f_minus.flat[0]) / (2 * eps)
+
+    return fnn.tensor(grad.flatten(), grad.shape)
+
+
+def check_grad(op, *inputs, eps=1e-3, atol=1e-3, rtol=1e-3, reduction="sum"):
+    """Check analytical gradient against numerical gradient.
+
+    Args:
+        op: The operation to test (function that takes inputs and returns output)
+        *inputs: Input tensors (at least one must require grad)
+        eps: Finite difference epsilon
+        atol: Absolute tolerance
+        rtol: Relative tolerance
+        reduction: How to reduce the output for backward ('sum', 'mean', or 'none')
+    """
+    # Clone inputs and enable gradients
+    input_tensors = []
+    for inp in inputs:
+        t = fnn.tensor(inp.numpy().flatten(), inp.numpy().shape)
+        t.requires_grad_(True)
+        input_tensors.append(t)
+
+    # Forward pass
+    output = op(*input_tensors)
+
+    # Apply reduction for scalar gradient
+    if reduction == "sum":
+        output = output.sum()
+    elif reduction == "mean":
+        output = output.mean()
+
+    # Backward pass
+    output.backward()
+
+    # Check each input's gradient
+    results = []
+    for i, inp in enumerate(input_tensors):
+        if inp.grad is None:
+            results.append((i, False, "No gradient computed"))
+            continue
+
+        # Compute numerical gradient
+        def op_wrapper(*args):
+            out = op(*args)
+            if reduction == "sum":
+                return out.sum()
+            elif reduction == "mean":
+                return out.mean()
+            return out
+
+        numerical = numerical_grad_elementwise(
+            lambda x: op_wrapper(
+                *[x if j == i else input_tensors[j] for j in range(len(input_tensors))]
+            ),
+            inp,
+            eps,
+        )
+
+        analytical = inp.grad.numpy()
+        numerical_np = numerical.numpy()
+
+        passed = np.allclose(analytical, numerical_np, atol=atol, rtol=rtol)
+        results.append(
+            (
+                i,
+                passed,
+                {
+                    "analytical": analytical,
+                    "numerical": numerical_np,
+                    "diff": np.abs(analytical - numerical_np),
+                },
+            )
+        )
+
+    return results
+
+
+def check_unary_grad(op_name, x_data, atol=1e-3, rtol=1e-3):
+    """Test gradient for a unary operation."""
+    ops = {
+        "relu": fnn.relu,
+        "sigmoid": fnn.sigmoid,
+        "tanh": fnn.tanh,
+        "gelu": fnn.gelu,
+        "silu": fnn.silu,
+        "exp": fnn.exp,
+        "log": fnn.log,
+        "sqrt": fnn.sqrt,
+        "abs": fnn.abs,
+        "neg": fnn.neg,
+    }
+
+    if op_name not in ops:
+        raise ValueError(f"Unknown op: {op_name}")
+
+    op = ops[op_name]
+    x = fnn.tensor(x_data.flatten(), x_data.shape)
+    x.requires_grad_(True)
+
+    y = op(x)
+    y.sum().backward()
+
+    # Numerical gradient (perturb each element individually)
+    numerical = np.zeros_like(x_data)
+    for i in range(x_data.size):
+        x_plus = x_data.copy()
+        x_minus = x_data.copy()
+        x_plus.flat[i] += 1e-3
+        x_minus.flat[i] -= 1e-3
+
+        x_plus_t = fnn.tensor(x_plus.flatten(), x_plus.shape)
+        x_minus_t = fnn.tensor(x_minus.flatten(), x_minus.shape)
+
+        y_plus = op(x_plus_t)
+        y_minus = op(x_minus_t)
+
+        numerical.flat[i] = (y_plus.sum().numpy()[0] - y_minus.sum().numpy()[0]) / (
+            2 * 1e-3
+        )
+
+    numerical = numerical.flatten()
+    analytical = x.grad.numpy()
+
+    passed = np.allclose(analytical, numerical, atol=atol, rtol=rtol)
+    return {
+        "op": op_name,
+        "passed": passed,
+        "analytical": analytical,
+        "numerical": numerical,
+        "diff": np.abs(analytical - numerical)
+        if hasattr(analytical, "__iter__")
+        else abs(analytical - numerical),
+    }
+
+
+def check_binary_grad(op_name, a_data, b_data, atol=1e-3, rtol=1e-3):
+    """Test gradient for a binary operation."""
+    ops = {
+        "add": lambda a, b: a + b,
+        "sub": lambda a, b: a - b,
+        "mul": lambda a, b: a * b,
+        "div": lambda a, b: a / b,
+    }
+
+    if op_name not in ops:
+        raise ValueError(f"Unknown op: {op_name}")
+
+    op = ops[op_name]
+
+    a = fnn.tensor(a_data.flatten(), a_data.shape)
+    b = fnn.tensor(b_data.flatten(), b_data.shape)
+    a.requires_grad_(True)
+    b.requires_grad_(True)
+
+    y = op(a, b)
+    y.sum().backward()
+
+    # Numerical gradient for a (perturb each element individually)
+    numerical_a = np.zeros_like(a_data)
+    for i in range(a_data.size):
+        a_plus = a_data.copy()
+        a_minus = a_data.copy()
+        a_plus.flat[i] += 1e-3
+        a_minus.flat[i] -= 1e-3
+
+        a_plus_t = fnn.tensor(a_plus.flatten(), a_plus.shape)
+        a_minus_t = fnn.tensor(a_minus.flatten(), a_minus.shape)
+
+        y_plus = op(a_plus_t, b)
+        y_minus = op(a_minus_t, b)
+
+        numerical_a.flat[i] = (y_plus.sum().numpy()[0] - y_minus.sum().numpy()[0]) / (
+            2 * 1e-3
+        )
+
+    numerical_a = numerical_a.flatten()
+
+    # Numerical gradient for b (perturb each element individually)
+    numerical_b = np.zeros_like(b_data)
+    for i in range(b_data.size):
+        b_plus = b_data.copy()
+        b_minus = b_data.copy()
+        b_plus.flat[i] += 1e-3
+        b_minus.flat[i] -= 1e-3
+
+        b_plus_t = fnn.tensor(b_plus.flatten(), b_plus.shape)
+        b_minus_t = fnn.tensor(b_minus.flatten(), b_minus.shape)
+
+        y_plus = op(a, b_plus_t)
+        y_minus = op(a, b_minus_t)
+
+        numerical_b.flat[i] = (y_plus.sum().numpy()[0] - y_minus.sum().numpy()[0]) / (
+            2 * 1e-3
+        )
+
+    numerical_b = numerical_b.flatten()
+
+    analytical_a = a.grad.numpy()
+    analytical_b = b.grad.numpy()
+
+    passed_a = np.allclose(analytical_a, numerical_a, atol=atol, rtol=rtol)
+    passed_b = np.allclose(analytical_b, numerical_b, atol=atol, rtol=rtol)
+
+    return {
+        "op": op_name,
+        "passed_a": passed_a,
+        "passed_b": passed_b,
+        "analytical_a": analytical_a,
+        "numerical_a": numerical_a,
+        "analytical_b": analytical_b,
+        "numerical_b": numerical_b,
+    }
 
 
 def test_relu_gradient_mask():
     """Test that ReLU gradient is zero at negative input positions."""
     x = fnn.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], [5])
-    requires_grad(x)
+    x.requires_grad_(True)
     y = fnn.relu(x)
     y.sum().backward()
 
@@ -29,7 +274,7 @@ def test_relu_gradient_mask():
 def test_abs_gradient_sign():
     """Test that Abs gradient is sign of input."""
     x = fnn.tensor([-2.0, -0.5, 0.0, 0.5, 2.0], [5])
-    requires_grad(x)
+    x.requires_grad_(True)
     y = fnn.abs(x)
     y.sum().backward()
 
@@ -45,15 +290,15 @@ def test_abs_gradient_sign():
 def test_silu_gradient_no_divbyzero():
     """Test that SiLU gradient doesn't have division by zero issues."""
     x = fnn.tensor([-1.0, 0.0, 1.0], [3])
-    requires_grad(x)
+    x.requires_grad_(True)
     y = fnn.silu(x)
     y.sum().backward()
 
     # Should not raise and should have valid gradients
     assert x.grad is not None
     grad_data = x.grad.numpy()
-    assert not np.any(np.isnan(grad_data))  # SiLU gradient has NaN
-    assert not np.any(np.isinf(grad_data))  # SiLU gradient has Inf
+    assert not np.any(np.isnan(grad_data)), "SiLU gradient has NaN"
+    assert not np.any(np.isinf(grad_data)), "SiLU gradient has Inf"
 
 
 def test_gelu_gradient():
@@ -114,21 +359,21 @@ def test_sub_grad():
 
 
 def test_exp_grad():
-    """Test exp gradient: d(exp(x)/dx = exp(x)."""
+    """Test exp gradient: d(exp(x))/dx = exp(x)."""
     x_data = np.array([0.0, 0.5, 1.0], dtype=np.float32)
     result = check_unary_grad("exp", x_data)
     assert result["passed"], f"Exp gradient failed: {result}"
 
 
 def test_log_grad():
-    """Test log gradient: d(log(x)/dx = 1/x."""
+    """Test log gradient: d(log(x))/dx = 1/x."""
     x_data = np.array([0.5, 1.0, 2.0], dtype=np.float32)
     result = check_unary_grad("log", x_data)
     assert result["passed"], f"Log gradient failed: {result}"
 
 
 def test_sqrt_grad():
-    """Test sqrt gradient: d(sqrt(x)/dx = 1/(2*sqrt(x)."""
+    """Test sqrt gradient: d(sqrt(x))/dx = 1/(2*sqrt(x))."""
     x_data = np.array([0.25, 1.0, 4.0], dtype=np.float32)
     result = check_unary_grad("sqrt", x_data)
     assert result["passed"], f"Sqrt gradient failed: {result}"
@@ -145,8 +390,8 @@ def test_matmul_grad():
     """Test matmul gradient for 2D matrices."""
     a = fnn.tensor([[1.0, 2.0], [3.0, 4.0]], [2, 2])
     b = fnn.tensor([[5.0, 6.0], [7.0, 8.0]], [2, 2])
-    requires_grad(a)
-    requires_grad(b)
+    a.requires_grad_(True)
+    b.requires_grad_(True)
 
     c = a @ b
     c.sum().backward()
@@ -171,10 +416,10 @@ def test_matmul_grad():
 def test_softmax_grad():
     """Test softmax gradient."""
     x = fnn.tensor([[1.0, 2.0, 3.0]], [1, 3])
-    requires_grad(x)
+    x.requires_grad_(True)
     y = fnn.softmax(x, -1)
     # Use a different loss that will have non-zero gradient
-    # sum(x * softmax(x) has non-zero gradient
+    # sum(x * softmax(x)) has non-zero gradient
     loss = (x * y).sum()
     loss.backward()
 
@@ -184,8 +429,8 @@ def test_softmax_grad():
     assert not np.allclose(grad_val, 0), "Softmax gradient is all zeros"
 
     # Verify the gradient is correct
-    # For sum(x * softmax(x), the gradient should be:
-    # d(sum(x_i * softmax_i)/dx_j = softmax_j + x_j * softmax_j * (1 - softmax_j) - sum_i x_i * softmax_i * softmax_j
+    # For sum(x * softmax(x)), the gradient should be:
+    # d(sum(x_i * softmax_i))/dx_j = softmax_j + x_j * softmax_j * (1 - softmax_j) - sum_i x_i * softmax_i * softmax_j
     # This is more complex, so we just check it's not all zeros
     print(f"Softmax gradient: {grad_val}")
 
@@ -193,8 +438,8 @@ def test_softmax_grad():
 def test_layer_norm_grad():
     """Test layer norm gradient."""
     x = fnn.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [2, 3])
-    requires_grad(x)
-    layer_norm = fnn.layers.LayerNorm(3)
+    x.requires_grad_(True)
+    layer_norm = fnn.LayerNorm(3)
     y = layer_norm(x)
     y.sum().backward()
     assert x.grad is not None
@@ -206,7 +451,7 @@ def test_embedding_grad():
     vocab_size = 10
     embed_dim = 4
     indices = fnn.tensor([0, 1, 2], [3])
-    embedding = fnn.layers.Embedding(vocab_size, embed_dim)
+    embedding = fnn.Embedding(vocab_size, embed_dim)
     output = embedding(indices)
     output.sum().backward()
     # Check that weight gradient exists
@@ -219,7 +464,8 @@ def test_cross_entropy_grad():
     """Test cross entropy gradient."""
     logits = fnn.tensor([[2.0, 1.0, 0.1]], [1, 3])
     targets = fnn.tensor([0], [1])
-    requires_grad(logits)
+    logits.requires_grad_(True)
+
     loss = fnn.cross_entropy_loss(logits, targets, reduction="mean")
     loss.backward()
 

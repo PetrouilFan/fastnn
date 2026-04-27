@@ -34,23 +34,23 @@ pub fn gemv_packed_simd<T: PackedWord>(
         // Use TypeId for zero-cost type check
         let tid = std::any::TypeId::of::<T>();
         if tid == std::any::TypeId::of::<crate::dtypes::U8x4>() {
-            // Safe: We've verified the type matches via TypeId
-            let w = unsafe { &*(weights as *const PackedTensor<T> as *const PackedTensor<crate::dtypes::U8x4>) };
+            let w: &PackedTensor<crate::dtypes::U8x4> =
+                unsafe { &*(weights as *const _ as *const _) };
             return gemv_u8x4_dispatch(w, activation, output);
         }
         if tid == std::any::TypeId::of::<crate::dtypes::F16x2>() {
-            // Safe: We've verified the type matches via TypeId
-            let w = unsafe { &*(weights as *const PackedTensor<T> as *const PackedTensor<crate::dtypes::F16x2>) };
+            let w: &PackedTensor<crate::dtypes::F16x2> =
+                unsafe { &*(weights as *const _ as *const _) };
             return gemv_f16x2_dispatch(w, activation, output);
         }
         if tid == std::any::TypeId::of::<crate::dtypes::U4x8>() {
-            // Safe: We've verified the type matches via TypeId
-            let w = unsafe { &*(weights as *const PackedTensor<T> as *const PackedTensor<crate::dtypes::U4x8>) };
+            let w: &PackedTensor<crate::dtypes::U4x8> =
+                unsafe { &*(weights as *const _ as *const _) };
             return gemv_u4x8_dispatch(w, activation, output);
         }
         if tid == std::any::TypeId::of::<crate::dtypes::F32x1>() {
-            // Safe: We've verified the type matches via TypeId
-            let w = unsafe { &*(weights as *const PackedTensor<T> as *const PackedTensor<crate::dtypes::F32x1>) };
+            let w: &PackedTensor<crate::dtypes::F32x1> =
+                unsafe { &*(weights as *const _ as *const _) };
             return gemv_f32x1_dispatch(w, activation, output);
         }
     }
@@ -60,16 +60,6 @@ pub fn gemv_packed_simd<T: PackedWord>(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
-
-    // Validate output length matches number of rows
-    if output.len() < m {
-        panic!("Output slice length {} is less than number of rows {}", output.len(), m);
-    }
-    
-    // Validate activation length matches K dimension
-    if activation.len() < k {
-        panic!("Activation length {} is less than K dimension {}", activation.len(), k);
-    }
 
     if k <= K_BLOCK_SIZE {
         gemv_packed_inner::<T>(weights, activation, output, m, k, k_packed);
@@ -183,15 +173,6 @@ unsafe fn gemv_row_u8x4_avx2(
     k: usize,
     k_packed: usize,
 ) -> f32 {
-    // Bounds validation
-    if row_offset + k_packed > weights_u32.len() {
-        panic!("Row offset {} + k_packed {} exceeds weights length {}", 
-               row_offset, k_packed, weights_u32.len());
-    }
-    if activation.len() < k {
-        panic!("Activation length {} is less than k {}", activation.len(), k);
-    }
-    
     let mut acc = _mm256_setzero_ps();
     let mut p = 0;
     let mut act_idx = 0;
@@ -200,22 +181,14 @@ unsafe fn gemv_row_u8x4_avx2(
     while p + 1 < k_packed && act_idx + 8 <= k {
         // Prefetch next iteration's weights into L1
         if p + 4 < k_packed {
-            let prefetch_idx = row_offset + p + 4;
-            if prefetch_idx < weights_u32.len() {
-                _mm_prefetch(
-                    weights_u32.as_ptr().add(prefetch_idx) as *const i8,
-                    _MM_HINT_T0,
-                );
-            }
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 4) as *const i8,
+                _MM_HINT_T0,
+            );
         }
 
-        let w0_idx = row_offset + p;
-        let w1_idx = row_offset + p + 1;
-        if w0_idx >= weights_u32.len() || w1_idx >= weights_u32.len() {
-            panic!("Weight indices out of bounds: {} or {}", w0_idx, w1_idx);
-        }
-        let w0 = weights_u32[w0_idx];
-        let w1 = weights_u32[w1_idx];
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
 
         let byte_array: [u8; 8] = [
             w0 as u8,
@@ -235,13 +208,8 @@ unsafe fn gemv_row_u8x4_avx2(
         let f32x4_hi = _mm_cvtepi32_ps(i32x4_hi);
         let weight_f32 = _mm256_insertf128_ps(_mm256_castps128_ps256(f32x4_lo), f32x4_hi, 1);
 
-        // Bounds check for activation access
-        if act_idx + 8 <= activation.len() {
-            let act = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
-            acc = _mm256_fmadd_ps(weight_f32, act, acc);
-        } else {
-            panic!("Activation index {} + 8 exceeds length {}", act_idx, activation.len());
-        }
+        let act = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc = _mm256_fmadd_ps(weight_f32, act, acc);
 
         p += 2;
         act_idx += 8;
@@ -252,15 +220,12 @@ unsafe fn gemv_row_u8x4_avx2(
 
     // Scalar tail for remaining packed words (1 at a time = 4 values)
     while p < k_packed && act_idx < k {
-        let w_idx = row_offset + p;
-        if w_idx < weights_u32.len() {
-            let w = weights_u32[w_idx];
-            let bytes = w.to_le_bytes();
-            for j in 0..4 {
-                let idx = act_idx + j;
-                if idx < k && idx < activation.len() {
-                    total += (bytes[j] as i8) as f32 * activation[idx];
-                }
+        let w = weights_u32[row_offset + p];
+        let bytes = w.to_le_bytes();
+        for j in 0..4 {
+            let idx = act_idx + j;
+            if idx < k {
+                total += (bytes[j] as i8) as f32 * activation[idx];
             }
         }
         p += 1;
@@ -280,15 +245,6 @@ unsafe fn gemv_row_u8x4_avx512(
     k: usize,
     k_packed: usize,
 ) -> f32 {
-    // Bounds validation
-    if row_offset + k_packed > weights_u32.len() {
-        panic!("Row offset {} + k_packed {} exceeds weights length {}", 
-               row_offset, k_packed, weights_u32.len());
-    }
-    if activation.len() < k {
-        panic!("Activation length {} is less than k {}", activation.len(), k);
-    }
-    
     let mut acc0 = _mm512_setzero_ps();
     let mut p = 0;
     let mut act_idx = 0;
@@ -296,27 +252,16 @@ unsafe fn gemv_row_u8x4_avx512(
     // Process 4 u32 words at a time (16 int8 → 16 f32) using AVX512BW for byte ops
     while p + 4 <= k_packed && act_idx + 16 <= k {
         if p + 8 < k_packed {
-            let prefetch_idx = row_offset + p + 8;
-            if prefetch_idx < weights_u32.len() {
-                _mm_prefetch(
-                    weights_u32.as_ptr().add(prefetch_idx) as *const i8,
-                    _MM_HINT_T0,
-                );
-            }
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 8) as *const i8,
+                _MM_HINT_T0,
+            );
         }
 
-        let w0_idx = row_offset + p;
-        let w1_idx = row_offset + p + 1;
-        let w2_idx = row_offset + p + 2;
-        let w3_idx = row_offset + p + 3;
-        if w0_idx >= weights_u32.len() || w1_idx >= weights_u32.len() || 
-           w2_idx >= weights_u32.len() || w3_idx >= weights_u32.len() {
-            panic!("Weight indices out of bounds");
-        }
-        let w0 = weights_u32[w0_idx];
-        let w1 = weights_u32[w1_idx];
-        let w2 = weights_u32[w2_idx];
-        let w3 = weights_u32[w3_idx];
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
+        let w2 = weights_u32[row_offset + p + 2];
+        let w3 = weights_u32[row_offset + p + 3];
 
         // Pack 16 bytes from 4 u32 words into a 128-bit register
         let bytes = _mm_set_epi32(w3 as i32, w2 as i32, w1 as i32, w0 as i32);
@@ -324,13 +269,8 @@ unsafe fn gemv_row_u8x4_avx512(
         let i32x16 = _mm512_cvtepi8_epi32(bytes);
         let weight_f32 = _mm512_cvtepi32_ps(i32x16);
 
-        // Bounds check for activation access
-        if act_idx + 16 <= activation.len() {
-            let act = _mm512_loadu_ps(activation.as_ptr().add(act_idx));
-            acc0 = _mm512_fmadd_ps(weight_f32, act, acc0);
-        } else {
-            panic!("Activation index {} + 16 exceeds length {}", act_idx, activation.len());
-        }
+        let act = _mm512_loadu_ps(activation.as_ptr().add(act_idx));
+        acc0 = _mm512_fmadd_ps(weight_f32, act, acc0);
 
         p += 4;
         act_idx += 16;
@@ -462,15 +402,6 @@ unsafe fn gemv_row_u4x8_avx2(
     k: usize,
     k_packed: usize,
 ) -> f32 {
-    // Bounds validation
-    if row_offset + k_packed > weights_u32.len() {
-        panic!("Row offset {} + k_packed {} exceeds weights length {}", 
-               row_offset, k_packed, weights_u32.len());
-    }
-    if activation.len() < k {
-        panic!("Activation length {} is less than k {}", activation.len(), k);
-    }
-    
     let mut acc0 = _mm256_setzero_ps();
     let mut acc1 = _mm256_setzero_ps();
     let mut p = 0;
@@ -480,13 +411,8 @@ unsafe fn gemv_row_u4x8_avx2(
 
     // Process 2 u32 words (16 nibbles) per iteration with dual accumulators
     while p + 2 <= k_packed && act_idx + 16 <= k {
-        let w0_idx = row_offset + p;
-        let w1_idx = row_offset + p + 1;
-        if w0_idx >= weights_u32.len() || w1_idx >= weights_u32.len() {
-            panic!("Weight indices out of bounds: {} or {}", w0_idx, w1_idx);
-        }
-        let w0 = weights_u32[w0_idx];
-        let w1 = weights_u32[w1_idx];
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
 
         // Extract low nibbles (bits 0,4,8,12,16,20,24,28) from both words
         let shift0 = _mm256_set_epi32(28, 24, 20, 16, 12, 8, 4, 0);
@@ -577,15 +503,6 @@ unsafe fn gemv_row_u4x8_avx512(
     k: usize,
     k_packed: usize,
 ) -> f32 {
-    // Bounds validation
-    if row_offset + k_packed > weights_u32.len() {
-        panic!("Row offset {} + k_packed {} exceeds weights length {}", 
-               row_offset, k_packed, weights_u32.len());
-    }
-    if activation.len() < k {
-        panic!("Activation length {} is less than k {}", activation.len(), k);
-    }
-    
     let mut acc0 = _mm512_setzero_ps();
     let mut acc1 = _mm512_setzero_ps();
     let mut p = 0;
@@ -596,22 +513,14 @@ unsafe fn gemv_row_u4x8_avx512(
     // Process 2 u32 words (16 nibbles) per iteration with dual accumulators
     while p + 2 <= k_packed && act_idx + 16 <= k {
         if p + 4 < k_packed {
-            let prefetch_idx = row_offset + p + 4;
-            if prefetch_idx < weights_u32.len() {
-                _mm_prefetch(
-                    weights_u32.as_ptr().add(prefetch_idx) as *const i8,
-                    _MM_HINT_T0,
-                );
-            }
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 4) as *const i8,
+                _MM_HINT_T0,
+            );
         }
 
-        let w0_idx = row_offset + p;
-        let w1_idx = row_offset + p + 1;
-        if w0_idx >= weights_u32.len() || w1_idx >= weights_u32.len() {
-            panic!("Weight indices out of bounds: {} or {}", w0_idx, w1_idx);
-        }
-        let w0 = weights_u32[w0_idx];
-        let w1 = weights_u32[w1_idx];
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
         let w0v = _mm256_set1_epi32(w0 as i32);
         let w1v = _mm256_set1_epi32(w1 as i32);
 
@@ -786,15 +695,6 @@ unsafe fn gemv_row_f16x2_f16c(
     k: usize,
     k_packed: usize,
 ) -> f32 {
-    // Bounds validation
-    if row_offset + k_packed > weights_u32.len() {
-        panic!("Row offset {} + k_packed {} exceeds weights length {}", 
-               row_offset, k_packed, weights_u32.len());
-    }
-    if activation.len() < k {
-        panic!("Activation length {} is less than k {}", activation.len(), k);
-    }
-    
     let mut acc0 = _mm256_setzero_ps();
     let mut acc1 = _mm256_setzero_ps();
     let mut p = 0;
@@ -803,59 +703,29 @@ unsafe fn gemv_row_f16x2_f16c(
     // Process 8 u32 words (16 f16) per iteration — 2x throughput with ILP
     while p + 8 <= k_packed && act_idx + 16 <= k {
         if p + 16 < k_packed {
-            let prefetch_idx = row_offset + p + 16;
-            if prefetch_idx < weights_u32.len() {
-                _mm_prefetch(
-                    weights_u32.as_ptr().add(prefetch_idx) as *const i8,
-                    _MM_HINT_T0,
-                );
-            }
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 16) as *const i8,
+                _MM_HINT_T0,
+            );
         }
 
-        let w0_idx = row_offset + p;
-        let w1_idx = row_offset + p + 1;
-        let w2_idx = row_offset + p + 2;
-        let w3_idx = row_offset + p + 3;
-        if w0_idx >= weights_u32.len() || w1_idx >= weights_u32.len() || 
-           w2_idx >= weights_u32.len() || w3_idx >= weights_u32.len() {
-            panic!("Weight indices out of bounds");
-        }
         let f0 = u32x4_to_f32x8_f16c(
-            weights_u32[w0_idx],
-            weights_u32[w1_idx],
-            weights_u32[w2_idx],
-            weights_u32[w3_idx],
+            weights_u32[row_offset + p],
+            weights_u32[row_offset + p + 1],
+            weights_u32[row_offset + p + 2],
+            weights_u32[row_offset + p + 3],
         );
-        
-        // Bounds check for activation access
-        if act_idx + 8 <= activation.len() {
-            let a0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
-            acc0 = _mm256_fmadd_ps(f0, a0, acc0);
-        } else {
-            panic!("Activation index {} + 8 exceeds length {}", act_idx, activation.len());
-        }
+        let a0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc0 = _mm256_fmadd_ps(f0, a0, acc0);
 
-        let w4_idx = row_offset + p + 4;
-        let w5_idx = row_offset + p + 5;
-        let w6_idx = row_offset + p + 6;
-        let w7_idx = row_offset + p + 7;
-        if w4_idx >= weights_u32.len() || w5_idx >= weights_u32.len() || 
-           w6_idx >= weights_u32.len() || w7_idx >= weights_u32.len() {
-            panic!("Weight indices out of bounds");
-        }
         let f1 = u32x4_to_f32x8_f16c(
-            weights_u32[w4_idx],
-            weights_u32[w5_idx],
-            weights_u32[w6_idx],
-            weights_u32[w7_idx],
+            weights_u32[row_offset + p + 4],
+            weights_u32[row_offset + p + 5],
+            weights_u32[row_offset + p + 6],
+            weights_u32[row_offset + p + 7],
         );
-        
-        if act_idx + 16 <= activation.len() {
-            let a1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 8));
-            acc1 = _mm256_fmadd_ps(f1, a1, acc1);
-        } else {
-            panic!("Activation index {} + 16 exceeds length {}", act_idx + 8, activation.len());
-        }
+        let a1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 8));
+        acc1 = _mm256_fmadd_ps(f1, a1, acc1);
 
         p += 8;
         act_idx += 16;
@@ -863,27 +733,14 @@ unsafe fn gemv_row_f16x2_f16c(
 
     // 4-word tail: 8 f16 → 8 f32
     while p + 4 <= k_packed && act_idx + 8 <= k {
-        let w0_idx = row_offset + p;
-        let w1_idx = row_offset + p + 1;
-        let w2_idx = row_offset + p + 2;
-        let w3_idx = row_offset + p + 3;
-        if w0_idx >= weights_u32.len() || w1_idx >= weights_u32.len() || 
-           w2_idx >= weights_u32.len() || w3_idx >= weights_u32.len() {
-            panic!("Weight indices out of bounds");
-        }
         let f = u32x4_to_f32x8_f16c(
-            weights_u32[w0_idx],
-            weights_u32[w1_idx],
-            weights_u32[w2_idx],
-            weights_u32[w3_idx],
+            weights_u32[row_offset + p],
+            weights_u32[row_offset + p + 1],
+            weights_u32[row_offset + p + 2],
+            weights_u32[row_offset + p + 3],
         );
-        
-        if act_idx + 8 <= activation.len() {
-            let a = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
-            acc0 = _mm256_fmadd_ps(f, a, acc0);
-        } else {
-            panic!("Activation index {} + 8 exceeds length {}", act_idx, activation.len());
-        }
+        let a = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc0 = _mm256_fmadd_ps(f, a, acc0);
         p += 4;
         act_idx += 8;
     }
@@ -893,40 +750,25 @@ unsafe fn gemv_row_f16x2_f16c(
 
     // 2-word tail: 4 f16 → 4 f32
     if p + 2 <= k_packed && act_idx + 4 <= k {
-        let w0_idx = row_offset + p;
-        let w1_idx = row_offset + p + 1;
-        if w0_idx >= weights_u32.len() || w1_idx >= weights_u32.len() {
-            panic!("Weight indices out of bounds");
-        }
-        let f = u32x2_to_f32x4_f16c(weights_u32[w0_idx], weights_u32[w1_idx]);
-        
-        if act_idx + 4 <= activation.len() {
-            let a = _mm_loadu_ps(activation.as_ptr().add(act_idx));
-            let prod = _mm_mul_ps(f, a);
-            let shuf = _mm_shuffle_ps(prod, prod, 0x0E);
-            let sums = _mm_add_ps(prod, shuf);
-            let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
-            total += _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
-        } else {
-            panic!("Activation index {} + 4 exceeds length {}", act_idx, activation.len());
-        }
+        let f = u32x2_to_f32x4_f16c(weights_u32[row_offset + p], weights_u32[row_offset + p + 1]);
+        let a = _mm_loadu_ps(activation.as_ptr().add(act_idx));
+        let prod = _mm_mul_ps(f, a);
+        let shuf = _mm_shuffle_ps(prod, prod, 0x0E);
+        let sums = _mm_add_ps(prod, shuf);
+        let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
+        total += _mm_cvtss_f32(_mm_add_ss(sums, shuf2));
         p += 2;
         act_idx += 4;
     }
 
     // 1-word tail: 2 f16 → 2 f32
     if p < k_packed && act_idx < k {
-        let w_idx = row_offset + p;
-        if w_idx < weights_u32.len() {
-            let w = weights_u32[w_idx];
-            let f = u32x2_to_f32x4_f16c(w, 0);
-            let arr: [f32; 4] = std::mem::transmute(f);
-            if act_idx < activation.len() {
-                total += arr[0] * activation[act_idx];
-            }
-            if act_idx + 1 < k && act_idx + 1 < activation.len() {
-                total += arr[1] * activation[act_idx + 1];
-            }
+        let w = weights_u32[row_offset + p];
+        let f = u32x2_to_f32x4_f16c(w, 0);
+        let arr: [f32; 4] = std::mem::transmute(f);
+        total += arr[0] * activation[act_idx];
+        if act_idx + 1 < k {
+            total += arr[1] * activation[act_idx + 1];
         }
     }
 
@@ -946,17 +788,6 @@ fn gemv_f32x1_dispatch(
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
-    
-    // Validate output length matches number of rows
-    if output.len() < m {
-        panic!("Output slice length {} is less than number of rows {}", output.len(), m);
-    }
-    
-    // Validate activation length matches K dimension
-    if activation.len() < k {
-        panic!("Activation length {} is less than K dimension {}", activation.len(), k);
-    }
-    
     // F32x1: u32 IS f32, reinterpret directly
     let weights_f32: &[f32] = unsafe {
         std::slice::from_raw_parts(
@@ -968,12 +799,7 @@ fn gemv_f32x1_dispatch(
     {
         use rayon::prelude::*;
         output.par_iter_mut().enumerate().for_each(|(row, out)| {
-            let row_start = row * k;
-            let row_end = (row + 1) * k;
-            if row_end > weights_f32.len() {
-                panic!("Row {} exceeds weights length {}", row, weights_f32.len());
-            }
-            let row_data = &weights_f32[row_start..row_end];
+            let row_data = &weights_f32[row * k..(row + 1) * k];
             let dot = fma_f32_slice(row_data, activation);
             *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         });
@@ -982,12 +808,7 @@ fn gemv_f32x1_dispatch(
     #[cfg(not(feature = "parallel"))]
     {
         for row in 0..m {
-            let row_start = row * k;
-            let row_end = (row + 1) * k;
-            if row_end > weights_f32.len() {
-                panic!("Row {} exceeds weights length {}", row, weights_f32.len());
-            }
-            let row_data = &weights_f32[row_start..row_end];
+            let row_data = &weights_f32[row * k..(row + 1) * k];
             let dot = fma_f32_slice(row_data, activation);
             output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
@@ -1029,11 +850,6 @@ fn gemv_packed_inner<T: PackedWord>(
     k: usize,
     k_packed: usize,
 ) {
-    // Validate activation length matches K dimension
-    if activation.len() < k {
-        panic!("Activation length {} is less than K dimension {}", activation.len(), k);
-    }
-    
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
@@ -1139,37 +955,16 @@ fn gemv_row<T: PackedWord>(
     k_packed: usize,
     unpack_buf: &mut [f32],
 ) -> f32 {
-    // Bounds validation
     let items = T::ITEMS;
     let row_offset = row * k_packed;
-    
-    if row_offset + k_packed > weights.as_packed().len() {
-        panic!("Row offset {} + k_packed {} exceeds weights length {}", 
-               row_offset, k_packed, weights.as_packed().len());
-    }
-    
-    if activation.len() < k {
-        panic!("Activation length {} is less than k {}", activation.len(), k);
-    }
-    
-    if unpack_buf.len() < k {
-        panic!("Unpack buffer length {} is less than k {}", unpack_buf.len(), k);
-    }
 
     for p in 0..k_packed {
-        let word_idx = row_offset + p;
-        if word_idx >= weights.as_packed().len() {
-            panic!("Weight index {} out of bounds (len: {})", word_idx, weights.as_packed().len());
-        }
-        let word = weights.as_packed()[word_idx];
+        let word = weights.as_packed()[row_offset + p];
         let unpacked = word.unpack_to_f32();
         let base = p * items;
         for j in 0..items {
             let idx = base + j;
             if idx < k {
-                if idx >= unpack_buf.len() {
-                    panic!("Unpack buffer index {} out of bounds (len: {})", idx, unpack_buf.len());
-                }
                 unpack_buf[idx] = unpacked.as_ref()[j];
             }
         }
@@ -1199,10 +994,7 @@ unsafe fn hsum256_ps(v: __m256) -> f32 {
 /// SIMD dot product of two f32 slices.
 #[inline]
 fn fma_f32_slice(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        panic!("fma_f32_slice: slice lengths don't match: a.len()={}, b.len()={}", 
-               a.len(), b.len());
-    }
+    debug_assert_eq!(a.len(), b.len());
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
@@ -1230,21 +1022,12 @@ fn fma_f32_scalar(a: &[f32], b: &[f32]) -> f32 {
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        panic!("fma_f32_avx2: slice lengths don't match: a.len()={}, b.len()={}", 
-               a.len(), b.len());
-    }
-    
     let len = a.len();
     let mut acc0 = _mm256_setzero_ps();
     let mut acc1 = _mm256_setzero_ps();
     let mut i = 0;
 
     while i + 16 <= len {
-        // Bounds check for SIMD loads
-        if i + 16 > a.len() || i + 16 > b.len() {
-            panic!("fma_f32_avx2: SIMD load out of bounds at index {}", i);
-        }
         let a0 = _mm256_loadu_ps(a.as_ptr().add(i));
         let a1 = _mm256_loadu_ps(a.as_ptr().add(i + 8));
         let b0 = _mm256_loadu_ps(b.as_ptr().add(i));
@@ -1255,10 +1038,6 @@ unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
     }
 
     while i + 8 <= len {
-        // Bounds check for SIMD load
-        if i + 8 > a.len() || i + 8 > b.len() {
-            panic!("fma_f32_avx2: SIMD load out of bounds at index {}", i);
-        }
         let a0 = _mm256_loadu_ps(a.as_ptr().add(i));
         let b0 = _mm256_loadu_ps(b.as_ptr().add(i));
         acc0 = _mm256_fmadd_ps(a0, b0, acc0);
@@ -1269,9 +1048,6 @@ unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
     let mut total = hsum256_ps(combined);
 
     while i < len {
-        if i >= a.len() || i >= b.len() {
-            panic!("fma_f32_avx2: scalar access out of bounds at index {}", i);
-        }
         total += a[i] * b[i];
         i += 1;
     }
@@ -1283,21 +1059,12 @@ unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 #[target_feature(enable = "avx512f")]
 #[inline]
 unsafe fn fma_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        panic!("fma_f32_avx512: slice lengths don't match: a.len()={}, b.len()={}", 
-               a.len(), b.len());
-    }
-    
     let len = a.len();
     let mut acc0 = _mm512_setzero_ps();
     let mut acc1 = _mm512_setzero_ps();
     let mut i = 0;
 
     while i + 32 <= len {
-        // Bounds check for SIMD loads
-        if i + 32 > a.len() || i + 32 > b.len() {
-            panic!("fma_f32_avx512: SIMD load out of bounds at index {}", i);
-        }
         let a0 = _mm512_loadu_ps(a.as_ptr().add(i));
         let b0 = _mm512_loadu_ps(b.as_ptr().add(i));
         acc0 = _mm512_fmadd_ps(a0, b0, acc0);
@@ -1308,10 +1075,6 @@ unsafe fn fma_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
     }
 
     while i + 16 <= len {
-        // Bounds check for SIMD load
-        if i + 16 > a.len() || i + 16 > b.len() {
-            panic!("fma_f32_avx512: SIMD load out of bounds at index {}", i);
-        }
         let a0 = _mm512_loadu_ps(a.as_ptr().add(i));
         let b0 = _mm512_loadu_ps(b.as_ptr().add(i));
         acc0 = _mm512_fmadd_ps(a0, b0, acc0);
@@ -1322,9 +1085,6 @@ unsafe fn fma_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
     let mut total = _mm512_reduce_add_ps(combined);
 
     while i < len {
-        if i >= a.len() || i >= b.len() {
-            panic!("fma_f32_avx512: scalar access out of bounds at index {}", i);
-        }
         total += a[i] * b[i];
         i += 1;
     }
@@ -1503,4 +1263,3 @@ mod tests {
         }
     }
 }
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         

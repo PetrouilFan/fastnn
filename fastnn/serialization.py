@@ -169,8 +169,16 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
                     if has_grad:
                         grad_name = name + ".grad"
                         _, grad_data = read_tensor(f)
-                        # Gradient storage not automatically attached; ignore for now
-                        # Could store in separate dict
+                        # Attach gradient to the tensor
+                        grad_tensor = tensor(grad_data.copy().flatten().tolist(), list(grad_data.shape))
+                        # Store gradient in autograd metadata if available
+                        if hasattr(result[name], 'inner') and hasattr(result[name].inner, 'autograd_meta'):
+                            from fastnn.autograd import AutogradMeta
+                            meta = result[name].inner.autograd_meta
+                            if meta is not None:
+                                meta.grad = grad_tensor
+                        # Also store in result dict for access
+                        result[grad_name] = grad_tensor
                 return result
             
             else:

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use wgpu::{Buffer, ComputePipeline, Device, Queue, ShaderModule};
 
 // Import GPU operations module to register kernels
@@ -381,14 +381,11 @@ impl GpuContext {
         let buffer = self.get_or_create_gpu_buffer(data, label);
 
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
-        let strong = get_context(self.device_id);
         GpuBuffer {
             id,
             buffer: Arc::new(buffer),
             size,
             device_id: self.device_id,
-            ctx: Some(Arc::downgrade(&strong)),
-            released: false,
         }
     }
 
@@ -716,8 +713,6 @@ pub struct GpuBuffer {
     pub buffer: Arc<Buffer>,
     pub size: usize,
     pub device_id: usize,
-    ctx: Option<Weak<GpuContext>>,
-    released: bool,
 }
 
 fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
