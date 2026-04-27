@@ -36,7 +36,7 @@ def benchmark_conv_bn_silu(batch_size=1, in_channels=64, out_channels=128, heigh
             torch_times.append((t1 - t0) * 1000)
 
     torch_median = np.median(torch_times)
-    print(".2f")
+    print(f"  Median time: {torch_median:.2f} ms")
 
     # FastNN version - separate ops
     fastnn_conv = fastnn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
@@ -62,10 +62,10 @@ def benchmark_conv_bn_silu(batch_size=1, in_channels=64, out_channels=128, heigh
         fastnn_times.append((t1 - t0) * 1000)
 
     fastnn_median = np.median(fastnn_times)
-    print(".2f")
+    print(f"  Median time: {fastnn_median:.2f} ms")
 
     speedup = torch_median / fastnn_median
-    print(".2f")
+    print(f"  Speedup: {speedup:.2f}x")
 
     return torch_median, fastnn_median, speedup
 
@@ -90,7 +90,7 @@ def main():
         print()
 
     avg_speedup = total_speedup / count
-    print(".2f")
+    print(f"Average speedup: {avg_speedup:.2f}x")
     print()
     print("Key Findings:")
     print("- FastNN kernels are optimized for inference workloads")
