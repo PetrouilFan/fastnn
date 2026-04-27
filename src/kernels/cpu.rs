@@ -8385,7 +8385,7 @@ fn conv2d_1x1(
     CONV_SCRATCH.with(|scratch| {
         let mut buf = scratch.borrow_mut();
         if buf.len() < total_scratch {
-            buf.resize(total_scratch, 0.0f32);
+            buf.resize(total_scratch);
         }
 
         let (w_t_buf, rest) = buf.split_at_mut(k * m);
@@ -8604,7 +8604,7 @@ fn conv2d_im2col(
     CONV_SCRATCH.with(|scratch| {
         let mut buf = scratch.borrow_mut();
         if buf.len() < total_scratch {
-            buf.resize(total_scratch, 0.0f32);
+            buf.resize(total_scratch);
         }
         // Zero only the im2col portion. gemm_out is fully overwritten by BLAS.
         buf.data[..col_size].fill(0.0);

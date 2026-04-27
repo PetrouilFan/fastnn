@@ -76,13 +76,14 @@ impl Muon {
         const EPSILON: f32 = 1e-8;
 
         if norm_val < EPSILON {
-            return Tensor::zeros(a.shape(), a.dtype(), a.device());
+            *out = Tensor::zeros(a.shape(), a.dtype(), a.device());
+            return;
         }
 
         // Normalize by Frobenius norm to ensure numerical stability
         // Add epsilon to prevent division by zero
         let norm_safe = Tensor::from_scalar(norm_val + EPSILON);
-        out.copy_from_(a);
+        *out = a.clone();
         out.div_(&norm_safe);
 
         for _ in 0..num_iterations {
@@ -101,7 +102,7 @@ impl Muon {
             let x_norm = x_norm_squared.sqrt();
             let x_norm_val = x_norm.item();
             if x_norm_val < EPSILON {
-                out.zero_();
+                *out = Tensor::zeros(out.shape(), out.dtype(), out.device());
                 return;
             }
             let x_norm_safe = Tensor::from_scalar(x_norm_val + EPSILON);
@@ -128,13 +129,13 @@ impl Optimizer for Muon {
 
             // Apply weight decay: effective_grad = grad + weight_decay * param
             let effective_grad = if weight_decay != 0.0 {
-                self.temp_wd[i].copy_from_(param);
+                self.temp_wd[i] = param.clone();
                 self.temp_wd[i].mul_scalar_(weight_decay);
-                self.temp_eg[i].copy_from_(grad);
+                self.temp_eg[i] = grad.clone();
                 self.temp_eg[i].add_(&self.temp_wd[i]);
                 &self.temp_eg[i]
             } else {
-                grad
+                &grad
             };
 
             if is_2d {
@@ -147,12 +148,12 @@ impl Optimizer for Muon {
 
                 // For Nesterov: update_dir = effective_grad + momentum * ortho_momentum
                 if self.nesterov {
-                    self.temp_mom_ortho[i].copy_from_(&self.temp_ortho[i]);
+                    self.temp_mom_ortho[i] = self.temp_ortho[i].clone();
                     self.temp_mom_ortho[i].mul_scalar_(momentum);
-                    self.temp_update_dir[i].copy_from_(effective_grad);
+                    self.temp_update_dir[i] = (*effective_grad).clone();
                     self.temp_update_dir[i].add_(&self.temp_mom_ortho[i]);
                 } else {
-                    self.temp_update_dir[i].copy_from_(&self.temp_ortho[i]);
+                    self.temp_update_dir[i] = self.temp_ortho[i].clone();
                 }
 
                 // param = param - lr * update_dir
@@ -163,7 +164,7 @@ impl Optimizer for Muon {
                 self.m[i].mul_scalar_(momentum);
                 self.m[i].add_(effective_grad);
 
-                self.temp_update_dir[i].copy_from_(&self.m[i]);
+                self.temp_update_dir[i] = self.m[i].clone();
                 self.temp_update_dir[i].mul_scalar_(lr);
                 param.sub_(&self.temp_update_dir[i]);
             }

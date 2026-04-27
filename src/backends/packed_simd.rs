@@ -8,7 +8,6 @@
 
 use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
-use std::mem::MaybeUninit;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
@@ -969,7 +968,7 @@ fn gemv_packed_blocked<T: PackedWord>(
                     let dst_start = i * items;
                     for j in 0..items {
                         if dst_start + j < k_block {
-                            unpack_buf[dst_start + j] = unpacked.as_ref()[j];
+                            unpack_buf.data[dst_start + j] = unpacked.as_ref()[j];
                         }
                     }
                 }
