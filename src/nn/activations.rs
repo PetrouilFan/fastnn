@@ -1,9 +1,7 @@
 #![allow(dead_code)]
-use crate::autograd::{self, AutogradMeta};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
-use std::sync::Arc;
 
 #[allow(dead_code)]
 pub struct ReLU;
@@ -153,17 +151,7 @@ impl SiLU {
 impl Module for SiLU {
     fn forward(&self, x: &Tensor) -> Tensor {
         let result = dispatch("silu", DispatchKey::Cpu, &[x]);
-        let mut output = result[0].clone();
-
-        if x.requires_grad() {
-            let edges = autograd::make_edge(x);
-            let backward = Arc::new(autograd::SiLUBackward::new(x.clone(), edges));
-            let mut meta = autograd::AutogradMeta::new_non_leaf(false);
-            meta.grad_fn = Some(backward);
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
-
-        output
+        result[0].clone()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -199,21 +187,7 @@ impl Module for LeakyReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
         let slope_tensor = Tensor::from_scalar(self.negative_slope as f32);
         let result = dispatch("leaky_relu", DispatchKey::Cpu, &[x, &slope_tensor]);
-        let mut output = result[0].clone();
-
-        if x.requires_grad() {
-            let edges = autograd::make_edge(x);
-            let backward = Arc::new(autograd::LeakyReLUBackward::new(
-                x.clone(),
-                self.negative_slope as f32,
-                edges,
-            ));
-            let mut meta = autograd::AutogradMeta::new_non_leaf(false);
-            meta.grad_fn = Some(backward);
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
-
-        output
+        result[0].clone()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -256,22 +230,7 @@ impl PReLU {
 impl Module for PReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
         let result = dispatch("prelu", DispatchKey::Cpu, &[x, &self.weight]);
-        let mut output = result[0].clone();
-
-        if x.requires_grad() || self.weight.requires_grad() {
-            let mut edges = autograd::make_edge(x);
-            edges.extend(autograd::make_edge(&self.weight));
-            let backward = Arc::new(autograd::PReLUBackward::new(
-                x.clone(),
-                self.weight.clone(),
-                edges,
-            ));
-            let mut meta = autograd::AutogradMeta::new_non_leaf(false);
-            meta.grad_fn = Some(backward);
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
-
-        output
+        result[0].clone()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -309,22 +268,7 @@ impl Module for Softplus {
         let beta_t = Tensor::from_scalar(self.beta as f32);
         let threshold_t = Tensor::from_scalar(self.threshold as f32);
         let result = dispatch("softplus", DispatchKey::Cpu, &[x, &beta_t, &threshold_t]);
-        let mut output = result[0].clone();
-
-        if x.requires_grad() {
-            let edges = autograd::make_edge(x);
-            let backward = Arc::new(autograd::SoftplusBackward::new(
-                x.clone(),
-                self.beta as f32,
-                self.threshold as f32,
-                edges,
-            ));
-            let mut meta = autograd::AutogradMeta::new_non_leaf(false);
-            meta.grad_fn = Some(backward);
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
-
-        output
+        result[0].clone()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -393,21 +337,7 @@ impl Module for Elu {
     fn forward(&self, x: &Tensor) -> Tensor {
         let alpha_tensor = Tensor::from_scalar(self.alpha as f32);
         let result = dispatch("elu", DispatchKey::Cpu, &[x, &alpha_tensor]);
-        let mut output = result[0].clone();
-
-        if x.requires_grad() {
-            let edges = autograd::make_edge(x);
-            let backward = Arc::new(autograd::EluBackward::new(
-                x.clone(),
-                self.alpha as f32,
-                edges,
-            ));
-            let mut meta = autograd::AutogradMeta::new_non_leaf(false);
-            meta.grad_fn = Some(backward);
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
-
-        output
+        result[0].clone()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -518,23 +448,7 @@ impl Module for AdaptiveAvgPool2d {
             }
         }
 
-        let output = Tensor::from_vec(output_data, vec![batch, channels, out_h, out_w]);
-
-        if x.requires_grad() {
-            let edges = autograd::make_edge(x);
-            let backward = Arc::new(autograd::AdaptiveAvgPool2dBackward::new(
-                x_shape.clone(),
-                self.output_size,
-                edges,
-            ));
-            let mut meta = AutogradMeta::new_non_leaf(false);
-            meta.grad_fn = Some(backward);
-            let mut output = output;
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            output
-        }
+        Tensor::from_vec(output_data, vec![batch, channels, out_h, out_w])
     }
 
     fn parameters(&self) -> Vec<Tensor> {

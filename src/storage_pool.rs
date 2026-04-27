@@ -1,67 +1,66 @@
 use dashmap::DashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use crate::storage::{DType, Device, Storage};
 
 pub struct StoragePool {
     buffers: DashMap<usize, Vec<Arc<Storage>>>,
-    max_buffers_per_size: usize,
 }
 
 impl StoragePool {
     pub fn new() -> Self {
         Self {
             buffers: DashMap::new(),
-            max_buffers_per_size: 100, // Limit to prevent unbounded growth
         }
     }
 
-    /// Acquire a storage buffer of at least nbytes from the pool
-    /// If no suitable buffer exists, allocate a new one
-    pub fn acquire(&self, nbytes: usize, device: Device, dtype: DType) -> Arc<Storage> {
-        // Only CPU storage can be pooled (GPU buffers managed separately)
-        if let Device::Cpu = device {
-            // Look for exact size match first
-            if let Some(mut vec) = self.buffers.get_mut(&nbytes) {
-                if let Some(buffer) = vec.pop() {
-                    // If vec is now empty, remove the entry to keep DashMap clean
-                    if vec.is_empty() {
-                        self.buffers.remove(&nbytes);
-                    }
-                    return buffer;
-                }
-            }
-            
-            // Try to find a larger buffer that we can split (simplified - just allocate new)
-            // In a more sophisticated implementation, we could split larger buffers
-        }
-        
-        // Allocate new storage if nothing suitable in pool
-        Storage::new_cpu(dtype, nbytes)
-    }
+    pub fn acquire(&self, nbytes: usize, device: Device) -> Arc<Storage> {
+        match device {
+            Device::Cpu => {
+                let key = nbytes;
 
-    /// Release a storage buffer back to the pool for reuse
-    pub fn release(&self, storage: Arc<Storage>) {
-        // Only CPU storage can be pooled
-        if let Storage::Cpu(_) = &storage {
-            if let Device::Cpu = storage.device() {
-                let nbytes = storage.nbytes();
-                
-                // Only pool if under limit for this size
-                if let Some(vec) = self.buffers.get(&nbytes) {
-                    if vec.len() < self.max_buffers_per_size {
-                        if let Some(mut vec) = self.buffers.get_mut(&nbytes) {
-                            vec.push(storage);
+                if let Some(mut storages) = self.buffers.get_mut(&key) {
+                    if let Some(storage) = storages.pop() {
+                        match Arc::try_unwrap(storage) {
+                            Ok(mut owned_storage) => {
+                                match &mut owned_storage {
+                                    Storage::Cpu(cpu) => {
+                                        let data = Arc::make_mut(&mut cpu.data);
+                                        data.fill(0);
+                                    }
+                                    Storage::Wgpu(_) => {}
+                                }
+                                return Arc::new(owned_storage);
+                            }
+                            Err(storage) => {
+                                storages.push(storage);
+                            }
                         }
                     }
+                }
+
+                Arc::new(Storage::new_cpu(DType::F32, nbytes))
+            }
+            Device::Wgpu(_) => Arc::new(Storage::new_cpu(DType::F32, nbytes)),
+        }
+    }
+
+    pub fn release(&self, storage: Arc<Storage>) {
+        match storage.device() {
+            Device::Cpu => {
+                let nbytes = storage.nbytes();
+                let key = nbytes;
+
+                if let Some(mut storages) = self.buffers.get_mut(&key) {
+                    if storages.len() < 64 {
+                        storages.push(storage);
+                    }
                 } else {
-                    // Create new entry for this size
-                    self.buffers.insert(nbytes, vec![storage]);
+                    self.buffers.insert(key, vec![storage]);
                 }
             }
+            Device::Wgpu(_) => {}
         }
-        // If not CPU storage or not on CPU device, just drop it (storage will be freed)
     }
 
     pub fn clear(&self) {

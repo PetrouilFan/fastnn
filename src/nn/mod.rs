@@ -3,7 +3,6 @@ pub mod attention;
 pub mod conv;
 pub mod dropout;
 pub mod embedding;
-pub mod fused;
 pub mod linear;
 pub mod norm;
 pub mod pooling;

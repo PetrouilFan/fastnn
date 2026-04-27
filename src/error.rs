@@ -45,15 +45,32 @@ pub enum FastnnError {
     /// Autograd/backward pass error
     #[error("Autograd error: {0}")]
     Autograd(String),
-    
+
     /// Computation error (e.g., kernel execution failed)
     #[error("Computation error: {0}")]
     Computation(String),
-    
+
+    /// Tensor operation error
+    #[error("Tensor operation error: {0}")]
+    TensorOp(String),
+
+    /// Optimizer error
+    #[error("Optimizer error: {0}")]
+    Optimizer(String),
+
+    /// Data loader error
+    #[error("Data loader error: {0}")]
+    DataLoader(String),
+
+    /// Internal error
+    #[error("Internal error: {0}")]
+    Internal(String),
+
     /// General error with custom message
     #[error("{0}")]
     Other(String),
 }
+
 
 impl FastnnError {
     /// Create a shape error with context
