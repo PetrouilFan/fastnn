@@ -14,20 +14,20 @@ def benchmark_conv(batch_size=1, in_channels=64, out_channels=128, height=32, wi
 
     # Warmup
     for _ in range(10):
-        out = conv(x)
+        _ = conv(x)
 
     # Benchmark
     times = []
     for _ in range(iters):
         t0 = time.perf_counter()
-        out = conv(x)
+        _ = conv(x)
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000)
 
     median_time = np.median(times)
     fps = 1000.0 / median_time
-    print(".2f")
-    print(".1f")
+    print(f"  Median time: {median_time:.2f} ms")
+    print(f"  Throughput: {fps:.1f} FPS")
 
     return median_time, fps
 
@@ -59,8 +59,8 @@ def benchmark_conv_bn_silu(batch_size=1, in_channels=64, out_channels=128, heigh
 
     median_time = np.median(times)
     fps = 1000.0 / median_time
-    print(".2f")
-    print(".1f")
+    print(f"  Median time: {median_time:.2f} ms")
+    print(f"  Throughput: {fps:.1f} FPS")
 
     return median_time, fps
 
