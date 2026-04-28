@@ -147,6 +147,7 @@ sub = _core.sub
 mul = _core.mul
 div = _core.div
 matmul = _core.matmul
+im2col = _core.im2col
 neg = _core.neg
 abs = _core.abs
 exp = _core.exp

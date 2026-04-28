@@ -16,6 +16,6 @@ dependencies = [
 dev = ["pytest", "pytest-benchmark"]
 
 [tool.maturin]
-features = ["pyo3/extension-module", "blas"]
+features = ["pyo3/extension-module", "openblas", "blas"]
 python-source = "."
 module-name = "fastnn._core"
