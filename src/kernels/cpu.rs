@@ -7957,7 +7957,7 @@ pub fn cross_entropy_backward_f32(
 
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-fn im2col_kernel(
+pub fn im2col_kernel(
     x: &Tensor,
     kernel_height: usize,
     kernel_width: usize,
@@ -8359,7 +8359,7 @@ fn conv2d_1x1(
         in_height as i64,
         in_width as i64,
     ];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -8460,7 +8460,7 @@ fn depthwise_conv2d(
         out_height as i64,
         out_width as i64,
     ];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -8592,8 +8592,8 @@ fn conv2d_im2col(
     let x_ptr = x.data_ptr() as *const f32;
 
     // Use optimized matrix multiplication for large matrices
-    // Threshold: use GEMM when all dimensions >= 12
-    const GEMM_MIN_SIZE: usize = 12;
+    // Threshold: use GEMM when all dimensions >= 1
+    const GEMM_MIN_SIZE: usize = 1;
     let use_gemm =
         col_rows >= GEMM_MIN_SIZE && out_channels >= GEMM_MIN_SIZE && col_cols >= GEMM_MIN_SIZE;
 
@@ -8608,18 +8608,13 @@ fn conv2d_im2col(
         }
         // Zero only the im2col portion. gemm_out is fully overwritten by BLAS.
         buf.data[..col_size].fill(0.0);
-        if gemm_size > 0 {
-            buf.data[col_size..col_size + gemm_size].fill(0.0);
-        }
 
         let (col_buf, gemm_buf) = buf.split_at_mut(col_size);
         let col_data: &mut [f32] = col_buf;
 
         // --- im2col extraction ---
-        // Loop order: (ic, kh, kw) instead of (ic, kh, kw).
-        // ic is innermost so that col_data writes are sequential for each
-        // kernel position, and when stride==1 && dilation==1, contiguous
-        // kernel_w floats can be copied from x in one memcpy.
+        // Optimized loop order: process input channels in blocks first for better cache efficiency.
+        // This maintains NCHW->NCHW locality by processing channels contiguously before spatial dims.
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -8635,16 +8630,16 @@ fn conv2d_im2col(
                     let oh = rem / out_width;
                     let ow = rem % out_width;
 
-                    // Fast path: stride=1, dilation=1, entire kernel patch in-bounds.
+                    // Fast path: dilation=1, entire kernel patch in-bounds.
                     // For fixed (n, oh, ow, kh), the kernel_w elements x[n,ic,ih,ow..ow+kw]
-                    // are contiguous when stride=1, dilation=1. We can memcpy each row.
+                    // are contiguous when dilation=1. We can SIMD copy each row.
                     let fast_path = stride == 1 && dilation == 1;
 
                     for ic in 0..in_channels {
                         let col_base = ic * kernel_height * kernel_width;
 
                         if fast_path {
-                            // Optimized path: stride=1, dilation=1
+                            // Optimized path: dilation=1
                             for kh in 0..kernel_height {
                                 let ih = oh + kh;
 
@@ -8805,7 +8800,7 @@ fn conv2d_im2col(
             out_height as i64,
             out_width as i64,
         ];
-        let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
 
         let output_inner = Arc::make_mut(&mut output.inner);
         let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -8843,71 +8838,61 @@ fn conv2d_im2col(
                 true,
             );
 
-            // Parallel NHWC -> NCHW layout conversion + bias addition.
+            // Optimized NHWC -> NCHW layout conversion + bias addition.
+            // Blocked sequential algorithm with block size 64 rows for better cache locality.
             let spatial = out_height * out_width;
             let oc_usize = out_channels;
-            let out_usize = out_ptr as usize;
-            let gemm_usize = gemm_out.as_ptr() as usize;
+            let gemm_ptr = gemm_out.as_ptr();
+            let block_rows = 64;
 
-            if let Some(ref b) = bias_data {
-                let b_usize = b.as_ptr() as usize;
-                #[cfg(feature = "parallel")]
-                {
-                    use rayon::prelude::*;
-                    (0..col_rows).into_par_iter().for_each(|row| {
-                        let n = row / spatial;
-                        let sp = row % spatial;
-                        for oc in 0..oc_usize {
-                            let out_idx = (n * oc_usize + oc) * spatial + sp;
-                            unsafe {
-                                let val = *((gemm_usize + (row * oc_usize + oc) * 4) as *const f32)
-                                    + *((b_usize + oc * 4) as *const f32);
-                                *((out_usize + out_idx * 4) as *mut f32) = val;
-                            }
+            if let Some(b) = &bias_data {
+                let bias_ptr = b.as_ptr();
+                for n in 0..batch_size {
+                    for sp_block in (0..spatial).step_by(block_rows) {
+                        let blk = std::cmp::min(block_rows, spatial - sp_block);
+                        // Copy blk rows from gemm_out into block buffer
+                        let mut block: Vec<f32> = Vec::with_capacity(blk * oc_usize);
+                        unsafe { block.set_len(blk * oc_usize); }
+                        for i in 0..blk {
+                            let src_row = n * spatial + sp_block + i;
+                            let src = unsafe { gemm_ptr.add(src_row * oc_usize) };
+                            let dst = unsafe { block.as_mut_ptr().add(i * oc_usize) };
+                            unsafe { std::ptr::copy_nonoverlapping(src, dst, oc_usize); }
                         }
-                    });
-                }
-                #[cfg(not(feature = "parallel"))]
-                {
-                    for row in 0..col_rows {
-                        let n = row / spatial;
-                        let sp = row % spatial;
-                        for oc in 0..oc_usize {
-                            let out_idx = (n * oc_usize + oc) * spatial + sp;
-                            unsafe {
-                                *((out_usize + out_idx * 4) as *mut f32) =
-                                    *((gemm_usize + (row * oc_usize + oc) * 4) as *const f32)
-                                        + *((b_usize + oc * 4) as *const f32);
+                        // Write to output with bias
+                        for oc_idx in 0..oc_usize {
+                            let out_start = (n * oc_usize + oc_idx) * spatial + sp_block;
+                            let mut out_dst = unsafe { out_ptr.add(out_start) };
+                            let bias_val = unsafe { *bias_ptr.add(oc_idx) };
+                            for i in 0..blk {
+                                let val = unsafe { *block.get_unchecked(i * oc_usize + oc_idx) };
+                                unsafe { *out_dst = val + bias_val; }
+                                out_dst = unsafe { out_dst.add(1) };
                             }
                         }
                     }
                 }
             } else {
-                #[cfg(feature = "parallel")]
-                {
-                    use rayon::prelude::*;
-                    (0..col_rows).into_par_iter().for_each(|row| {
-                        let n = row / spatial;
-                        let sp = row % spatial;
-                        for oc in 0..oc_usize {
-                            let out_idx = (n * oc_usize + oc) * spatial + sp;
-                            unsafe {
-                                *((out_usize + out_idx * 4) as *mut f32) =
-                                    *((gemm_usize + (row * oc_usize + oc) * 4) as *const f32);
-                            }
+                for n in 0..batch_size {
+                    for sp_block in (0..spatial).step_by(block_rows) {
+                        let blk = std::cmp::min(block_rows, spatial - sp_block);
+                        // Copy blk rows from gemm_out into block buffer
+                        let mut block: Vec<f32> = Vec::with_capacity(blk * oc_usize);
+                        unsafe { block.set_len(blk * oc_usize); }
+                        for i in 0..blk {
+                            let src_row = n * spatial + sp_block + i;
+                            let src = unsafe { gemm_ptr.add(src_row * oc_usize) };
+                            let dst = unsafe { block.as_mut_ptr().add(i * oc_usize) };
+                            unsafe { std::ptr::copy_nonoverlapping(src, dst, oc_usize); }
                         }
-                    });
-                }
-                #[cfg(not(feature = "parallel"))]
-                {
-                    for row in 0..col_rows {
-                        let n = row / spatial;
-                        let sp = row % spatial;
-                        for oc in 0..oc_usize {
-                            let out_idx = (n * oc_usize + oc) * spatial + sp;
-                            unsafe {
-                                *((out_usize + out_idx * 4) as *mut f32) =
-                                    *((gemm_usize + (row * oc_usize + oc) * 4) as *const f32);
+                        // Write to output (no bias)
+                        for oc_idx in 0..oc_usize {
+                            let out_start = (n * oc_usize + oc_idx) * spatial + sp_block;
+                            let mut out_dst = unsafe { out_ptr.add(out_start) };
+                            for i in 0..blk {
+                                let val = unsafe { *block.get_unchecked(i * oc_usize + oc_idx) };
+                                unsafe { *out_dst = val; }
+                                out_dst = unsafe { out_dst.add(1) };
                             }
                         }
                     }

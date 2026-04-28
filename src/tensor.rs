@@ -2528,7 +2528,16 @@ impl Tensor {
         let n = b_shape[1] as usize;
 
         // Allocate output directly
-        let mut output = Tensor::zeros(vec![m as i64, n as i64], DType::F32, Device::Cpu);
+        let sizes: SmallVec<[i64; 8]> = smallvec![m as i64, n as i64];
+        let nbytes = m * n * DType::F32.size();
+        let mut data = Vec::with_capacity(nbytes);
+        unsafe { data.set_len(nbytes) };
+        let storage = Arc::new(Storage::Cpu(CpuStorage {
+            data: Arc::new(data),
+            nbytes,
+            gpu_buffer_cache: RwLock::new(HashMap::new()),
+        }));
+        let mut output = Tensor::new(TensorImpl::new(storage, sizes, DType::F32));
         {
             let output_inner = Arc::make_mut(&mut output.inner);
             let output_storage = Arc::make_mut(&mut output_inner.storage);

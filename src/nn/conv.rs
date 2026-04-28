@@ -96,7 +96,7 @@ impl Module for Conv2d {
             ],
         );
 
-        let output = result[0].clone();
+        let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() || self.weight.requires_grad() {
             let edges = {

@@ -35,8 +35,8 @@ blas-src     = { version = "0.10", features = ["openblas"], optional = true }
 libc = "0.2"
 
 [features]
-default = ["simd", "parallel", "simd_avx512", "openblas"]
-openblas = ["blas-src/openblas"]
+default = ["simd", "parallel", "simd_avx512", "openblas", "blas"]
+openblas = ["blas-src/openblas-src"]
 blas = []
 parallel = []
 simd = []
@@ -60,3 +60,12 @@ harness = false
 name = "wgpu_bench"
 path = "benches/wgpu_bench.rs"
 harness = false
+
+[[bench]]
+name = "matmul_bench"
+path = "benches/matmul_bench.rs"
+harness = false
+
+[[bin]]
+name = "matmul_direct"
+path = "benches/matmul_direct.rs"
