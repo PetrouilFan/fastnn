@@ -3,7 +3,7 @@ mod autograd;
 mod dispatcher;
 mod io;
 mod iterator;
-mod kernels;
+pub mod kernels;
 mod nn;
 mod optim;
 mod storage;
@@ -11,6 +11,10 @@ mod storage_pool;
 mod tensor;
 mod train;
 mod residual;
+
+// Re-export core types
+pub use tensor::Tensor;
+pub use storage::{DType, Device};
 
 // Native packed precision modules
 pub mod dtypes;
@@ -40,8 +44,7 @@ use pyo3::PyAny;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use storage::{allocator_stats as storage_allocator_stats, DType, Device};
-use tensor::Tensor;
+use storage::allocator_stats as storage_allocator_stats;
 
 // Custom exception hierarchy for fastnn
 pyo3::create_exception!(fastnn, FastnnError, PyRuntimeError, "Base exception for fastnn operations.");
@@ -2572,6 +2575,15 @@ fn load_model(path: String) -> PyResult<HashMap<String, PyTensor>> {
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Set OpenBLAS and OMP to single-threaded mode by default for optimal
+    // single-threaded performance. Users can override via environment variables.
+    if std::env::var("OPENBLAS_NUM_THREADS").is_err() {
+        std::env::set_var("OPENBLAS_NUM_THREADS", "1");
+    }
+    if std::env::var("OMP_NUM_THREADS").is_err() {
+        std::env::set_var("OMP_NUM_THREADS", "1");
+    }
+
     let py = m.py();
 
     // Register exception hierarchy
@@ -2686,6 +2698,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
     m.add_function(wrap_pyfunction!(cat, py)?)?;
     m.add_function(wrap_pyfunction!(einsum, py)?)?;
+    m.add_function(wrap_pyfunction!(im2col, py)?)?;
+
     m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
     m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
     m.add_function(wrap_pyfunction!(flash_attention, py)?)?;
@@ -2792,6 +2806,52 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyTensor {
 fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
     let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     PyTensor::from_tensor(tensor::einsum(equation, &tensors))
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, kernel_size, stride=1, padding=0, dilation=1))]
+fn im2col(
+    x: &PyTensor,
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+    dilation: i64,
+) -> PyResult<PyTensor> {
+    let x_inner = &x.inner;
+    let shape = x_inner.shape();
+    if shape.len() != 4 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Input must be a 4D tensor (N, C, H, W)",
+        ));
+    }
+    let batch = shape[0] as usize;
+    let in_channels = shape[1] as usize;
+    let in_height = shape[2] as usize;
+    let in_width = shape[3] as usize;
+
+    let kernel_h = kernel_size as usize;
+    let kernel_w = kernel_size as usize;
+    let stride_us = stride as usize;
+    let padding_us = padding as usize;
+    let dilation_us = dilation as usize;
+
+    // Compute output dimensions
+    let out_height = (in_height + 2 * padding_us - kernel_h) / stride_us + 1;
+    let out_width = (in_width + 2 * padding_us - kernel_w) / stride_us + 1;
+
+    // Call the internal im2col_kernel
+    let col_tensor = crate::kernels::cpu::im2col_kernel(
+        x_inner,
+        kernel_h,
+        kernel_w,
+        stride_us,
+        padding_us,
+        dilation_us,
+        out_height,
+        out_width,
+    );
+
+    Ok(PyTensor::from_tensor(col_tensor))
 }
 
 #[pyfunction]

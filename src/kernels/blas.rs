@@ -8,22 +8,22 @@ pub const MIN_BLAS_SIZE: usize = 64;
 
 // Try to use system BLAS (cblas) when available
 #[cfg(all(feature = "blas", not(target_os = "windows")))]
-#[link(name = "cblas")]
+#[link(name = "openblas", kind = "static")]
 extern "C" {
     fn cblas_sgemm(
-        layout: i32,
-        transa: i32,
-        transb: i32,
-        m: i32,
-        n: i32,
-        k: i32,
+        Order: i32,
+        TransA: i32,
+        TransB: i32,
+        M: i32,
+        N: i32,
+        K: i32,
         alpha: f32,
-        a: *const f32,
+        A: *const f32,
         lda: i32,
-        b: *const f32,
+        B: *const f32,
         ldb: i32,
         beta: f32,
-        c: *mut f32,
+        C: *mut f32,
         ldc: i32,
     );
 }
