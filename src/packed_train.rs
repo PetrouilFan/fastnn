@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use wide::f32x4;
 
 use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
@@ -51,27 +52,75 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
         assert_eq!(gradients.len(), self.master.len());
         self.step += 1;
         let t = self.step as f32;
+        let beta1_corr = 1.0 - self.beta1.powf(t);
+        let beta2_corr = 1.0 - self.beta2.powf(t);
+        let lr_wd = if self.weight_decay != 0.0 { self.lr * self.weight_decay } else { 0.0 };
+        let one_minus_beta1 = 1.0 - self.beta1;
+        let one_minus_beta2 = 1.0 - self.beta2;
+        let lr = self.lr;
+        let eps = self.eps;
 
-        for i in 0..self.master.len() {
-            let g = gradients[i];
+        let len = self.master.len();
+        let chunk_size = 4;
+        let mut i = 0;
+        while i + chunk_size <= len {
+            let g_arr = [gradients[i], gradients[i+1], gradients[i+2], gradients[i+3]];
+            let g = f32x4::from(g_arr);
+            let master_arr = [self.master[i], self.master[i+1], self.master[i+2], self.master[i+3]];
+            let mut master = f32x4::from(master_arr);
+            let m_arr = [self.m[i], self.m[i+1], self.m[i+2], self.m[i+3]];
+            let mut m = f32x4::from(m_arr);
+            let v_arr = [self.v[i], self.v[i+1], self.v[i+2], self.v[i+3]];
+            let mut v = f32x4::from(v_arr);
 
             // Apply weight decay
-            if self.weight_decay != 0.0 {
-                self.master[i] -= self.lr * self.weight_decay * self.master[i];
-            }
+            master = master - f32x4::splat(lr_wd) * master;
 
             // Update first moment
-            self.m[i] = self.beta1 * self.m[i] + (1.0 - self.beta1) * g;
+            m = f32x4::mul_add(f32x4::splat(self.beta1), m, f32x4::splat(one_minus_beta1) * g);
 
             // Update second moment
-            self.v[i] = self.beta2 * self.v[i] + (1.0 - self.beta2) * g * g;
+            let g_sq = g * g;
+            v = f32x4::mul_add(f32x4::splat(self.beta2), v, f32x4::splat(one_minus_beta2) * g_sq);
 
             // Bias correction
-            let m_hat = self.m[i] / (1.0 - self.beta1.powf(t));
-            let v_hat = self.v[i] / (1.0 - self.beta2.powf(t));
+            let m_hat = m / f32x4::splat(beta1_corr);
+            let v_hat = v / f32x4::splat(beta2_corr);
 
             // Update master weight
-            self.master[i] -= self.lr * m_hat / (v_hat.sqrt() + self.eps);
+            let denom = v_hat.sqrt() + f32x4::splat(eps);
+            master -= f32x4::splat(lr) * m_hat / denom;
+
+            // Store back
+            let master_arr_out: [f32; 4] = master.into();
+            self.master[i..i+4].copy_from_slice(&master_arr_out);
+            let m_arr_out: [f32; 4] = m.into();
+            self.m[i..i+4].copy_from_slice(&m_arr_out);
+            let v_arr_out: [f32; 4] = v.into();
+            self.v[i..i+4].copy_from_slice(&v_arr_out);
+
+            i += chunk_size;
+        }
+
+        // Handle remainder
+        for j in i..len {
+            let g = gradients[j];
+
+            // Apply weight decay
+            self.master[j] -= lr_wd * self.master[j];
+
+            // Update first moment
+            self.m[j] = self.beta1 * self.m[j] + one_minus_beta1 * g;
+
+            // Update second moment
+            self.v[j] = self.beta2 * self.v[j] + one_minus_beta2 * g * g;
+
+            // Bias correction
+            let m_hat = self.m[j] / beta1_corr;
+            let v_hat = self.v[j] / beta2_corr;
+
+            // Update master weight
+            self.master[j] -= lr * m_hat / (v_hat.sqrt() + eps);
         }
 
         // Recalibrate scale periodically

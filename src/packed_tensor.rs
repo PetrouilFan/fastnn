@@ -37,10 +37,7 @@ impl<T: PackedWord> PackedTensor<T> {
     pub fn zeros(shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
         let packed_len = numel.div_ceil(T::ITEMS);
-        let mut data = zeroed_vec(packed_len);
-        for d in data.iter_mut() {
-            *d = T::zeroed();
-        }
+        let data = zeroed_vec(packed_len);
         PackedTensor {
             data,
             shape: shape.to_vec(),
