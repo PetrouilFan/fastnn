@@ -36,6 +36,32 @@ def mean(a, dim=None, keepdim=False):
     return _core.mean(a, dim, keepdim)
 
 
+def maximum(a, b):
+    """Element-wise maximum of two tensors.
+
+    Args:
+        a: First tensor
+        b: Second tensor
+
+    Returns:
+        Tensor containing element-wise maximum
+    """
+    return a.maximum(b)
+
+
+def minimum(a, b):
+    """Element-wise minimum of two tensors.
+
+    Args:
+        a: First tensor
+        b: Second tensor
+
+    Returns:
+        Tensor containing element-wise minimum
+    """
+    return a.minimum(b)
+
+
 @contextlib.contextmanager
 def no_grad():
     _core._no_grad_enter()

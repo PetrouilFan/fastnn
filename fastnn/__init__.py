@@ -162,7 +162,6 @@ tanh = _core.tanh
 silu = _core.silu
 softmax = _core.softmax
 log_softmax = _core.log_softmax
-embedding = _core.embedding
 argmax = _core.argmax
 argmin = _core.argmin
 sum = _core.sum
@@ -170,6 +169,8 @@ mean = _core.mean
 
 max = _core.max
 min = _core.min
+maximum = _core.maximum
+minimum = _core.minimum
 mse_loss = _core.mse_loss
 cross_entropy_loss = _core.cross_entropy_loss
 Linear = _core.Linear
