@@ -167,11 +167,15 @@ fused_conv_bn_silu = _core.fused_conv_bn_silu
 embedding = _core.embedding
 argmax = _core.argmax
 argmin = _core.argmin
+cat = _core.cat
+stack = _core.stack
 sum = _core.sum
 mean = _core.mean
 
 max = _core.max
 min = _core.min
+maximum = _core.maximum
+minimum = _core.minimum
 mse_loss = _core.mse_loss
 cross_entropy_loss = _core.cross_entropy_loss
 Linear = _core.Linear
