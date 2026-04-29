@@ -3162,6 +3162,39 @@ impl Tensor {
         Tensor::from_vec(output_data, output_shape.into_vec())
     }
 
+    /// Stack tensors along a new dimension.
+    /// Similar to PyTorch's stack - concatenates along a new dimension.
+    pub fn stack(tensors: &[Tensor], dim: i32) -> Tensor {
+        if tensors.is_empty() {
+            panic!("stack: need at least one tensor");
+        }
+        
+        // Get input shape
+        let first_shape = tensors[0].shape();
+        let ndim = first_shape.len();
+        
+        // Normalize dim
+        let dim = if dim < 0 { (ndim as i32 + dim + 1) as usize } else { dim as usize };
+        if dim > ndim {
+            panic!("stack: dimension out of range");
+        }
+        
+        // Validate all tensors have same shape
+        for t in tensors {
+            if t.shape() != first_shape {
+                panic!("stack: tensors must have same shape");
+            }
+        }
+        
+        // Unsqueeze each tensor at the target dimension, then cat
+        let unsqueezed: Vec<Tensor> = tensors.iter()
+            .map(|t| t.unsqueeze(dim))
+            .collect();
+        
+        // Concatenate along the new dimension
+        Tensor::cat(&unsqueezed, dim as i32)
+    }
+
     pub fn repeat(&self, repeats: &[i64]) -> Tensor {
         if repeats.len() < self.ndim() {
             panic!("repeat: number of repeats must be >= number of dimensions");

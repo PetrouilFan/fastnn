@@ -164,6 +164,8 @@ softmax = _core.softmax
 log_softmax = _core.log_softmax
 argmax = _core.argmax
 argmin = _core.argmin
+cat = _core.cat
+stack = _core.stack
 sum = _core.sum
 mean = _core.mean
 
