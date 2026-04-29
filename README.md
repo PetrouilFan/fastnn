@@ -37,6 +37,20 @@ fastnn is built for researchers and engineers who need efficient neural network 
 
 ---
 
+### Fused Conv+BN+SiLU Performance
+
+Using the optimized fused kernel (`fused_conv_bn_silu`), FastNN achieves **14-25× speedup** over PyTorch's separate Conv2d+BatchNorm2d+SiLU operations on CPU:
+
+| Configuration | PyTorch (separate) | FastNN (fused) | Speedup |
+|---------------|-------------------|----------------|---------|
+| Conv2d(32→64) + BN + SiLU (64×64) | 81.81 ms | 3.27 ms | **25.0×** |
+| Conv2d(64→128) + BN + SiLU (32×32) | 42.55 ms | 2.01 ms | **21.2×** |
+| Conv2d(128→256) + BN + SiLU (16×16) | 26.24 ms | 1.82 ms | **14.4×** |
+
+These results demonstrate the effectiveness of operator fusion and SIMD-accelerated 3×3 convolution kernels.
+
+---
+
 ## Packed Precision Performance
 
 Native low-bit inference — weights stored packed in u32 words, SIMD/SWAR kernels operating directly on the packed representation without unpacking.
