@@ -2535,3 +2535,154 @@ impl Node for EluBackward {
         std::slice::from_ref(&self.input)
     }
 }
+
+// Minimum/Maximum backward nodes
+#[allow(dead_code)]
+pub struct MinimumBackward {
+    pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
+}
+
+impl MinimumBackward {
+    pub fn new(inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
+        MinimumBackward { inputs, edges }
+    }
+}
+
+impl Node for MinimumBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+        let a = &self.inputs[0];
+        let b = &self.inputs[1];
+        
+        // grad_a = grad * (a <= b)
+        // grad_b = grad * (a > b)
+        let mask = a.le_tensor(b);
+        let mask_not = mask.logical_not();
+        
+        let mut grad_a = grad.mul(&mask);
+        let mut grad_b = grad.mul(&mask_not);
+        
+        // Handle broadcasting
+        if a.shape() != grad_a.shape() {
+            let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
+            for i in (0..grad_a.shape().len()).rev() {
+                let a_dim = if i as i32 >= diff {
+                    a.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if a_dim != grad_a.shape()[i] {
+                    grad_a = grad_a.sum(i as i32, false);
+                }
+            }
+        }
+        
+        if b.shape() != grad_b.shape() {
+            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
+            for i in (0..grad_b.shape().len()).rev() {
+                let b_dim = if i as i32 >= diff {
+                    b.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if b_dim != grad_b.shape()[i] {
+                    grad_b = grad_b.sum(i as i32, false);
+                }
+            }
+        }
+        
+        vec![Some(grad_a), Some(grad_b)]
+    }
+    
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+    
+    fn num_inputs(&self) -> usize {
+        2
+    }
+    
+    fn name(&self) -> &str {
+        "MinimumBackward"
+    }
+    
+    fn inputs(&self) -> &[Tensor] {
+        &self.inputs
+    }
+}
+
+#[allow(dead_code)]
+pub struct MaximumBackward {
+    pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
+}
+
+impl MaximumBackward {
+    pub fn new(inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
+        MaximumBackward { inputs, edges }
+    }
+}
+
+impl Node for MaximumBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+        let a = &self.inputs[0];
+        let b = &self.inputs[1];
+        
+        // grad_a = grad * (a >= b)
+        // grad_b = grad * (a < b)
+        let mask = a.ge_tensor(b);
+        let mask_not = mask.logical_not();
+        
+        let mut grad_a = grad.mul(&mask);
+        let mut grad_b = grad.mul(&mask_not);
+        
+        // Handle broadcasting
+        if a.shape() != grad_a.shape() {
+            let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
+            for i in (0..grad_a.shape().len()).rev() {
+                let a_dim = if i as i32 >= diff {
+                    a.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if a_dim != grad_a.shape()[i] {
+                    grad_a = grad_a.sum(i as i32, false);
+                }
+            }
+        }
+        
+        if b.shape() != grad_b.shape() {
+            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
+            for i in (0..grad_b.shape().len()).rev() {
+                let b_dim = if i as i32 >= diff {
+                    b.shape()[(i as i32 - diff) as usize]
+                } else {
+                    1
+                };
+                if b_dim != grad_b.shape()[i] {
+                    grad_b = grad_b.sum(i as i32, false);
+                }
+            }
+        }
+        
+        vec![Some(grad_a), Some(grad_b)]
+    }
+    
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+    
+    fn num_inputs(&self) -> usize {
+        2
+    }
+    
+    fn name(&self) -> &str {
+        "MaximumBackward"
+    }
+    
+    fn inputs(&self) -> &[Tensor] {
+        &self.inputs
+    }
+}

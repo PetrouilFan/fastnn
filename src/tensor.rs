@@ -3033,6 +3033,39 @@ impl Tensor {
         result[0].clone()
     }
 
+    pub fn minimum(&self, other: &Tensor) -> Tensor {
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
+        let result = dispatch("minimum", dispatch_key, &[self, other]);
+        result[0].clone()
+    }
+
+    // Tensor comparison operations for autograd
+    pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
+        let numel = self.numel() as usize;
+        let self_data = self.as_f32_slice();
+        let other_data = other.as_f32_slice();
+        let mut output_data = vec![0.0f32; numel];
+        for i in 0..numel {
+            output_data[i] = if self_data[i] >= other_data[i] { 1.0 } else { 0.0 };
+        }
+        Tensor::from_vec(output_data, self.shape())
+    }
+
+    pub fn le_tensor(&self, other: &Tensor) -> Tensor {
+        let numel = self.numel() as usize;
+        let self_data = self.as_f32_slice();
+        let other_data = other.as_f32_slice();
+        let mut output_data = vec![0.0f32; numel];
+        for i in 0..numel {
+            output_data[i] = if self_data[i] <= other_data[i] { 1.0 } else { 0.0 };
+        }
+        Tensor::from_vec(output_data, self.shape())
+    }
+
     pub fn lt_scalar(&self, threshold: f32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch(
