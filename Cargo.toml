@@ -52,6 +52,11 @@ strip = true
 panic = "abort"
 
 [[bench]]
+name = "quantized_vs_pytorch"
+path = "benches/quantized_vs_pytorch.rs"
+harness = false
+
+[[bench]]
 name = "packed_bench"
 path = "benches/packed_bench.rs"
 harness = false

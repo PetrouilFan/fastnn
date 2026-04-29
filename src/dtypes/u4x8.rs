@@ -3,7 +3,7 @@ use super::PackedWord;
 /// 4-bit signed integer, 8 values packed per u32 word.
 /// Values are in the range [-8, 7].
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct U4x8(pub u32);
 
 unsafe impl bytemuck::Pod for U4x8 {}
