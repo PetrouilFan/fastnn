@@ -7,10 +7,13 @@ pub mod kernels;
 mod nn;
 mod optim;
 mod storage;
+mod storage_quantized;
 mod storage_pool;
 mod tensor;
 mod train;
 mod residual;
+
+pub use storage_quantized::QuantizedTensor;
 
 // Re-export core types
 pub use tensor::Tensor;

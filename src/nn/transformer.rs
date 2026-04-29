@@ -1,10 +1,13 @@
-use crate::nn::attention::MultiHeadAttention;
+use crate::nn::attention::{MultiHeadAttention, PackedMultiHeadAttention};
 use crate::nn::dropout::Dropout;
 use crate::nn::embedding::Embedding;
 use crate::nn::linear::Linear;
 use crate::nn::norm::LayerNorm;
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use crate::dtypes::PackedWord;
+use crate::packed_tensor::PackedTensor;
+use crate::packed_layer::PackedLinear;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -338,6 +341,248 @@ impl Module for TransformerEncoder {
         }
         self.norm.eval_mode();
         self.classifier.eval_mode();
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.load(Ordering::Relaxed)
+    }
+}
+
+/// Quantized Transformer Block with packed precision weights.
+/// Uses quantized linear layers and attention for reduced memory bandwidth.
+pub struct PackedTransformerBlock<T: PackedWord> {
+    /// Quantized self-attention
+    pub self_attn: PackedMultiHeadAttention<T>,
+    /// Layer normalization 1
+    pub norm1: LayerNorm,
+    /// Layer normalization 2
+    pub norm2: LayerNorm,
+    /// Quantized feed-forward layer 1
+    pub ff1: PackedLinear<T>,
+    /// Quantized feed-forward layer 2
+    pub ff2: PackedLinear<T>,
+    #[allow(dead_code)]
+    pub dropout: Dropout,
+    #[allow(dead_code)]
+    pub d_model: i64,
+    #[allow(dead_code)]
+    pub ff_dim: i64,
+    training: AtomicBool,
+}
+
+impl<T: PackedWord> PackedTransformerBlock<T> {
+    /// Create a new quantized transformer block.
+    pub fn new(d_model: i64, num_heads: i64, ff_dim: i64, dropout_p: f32) -> Self {
+        let self_attn = PackedMultiHeadAttention::<T>::new(d_model, num_heads, dropout_p, false);
+        let norm1 = LayerNorm::new(d_model, 1e-5);
+        let norm2 = LayerNorm::new(d_model, 1e-5);
+        let ff1 = PackedLinear::<T>::new(d_model as usize, ff_dim as usize, true);
+        let ff2 = PackedLinear::<T>::new(ff_dim as usize, d_model as usize, true);
+        let dropout = Dropout::new(dropout_p as f64);
+
+        PackedTransformerBlock {
+            self_attn,
+            norm1,
+            norm2,
+            ff1,
+            ff2,
+            dropout,
+            d_model,
+            ff_dim,
+            training: AtomicBool::new(true),
+        }
+    }
+
+    /// Forward pass with quantized operations.
+    pub fn forward(&self, x: &Tensor) -> Tensor {
+        // Layer 1: Self-attention with residual connection and dropout
+        let x_norm1 = self.norm1.forward(x);
+        let attn_output = self.self_attn.forward(&x_norm1);
+        let attn_dropped = self.dropout.forward(&attn_output);
+        let x = attn_dropped.add(x);
+
+        // Layer 2: Feed-forward with residual connection and dropout
+        let x_norm2 = self.norm2.forward(&x);
+
+        // Convert to f32 for quantized linear layers
+        let x_data = x.to_numpy();
+        
+        // Fused feed-forward: linear -> gelu -> linear
+        // Note: This is a simplified implementation
+        // In practice, we'd want to use proper quantized GEMM
+        let ff_hidden = self.ff1.forward(&x_data);
+        let ff_gelu: Vec<f32> = ff_hidden.iter().map(|&v| v.max(0.0) * (1.0 + (-v).exp())).collect(); // GELU approximation
+        let ff_out = self.ff2.forward(&ff_gelu);
+        let ff_dropped = self.dropout.forward(&Tensor::from_vec(ff_out.clone(), vec![x.shape()[0] as i64, x.shape()[1] as i64, self.d_model]));
+
+        ff_dropped.add(&x)
+    }
+}
+
+impl<T: PackedWord> Module for PackedTransformerBlock<T> {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        PackedTransformerBlock::forward(self, x)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        // Note: Packed layers don't have Tensor parameters in the traditional sense
+        // They have packed weight representations
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![]
+    }
+
+    fn zero_grad(&self) {
+        // Packed layers don't maintain gradients in the same way
+    }
+
+    fn train_mode(&self) {
+        self.training.store(true, Ordering::Relaxed);
+    }
+
+    fn eval_mode(&self) {
+        self.training.store(false, Ordering::Relaxed);
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.load(Ordering::Relaxed)
+    }
+}
+
+/// Quantized Transformer Encoder with packed precision.
+pub struct PackedTransformerEncoder<T: PackedWord> {
+    /// Token embedding (kept in f32 for compatibility)
+    pub embedding: Embedding,
+    /// Positional embedding (kept in f32 for compatibility)
+    pub pos_embedding: Embedding,
+    /// Quantized transformer layers
+    pub layers: Vec<PackedTransformerBlock<T>>,
+    /// Final layer normalization
+    pub norm: LayerNorm,
+    /// Classifier head (quantized)
+    pub classifier: PackedLinear<T>,
+    #[allow(dead_code)]
+    pub d_model: i64,
+    #[allow(dead_code)]
+    pub max_seq_len: i64,
+    #[allow(dead_code)]
+    pub num_classes: i64,
+    training: AtomicBool,
+}
+
+impl<T: PackedWord> PackedTransformerEncoder<T> {
+    /// Create a new quantized transformer encoder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        vocab_size: i64,
+        max_seq_len: i64,
+        d_model: i64,
+        num_heads: i64,
+        num_layers: i64,
+        ff_dim: i64,
+        num_classes: i64,
+        dropout_p: f32,
+    ) -> Self {
+        let embedding = Embedding::new(vocab_size, d_model);
+        let pos_embedding = Embedding::new(max_seq_len, d_model);
+
+        let mut layers = Vec::new();
+        for _ in 0..num_layers {
+            layers.push(PackedTransformerBlock::<T>::new(d_model, num_heads, ff_dim, dropout_p));
+        }
+
+        let norm = LayerNorm::new(d_model, 1e-5);
+        let classifier = PackedLinear::<T>::new(d_model as usize, num_classes as usize, true);
+
+        PackedTransformerEncoder {
+            embedding,
+            pos_embedding,
+            layers,
+            norm,
+            classifier,
+            d_model,
+            max_seq_len,
+            num_classes,
+            training: AtomicBool::new(true),
+        }
+    }
+
+    /// Forward pass through quantized transformer.
+    pub fn forward(&self, token_ids: &Tensor) -> Tensor {
+        let shape = token_ids.shape();
+        if shape.len() < 2 {
+            panic!(
+                "PackedTransformerEncoder expected input with at least 2 dimensions (batch, seq_len), got shape {:?}",
+                shape
+            );
+        }
+        let batch = shape[0];
+        let seq_len = shape[1];
+
+        if seq_len > self.max_seq_len {
+            panic!(
+                "Sequence length {} exceeds maximum sequence length {}",
+                seq_len, self.max_seq_len
+            );
+        }
+        if seq_len == 0 {
+            panic!("Sequence length cannot be 0");
+        }
+
+        // Use standard embeddings (kept in f32 for compatibility)
+        let x = self.embedding.forward(token_ids);
+
+        // Process through quantized layers
+        let mut x = x;
+        for layer in &self.layers {
+            x = layer.forward(&x);
+        }
+
+        x = self.norm.forward(&x);
+
+        // Extract CLS token (first token of sequence)
+        let cls_token = x.slice(1, 0, 1, 1);
+        let cls_token = cls_token.squeeze(Some(1));
+
+        // Quantized classifier - convert to f32 for quantized linear layer
+        let cls_data = cls_token.to_numpy();
+        let output_data = self.classifier.forward(&cls_data);
+        Tensor::from_vec(output_data, vec![batch, self.num_classes])
+    }
+}
+
+impl<T: PackedWord> Module for PackedTransformerEncoder<T> {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        PackedTransformerEncoder::forward(self, x)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        // Note: Packed layers don't have Tensor parameters in the traditional sense
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![]
+    }
+
+    fn zero_grad(&self) {
+        // Packed layers don't maintain gradients in the same way
+    }
+
+    fn train_mode(&self) {
+        self.training.store(true, Ordering::Relaxed);
+        for layer in &self.layers {
+            layer.train_mode();
+        }
+    }
+
+    fn eval_mode(&self) {
+        self.training.store(false, Ordering::Relaxed);
+        for layer in &self.layers {
+            layer.eval_mode();
+        }
     }
 
     fn is_training(&self) -> bool {
