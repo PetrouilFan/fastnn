@@ -26,16 +26,14 @@ mimalloc      = "0.1"
 wide         = "0.7"
 wgpu         = "24"
 pollster     = "0.4"
-openblas-src = { version = "0.10", optional = true }
-fnv          = "1.0"
-ndarray      = { version = "0.16", features = ["blas"] }
-blas-src     = { version = "0.10", features = ["openblas"], optional = true }
+ openblas-src = { version = "0.10", optional = true }
+ blas-src     = { version = "0.10", features = ["openblas"], optional = true }
 
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-libc = "0.2"
+ [target.'cfg(not(target_os = "windows"))'.dependencies]
+ libc = "0.2"
 
 [features]
-default = ["simd", "parallel", "simd_avx512", "openblas", "blas"]
+default = ["simd", "parallel", "simd_avx512"]
 openblas = ["blas-src/openblas-src"]
 blas = []
 parallel = []
