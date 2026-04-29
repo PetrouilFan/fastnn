@@ -163,6 +163,7 @@ tanh = _core.tanh
 silu = _core.silu
 softmax = _core.softmax
 log_softmax = _core.log_softmax
+fused_conv_bn_silu = _core.fused_conv_bn_silu
 embedding = _core.embedding
 argmax = _core.argmax
 argmin = _core.argmin
