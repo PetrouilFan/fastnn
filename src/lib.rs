@@ -1912,6 +1912,22 @@ impl BatchNorm2d {
     fn eval(&mut self) {
         self.inner.eval_mode();
     }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = weight.inner;
+    }
+
+    fn set_bias(&mut self, bias: PyTensor) {
+        self.inner.bias = bias.inner;
+    }
+
+    fn set_running_mean(&mut self, mean: PyTensor) {
+        *self.inner.running_mean.write() = mean.inner;
+    }
+
+    fn set_running_var(&mut self, var: PyTensor) {
+        *self.inner.running_var.write() = var.inner;
+    }
 }
 
 #[pyclass]

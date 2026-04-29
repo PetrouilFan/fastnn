@@ -8617,9 +8617,13 @@ fn conv2d_3x3_direct(
 
                         let res = acc + bias_vec;
                         let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                        unsafe {
-                            std::slice::from_raw_parts_mut(out_ptr.add(out_idx_base), 8)
-                                .copy_from_slice(&res.to_array());
+                        let spatial_stride = out_height * out_width;
+                        let res_arr = res.to_array();
+                        for i in 0..8 {
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe {
+                                *out_ptr.add(out_idx) = res_arr[i];
+                            }
                         }
                     }
                     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -8657,11 +8661,16 @@ fn conv2d_3x3_direct(
                         let res_lo = acc_lo + bias_lo;
                         let res_hi = acc_hi + bias_hi;
                         let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                        unsafe {
-                            std::slice::from_raw_parts_mut(out_ptr.add(out_idx_base), 4)
-                                .copy_from_slice(&res_lo.to_array());
-                            std::slice::from_raw_parts_mut(out_ptr.add(out_idx_base + 4), 4)
-                                .copy_from_slice(&res_hi.to_array());
+                        let spatial_stride = out_height * out_width;
+                        let res_lo_arr = res_lo.to_array();
+                        let res_hi_arr = res_hi.to_array();
+                        for i in 0..4 {
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = res_lo_arr[i]; }
+                        }
+                        for i in 0..4 {
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = res_hi_arr[i]; }
                         }
                     }
                     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
@@ -8756,9 +8765,13 @@ fn conv2d_3x3_direct(
 
                         let res = acc + bias_vec;
                         let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                        unsafe {
-                            std::slice::from_raw_parts_mut(out_ptr.add(out_idx_base), 8)
-                                .copy_from_slice(&res.to_array());
+                        let spatial_stride = out_height * out_width;
+                        let res_arr = res.to_array();
+                        for i in 0..8 {
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe {
+                                *out_ptr.add(out_idx) = res_arr[i];
+                            }
                         }
                     }
                     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -8796,11 +8809,16 @@ fn conv2d_3x3_direct(
                         let res_lo = acc_lo + bias_lo;
                         let res_hi = acc_hi + bias_hi;
                         let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
-                        unsafe {
-                            std::slice::from_raw_parts_mut(out_ptr.add(out_idx_base), 4)
-                                .copy_from_slice(&res_lo.to_array());
-                            std::slice::from_raw_parts_mut(out_ptr.add(out_idx_base + 4), 4)
-                                .copy_from_slice(&res_hi.to_array());
+                        let spatial_stride = out_height * out_width;
+                        let res_lo_arr = res_lo.to_array();
+                        let res_hi_arr = res_hi.to_array();
+                        for i in 0..4 {
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = res_lo_arr[i]; }
+                        }
+                        for i in 0..4 {
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = res_hi_arr[i]; }
                         }
                     }
                     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
@@ -8997,6 +9015,7 @@ pub fn fused_conv_bn_silu_3x3_direct(
 
                         let res_arr = (acc + bias_vec).to_array();
                         let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
 
                         // Apply BN+SiLU per-element and store
                         for i in 0..8 {
@@ -9008,8 +9027,9 @@ pub fn fused_conv_bn_silu_3x3_direct(
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
                             v = v * (1.0 / (1.0 + (-v).exp()));
+                            let out_idx = out_idx_base + i * spatial_stride;
                             unsafe {
-                                *out_ptr.add(out_idx_base + i) = v;
+                                *out_ptr.add(out_idx) = v;
                             }
                         }
                     }
@@ -9046,6 +9066,7 @@ pub fn fused_conv_bn_silu_3x3_direct(
                         let res_lo = (acc_lo + bias_lo).to_array();
                         let res_hi = (acc_hi + bias_hi).to_array();
                         let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
 
                         // Apply BN+SiLU for lo (4)
                         for i in 0..4 {
@@ -9057,9 +9078,8 @@ pub fn fused_conv_bn_silu_3x3_direct(
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
                             v = v * (1.0 / (1.0 + (-v).exp()));
-                            unsafe {
-                                *out_ptr.add(out_idx_base + i) = v;
-                            }
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
                         }
                         // Apply BN+SiLU for hi (4)
                         for i in 0..4 {
@@ -9071,9 +9091,8 @@ pub fn fused_conv_bn_silu_3x3_direct(
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
                             v = v * (1.0 / (1.0 + (-v).exp()));
-                            unsafe {
-                                *out_ptr.add(out_idx_base + 4 + i) = v;
-                            }
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
                         }
                     }
                     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
@@ -9180,6 +9199,7 @@ pub fn fused_conv_bn_silu_3x3_direct(
 
                         let res_arr = (acc + bias_vec).to_array();
                         let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
 
                         // Apply BN+SiLU per-element and store
                         for i in 0..8 {
@@ -9191,8 +9211,9 @@ pub fn fused_conv_bn_silu_3x3_direct(
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
                             v = v * (1.0 / (1.0 + (-v).exp()));
+                            let out_idx = out_idx_base + i * spatial_stride;
                             unsafe {
-                                *out_ptr.add(out_idx_base + i) = v;
+                                *out_ptr.add(out_idx) = v;
                             }
                         }
                     }
@@ -9229,6 +9250,7 @@ pub fn fused_conv_bn_silu_3x3_direct(
                         let res_lo = (acc_lo + bias_lo).to_array();
                         let res_hi = (acc_hi + bias_hi).to_array();
                         let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
 
                         // Apply BN+SiLU for lo (4)
                         for i in 0..4 {
@@ -9240,9 +9262,8 @@ pub fn fused_conv_bn_silu_3x3_direct(
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
                             v = v * (1.0 / (1.0 + (-v).exp()));
-                            unsafe {
-                                *out_ptr.add(out_idx_base + i) = v;
-                            }
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
                         }
                         // Apply BN+SiLU for hi (4)
                         for i in 0..4 {
@@ -9254,9 +9275,8 @@ pub fn fused_conv_bn_silu_3x3_direct(
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
                             v = v * (1.0 / (1.0 + (-v).exp()));
-                            unsafe {
-                                *out_ptr.add(out_idx_base + 4 + i) = v;
-                            }
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
                         }
                     }
                     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
