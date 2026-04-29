@@ -34,7 +34,7 @@ def benchmark_fused_vs_separate(batch_size=1, in_ch=32, out_ch=64, h=64, w=64, i
     fused_times = []
     for _ in range(iters):
         t0 = time.perf_counter()
-        out_fused = fastnn._core.fused_conv_bn_silu(x, weight, bias, bn_w, bn_b, bn_mean, bn_var, stride_t, padding_t, dilation_t, groups_t, eps_t)
+        _ = fastnn._core.fused_conv_bn_silu(x, weight, bias, bn_w, bn_b, bn_mean, bn_var, stride_t, padding_t, dilation_t, groups_t, eps_t)
         t1 = time.perf_counter()
         fused_times.append((t1 - t0) * 1000)
     fused_med = np.median(fused_times)
