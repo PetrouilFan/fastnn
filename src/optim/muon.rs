@@ -10,6 +10,12 @@ pub struct Muon {
     pub weight_decay: f64,
     pub nesterov: bool,
     pub m: Vec<Tensor>, // momentum buffers
+    // Pre-allocated buffers
+    pub temp_wd: Vec<Tensor>,
+    pub temp_eg: Vec<Tensor>,
+    pub temp_ortho: Vec<Tensor>,
+    pub temp_mom_ortho: Vec<Tensor>,
+    pub temp_update_dir: Vec<Tensor>,
 }
 
 impl Muon {
@@ -24,6 +30,26 @@ impl Muon {
             .iter()
             .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
             .collect();
+        let temp_wd: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_eg: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_ortho: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_mom_ortho: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_update_dir: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
 
         Muon {
             params,
@@ -32,13 +58,16 @@ impl Muon {
             weight_decay,
             nesterov,
             m,
+            temp_wd,
+            temp_eg,
+            temp_ortho,
+            temp_mom_ortho,
+            temp_update_dir,
         }
     }
 
-    /// Newton-Schulz iteration for orthogonalization
-    /// Used for 2D weight matrices
-    /// For a matrix X with shape [m, k], we orthogonalize rows: X = 1.5 * X - 0.5 * X * X^T * X
-    fn newton_schulz_iteration(a: &Tensor, num_iterations: usize) -> Tensor {
+    /// Newton-Schulz iteration for orthogonalization in-place
+    fn newton_schulz_iteration_inplace(a: &Tensor, num_iterations: usize, out: &mut Tensor) {
         // Compute Frobenius norm: sqrt(sum(x * x))
         let norm_squared = a.mul(a).sum(-1, false).sum(-1, false);
         let norm = norm_squared.sqrt();
@@ -47,37 +76,38 @@ impl Muon {
         const EPSILON: f32 = 1e-8;
 
         if norm_val < EPSILON {
-            return Tensor::zeros(a.shape(), a.dtype(), a.device());
+            *out = Tensor::zeros(a.shape(), a.dtype(), a.device());
+            return;
         }
 
         // Normalize by Frobenius norm to ensure numerical stability
         // Add epsilon to prevent division by zero
         let norm_safe = Tensor::from_scalar(norm_val + EPSILON);
-        let mut x = a.div(&norm_safe);
+        *out = a.clone();
+        out.div_(&norm_safe);
 
         for _ in 0..num_iterations {
             // X = 1.5 * X - 0.5 * X * X^T * X
-            let x_t = x.transpose(0, 1);
-            let x_x_t = x.matmul(&x_t);
-            let mut x_x_t_x = x_x_t.matmul(&x);
+            let x_t = out.transpose(0, 1);
+            let x_x_t = out.matmul(&x_t);
+            let mut x_x_t_x = x_x_t.matmul(out);
 
-            // Fused: x = 1.5*x - 0.5*x_x_t_x without allocating scalar tensors
+            // Fused: out = 1.5*out - 0.5*x_x_t_x without allocating scalar tensors
             x_x_t_x.mul_scalar_(0.5);
-            x.mul_scalar_(1.5);
-            x.sub_(&x_x_t_x);
+            out.mul_scalar_(1.5);
+            out.sub_(&x_x_t_x);
 
             // Re-normalize after each iteration for stability
-            let x_norm_squared = x.mul(&x).sum(-1, false).sum(-1, false);
+            let x_norm_squared = out.mul(out).sum(-1, false).sum(-1, false);
             let x_norm = x_norm_squared.sqrt();
             let x_norm_val = x_norm.item();
             if x_norm_val < EPSILON {
-                return Tensor::zeros(a.shape(), a.dtype(), a.device());
+                *out = Tensor::zeros(out.shape(), out.dtype(), out.device());
+                return;
             }
             let x_norm_safe = Tensor::from_scalar(x_norm_val + EPSILON);
-            x = x.div(&x_norm_safe);
+            out.div_(&x_norm_safe);
         }
-
-        x
     }
 }
 
@@ -98,47 +128,45 @@ impl Optimizer for Muon {
             let is_2d = shape.len() == 2;
 
             // Apply weight decay: effective_grad = grad + weight_decay * param
-            // This is applied to both 2D and 1D parameters
             let effective_grad = if weight_decay != 0.0 {
-                let mut wd = param.clone();
-                wd.mul_scalar_(weight_decay);
-                let mut eg = grad.clone();
-                eg.add_(&wd);
-                eg
+                self.temp_wd[i] = param.clone();
+                self.temp_wd[i].mul_scalar_(weight_decay);
+                self.temp_eg[i] = grad.clone();
+                self.temp_eg[i].add_(&self.temp_wd[i]);
+                &self.temp_eg[i]
             } else {
-                grad
+                &grad
             };
 
             if is_2d {
                 // Standard momentum: m = momentum * m + grad
                 self.m[i].mul_scalar_(momentum);
-                self.m[i].add_(&effective_grad);
+                self.m[i].add_(effective_grad);
 
                 // Orthogonalize the momentum
-                let ortho_momentum = Self::newton_schulz_iteration(&self.m[i], 5);
+                Self::newton_schulz_iteration_inplace(&self.m[i], 5, &mut self.temp_ortho[i]);
 
                 // For Nesterov: update_dir = effective_grad + momentum * ortho_momentum
-                let mut update_dir = if self.nesterov {
-                    let mut mom_ortho = ortho_momentum;
-                    mom_ortho.mul_scalar_(momentum);
-                    let mut eg = effective_grad;
-                    eg.add_(&mom_ortho);
-                    eg
+                if self.nesterov {
+                    self.temp_mom_ortho[i] = self.temp_ortho[i].clone();
+                    self.temp_mom_ortho[i].mul_scalar_(momentum);
+                    self.temp_update_dir[i] = (*effective_grad).clone();
+                    self.temp_update_dir[i].add_(&self.temp_mom_ortho[i]);
                 } else {
-                    ortho_momentum
-                };
+                    self.temp_update_dir[i] = self.temp_ortho[i].clone();
+                }
 
                 // param = param - lr * update_dir
-                update_dir.mul_scalar_(lr);
-                param.sub_(&update_dir);
+                self.temp_update_dir[i].mul_scalar_(lr);
+                param.sub_(&self.temp_update_dir[i]);
             } else {
                 // Fallback SGD with momentum for 1D params
                 self.m[i].mul_scalar_(momentum);
-                self.m[i].add_(&effective_grad);
+                self.m[i].add_(effective_grad);
 
-                let mut update = self.m[i].clone();
-                update.mul_scalar_(lr);
-                param.sub_(&update);
+                self.temp_update_dir[i] = self.m[i].clone();
+                self.temp_update_dir[i].mul_scalar_(lr);
+                param.sub_(&self.temp_update_dir[i]);
             }
         }
     }
@@ -159,8 +187,33 @@ impl Optimizer for Muon {
             .iter()
             .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
             .collect();
+        let temp_wd: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_eg: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_ortho: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_mom_ortho: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_update_dir: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
 
         self.m.extend(m);
+        self.temp_wd.extend(temp_wd);
+        self.temp_eg.extend(temp_eg);
+        self.temp_ortho.extend(temp_ortho);
+        self.temp_mom_ortho.extend(temp_mom_ortho);
+        self.temp_update_dir.extend(temp_update_dir);
         self.params.extend(params);
     }
 

@@ -10,7 +10,7 @@ pub use u8x4::U8x4;
 
 /// Core trait for packed multi-precision types.
 /// Each implementor packs N values into a single u32 word.
-pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable {
+pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + Default {
     /// Number of values stored per u32 word
     const ITEMS: usize;
     /// Bit width of each individual value

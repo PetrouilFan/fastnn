@@ -8,7 +8,6 @@
 
 use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
-use std::mem::MaybeUninit;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
@@ -16,6 +15,35 @@ use std::arch::x86_64::*;
 /// Cache-blocked GEMV for packed types.
 /// Tiles the K dimension to keep activation blocks in L2 cache.
 const K_BLOCK_SIZE: usize = 4096; // 16KB of f32 activations per block
+
+/// Aligned scratch buffer for unpacking operations
+#[repr(align(32))]
+struct AlignedScratchBuffer {
+    data: Vec<f32>,
+}
+
+impl AlignedScratchBuffer {
+    fn new() -> Self {
+        Self { data: Vec::new() }
+    }
+
+    fn resize(&mut self, size: usize) {
+        self.data.resize(size, 0.0);
+    }
+
+    fn as_slice(&self) -> &[f32] {
+        &self.data
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [f32] {
+        &mut self.data
+    }
+
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+}
 
 // ============================================================
 // Main entry point — type-dispatched
@@ -291,7 +319,31 @@ unsafe fn gemv_row_u8x4_avx512(
         act_idx += 8;
     }
 
-    // Scalar tail for remaining packed words
+    // Vectorized tail for remaining packed words using 128-bit operations
+    while p < k_packed && act_idx + 4 <= k {
+        let w = weights_u32[row_offset + p];
+        let bytes = w.to_le_bytes();
+        let weights_f32: [f32; 4] = [
+            bytes[0] as i8 as f32,
+            bytes[1] as i8 as f32,
+            bytes[2] as i8 as f32,
+            bytes[3] as i8 as f32,
+        ];
+        let acts = [activation[act_idx], activation[act_idx + 1], activation[act_idx + 2], activation[act_idx + 3]];
+
+        // Use 128-bit FMA
+        let w_vec = _mm_loadu_ps(weights_f32.as_ptr());
+        let a_vec = _mm_loadu_ps(acts.as_ptr());
+        let prod = _mm_mul_ps(w_vec, a_vec);
+        let hsum = _mm_hadd_ps(prod, prod);
+        let final_sum = _mm_hadd_ps(hsum, hsum);
+        total += _mm_cvtss_f32(final_sum);
+
+        p += 1;
+        act_idx += 4;
+    }
+
+    // Scalar tail for remaining elements
     while p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
         let bytes = w.to_le_bytes();
@@ -859,18 +911,12 @@ fn gemv_packed_inner<T: PackedWord>(
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
                 let start_row = chunk_idx * rows_per_chunk;
-                // Pre-allocate buffer without zeroing - all read elements are written first
-                let mut unpack_buf: Vec<MaybeUninit<f32>> = Vec::with_capacity(k_packed * T::ITEMS);
-                unpack_buf.resize(k_packed * T::ITEMS, MaybeUninit::uninit());
-                let unpack_buf: &mut [f32] = unsafe {
-                    &mut *(std::ptr::slice_from_raw_parts_mut(
-                        unpack_buf.as_mut_ptr(),
-                        k_packed * T::ITEMS,
-                    ) as *mut [f32])
-                };
+    // Pre-allocate aligned buffer for unpacking
+    let mut unpack_buf = AlignedScratchBuffer::new();
+    unpack_buf.resize(k_packed * T::ITEMS);
                 for (local_row, out) in out_chunk.iter_mut().enumerate() {
                     let row = start_row + local_row;
-                    let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf);
+                    let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf.as_mut_slice());
                     *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
                 }
             });
@@ -878,15 +924,11 @@ fn gemv_packed_inner<T: PackedWord>(
 
     #[cfg(not(feature = "parallel"))]
     {
-        // Pre-allocate buffer without zeroing - all read elements are written first
-        let mut unpack_buf: Vec<MaybeUninit<f32>> = Vec::with_capacity(k_packed * T::ITEMS);
-        unpack_buf.resize(k_packed * T::ITEMS, MaybeUninit::uninit());
-        let unpack_buf: &mut [f32] = unsafe {
-            &mut *(std::ptr::slice_from_raw_parts_mut(unpack_buf.as_mut_ptr(), k_packed * T::ITEMS)
-                as *mut [f32])
-        };
+        // Pre-allocate aligned buffer for unpacking
+        let mut unpack_buf = AlignedScratchBuffer::new();
+        unpack_buf.resize(k_packed * T::ITEMS);
         for row in 0.._m {
-            let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf);
+            let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf.as_mut_slice());
             output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
     }
@@ -906,7 +948,8 @@ fn gemv_packed_blocked<T: PackedWord>(
     }
 
     let items = T::ITEMS;
-    let mut unpack_buf = vec![0.0f32; K_BLOCK_SIZE];
+    let mut unpack_buf = AlignedScratchBuffer::new();
+    unpack_buf.resize(K_BLOCK_SIZE);
 
     let mut k_offset = 0;
     while k_offset < k {
@@ -919,19 +962,19 @@ fn gemv_packed_blocked<T: PackedWord>(
             let packed_end = k_end.div_ceil(items);
             let unpack_len = (packed_end - packed_start) * items;
 
-            if unpack_len <= unpack_buf.len() {
+            if unpack_len <= unpack_buf.data.len() {
                 for (i, p) in (packed_start..packed_end).enumerate() {
                     let word = weights.as_packed()[row_offset + p];
                     let unpacked = word.unpack_to_f32();
                     let dst_start = i * items;
                     for j in 0..items {
                         if dst_start + j < k_block {
-                            unpack_buf[dst_start + j] = unpacked.as_ref()[j];
+                            unpack_buf.data[dst_start + j] = unpacked.as_ref()[j];
                         }
                     }
                 }
                 let acc = fma_f32_slice(
-                    &unpack_buf[..k_block.min(unpack_len)],
+                    &unpack_buf.data[..k_block.min(unpack_len)],
                     &activation[k_offset..k_end],
                 );
                 output[row] += acc;
@@ -1130,7 +1173,8 @@ pub fn gemm_packed_batched<T: PackedWord>(
         (0..m).into_par_iter().for_each(|row| {
             let scale = weights.scale_for_row(row);
             let zero = weights.zero_for_row(row);
-            let mut unpack_buf = vec![0.0f32; k];
+            let mut unpack_buf = AlignedScratchBuffer::new();
+            unpack_buf.resize(k);
             let row_offset = row * k_packed;
             for p in 0..k_packed {
                 let word = weights.as_packed()[row_offset + p];
@@ -1139,13 +1183,13 @@ pub fn gemm_packed_batched<T: PackedWord>(
                 for j in 0..k_items {
                     let idx = base + j;
                     if idx < k {
-                        unpack_buf[idx] = unpacked.as_ref()[j];
+                        unpack_buf.as_mut_slice()[idx] = unpacked.as_ref()[j];
                     }
                 }
             }
 
             for (bi, input) in batch_inputs.iter().enumerate() {
-                let acc = fma_f32_slice(&unpack_buf, input);
+                let acc = fma_f32_slice(unpack_buf.as_slice(), input);
                 unsafe {
                     *((out_addrs[bi] as *mut f32).add(row)) = acc * scale + zero;
                 }
@@ -1155,7 +1199,8 @@ pub fn gemm_packed_batched<T: PackedWord>(
 
     #[cfg(not(feature = "parallel"))]
     {
-        let mut unpack_buf = vec![0.0f32; k];
+        let mut unpack_buf = AlignedScratchBuffer::new();
+        unpack_buf.resize(k);
         for row in 0..m {
             let scale = weights.scale_for_row(row);
             let zero = weights.zero_for_row(row);
@@ -1167,12 +1212,12 @@ pub fn gemm_packed_batched<T: PackedWord>(
                 for j in 0..T::ITEMS {
                     let idx = base + j;
                     if idx < k {
-                        unpack_buf[idx] = unpacked.as_ref()[j];
+                        unpack_buf.as_mut_slice()[idx] = unpacked.as_ref()[j];
                     }
                 }
             }
             for (bi, input) in batch_inputs.iter().enumerate() {
-                let acc = fma_f32_slice(&unpack_buf, input);
+                let acc = fma_f32_slice(unpack_buf.as_slice(), input);
                 outputs[bi][row] = acc * scale + zero;
             }
         }

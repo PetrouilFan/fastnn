@@ -3,14 +3,21 @@ mod autograd;
 mod dispatcher;
 mod io;
 mod iterator;
-mod kernels;
+pub mod kernels;
 mod nn;
 mod optim;
 mod storage;
+mod storage_quantized;
 mod storage_pool;
 mod tensor;
 mod train;
 mod residual;
+
+pub use storage_quantized::QuantizedTensor;
+
+// Re-export core types
+pub use tensor::Tensor;
+pub use storage::{DType, Device};
 
 // Native packed precision modules
 pub mod dtypes;
@@ -40,8 +47,7 @@ use pyo3::PyAny;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use storage::{allocator_stats as storage_allocator_stats, DType, Device};
-use tensor::Tensor;
+use storage::allocator_stats as storage_allocator_stats;
 
 // Custom exception hierarchy for fastnn
 pyo3::create_exception!(fastnn, FastnnError, PyRuntimeError, "Base exception for fastnn operations.");
@@ -385,7 +391,7 @@ fn tensor_from_data<'py>(
     let shape: Vec<i64> = shape.extract()?;
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
         data, shape, device,
@@ -406,11 +412,11 @@ fn tensor_from_list(data: Vec<f32>, shape: Vec<i64>) -> PyTensor {
 #[pyo3(signature = (shape, dtype = None, device = None))]
 fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
-        .and_then(|s| DType::from_str(&s))
+        .and_then(|s| DType::from_str_label(&s))
         .unwrap_or(DType::F32);
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::zeros(shape, dtype, device))
 }
@@ -419,11 +425,11 @@ fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTe
 #[pyo3(signature = (shape, dtype = None, device = None))]
 fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
-        .and_then(|s| DType::from_str(&s))
+        .and_then(|s| DType::from_str_label(&s))
         .unwrap_or(DType::F32);
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::ones(shape, dtype, device))
 }
@@ -432,11 +438,11 @@ fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTen
 #[pyo3(signature = (shape, value, dtype = None, device = None))]
 fn full(shape: Vec<i64>, value: f32, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
-        .and_then(|s| DType::from_str(&s))
+        .and_then(|s| DType::from_str_label(&s))
         .unwrap_or(DType::F32);
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::full(shape, value, dtype, device))
 }
@@ -452,7 +458,7 @@ fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> Py
     let values: Vec<f32> = (0..numel).map(|i| (start_f64 + i as f64 * step_f64) as f32).collect();
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(
         values,
@@ -478,7 +484,7 @@ fn linspace(start: f32, end: f32, steps: usize, device: Option<String>) -> PyTen
         .collect();
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(
         values,
@@ -497,7 +503,7 @@ fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyTensor {
     }
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, vec![n, m], device))
 }
@@ -515,7 +521,7 @@ fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     }
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
@@ -527,7 +533,7 @@ fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     let values: Vec<f32> = (0..numel as usize).map(|_| rand::random()).collect();
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
@@ -549,7 +555,7 @@ fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyTe
     };
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
@@ -716,6 +722,43 @@ fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyT
         None => vec![&x.inner, &w.inner],
     };
     let result = dispatch("fused_linear_gelu", dispatch_key, &args);
+    PyTensor::from_tensor(result.into_iter().next().unwrap())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+fn fused_conv_bn_silu(
+    x: &PyTensor,
+    w: &PyTensor,
+    bias: Option<&PyTensor>,
+    bn_weight: &PyTensor,
+    bn_bias: &PyTensor,
+    bn_running_mean: &PyTensor,
+    bn_running_var: &PyTensor,
+    stride: &PyTensor,
+    padding: &PyTensor,
+    dilation: &PyTensor,
+    groups: &PyTensor,
+    eps: &PyTensor,
+) -> PyTensor {
+    use crate::dispatcher::{device_to_dispatch_key, dispatch};
+    let dispatch_key = device_to_dispatch_key(x.inner.device());
+    let mut args: Vec<&Tensor> = Vec::new();
+    args.push(&x.inner);
+    args.push(&w.inner);
+    if let Some(b) = bias {
+        args.push(&b.inner);
+    }
+    args.push(&bn_weight.inner);
+    args.push(&bn_bias.inner);
+    args.push(&bn_running_mean.inner);
+    args.push(&bn_running_var.inner);
+    args.push(&stride.inner);
+    args.push(&padding.inner);
+    args.push(&dilation.inner);
+    args.push(&groups.inner);
+    args.push(&eps.inner);
+    let result = dispatch("fused_conv_bn_silu", dispatch_key, &args);
     PyTensor::from_tensor(result.into_iter().next().unwrap())
 }
 
@@ -1024,7 +1067,7 @@ fn _get_num_threads() -> usize {
 
 #[pyfunction]
 fn _set_default_device(device: String) {
-    if let Some(device) = Device::from_str(&device) {
+    if let Some(device) = Device::from_str_label(&device) {
         set_default_device_internal(device);
     }
 }
@@ -1881,6 +1924,22 @@ impl BatchNorm2d {
     fn eval(&mut self) {
         self.inner.eval_mode();
     }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = weight.inner;
+    }
+
+    fn set_bias(&mut self, bias: PyTensor) {
+        self.inner.bias = bias.inner;
+    }
+
+    fn set_running_mean(&mut self, mean: PyTensor) {
+        *self.inner.running_mean.write() = mean.inner;
+    }
+
+    fn set_running_var(&mut self, var: PyTensor) {
+        *self.inner.running_var.write() = var.inner;
+    }
 }
 
 #[pyclass]
@@ -2580,6 +2639,15 @@ fn load_model(path: String) -> PyResult<HashMap<String, PyTensor>> {
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Set OpenBLAS and OMP to single-threaded mode by default for optimal
+    // single-threaded performance. Users can override via environment variables.
+    if std::env::var("OPENBLAS_NUM_THREADS").is_err() {
+        std::env::set_var("OPENBLAS_NUM_THREADS", "1");
+    }
+    if std::env::var("OMP_NUM_THREADS").is_err() {
+        std::env::set_var("OMP_NUM_THREADS", "1");
+    }
+
     let py = m.py();
 
     // Register exception hierarchy
@@ -2624,6 +2692,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fused_add_relu, py)?)?;
     m.add_function(wrap_pyfunction!(fused_linear_relu, py)?)?;
     m.add_function(wrap_pyfunction!(fused_linear_gelu, py)?)?;
+    m.add_function(wrap_pyfunction!(fused_conv_bn_silu, py)?)?;
     m.add_function(wrap_pyfunction!(gelu, py)?)?;
     m.add_function(wrap_pyfunction!(sigmoid, py)?)?;
     m.add_function(wrap_pyfunction!(tanh, py)?)?;
@@ -2696,6 +2765,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cat, py)?)?;
     m.add_function(wrap_pyfunction!(stack, py)?)?;
     m.add_function(wrap_pyfunction!(einsum, py)?)?;
+    m.add_function(wrap_pyfunction!(im2col, py)?)?;
+
     m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
     m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
     m.add_function(wrap_pyfunction!(flash_attention, py)?)?;
@@ -2808,6 +2879,52 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyTensor {
 fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
     let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     PyTensor::from_tensor(tensor::einsum(equation, &tensors))
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, kernel_size, stride=1, padding=0, dilation=1))]
+fn im2col(
+    x: &PyTensor,
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+    dilation: i64,
+) -> PyResult<PyTensor> {
+    let x_inner = &x.inner;
+    let shape = x_inner.shape();
+    if shape.len() != 4 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Input must be a 4D tensor (N, C, H, W)",
+        ));
+    }
+    let _batch = shape[0] as usize;
+    let _in_channels = shape[1] as usize;
+    let in_height = shape[2] as usize;
+    let in_width = shape[3] as usize;
+
+    let kernel_h = kernel_size as usize;
+    let kernel_w = kernel_size as usize;
+    let stride_us = stride as usize;
+    let padding_us = padding as usize;
+    let dilation_us = dilation as usize;
+
+    // Compute output dimensions
+    let out_height = (in_height + 2 * padding_us - kernel_h) / stride_us + 1;
+    let out_width = (in_width + 2 * padding_us - kernel_w) / stride_us + 1;
+
+    // Call the internal im2col_kernel
+    let col_tensor = crate::kernels::cpu::im2col_kernel(
+        x_inner,
+        kernel_h,
+        kernel_w,
+        stride_us,
+        padding_us,
+        dilation_us,
+        out_height,
+        out_width,
+    );
+
+    Ok(PyTensor::from_tensor(col_tensor))
 }
 
 #[pyfunction]

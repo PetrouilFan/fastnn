@@ -218,49 +218,77 @@ impl Node for AddBackward {
         let b = &self.inputs[1];
 
         // Handle broadcasting: if input shape doesn't match output shape,
-        // sum over the extra dimensions. Avoid double-clone when both match.
+        // sum over the extra dimensions. Minimize clones by reusing grad when possible.
         let a_matches = a.shape() == grad.shape();
         let b_matches = b.shape() == grad.shape();
 
-        let grad_a = if a_matches {
-            grad.clone()
-        } else {
-            let mut grad_a = grad.clone();
-            let diff = grad.shape().len() as i32 - a.shape().len() as i32;
-            for i in (0..grad.shape().len()).rev() {
-                let a_dim = if i as i32 >= diff {
-                    a.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if a_dim != grad.shape()[i] {
-                    grad_a = grad_a.sum(i as i32, false);
-                }
+        let (grad_a, grad_b) = match (a_matches, b_matches) {
+            (true, true) => {
+                // Both match: clone once, reuse for the other
+                (grad.clone(), grad)
             }
-            grad_a
-        };
+            (true, false) => {
+                // a matches, b doesn't: reuse grad for a, clone and modify for b
+                let mut grad_b = grad.clone();
+                let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
+                for i in (0..grad_b.shape().len()).rev() {
+                    let b_dim = if i as i32 >= diff {
+                        b.shape()[(i as i32 - diff) as usize]
+                    } else {
+                        1
+                    };
+                    if b_dim != grad_b.shape()[i] {
+                        grad_b = grad_b.sum(i as i32, false);
+                    }
+                }
+                (grad, grad_b)
+            }
+            (false, true) => {
+                // b matches, a doesn't: clone and modify for a, reuse grad for b
+                let mut grad_a = grad.clone();
+                let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
+                for i in (0..grad_a.shape().len()).rev() {
+                    let a_dim = if i as i32 >= diff {
+                        a.shape()[(i as i32 - diff) as usize]
+                    } else {
+                        1
+                    };
+                    if a_dim != grad_a.shape()[i] {
+                        grad_a = grad_a.sum(i as i32, false);
+                    }
+                }
+                (grad_a, grad)
+            }
+            (false, false) => {
+                // Neither matches: clone for both and modify each
+                let mut grad_a = grad.clone();
+                let mut grad_b = grad.clone();
 
-        let grad_b = if b_matches {
-            if a_matches {
-                // Both match: reuse grad instead of cloning again
-                grad
-            } else {
-                grad.clone()
-            }
-        } else {
-            let mut grad_b = grad;
-            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
-            for i in (0..grad_b.shape().len()).rev() {
-                let b_dim = if i as i32 >= diff {
-                    b.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if b_dim != grad_b.shape()[i] {
-                    grad_b = grad_b.sum(i as i32, false);
+                let diff_a = grad_a.shape().len() as i32 - a.shape().len() as i32;
+                for i in (0..grad_a.shape().len()).rev() {
+                    let a_dim = if i as i32 >= diff_a {
+                        a.shape()[(i as i32 - diff_a) as usize]
+                    } else {
+                        1
+                    };
+                    if a_dim != grad_a.shape()[i] {
+                        grad_a = grad_a.sum(i as i32, false);
+                    }
                 }
+
+                let diff_b = grad_b.shape().len() as i32 - b.shape().len() as i32;
+                for i in (0..grad_b.shape().len()).rev() {
+                    let b_dim = if i as i32 >= diff_b {
+                        b.shape()[(i as i32 - diff_b) as usize]
+                    } else {
+                        1
+                    };
+                    if b_dim != grad_b.shape()[i] {
+                        grad_b = grad_b.sum(i as i32, false);
+                    }
+                }
+                (grad_a, grad_b)
             }
-            grad_b
         };
 
         vec![Some(grad_a), Some(grad_b)]
