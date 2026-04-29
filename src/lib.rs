@@ -719,6 +719,42 @@ fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyT
 }
 
 #[pyfunction]
+fn fused_conv_bn_silu(
+    x: &PyTensor,
+    w: &PyTensor,
+    bias: Option<&PyTensor>,
+    bn_weight: &PyTensor,
+    bn_bias: &PyTensor,
+    bn_running_mean: &PyTensor,
+    bn_running_var: &PyTensor,
+    stride: &PyTensor,
+    padding: &PyTensor,
+    dilation: &PyTensor,
+    groups: &PyTensor,
+    eps: &PyTensor,
+) -> PyTensor {
+    use crate::dispatcher::{device_to_dispatch_key, dispatch};
+    let dispatch_key = device_to_dispatch_key(x.inner.device());
+    let mut args: Vec<&Tensor> = Vec::new();
+    args.push(&x.inner);
+    args.push(&w.inner);
+    if let Some(b) = bias {
+        args.push(&b.inner);
+    }
+    args.push(&bn_weight.inner);
+    args.push(&bn_bias.inner);
+    args.push(&bn_running_mean.inner);
+    args.push(&bn_running_var.inner);
+    args.push(&stride.inner);
+    args.push(&padding.inner);
+    args.push(&dilation.inner);
+    args.push(&groups.inner);
+    args.push(&eps.inner);
+    let result = dispatch("fused_conv_bn_silu", dispatch_key, &args);
+    PyTensor::from_tensor(result.into_iter().next().unwrap())
+}
+
+#[pyfunction]
 fn gelu(py: Python<'_>, a: &PyTensor) -> PyTensor {
     let a_inner = a.inner.clone();
     py.detach(move || PyTensor::from_tensor(a_inner.gelu()))
@@ -2628,6 +2664,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fused_add_relu, py)?)?;
     m.add_function(wrap_pyfunction!(fused_linear_relu, py)?)?;
     m.add_function(wrap_pyfunction!(fused_linear_gelu, py)?)?;
+    m.add_function(wrap_pyfunction!(fused_conv_bn_silu, py)?)?;
     m.add_function(wrap_pyfunction!(gelu, py)?)?;
     m.add_function(wrap_pyfunction!(sigmoid, py)?)?;
     m.add_function(wrap_pyfunction!(tanh, py)?)?;
