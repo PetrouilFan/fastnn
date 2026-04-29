@@ -121,9 +121,6 @@ use rayon::prelude::*;
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 use std::arch::aarch64::*;
 
-#[cfg(all(feature = "simd", target_arch = "aarch64"))]
-use wide::f32x4;
-
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 use wide::f32x8;
 use wide::f32x4;
@@ -131,13 +128,14 @@ use wide::f32x4;
 // Memory-bound elementwise ops: 128KB working set (L2 cache friendly)
 const CHUNK_MEMBOUND: usize = 1024 * 32; // 32K f32 = 128KB
 #[inline]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn from_slice_unaligned_f32x8(slice: &[f32]) -> f32x8 {
     let arr: [f32; 8] = slice.try_into().unwrap();
     f32x8::new(arr)
 }
 #[inline]
     #[allow(dead_code)]
-    fn from_slice_unaligned_f32x4(slice: &[f32]) -> f32x4 {
+fn from_slice_unaligned_f32x4(slice: &[f32]) -> f32x4 {
     let arr: [f32; 4] = slice.try_into().unwrap();
     f32x4::new(arr)
 }
@@ -10435,7 +10433,7 @@ fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     unsafe fn compute_stats_simd(
         x_ptr: *const f32,
         indices: &[(usize, usize)],
-        n: usize,
+        _n: usize,
     ) -> (f32, f32) {
         // Scalar fallback using Welford's algorithm
         let mut count = 0.0f32;
