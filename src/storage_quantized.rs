@@ -18,8 +18,6 @@ pub struct QuantizedTensor<T: PackedWord> {
     pub scale_zp: Vec<(f32, f32)>,
     /// Raw packed data
     data: Vec<T>,
-    /// Number of elements per block
-    block_elements: Vec<usize>,
     /// Shape of the tensor
     shape: Vec<usize>,
     _marker: PhantomData<T>,
@@ -29,31 +27,30 @@ impl<T: PackedWord> QuantizedTensor<T> {
     /// Create a new quantized tensor from f32 data with block-wise quantization.
     pub fn from_f32_blockwise(data: &[f32], shape: &[usize], block_size: usize) -> Self {
         let numel: usize = shape.iter().product();
-        let n_blocks = (numel + block_size - 1) / block_size;
+        let n_blocks = numel.div_ceil(block_size);
         
         let mut scale_zp = Vec::with_capacity(n_blocks);
-        let mut packed_data = Vec::with_capacity((numel + T::ITEMS - 1) / T::ITEMS);
-        let mut block_elements = Vec::with_capacity(n_blocks);
+        let mut packed_data = Vec::with_capacity(numel.div_ceil(T::ITEMS));
         
         for block_idx in 0..n_blocks {
             let start = block_idx * block_size;
             let end = (start + block_size).min(numel);
-            let elem_count = end - start;
-            block_elements.push(elem_count);
+            let _block_len = end - start;
+            let packed_start = start / T::ITEMS;
+            let packed_end = end.div_ceil(T::ITEMS);
             
-            let block_data = &data[start..end];
-            let max_abs = block_data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let max_abs = data[start..end].iter().map(|v| v.abs()).fold(0.0f32, f32::max);
             let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
             let scale = if max_abs == 0.0 { 1.0 } else { max_abs / max_val };
             
+            pack_block::<T>(&data[start..end], scale, 0.0, &mut packed_data);
+            
             scale_zp.push((scale, 0.0));
-            pack_block::<T>(block_data, scale, 0.0, &mut packed_data);
         }
         
         QuantizedTensor {
             scale_zp,
             data: packed_data,
-            block_elements,
             shape: shape.to_vec(),
             _marker: PhantomData,
         }
@@ -64,7 +61,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
         let numel: usize = self.shape.iter().product();
         
         // Build scales array
-        let scales: Vec<f32> = (0..numel).map(|i| {
+        let _scales: Vec<f32> = (0..numel).map(|i| {
             let block_idx = i / DEFAULT_BLOCK_SIZE;
             self.scale_zp.get(block_idx).map(|&(s, _)| s).unwrap_or(1.0)
         }).collect();
@@ -75,7 +72,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
             let (scale, zero) = self.scale_zp[block_idx];
             let start = block_idx * DEFAULT_BLOCK_SIZE;
             let end = (start + DEFAULT_BLOCK_SIZE).min(numel);
-            let block_len = end - start;
+            let _block_len = end - start;
             let packed_start = start / T::ITEMS;
             let packed_end = end.div_ceil(T::ITEMS);
             

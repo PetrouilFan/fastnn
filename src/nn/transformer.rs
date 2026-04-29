@@ -6,7 +6,6 @@ use crate::nn::norm::LayerNorm;
 use crate::nn::Module;
 use crate::tensor::Tensor;
 use crate::dtypes::PackedWord;
-use crate::packed_tensor::PackedTensor;
 use crate::packed_layer::PackedLinear;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -402,7 +401,7 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
         let x = attn_dropped.add(x);
 
         // Layer 2: Feed-forward with residual connection and dropout
-        let x_norm2 = self.norm2.forward(&x);
+        let _x_norm2 = self.norm2.forward(&x);
 
         // Convert to f32 for quantized linear layers
         let x_data = x.to_numpy();
@@ -413,7 +412,7 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
         let ff_hidden = self.ff1.forward(&x_data);
         let ff_gelu: Vec<f32> = ff_hidden.iter().map(|&v| v.max(0.0) * (1.0 + (-v).exp())).collect(); // GELU approximation
         let ff_out = self.ff2.forward(&ff_gelu);
-        let ff_dropped = self.dropout.forward(&Tensor::from_vec(ff_out.clone(), vec![x.shape()[0] as i64, x.shape()[1] as i64, self.d_model]));
+        let ff_dropped = self.dropout.forward(&Tensor::from_vec(ff_out.clone(), vec![x.shape()[0], x.shape()[1], self.d_model]));
 
         ff_dropped.add(&x)
     }
