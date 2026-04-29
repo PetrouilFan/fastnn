@@ -3185,6 +3185,39 @@ impl Tensor {
         result[0].clone()
     }
 
+    pub fn minimum(&self, other: &Tensor) -> Tensor {
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
+        let result = dispatch("minimum", dispatch_key, &[self, other]);
+        result[0].clone()
+    }
+
+    // Tensor comparison operations for autograd
+    pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
+        let numel = self.numel() as usize;
+        let self_data = self.as_f32_slice();
+        let other_data = other.as_f32_slice();
+        let mut output_data = vec![0.0f32; numel];
+        for i in 0..numel {
+            output_data[i] = if self_data[i] >= other_data[i] { 1.0 } else { 0.0 };
+        }
+        Tensor::from_vec(output_data, self.shape())
+    }
+
+    pub fn le_tensor(&self, other: &Tensor) -> Tensor {
+        let numel = self.numel() as usize;
+        let self_data = self.as_f32_slice();
+        let other_data = other.as_f32_slice();
+        let mut output_data = vec![0.0f32; numel];
+        for i in 0..numel {
+            output_data[i] = if self_data[i] <= other_data[i] { 1.0 } else { 0.0 };
+        }
+        Tensor::from_vec(output_data, self.shape())
+    }
+
     pub fn lt_scalar(&self, threshold: f32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch(
@@ -3279,6 +3312,39 @@ impl Tensor {
             out_offset += dim_size * out_strides[dim];
         }
         Tensor::from_vec(output_data, output_shape.into_vec())
+    }
+
+    /// Stack tensors along a new dimension.
+    /// Similar to PyTorch's stack - concatenates along a new dimension.
+    pub fn stack(tensors: &[Tensor], dim: i32) -> Tensor {
+        if tensors.is_empty() {
+            panic!("stack: need at least one tensor");
+        }
+        
+        // Get input shape
+        let first_shape = tensors[0].shape();
+        let ndim = first_shape.len();
+        
+        // Normalize dim
+        let dim = if dim < 0 { (ndim as i32 + dim + 1) as usize } else { dim as usize };
+        if dim > ndim {
+            panic!("stack: dimension out of range");
+        }
+        
+        // Validate all tensors have same shape
+        for t in tensors {
+            if t.shape() != first_shape {
+                panic!("stack: tensors must have same shape");
+            }
+        }
+        
+        // Unsqueeze each tensor at the target dimension, then cat
+        let unsqueezed: Vec<Tensor> = tensors.iter()
+            .map(|t| t.unsqueeze(dim))
+            .collect();
+        
+        // Concatenate along the new dimension
+        Tensor::cat(&unsqueezed, dim as i32)
     }
 
     pub fn repeat(&self, repeats: &[i64]) -> Tensor {
