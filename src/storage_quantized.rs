@@ -36,8 +36,8 @@ impl<T: PackedWord> QuantizedTensor<T> {
             let start = block_idx * block_size;
             let end = (start + block_size).min(numel);
             let _block_len = end - start;
-            let packed_start = start / T::ITEMS;
-            let packed_end = end.div_ceil(T::ITEMS);
+            let _packed_start = start / T::ITEMS;
+            let _packed_end = end.div_ceil(T::ITEMS);
             
             let max_abs = data[start..end].iter().map(|v| v.abs()).fold(0.0f32, f32::max);
             let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
