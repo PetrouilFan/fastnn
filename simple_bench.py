@@ -45,13 +45,13 @@ def benchmark_conv(batch_size=1, in_channels=32, out_channels=64, height=64, wid
 
     # Warmup
     for _ in range(3):
-        out = fastnn_conv(x_fastnn)
+        _ = fastnn_conv(x_fastnn)
 
     # Benchmark FastNN
     fastnn_times = []
     for _ in range(iters):
         t0 = time.perf_counter()
-        out = fastnn_conv(x_fastnn)
+        _ = fastnn_conv(x_fastnn)
         t1 = time.perf_counter()
         fastnn_times.append((t1 - t0) * 1000)
 
