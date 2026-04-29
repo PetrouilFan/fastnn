@@ -280,6 +280,10 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.maximum(&other.inner))
     }
 
+    fn minimum(&self, other: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.minimum(&other.inner))
+    }
+
     fn log_softmax(&self, dim: i32) -> PyTensor {
         PyTensor::from_tensor(self.inner.log_softmax(dim))
     }
@@ -758,14 +762,6 @@ fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
 }
 
 #[pyfunction]
-fn embedding(weight: &PyTensor, indices: &PyTensor) -> PyTensor {
-    use dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(weight.inner.device());
-    let result = dispatch("embedding", dispatch_key, &[&weight.inner, &indices.inner]);
-    PyTensor::from_tensor(result[0].clone())
-}
-
-#[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let dim = dim.unwrap_or(0);
@@ -784,6 +780,18 @@ fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
 fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let dim = dim.unwrap_or(0);
     PyTensor::from_tensor(a.inner.max(dim, keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, other))]
+fn maximum(a: &PyTensor, other: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(a.inner.maximum(&other.inner))
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, other))]
+fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(a.inner.minimum(&other.inner))
 }
 
 #[pyfunction]
@@ -2622,11 +2630,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(silu, py)?)?;
     m.add_function(wrap_pyfunction!(softmax, py)?)?;
     m.add_function(wrap_pyfunction!(log_softmax, py)?)?;
-    m.add_function(wrap_pyfunction!(embedding, py)?)?;
     m.add_function(wrap_pyfunction!(sum, py)?)?;
     m.add_function(wrap_pyfunction!(mean, py)?)?;
     m.add_function(wrap_pyfunction!(max, py)?)?;
     m.add_function(wrap_pyfunction!(min, py)?)?;
+    m.add_function(wrap_pyfunction!(maximum, py)?)?;
+    m.add_function(wrap_pyfunction!(minimum, py)?)?;
     m.add_function(wrap_pyfunction!(argmax, py)?)?;
     m.add_function(wrap_pyfunction!(argmin, py)?)?;
     m.add_function(wrap_pyfunction!(mse_loss, py)?)?;
@@ -2685,6 +2694,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
     m.add_function(wrap_pyfunction!(cat, py)?)?;
+    m.add_function(wrap_pyfunction!(stack, py)?)?;
     m.add_function(wrap_pyfunction!(einsum, py)?)?;
     m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
     m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
@@ -2773,6 +2783,12 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
 fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
     let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     PyTensor::from_tensor(tensor::Tensor::cat(&tensors, dim))
+}
+
+#[pyfunction]
+fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
+    let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
+    PyTensor::from_tensor(tensor::Tensor::stack(&tensors, dim))
 }
 
 #[pyfunction]
