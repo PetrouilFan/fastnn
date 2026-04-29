@@ -349,6 +349,7 @@ impl Module for TransformerEncoder {
 
 /// Quantized Transformer Block with packed precision weights.
 /// Uses quantized linear layers and attention for reduced memory bandwidth.
+#[allow(dead_code)]
 pub struct PackedTransformerBlock<T: PackedWord> {
     /// Quantized self-attention
     pub self_attn: PackedMultiHeadAttention<T>,
@@ -370,6 +371,7 @@ pub struct PackedTransformerBlock<T: PackedWord> {
 }
 
 impl<T: PackedWord> PackedTransformerBlock<T> {
+    #[allow(dead_code)]
     /// Create a new quantized transformer block.
     pub fn new(d_model: i64, num_heads: i64, ff_dim: i64, dropout_p: f32) -> Self {
         let self_attn = PackedMultiHeadAttention::<T>::new(d_model, num_heads, dropout_p, false);
@@ -451,6 +453,7 @@ impl<T: PackedWord> Module for PackedTransformerBlock<T> {
 }
 
 /// Quantized Transformer Encoder with packed precision.
+#[allow(dead_code)]
 pub struct PackedTransformerEncoder<T: PackedWord> {
     /// Token embedding (kept in f32 for compatibility)
     pub embedding: Embedding,
@@ -472,6 +475,7 @@ pub struct PackedTransformerEncoder<T: PackedWord> {
 }
 
 impl<T: PackedWord> PackedTransformerEncoder<T> {
+    #[allow(dead_code)]
     /// Create a new quantized transformer encoder.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
