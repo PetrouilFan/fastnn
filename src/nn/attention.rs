@@ -37,10 +37,10 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         // Initialize with random weights (will be replaced with actual weights)
         let d_model_usize = d_model as usize;
         let qkv_data: Vec<f32> = (0..d_model_usize * d_model_usize * 3)
-            .map(|i| ((i as f32 * 0.01).sin() * 0.1))
+            .map(|i| (i as f32 * 0.01).sin() * 0.1)
             .collect();
         let out_data: Vec<f32> = (0..d_model_usize * d_model_usize)
-            .map(|i| ((i as f32 * 0.01).cos() * 0.1))
+            .map(|i| (i as f32 * 0.01).cos() * 0.1)
             .collect();
 
         let qkv_proj = PackedTensor::<T>::from_f32_auto(&qkv_data, &[d_model_usize, d_model_usize * 3]);
