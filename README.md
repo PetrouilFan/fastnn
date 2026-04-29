@@ -377,9 +377,11 @@ output = fnn_model(fnn.tensor(data, shape))
 | `x.permute(dims)`               | Permute all dimensions           |
 | `x.view(shape)`                 | View (no copy)                   |
 | `x.squeeze(dim)` / `x.unsqueeze(dim)` | Add/remove dimensions    |
-| `x.flip(dim)`                   | Reverse along dimension          |
-| `x.maximum(y)`                  | Elementwise maximum              |
-| `x.sum(dim, keepdim)`           | Sum reduction                    |
+| `x.flip(dim)` | Reverse along dimension |
+| `fnn.maximum(a, b)` | Elementwise maximum (with broadcasting) |
+| `fnn.minimum(a, b)` | Elementwise minimum (with broadcasting) |
+| `fnn.stack([a, b], dim)` | Stack tensors along new dimension |
+| `x.sum(dim, keepdim)` | Sum reduction |
 | `x.mean(dim, keepdim)`          | Mean reduction                   |
 | `x.max(dim, keepdim)`           | Max reduction                    |
 | `x.min(dim, keepdim)`           | Min reduction                    |
