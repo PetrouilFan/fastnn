@@ -10272,6 +10272,71 @@ fn maximum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+fn minimum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let a = args[0];
+    let b = args[1];
+    let out_shape = broadcast_shapes_simple(&a.shape(), &b.shape());
+    let numel = out_shape.iter().product::<i64>() as usize;
+    let mut output = Tensor::zeros(out_shape.clone(), a.dtype(), a.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+    let a_data = a.as_f32_slice();
+    let b_data = b.as_f32_slice();
+    let a_strides = &a.inner.strides;
+    let b_strides = &b.inner.strides;
+    let out_strides = &output.inner.strides;
+    let ndim = out_shape.len();
+    let a_offset = a.inner.storage_offset as usize;
+    let b_offset = b.inner.storage_offset as usize;
+    let mut indices = vec![0i64; ndim];
+    for _out_idx in 0..numel {
+        let mut a_idx: usize = a_offset;
+        let mut b_idx: usize = b_offset;
+        for d in 0..ndim {
+            let a_dim_idx = if d >= ndim - a.ndim() {
+                d - (ndim - a.ndim())
+            } else {
+                usize::MAX
+            };
+            let b_dim_idx = if d >= ndim - b.ndim() {
+                d - (ndim - b.ndim())
+            } else {
+                usize::MAX
+            };
+            if a_dim_idx != usize::MAX && a.shape()[a_dim_idx] != 1 {
+                a_idx +=
+                    (indices[d] % a.shape()[a_dim_idx]) as usize * a_strides[a_dim_idx] as usize;
+            }
+            if b_dim_idx != usize::MAX && b.shape()[b_dim_idx] != 1 {
+                b_idx +=
+                    (indices[d] % b.shape()[b_dim_idx]) as usize * b_strides[b_dim_idx] as usize;
+            }
+        }
+        let av = unsafe { *a_data.as_ptr().add(a_idx) };
+        let bv = unsafe { *b_data.as_ptr().add(b_idx) };
+        let mut out_linear: usize = 0;
+        for d in 0..ndim {
+            out_linear += indices[d] as usize * out_strides[d] as usize;
+        }
+        unsafe {
+            *out_ptr.add(out_linear) = if av < bv { av } else { bv };
+        }
+        for d in (0..ndim).rev() {
+            indices[d] += 1;
+            if indices[d] < out_shape[d] {
+                break;
+            }
+            indices[d] = 0;
+        }
+    }
+    vec![output]
+}
+
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Cpu, add_kernel as KernelFn);
@@ -10331,6 +10396,7 @@ fn register_kernels() {
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);
     register("min", DispatchKey::Cpu, min_kernel as KernelFn);
     register("maximum", DispatchKey::Cpu, maximum_kernel as KernelFn);
+    register("minimum", DispatchKey::Cpu, minimum_kernel as KernelFn);
     register("softmax", DispatchKey::Cpu, softmax_kernel as KernelFn);
     register(
         "log_softmax",
