@@ -48,14 +48,42 @@ fnn.silu(x)       # SiLU (Swish)
 
 ### Reductions
 ```python
-fnn.sum(x)        # Sum all elements
-fnn.mean(x)       # Mean
-fnn.max(x)        # Maximum
-fnn.min(x)        # Minimum
-fnn.argmax(x)     # Index of max
-fnn.argmin(x)     # Index of min
-fnn.softmax(x, axis)   # Softmax
-fnn.log_softmax(x, axis)  # Log softmax
+fnn.sum(x)          # Sum all elements
+fnn.mean(x)        # Mean
+fnn.max(x)          # Maximum (reduction)
+fnn.min(x)          # Minimum (reduction)
+fnn.argmax(x)       # Index of max
+fnn.argmin(x)       # Index of min
+fnn.softmax(x, axis)    # Softmax
+fnn.log_softmax(x, axis) # Log softmax
+```
+
+### Element-wise Maximum/Minimum
+```python
+# Element-wise maximum/minimum with broadcasting
+fnn.maximum(a, b)   # Element-wise max (like np.maximum)
+fnn.minimum(a, b)   # Element-wise min (like np.minimum)
+
+# Example: Clipped double Q-learning in SAC
+q1 = fnn.randn([batch_size, action_dim])
+q2 = fnn.randn([batch_size, action_dim])
+q_clipped = fnn.minimum(q1, q2)  # Conservative Q estimate
+```
+
+### Concatenation and Stacking
+```python
+fnn.cat([a, b], dim)      # Concatenate along existing dimension
+fnn.stack([a, b], dim)    # Stack along NEW dimension (like np.stack)
+
+# Example:
+x = fnn.tensor([1, 2, 3], [3])
+y = fnn.tensor([4, 5, 6], [3])
+
+# cat requires same dimensions except concat dim
+z = fnn.cat([x.unsqueeze(0), y.unsqueeze(0)], dim=0)  # [2, 3]
+
+# stack creates new dimension
+z = fnn.stack([x, y], dim=0)  # [2, 3] - cleaner!
 ```
 
 ## Loss Functions

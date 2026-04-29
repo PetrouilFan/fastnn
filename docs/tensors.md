@@ -154,8 +154,25 @@ y = x.flip(1)           # Reverse along dim 1
 a = fnn.randn([2, 3])
 b = fnn.randn([4, 3])
 
-# Concatenate
+# Concatenate (along existing dimension)
 c = fnn.cat([a, b], dim=0)  # [6, 3]
+
+# Stack (concatenate along NEW dimension)
+x = fnn.tensor([1, 2, 3], [3])
+y = fnn.tensor([4, 5, 6], [3])
+z = fnn.tensor([7, 8, 9], [3])
+
+# Stack along dim=0 creates new dimension at front
+stacked = fnn.stack([x, y, z], dim=0)  # Shape: [3, 3]
+# [[1, 2, 3],
+#  [4, 5, 6],
+#  [7, 8, 9]]
+
+# Stack along dim=1 creates new dimension at position 1
+stacked_t = fnn.stack([x, y, z], dim=1)  # Shape: [3, 3]
+# [[1, 4, 7],
+#  [2, 5, 8],
+#  [3, 6, 9]]
 
 # Repeat
 x = fnn.randn([2, 3])
@@ -189,10 +206,18 @@ dot = fnn.einsum('i,i->', [a, b])
 a = fnn.tensor([1.0, 2.0, 3.0], [3])
 b = fnn.tensor([2.0, 2.0, 2.0], [3])
 
-mask = a.gt_scalar(1.5)      # [0.0, 1.0, 1.0]
-mask = a.lt_scalar(2.5)      # [1.0, 1.0, 0.0]
-mask = a.logical_not()       # Invert boolean mask
-c = a.maximum(b)             # Element-wise max
+mask = a.gt_scalar(1.5)  # [0.0, 1.0, 1.0]
+mask = a.lt_scalar(2.5)  # [1.0, 1.0, 0.0]
+mask = a.logical_not()  # Invert boolean mask
+
+# Element-wise maximum/minimum (with broadcasting)
+c = fnn.maximum(a, b)  # Element-wise max: [2.0, 2.0, 3.0]
+d = fnn.minimum(a, b)  # Element-wise min: [1.0, 2.0, 2.0]
+
+# Use in RL for clipped double Q-learning
+q1 = fnn.tensor([10.0, 20.0, 30.0], [3])
+q2 = fnn.tensor([15.0, 18.0, 35.0], [3])
+q_clipped = fnn.minimum(q1, q2)  # [10.0, 18.0, 30.0]
 ```
 
 ## Autograd
