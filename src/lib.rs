@@ -2694,6 +2694,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
     m.add_function(wrap_pyfunction!(cat, py)?)?;
+    m.add_function(wrap_pyfunction!(stack, py)?)?;
     m.add_function(wrap_pyfunction!(einsum, py)?)?;
     m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
     m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
@@ -2782,6 +2783,12 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
 fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
     let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     PyTensor::from_tensor(tensor::Tensor::cat(&tensors, dim))
+}
+
+#[pyfunction]
+fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
+    let tensors: Vec<tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
+    PyTensor::from_tensor(tensor::Tensor::stack(&tensors, dim))
 }
 
 #[pyfunction]
