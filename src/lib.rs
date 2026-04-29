@@ -391,7 +391,7 @@ fn tensor_from_data<'py>(
     let shape: Vec<i64> = shape.extract()?;
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
         data, shape, device,
@@ -412,11 +412,11 @@ fn tensor_from_list(data: Vec<f32>, shape: Vec<i64>) -> PyTensor {
 #[pyo3(signature = (shape, dtype = None, device = None))]
 fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
-        .and_then(|s| DType::from_str(&s))
+        .and_then(|s| DType::from_str_label(&s))
         .unwrap_or(DType::F32);
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::zeros(shape, dtype, device))
 }
@@ -425,11 +425,11 @@ fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTe
 #[pyo3(signature = (shape, dtype = None, device = None))]
 fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
-        .and_then(|s| DType::from_str(&s))
+        .and_then(|s| DType::from_str_label(&s))
         .unwrap_or(DType::F32);
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::ones(shape, dtype, device))
 }
@@ -438,11 +438,11 @@ fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTen
 #[pyo3(signature = (shape, value, dtype = None, device = None))]
 fn full(shape: Vec<i64>, value: f32, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
-        .and_then(|s| DType::from_str(&s))
+        .and_then(|s| DType::from_str_label(&s))
         .unwrap_or(DType::F32);
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::full(shape, value, dtype, device))
 }
@@ -458,7 +458,7 @@ fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> Py
     let values: Vec<f32> = (0..numel).map(|i| (start_f64 + i as f64 * step_f64) as f32).collect();
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(
         values,
@@ -484,7 +484,7 @@ fn linspace(start: f32, end: f32, steps: usize, device: Option<String>) -> PyTen
         .collect();
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(
         values,
@@ -503,7 +503,7 @@ fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyTensor {
     }
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, vec![n, m], device))
 }
@@ -521,7 +521,7 @@ fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     }
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
@@ -533,7 +533,7 @@ fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     let values: Vec<f32> = (0..numel as usize).map(|_| rand::random()).collect();
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
@@ -555,7 +555,7 @@ fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyTe
     };
     let device = device
         .as_ref()
-        .and_then(|s| Device::from_str(s))
+        .and_then(|s| Device::from_str_label(s))
         .unwrap_or_else(get_default_device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
@@ -725,6 +725,7 @@ fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyT
     PyTensor::from_tensor(result.into_iter().next().unwrap())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[pyfunction]
 fn fused_conv_bn_silu(
     x: &PyTensor,
@@ -1066,7 +1067,7 @@ fn _get_num_threads() -> usize {
 
 #[pyfunction]
 fn _set_default_device(device: String) {
-    if let Some(device) = Device::from_str(&device) {
+    if let Some(device) = Device::from_str_label(&device) {
         set_default_device_internal(device);
     }
 }
@@ -2896,8 +2897,8 @@ fn im2col(
             "Input must be a 4D tensor (N, C, H, W)",
         ));
     }
-    let batch = shape[0] as usize;
-    let in_channels = shape[1] as usize;
+    let _batch = shape[0] as usize;
+    let _in_channels = shape[1] as usize;
     let in_height = shape[2] as usize;
     let in_width = shape[3] as usize;
 

@@ -2530,8 +2530,7 @@ impl Tensor {
         // Allocate output directly
         let sizes: SmallVec<[i64; 8]> = smallvec![m as i64, n as i64];
         let nbytes = m * n * DType::F32.size();
-        let mut data = Vec::with_capacity(nbytes);
-        unsafe { data.set_len(nbytes) };
+        let data = vec![0u8; nbytes];
         let storage = Arc::new(Storage::Cpu(CpuStorage {
             data: Arc::new(data),
             nbytes,

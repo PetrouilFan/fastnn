@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Quantized Multi-Head Attention with block-wise KV cache.
 /// Uses packed precision for weights and activations to reduce memory bandwidth.
+#[allow(dead_code)]
 pub struct PackedMultiHeadAttention<T: PackedWord> {
     /// Packed QKV projection [d_model, d_model * 3]
     pub qkv_proj: PackedTensor<T>,
@@ -25,6 +26,7 @@ pub struct PackedMultiHeadAttention<T: PackedWord> {
 }
 
 impl<T: PackedWord> PackedMultiHeadAttention<T> {
+    #[allow(dead_code)]
     /// Create a new quantized multi-head attention layer.
     pub fn new(d_model: i64, num_heads: i64, dropout_p: f32, causal: bool) -> Self {
         assert!(

@@ -39,6 +39,7 @@ impl AlignedScratchBuffer {
         &mut self.data
     }
 
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         self.data.len()
     }

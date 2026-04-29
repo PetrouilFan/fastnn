@@ -89,7 +89,7 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
 
             // Update master weight
             let denom = v_hat.sqrt() + f32x4::splat(eps);
-            master = master - f32x4::splat(lr) * m_hat / denom;
+            master -= f32x4::splat(lr) * m_hat / denom;
 
             // Store back
             let master_arr_out: [f32; 4] = master.into();
