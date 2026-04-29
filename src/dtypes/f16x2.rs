@@ -3,7 +3,7 @@ use half::f16;
 
 /// IEEE 754 half-precision float, 2 values packed per u32 word.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct F16x2(pub u32);
 
 unsafe impl bytemuck::Pod for F16x2 {}
