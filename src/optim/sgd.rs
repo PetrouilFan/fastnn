@@ -13,6 +13,11 @@ pub struct SGD {
     pub weight_decay: f64,
     pub nesterov: bool,
     pub velocity: Vec<Tensor>,
+    // Pre-allocated buffers
+    pub temp_wd: Vec<Tensor>,
+    pub temp_nesterov_grad: Vec<Tensor>,
+    pub temp_mom_v: Vec<Tensor>,
+    pub temp_vel: Vec<Tensor>,
 }
 
 impl SGD {
@@ -28,6 +33,22 @@ impl SGD {
             .iter()
             .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
             .collect();
+        let temp_wd: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_nesterov_grad: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_mom_v: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_vel: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
 
         SGD {
             params,
@@ -37,6 +58,10 @@ impl SGD {
             weight_decay,
             nesterov,
             velocity,
+            temp_wd,
+            temp_nesterov_grad,
+            temp_mom_v,
+            temp_vel,
         }
     }
 }
@@ -57,9 +82,9 @@ impl Optimizer for SGD {
 
             if weight_decay != 0.0 {
                 // grad = grad + weight_decay * param
-                let mut wd_term = param.clone();
-                wd_term.mul_scalar_(weight_decay);
-                grad.add_(&wd_term);
+                self.temp_wd[i] = param.clone();
+                self.temp_wd[i].mul_scalar_(weight_decay);
+                grad.add_(&self.temp_wd[i]);
             }
 
             if momentum != 0.0 {
@@ -67,28 +92,27 @@ impl Optimizer for SGD {
 
                 if self.nesterov {
                     // Nesterov: param -= lr * (grad + momentum * velocity)
-                    // where velocity is the velocity BEFORE update
-                    // So we compute: grad + momentum * velocity (old)
-                    let mut nesterov_grad = grad.clone();
-                    let mom_v = velocity.mul_scalar(momentum);
-                    nesterov_grad.add_(&mom_v);
+                    self.temp_nesterov_grad[i] = grad.clone();
+                    self.temp_mom_v[i] = velocity.clone();
+                    self.temp_mom_v[i].mul_scalar_(momentum);
+                    self.temp_nesterov_grad[i].add_(&self.temp_mom_v[i]);
 
                     // Now update velocity: velocity = momentum * velocity + grad
                     velocity.mul_scalar_(momentum);
                     velocity.add_(&grad);
 
                     // param = param - lr * nesterov_grad
-                    nesterov_grad.mul_scalar_(lr);
-                    param.sub_(&nesterov_grad);
+                    self.temp_nesterov_grad[i].mul_scalar_(lr);
+                    param.sub_(&self.temp_nesterov_grad[i]);
                 } else {
                     // Standard SGD: velocity = momentum * velocity + grad
                     velocity.mul_scalar_(momentum);
                     velocity.add_(&grad);
 
                     // param = param - lr * velocity
-                    let mut vel = velocity.clone();
-                    vel.mul_scalar_(lr);
-                    param.sub_(&vel);
+                    self.temp_vel[i] = velocity.clone();
+                    self.temp_vel[i].mul_scalar_(lr);
+                    param.sub_(&self.temp_vel[i]);
                 }
             } else {
                 // No momentum: simple update
@@ -114,8 +138,28 @@ impl Optimizer for SGD {
             .iter()
             .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
             .collect();
+        let temp_wd: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_nesterov_grad: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_mom_v: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
+        let temp_vel: Vec<Tensor> = params
+            .iter()
+            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+            .collect();
 
         self.velocity.extend(velocity);
+        self.temp_wd.extend(temp_wd);
+        self.temp_nesterov_grad.extend(temp_nesterov_grad);
+        self.temp_mom_v.extend(temp_mom_v);
+        self.temp_vel.extend(temp_vel);
         self.params.extend(params);
     }
 

@@ -3,7 +3,7 @@ use super::PackedWord;
 /// IEEE 754 single-precision float, 1 value per u32 word (no packing).
 /// This is the baseline type — no memory savings, but provides a uniform API.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct F32x1(pub u32);
 
 unsafe impl bytemuck::Pod for F32x1 {}

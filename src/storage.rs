@@ -28,19 +28,6 @@ impl DType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "f32" | "float32" => Some(DType::F32),
-            "f64" | "float64" => Some(DType::F64),
-            "i32" | "int32" => Some(DType::I32),
-            "i64" | "int64" => Some(DType::I64),
-            "bool" => Some(DType::Bool),
-            "f16" | "float16" => Some(DType::F16),
-            "bf16" | "bfloat16" => Some(DType::BF16),
-            _ => None,
-        }
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             DType::F32 => "f32",
@@ -52,6 +39,19 @@ impl DType {
             DType::BF16 => "bf16",
         }
     }
+
+    pub fn from_str_label(s: &str) -> Option<Self> {
+        match s {
+            "f32" | "float32" => Some(DType::F32),
+            "f64" | "float64" => Some(DType::F64),
+            "i32" | "int32" => Some(DType::I32),
+            "i64" | "int64" => Some(DType::I64),
+            "bool" => Some(DType::Bool),
+            "f16" | "float16" => Some(DType::F16),
+            "bf16" | "bfloat16" => Some(DType::BF16),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,7 +61,7 @@ pub enum Device {
 }
 
 impl Device {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_str_label(s: &str) -> Option<Self> {
         match s {
             "cpu" | "CPU" => Some(Device::Cpu),
             "gpu" | "GPU" | "wgpu" | "Wgpu" => Some(Device::Wgpu(0)),

@@ -15,6 +15,35 @@ use std::arch::x86_64::{
     _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_storeu_ps, _mm256_sub_ps,
 };
 
+/// SIMD-accelerated copy for f32 slices (AVX2)
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn simd_copy_f32(src: *const f32, dst: *mut f32, len: usize) {
+    let mut i = 0;
+    // Copy in chunks of 8 f32 (256 bits)
+    while i + 8 <= len {
+        unsafe {
+            let v = _mm256_loadu_ps(src.add(i));
+            _mm256_storeu_ps(dst.add(i), v);
+        }
+        i += 8;
+    }
+    // Handle remaining elements
+    while i < len {
+        unsafe {
+            *dst.add(i) = *src.add(i);
+        }
+        i += 1;
+    }
+}
+
+/// Fallback memcpy for f32
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+fn memcpy_f32(src: *const f32, dst: *mut f32, len: usize) {
+    unsafe {
+        std::ptr::copy_nonoverlapping(src, dst, len);
+    }
+}
+
 /// Cached scalar tensors for common dimension values (0-7)
 /// Avoids heap allocation on every softmax/sum/mean/max call
 fn dim_scalar(dim: i32) -> Tensor {
@@ -1286,14 +1315,22 @@ impl Tensor {
     pub fn to_numpy(&self) -> Vec<f32> {
         match &self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                // Fast path: contiguous F32 tensor - direct memory copy
-                if self.inner.dtype == DType::F32
-                    && self.inner.is_contiguous()
-                    && self.inner.storage_offset == 0
-                {
-                    let data = cpu.data.as_ref().as_ptr() as *const f32;
-                    let numel = self.inner.numel() as usize;
-                    return unsafe { std::slice::from_raw_parts(data, numel) }.to_vec();
+                // Fast path: contiguous F32 tensor - SIMD-accelerated copy
+                if self.inner.dtype == DType::F32 && self.inner.is_contiguous() {
+                    let slice = self.inner.as_f32_slice();
+                    let mut result = vec![0.0f32; slice.len()];
+                    let src = slice.as_ptr();
+                    let dst = result.as_mut_ptr();
+                    let len = slice.len();
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        simd_copy_f32(src, dst, len);
+                    }
+                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                    {
+                        memcpy_f32(src, dst, len);
+                    }
+                    return result;
                 }
 
                 match self.inner.dtype {
@@ -2189,6 +2226,112 @@ impl Tensor {
         self
     }
 
+    /// In-place addcmul: self += tensor1 * tensor2
+    /// Fused operation to reduce allocations in backward passes
+    pub fn addcmul_(&mut self, tensor1: &Tensor, tensor2: &Tensor) -> &mut Self {
+        // Fast path: CPU contiguous same-shape tensors, skip dispatch overhead
+        if self.device() == Device::Cpu
+            && tensor1.device() == Device::Cpu
+            && tensor2.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && tensor1.inner.dtype == DType::F32
+            && tensor2.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && tensor1.is_contiguous()
+            && tensor2.is_contiguous()
+            && self.inner.sizes == tensor1.inner.sizes
+            && self.inner.sizes == tensor2.inner.sizes
+        {
+            let numel = self.inner.numel() as usize;
+            let self_ptr = self.data_ptr_f32_mut();
+            let t1_ptr = tensor1.data_ptr_f32();
+            let t2_ptr = tensor2.data_ptr_f32();
+
+            #[cfg(feature = "parallel")]
+            {
+                if numel > 64 * 1024 {
+                    use rayon::prelude::*;
+                    const CHUNK: usize = 4096;
+                    let num_chunks = numel.div_ceil(CHUNK);
+                    let self_usize = self_ptr as usize;
+                    let t1_usize = t1_ptr as usize;
+                    let t2_usize = t2_ptr as usize;
+                    (0..num_chunks).into_par_iter().for_each(|chunk| {
+                        let start = chunk * CHUNK;
+                        let end = (start + CHUNK).min(numel);
+                        let s_p = self_usize as *mut f32;
+                        let t1_p = t1_usize as *const f32;
+                        let t2_p = t2_usize as *const f32;
+                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                        {
+                            if is_x86_feature_detected!("avx2") {
+                                unsafe {
+                                    let mut i = start;
+                                    while i + 8 <= end {
+                                        let sv = _mm256_loadu_ps(s_p.add(i));
+                                        let t1v = _mm256_loadu_ps(t1_p.add(i));
+                                        let t2v = _mm256_loadu_ps(t2_p.add(i));
+                                        let prod = _mm256_mul_ps(t1v, t2v);
+                                        let r = _mm256_add_ps(sv, prod);
+                                        _mm256_storeu_ps(s_p.add(i), r);
+                                        i += 8;
+                                    }
+                                    for j in i..end {
+                                        *s_p.add(j) += *t1_p.add(j) * *t2_p.add(j);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        // Scalar fallback
+                        for i in start..end {
+                            unsafe {
+                                *s_p.add(i) += *t1_p.add(i) * *t2_p.add(i);
+                            }
+                        }
+                    });
+                    return self;
+                }
+            }
+
+            // Small tensor or non-parallel: SIMD inline
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && numel >= 8 {
+                    unsafe {
+                        let mut i = 0;
+                        while i + 8 <= numel {
+                            let sv = _mm256_loadu_ps(self_ptr.add(i));
+                            let t1v = _mm256_loadu_ps(t1_ptr.add(i));
+                            let t2v = _mm256_loadu_ps(t2_ptr.add(i));
+                            let prod = _mm256_mul_ps(t1v, t2v);
+                            let r = _mm256_add_ps(sv, prod);
+                            _mm256_storeu_ps(self_ptr.add(i), r);
+                            i += 8;
+                        }
+                        for j in i..numel {
+                            *self_ptr.add(j) += *t1_ptr.add(j) * *t2_ptr.add(j);
+                        }
+                        return self;
+                    }
+                }
+            }
+
+            // Scalar fallback
+            for i in 0..numel {
+                unsafe {
+                    *self_ptr.add(i) += *t1_ptr.add(i) * *t2_ptr.add(i);
+                }
+            }
+            self
+        } else {
+            // Fallback: use dispatched operations
+            let product = tensor1.mul(tensor2);
+            self.add_(&product);
+            self
+        }
+    }
+
     pub fn sub(&self, other: &Tensor) -> Tensor {
         let dispatch_key = match (self.device(), other.device()) {
             (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
@@ -2385,7 +2528,15 @@ impl Tensor {
         let n = b_shape[1] as usize;
 
         // Allocate output directly
-        let mut output = Tensor::zeros(vec![m as i64, n as i64], DType::F32, Device::Cpu);
+        let sizes: SmallVec<[i64; 8]> = smallvec![m as i64, n as i64];
+        let nbytes = m * n * DType::F32.size();
+        let data = vec![0u8; nbytes];
+        let storage = Arc::new(Storage::Cpu(CpuStorage {
+            data: Arc::new(data),
+            nbytes,
+            gpu_buffer_cache: RwLock::new(HashMap::new()),
+        }));
+        let mut output = Tensor::new(TensorImpl::new(storage, sizes, DType::F32));
         {
             let output_inner = Arc::make_mut(&mut output.inner);
             let output_storage = Arc::make_mut(&mut output_inner.storage);
