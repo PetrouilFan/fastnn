@@ -32,6 +32,9 @@ def load_model(
         raise ValueError(f"Unknown backend: {backend}. Use 'fastnn' or 'transformers'.")
 
 
+from fastnn.models.llm.loaders.gguf_loader import GGUFLoader, load_gguf
+
+
 __all__ = [
     "BaseLoader",
     "ModelInfo",
