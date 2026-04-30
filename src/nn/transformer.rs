@@ -1,12 +1,12 @@
+use crate::dtypes::PackedWord;
 use crate::nn::attention::{MultiHeadAttention, PackedMultiHeadAttention};
 use crate::nn::dropout::Dropout;
 use crate::nn::embedding::Embedding;
 use crate::nn::linear::Linear;
 use crate::nn::norm::LayerNorm;
 use crate::nn::Module;
-use crate::tensor::Tensor;
-use crate::dtypes::PackedWord;
 use crate::packed_layer::PackedLinear;
+use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -407,14 +407,20 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
 
         // Convert to f32 for quantized linear layers
         let x_data = x.to_numpy();
-        
+
         // Fused feed-forward: linear -> gelu -> linear
         // Note: This is a simplified implementation
         // In practice, we'd want to use proper quantized GEMM
         let ff_hidden = self.ff1.forward(&x_data);
-        let ff_gelu: Vec<f32> = ff_hidden.iter().map(|&v| v.max(0.0) * (1.0 + (-v).exp())).collect(); // GELU approximation
+        let ff_gelu: Vec<f32> = ff_hidden
+            .iter()
+            .map(|&v| v.max(0.0) * (1.0 + (-v).exp()))
+            .collect(); // GELU approximation
         let ff_out = self.ff2.forward(&ff_gelu);
-        let ff_dropped = self.dropout.forward(&Tensor::from_vec(ff_out.clone(), vec![x.shape()[0], x.shape()[1], self.d_model]));
+        let ff_dropped = self.dropout.forward(&Tensor::from_vec(
+            ff_out.clone(),
+            vec![x.shape()[0], x.shape()[1], self.d_model],
+        ));
 
         ff_dropped.add(&x)
     }
@@ -493,7 +499,9 @@ impl<T: PackedWord> PackedTransformerEncoder<T> {
 
         let mut layers = Vec::new();
         for _ in 0..num_layers {
-            layers.push(PackedTransformerBlock::<T>::new(d_model, num_heads, ff_dim, dropout_p));
+            layers.push(PackedTransformerBlock::<T>::new(
+                d_model, num_heads, ff_dim, dropout_p,
+            ));
         }
 
         let norm = LayerNorm::new(d_model, 1e-5);
