@@ -13,9 +13,7 @@ fn bench_gemv<T: fastnn::dtypes::PackedWord>(
     iters: usize,
     label: &str,
 ) -> (f64, f64, f64) {
-    let weight_data: Vec<f32> = (0..m * k)
-        .map(|i| (i as f32 * 0.01).sin() * 2.0)
-        .collect();
+    let weight_data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.01).sin() * 2.0).collect();
     let activation: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01).cos()).collect();
     let mut output = vec![0.0f32; m];
 
@@ -38,7 +36,11 @@ fn bench_gemv<T: fastnn::dtypes::PackedWord>(
 
     println!(
         "  {:<10} {:>10.3} ms {:>10.2} GFLOP/s {:>10.2} MB {:>10.1}x speedup",
-        label, ms, gflops, memory_mb, gflops / 8.3
+        label,
+        ms,
+        gflops,
+        memory_mb,
+        gflops / 8.3
     );
 
     (ms, gflops, memory_mb)
