@@ -9,6 +9,104 @@ from typing import List, Optional, Dict, Any
 from fastnn.models.llm.base import LLMConfig
 
 
+class Gemma4Config(LLMConfig):
+    """Configuration for Google's Gemma 4 models."""
+    
+    def __init__(
+        self,
+        vocab_size: int = 262144,
+        hidden_size: int = 1536,
+        intermediate_size: int = 6144,
+        intermediate_sizes: Optional[List[int]] = None,
+        num_hidden_layers: int = 35,
+        num_attention_heads: int = 8,
+        num_key_value_heads: int = 1,
+        head_dim: int = 512,
+        head_dim_swa: int = 256,
+        rope_theta: float = 1000000.0,
+        rope_theta_swa: float = 10000.0,
+        rms_norm_eps: float = 1e-6,
+        max_position_embeddings: int = 131072,
+        sliding_window: int = 512,
+        sliding_window_pattern: Optional[List[bool]] = None,
+        shared_kv_layers: int = 20,
+        final_logit_softcapping: float = 30.0,
+        bos_token_id: int = 2,
+        eos_token_id: int = 106,
+        tie_embedding: bool = True,
+        model_type: str = "gemma4",
+        **kwargs
+    ):
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.intermediate_sizes = intermediate_sizes
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.head_dim = head_dim
+        self.head_dim_swa = head_dim_swa
+        self.rope_theta = rope_theta
+        self.rope_theta_swa = rope_theta_swa
+        self.rms_norm_eps = rms_norm_eps
+        self.max_position_embeddings = max_position_embeddings
+        self.sliding_window = sliding_window
+        self.sliding_window_pattern = sliding_window_pattern
+        self.shared_kv_layers = shared_kv_layers
+        self.final_logit_softcapping = final_logit_softcapping
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.tie_embedding = tie_embedding
+        self.model_type = "gemma4"
+    
+    @property
+    def layer_types(self) -> List[str]:
+        """Return attention type for each layer based on sliding_window_pattern."""
+        if self.sliding_window_pattern:
+            return [
+                "sliding_attention" if sw else "full_attention"
+                for sw in self.sliding_window_pattern
+            ]
+        # Default pattern: every 5th layer is full attention
+        return [
+            "sliding_attention" if (i % 5 != 4) else "full_attention"
+            for i in range(self.num_hidden_layers)
+        ]
+    
+    def get_intermediate_size(self, layer_idx: int) -> int:
+        """Get FFN intermediate size for a specific layer."""
+        if self.intermediate_sizes and layer_idx < len(self.intermediate_sizes):
+            return self.intermediate_sizes[layer_idx]
+        return self.intermediate_size
+    
+    def get_head_dim(self, layer_idx: int) -> int:
+        """Get head dimension for a specific layer (SWA vs full)."""
+        if self.sliding_window_pattern and layer_idx < len(self.sliding_window_pattern):
+            return self.head_dim_swa if self.sliding_window_pattern[layer_idx] else self.head_dim
+        return self.head_dim
+    
+    def is_sliding_window(self, layer_idx: int) -> bool:
+        """Check if layer uses sliding window attention."""
+        pattern = self.sliding_window_pattern or []
+        if layer_idx < len(pattern):
+            return pattern[layer_idx]
+        return layer_idx % 5 != 4
+    
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'Gemma4Config':
+        known = {
+            "vocab_size", "hidden_size", "intermediate_size",
+            "intermediate_sizes", "num_hidden_layers", "num_attention_heads",
+            "num_key_value_heads", "head_dim", "head_dim_swa", "rope_theta",
+            "rope_theta_swa", "rms_norm_eps", "max_position_embeddings",
+            "sliding_window", "sliding_window_pattern", "shared_kv_layers",
+            "final_logit_softcapping", "bos_token_id", "eos_token_id",
+            "tie_embedding"
+        }
+        filtered = {k: v for k, v in d.items() if k in known}
+        return cls(**filtered)
+
+
 class LlamaConfig(LLMConfig):
     """Configuration for Llama models.
     
@@ -222,6 +320,7 @@ def create_config(model_type: str, **kwargs) -> LLMConfig:
         "llama3": LlamaConfig,
         "lfm2": LFM2_5Config,
         "lfm2.5": LFM2_5Config,
+        "gemma4": Gemma4Config,
     }
     
     if model_type not in config_classes:
