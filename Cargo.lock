@@ -347,7 +347,6 @@ dependencies = [
  "dashmap",
  "fnv",
  "half",
- "libc",
  "matrixmultiply",
  "mimalloc",
  "ndarray",
