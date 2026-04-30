@@ -771,3 +771,6 @@ class ReduceLROnPlateau:
 allocator_stats = _core.allocator_stats
 list_registered_ops = _core.list_registered_ops
 batched_mlp_forward = _core.batched_mlp_forward
+
+# Utils
+from fastnn.utils import tensor_from_array
