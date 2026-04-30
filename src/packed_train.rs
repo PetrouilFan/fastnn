@@ -54,7 +54,11 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
         let t = self.step as f32;
         let beta1_corr = 1.0 - self.beta1.powf(t);
         let beta2_corr = 1.0 - self.beta2.powf(t);
-        let lr_wd = if self.weight_decay != 0.0 { self.lr * self.weight_decay } else { 0.0 };
+        let lr_wd = if self.weight_decay != 0.0 {
+            self.lr * self.weight_decay
+        } else {
+            0.0
+        };
         let one_minus_beta1 = 1.0 - self.beta1;
         let one_minus_beta2 = 1.0 - self.beta2;
         let lr = self.lr;
@@ -64,24 +68,42 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
         let chunk_size = 4;
         let mut i = 0;
         while i + chunk_size <= len {
-            let g_arr = [gradients[i], gradients[i+1], gradients[i+2], gradients[i+3]];
+            let g_arr = [
+                gradients[i],
+                gradients[i + 1],
+                gradients[i + 2],
+                gradients[i + 3],
+            ];
             let g = f32x4::from(g_arr);
-            let master_arr = [self.master[i], self.master[i+1], self.master[i+2], self.master[i+3]];
+            let master_arr = [
+                self.master[i],
+                self.master[i + 1],
+                self.master[i + 2],
+                self.master[i + 3],
+            ];
             let mut master = f32x4::from(master_arr);
-            let m_arr = [self.m[i], self.m[i+1], self.m[i+2], self.m[i+3]];
+            let m_arr = [self.m[i], self.m[i + 1], self.m[i + 2], self.m[i + 3]];
             let mut m = f32x4::from(m_arr);
-            let v_arr = [self.v[i], self.v[i+1], self.v[i+2], self.v[i+3]];
+            let v_arr = [self.v[i], self.v[i + 1], self.v[i + 2], self.v[i + 3]];
             let mut v = f32x4::from(v_arr);
 
             // Apply weight decay
             master = master - f32x4::splat(lr_wd) * master;
 
             // Update first moment
-            m = f32x4::mul_add(f32x4::splat(self.beta1), m, f32x4::splat(one_minus_beta1) * g);
+            m = f32x4::mul_add(
+                f32x4::splat(self.beta1),
+                m,
+                f32x4::splat(one_minus_beta1) * g,
+            );
 
             // Update second moment
             let g_sq = g * g;
-            v = f32x4::mul_add(f32x4::splat(self.beta2), v, f32x4::splat(one_minus_beta2) * g_sq);
+            v = f32x4::mul_add(
+                f32x4::splat(self.beta2),
+                v,
+                f32x4::splat(one_minus_beta2) * g_sq,
+            );
 
             // Bias correction
             let m_hat = m / f32x4::splat(beta1_corr);
@@ -93,11 +115,11 @@ impl<T: PackedWord> MasterWeightOptimizer<T> {
 
             // Store back
             let master_arr_out: [f32; 4] = master.into();
-            self.master[i..i+4].copy_from_slice(&master_arr_out);
+            self.master[i..i + 4].copy_from_slice(&master_arr_out);
             let m_arr_out: [f32; 4] = m.into();
-            self.m[i..i+4].copy_from_slice(&m_arr_out);
+            self.m[i..i + 4].copy_from_slice(&m_arr_out);
             let v_arr_out: [f32; 4] = v.into();
-            self.v[i..i+4].copy_from_slice(&v_arr_out);
+            self.v[i..i + 4].copy_from_slice(&v_arr_out);
 
             i += chunk_size;
         }

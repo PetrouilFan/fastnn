@@ -21,10 +21,12 @@ FastNN provides:
 - [Models](models.md) - Pre-built model architectures
 - [IO & Serialization](io.md) - Saving and loading models
 - [API Reference](api-reference.md) - Complete API documentation
+- [Development Architecture](development.md) - Internal module layout and contribution workflow
+- [Performance Roadmap](performance-roadmap.md) - GPU, fusion, optimizer, and packed precision roadmap
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.12+
 - numpy >= 1.24
 
 ## Quick Example

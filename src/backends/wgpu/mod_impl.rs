@@ -47,56 +47,55 @@ impl WgpuContext {
             .await
             .expect("Failed to create wgpu device");
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("packed gemv layout"),
-                entries: &[
-                    // weights: storage buffer, read-only
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("packed gemv layout"),
+            entries: &[
+                // weights: storage buffer, read-only
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // activations: storage buffer, read-only
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // activations: storage buffer, read-only
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // output: storage buffer, read-write
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // output: storage buffer, read-write
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // params: uniform buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // params: uniform buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         WgpuContext {
             device,
@@ -108,52 +107,51 @@ impl WgpuContext {
 
     /// Create a WgpuContext from an existing device and queue.
     pub fn from_device(device: wgpu::Device, queue: wgpu::Queue) -> Self {
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("packed gemv layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("packed gemv layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         WgpuContext {
             device,
@@ -203,21 +201,23 @@ impl WgpuContext {
     /// Create a GPU buffer from raw bytes.
     pub fn create_buffer(&self, data: &[u8], label: &str) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: data,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: data,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            })
     }
 
     /// Create a uniform buffer.
     pub fn create_uniform_buffer<T: bytemuck::Pod>(&self, data: &T, label: &str) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::bytes_of(data),
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::bytes_of(data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
     }
 
     /// Read a GPU buffer back to a Vec<u8>.
@@ -287,10 +287,7 @@ struct GemvParams {
 }
 
 /// GPU GEMV: matrix × vector using packed weights.
-pub fn gemv_wgpu<T: PackedWord>(
-    weights: &PackedTensor<T>,
-    activation: &[f32],
-) -> Vec<f32> {
+pub fn gemv_wgpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32]) -> Vec<f32> {
     // Per-row quantized tensors require per-row scale/zero which the GPU shader
     // does not support. Fall back to CPU tiled path for per-channel quantization.
     if weights.is_per_channel() {
@@ -368,11 +365,10 @@ pub fn gemv_wgpu<T: PackedWord>(
                 label: Some("gemv_encoder"),
             });
         {
-            let mut compute_pass =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("gemv_pass"),
-                    timestamp_writes: None,
-                });
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gemv_pass"),
+                timestamp_writes: None,
+            });
             compute_pass.set_pipeline(pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
@@ -411,7 +407,12 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         ctx.write_bytes_to_buffer(act_bytes, &activation_buf);
 
         // Write params to the cached params buffer
-        let params = GemvParams { scale, zero, k_packed: kpacked, m };
+        let params = GemvParams {
+            scale,
+            zero,
+            k_packed: kpacked,
+            m,
+        };
         let params_bytes: &[u8] = bytemuck::bytes_of(&params);
         ctx.write_bytes_to_buffer(params_bytes, &params_buf);
 
@@ -422,10 +423,22 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
                 label: Some("gemv_persistent_bindgroup"),
                 layout: &wctx.bind_group_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: weight_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: activation_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: output_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: weight_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: activation_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: output_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: params_buf.as_entire_binding(),
+                    },
                 ],
             }));
         }
@@ -438,14 +451,17 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         let staging = ctx.ensure_staging_buffer_gpu_to_cpu(output_size);
 
         // Single encoder: compute + copy-to-staging
-        let mut encoder = ctx.device().create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("gemv_encoder") }
-        );
+        let mut encoder = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("gemv_encoder"),
+            });
 
         {
-            let mut pass = encoder.begin_compute_pass(
-                &wgpu::ComputePassDescriptor { label: Some("gemv_pass"), timestamp_writes: None }
-            );
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("gemv_pass"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(workgroup_count, 1, 1);
