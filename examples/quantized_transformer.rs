@@ -1,5 +1,5 @@
 //! Example: Quantized Transformer with Native Packed Precision
-//! 
+//!
 //! This example demonstrates end-to-end quantized inference using FastNN's
 //! native packed precision types. The model uses INT4 (U4x8) weights for
 //! maximum memory efficiency while maintaining competitive accuracy.
@@ -81,7 +81,10 @@ fn main() {
     let token_ids: Vec<i64> = (0..batch_size * seq_len)
         .map(|i| (i % vocab_size) as i64)
         .collect();
-    let input = Tensor::from_vec(token_ids.iter().map(|&x| x as f32).collect(), &[batch_size, seq_len]);
+    let input = Tensor::from_vec(
+        token_ids.iter().map(|&x| x as f32).collect(),
+        &[batch_size, seq_len],
+    );
 
     // Run forward pass
     let output = model.forward(&input);
@@ -104,12 +107,15 @@ fn main() {
     println!("\n============================================================");
     println!("Memory Bandwidth Analysis");
     println!("============================================================");
-    println!("For a single forward pass with batch_size={}, seq_len={}:", batch_size, seq_len);
-    
+    println!(
+        "For a single forward pass with batch_size={}, seq_len={}:",
+        batch_size, seq_len
+    );
+
     let tokens_processed = batch_size * seq_len;
     let memory_f32 = tokens_processed as f64 * d_model as f64 * 4.0 / (1024.0 * 1024.0);
     let memory_u4 = tokens_processed as f64 * d_model as f64 * 0.5 / (1024.0 * 1024.0);
-    
+
     println!("  F32 memory traffic:  {:.1} MB", memory_f32);
     println!("  U4x8 memory traffic: {:.1} MB", memory_u4);
     println!("  Bandwidth savings:   {:.1}x\n", memory_f32 / memory_u4);

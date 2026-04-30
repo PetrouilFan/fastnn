@@ -10,6 +10,13 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+mod device;
+mod factories;
+mod indexing;
+mod ops;
+mod reductions;
+mod shape;
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::{
     _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_storeu_ps, _mm256_sub_ps,
@@ -3201,7 +3208,11 @@ impl Tensor {
         let other_data = other.as_f32_slice();
         let mut output_data = vec![0.0f32; numel];
         for i in 0..numel {
-            output_data[i] = if self_data[i] >= other_data[i] { 1.0 } else { 0.0 };
+            output_data[i] = if self_data[i] >= other_data[i] {
+                1.0
+            } else {
+                0.0
+            };
         }
         Tensor::from_vec(output_data, self.shape())
     }
@@ -3212,7 +3223,11 @@ impl Tensor {
         let other_data = other.as_f32_slice();
         let mut output_data = vec![0.0f32; numel];
         for i in 0..numel {
-            output_data[i] = if self_data[i] <= other_data[i] { 1.0 } else { 0.0 };
+            output_data[i] = if self_data[i] <= other_data[i] {
+                1.0
+            } else {
+                0.0
+            };
         }
         Tensor::from_vec(output_data, self.shape())
     }
@@ -3319,29 +3334,31 @@ impl Tensor {
         if tensors.is_empty() {
             panic!("stack: need at least one tensor");
         }
-        
+
         // Get input shape
         let first_shape = tensors[0].shape();
         let ndim = first_shape.len();
-        
+
         // Normalize dim
-        let dim = if dim < 0 { (ndim as i32 + dim + 1) as usize } else { dim as usize };
+        let dim = if dim < 0 {
+            (ndim as i32 + dim + 1) as usize
+        } else {
+            dim as usize
+        };
         if dim > ndim {
             panic!("stack: dimension out of range");
         }
-        
+
         // Validate all tensors have same shape
         for t in tensors {
             if t.shape() != first_shape {
                 panic!("stack: tensors must have same shape");
             }
         }
-        
+
         // Unsqueeze each tensor at the target dimension, then cat
-        let unsqueezed: Vec<Tensor> = tensors.iter()
-            .map(|t| t.unsqueeze(dim))
-            .collect();
-        
+        let unsqueezed: Vec<Tensor> = tensors.iter().map(|t| t.unsqueeze(dim)).collect();
+
         // Concatenate along the new dimension
         Tensor::cat(&unsqueezed, dim as i32)
     }

@@ -1,5 +1,14 @@
 # API Reference
 
+The stable public API remains available from `import fastnn as fnn`. New code may also import narrower facade modules:
+
+```python
+from fastnn.tensor import tensor, zeros, randn
+from fastnn.ops import matmul, relu, softmax
+from fastnn.nn import Linear, Conv2d, Sequential
+from fastnn.losses import mse_loss, cross_entropy_loss
+```
+
 ## Tensor Creation
 
 | Function | Description |

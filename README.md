@@ -2,7 +2,7 @@
 
 **fastnn** is a high-performance neural network library built from scratch in Rust, with seamless Python bindings. It supports both CPU and GPU training and inference — with sub-byte quantization, hand-written SIMD kernels, and a clean PyTorch-compatible API.
 
-> **Version:** v1.0.0 — GPU training & production-ready library
+> **Version:** v1.1.0 — Modular backend architecture & GPU execution improvements
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
@@ -115,18 +115,17 @@ fastnn/
 ├── Cargo.toml                  # Rust dependencies (PyO3, rayon, wgpu, half, ...)
 ├── pyproject.toml              # Python package configuration (maturin)
 ├── src/
-│   ├── lib.rs                  # Python module export & PyO3 bindings
-│   ├── tensor.rs               # Core Tensor struct, shape, strides, dtype
+│   ├── lib.rs                  # Crate root, module declarations, public re-exports
+│   ├── python/                 # PyO3 bindings and _core module registration
+│   ├── tensor/                 # Tensor struct, shape, factories, ops, reductions
 │   ├── storage.rs              # Memory backend, device allocation (CPU/GPU)
 │   ├── storage_pool.rs         # Storage pooling for output tensor reuse
 │   ├── dispatcher.rs           # Dynamic kernel dispatch (CPU vs GPU)
-│   ├── autograd/
-│   │   ├── mod.rs              # Backward nodes for all operations
-│   │   └── engine.rs           # Topological sort backward engine
-│   ├── kernels/
-│   │   ├── cpu.rs              # SIMD kernels: AVX2, AVX512, NEON, scalar fallbacks
-│   │   ├── blas.rs             # BLAS-accelerated matrix multiplication (optional)
-│   │   └── gpu/                # WebGPU compute pipelines and WGSL shaders
+│   ├── autograd/               # Backward engine and per-family gradient nodes
+│   ├── kernels/                # CPU/GPU backend kernels and registration
+│   │   ├── cpu/                # Elementwise, reductions, matmul, conv, norm, losses
+│   │   ├── gpu/                # WGPU kernels, buffers, sync policy, fusion, optimizers
+│   │   └── blas.rs             # BLAS-accelerated matrix multiplication (optional)
 │   ├── nn/                     # Neural network layers
 │   │   ├── linear.rs           # Linear (fully connected)
 │   │   ├── conv.rs             # Conv1d, Conv2d, Conv3d, ConvTranspose2d
@@ -154,7 +153,11 @@ fastnn/
 │   ├── packed_layer.rs         # PackedLinear<T> with auto backend selection
 │   └── packed_train.rs         # MasterWeightOptimizer for f32 master weights
 ├── fastnn/                     # Python package
-│   ├── __init__.py             # Public API surface
+│   ├── __init__.py             # Stable top-level public API facade
+│   ├── tensor.py               # Tensor factories and Tensor alias
+│   ├── ops.py                  # Tensor operations and reductions
+│   ├── nn.py                   # Neural network module aliases
+│   ├── losses.py               # Loss functions
 │   ├── parallel.py             # DataParallel / DDP (experimental)
 │   ├── models/                 # Pre-built models: MLP, Transformer
 │   ├── data.py                 # Dataset, TensorDataset, DataLoader, auto-tuning
@@ -162,6 +165,18 @@ fastnn/
 ├── tests/                      # Python test suite
 │   └── conftest.py             # Memory pool isolation fixture
 ```
+
+## Internal Architecture
+
+FastNN is organized around a stable Python API and modular Rust backend layers:
+
+1. Tensor API and shape/device behavior
+2. Dispatcher and backend kernel registration
+3. CPU, GPU, packed, and BLAS kernel implementations
+4. Autograd nodes
+5. PyO3 bindings and Python facade modules
+
+GPU execution is asynchronous by default. Kernel launch paths enqueue work and synchronize only at explicit host readback boundaries such as `.item()`, `.numpy()`, `.to_cpu()`, DLPack export, or test-only barriers. See [Development Architecture](docs/development.md) and [Performance Roadmap](docs/performance-roadmap.md) for contributor workflows.
 
 ---
 

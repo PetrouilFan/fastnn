@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.1.0 — Modular Backend Architecture & Packed Precision Optimization
+
+### Architecture
+
+- Moved PyO3 bindings out of `src/lib.rs` into `src/python/`.
+- Converted the tensor and CPU kernel implementations to directory modules.
+- Added module homes for tensor shape/factory/op/reduction/device/indexing code.
+- Added module homes for CPU SIMD, elementwise, reduction, matmul, convolution, normalization, pooling, loss, and factory kernels.
+- Added module homes for autograd node families.
+
+### GPU Execution
+
+- Removed immediate WGPU `device.poll(Maintain::Wait)` calls from hot unary, binary, scalar, logical, matmul, and supported reduction launch paths.
+- Documented that GPU kernels should synchronize only at explicit readback boundaries.
+
+### Python API
+
+- Added narrower facade modules: `fastnn.tensor`, `fastnn.ops`, `fastnn.nn`, and `fastnn.losses`.
+- Kept the top-level `import fastnn as fnn` API stable.
+
+### Performance: Packed Precision GEMV Optimization
+
+- **Fixed performance degradation for large matrices** in packed precision (U4x8, U8x4, F16x2) GEMV kernels.
+- **Before**: Packed types were 60-80% slower than F32 for K > 4096 (unusable for large models).
+- **After**: Packed types now provide consistent 2-25x speedups over F32 across all problem sizes.
+- **Technical**: Optimized `src/backends/packed_blas.rs` to use word-level processing, eliminate division/modulo in hot loops, and batch-unpack packed weights.
+- **Impact**: Production-ready quantized inference with 4-bit (8× memory savings) and 8-bit (4× savings) weights.
+
+### Documentation
+
+- Added development architecture and performance roadmap docs.
+- Updated README project structure for the modular layout.
+
+---
+
 ## v1.0.0 — Production Release
 
 ### GPU Training
