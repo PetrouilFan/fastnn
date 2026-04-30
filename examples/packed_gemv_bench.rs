@@ -3,11 +3,7 @@ use fastnn::dtypes::{F16x2, F32x1, U4x8, U8x4};
 use fastnn::packed_tensor::PackedTensor;
 use std::time::Instant;
 
-fn bench_gemv<T: fastnn::dtypes::PackedWord>(
-    m: usize,
-    k: usize,
-    iters: usize,
-) -> (f64, f64) {
+fn bench_gemv<T: fastnn::dtypes::PackedWord>(m: usize, k: usize, iters: usize) -> (f64, f64) {
     let weight_data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.01).sin() * 2.0).collect();
     let activation: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01).cos()).collect();
     let mut output = vec![0.0f32; m];

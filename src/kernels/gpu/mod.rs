@@ -55,6 +55,12 @@ pub fn try_get_context(device_id: usize) -> Option<Arc<GpuContext>> {
     Some(ctx)
 }
 
+/// GPU execution is asynchronous by default.
+///
+/// Kernel launch helpers should submit command buffers and return GPU-backed
+/// tensors without polling the device. Synchronization belongs at explicit
+/// host readback boundaries such as `read_buffer`, `Tensor::to_cpu`, Python
+/// `numpy()`, and test-only barriers.
 pub struct GpuContext {
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -1227,7 +1233,6 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
         compute_pass.dispatch_workgroups(x_groups, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
-    ctx.device.poll(wgpu::Maintain::Wait);
 
     // Create tensor with GPU storage (no CPU copy!)
     let storage = Arc::new(Storage::Wgpu(GpuStorage {
@@ -1319,7 +1324,6 @@ fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id
         compute_pass.dispatch_workgroups(x_groups, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
-    ctx.device.poll(wgpu::Maintain::Wait);
 
     // Create tensor with GPU storage (no CPU copy!)
     let storage = Arc::new(Storage::Wgpu(GpuStorage {
@@ -1486,7 +1490,6 @@ pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
         compute_pass.dispatch_workgroups(x_groups as u32, y_groups as u32, 1);
     }
     ctx.queue.submit([encoder.finish()]);
-    ctx.device.poll(wgpu::Maintain::Wait);
 
     // Create tensor with GPU storage (no CPU copy!)
     let storage = Arc::new(Storage::Wgpu(GpuStorage {
@@ -1728,7 +1731,6 @@ fn run_reduction_kernel(
             compute_pass.dispatch_workgroups(x_groups, y_groups.max(1), 1);
         }
         ctx.queue.submit([encoder.finish()]);
-        ctx.device.poll(wgpu::Maintain::Wait);
     } else {
         // For other cases, fall back to CPU implementation
         // Move input to CPU, compute, then move result back to GPU
@@ -2086,7 +2088,6 @@ fn run_scalar_kernel(
         compute_pass.dispatch_workgroups(x_groups, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
-    ctx.device.poll(wgpu::Maintain::Wait);
 
     let storage = Arc::new(Storage::Wgpu(GpuStorage {
         buffer: gpu_output.buffer,
@@ -2180,7 +2181,6 @@ pub fn gpu_logical_not(input: &Tensor, device_id: usize) -> Vec<Tensor> {
         compute_pass.dispatch_workgroups(x_groups, 1, 1);
     }
     ctx.queue.submit([encoder.finish()]);
-    ctx.device.poll(wgpu::Maintain::Wait);
 
     let storage = Arc::new(Storage::Wgpu(GpuStorage {
         buffer: gpu_output.buffer,

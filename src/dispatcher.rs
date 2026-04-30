@@ -17,7 +17,7 @@ pub fn device_to_dispatch_key(device: Device) -> DispatchKey {
     }
 }
 
-pub type KernelFn = fn(&[&Tensor]) -> Vec<Tensor>;
+pub type KernelFn = unsafe fn(&[&Tensor]) -> Vec<Tensor>;
 
 struct DispatcherInner {
     ops: HashMap<(&'static str, DispatchKey), KernelFn>,
@@ -52,7 +52,7 @@ pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Result<Vec<
         .get(&(op, key))
         .ok_or_else(|| format!("No kernel registered for op '{}' with key {:?}", op, key))?;
 
-    Ok(kernel(args))
+    Ok(unsafe { kernel(args) })
 }
 
 pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Vec<Tensor> {
