@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "fastnn"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "blas-src",
  "bytemuck",
@@ -347,7 +347,6 @@ dependencies = [
  "dashmap",
  "fnv",
  "half",
- "libc",
  "matrixmultiply",
  "mimalloc",
  "ndarray",

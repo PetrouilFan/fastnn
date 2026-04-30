@@ -1,7 +1,7 @@
 import numpy as np
 import fastnn._core as _core
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # Exception hierarchy - imported from _core (Rust side)
 FastnnError = _core.FastnnError
@@ -35,6 +35,7 @@ __all__ = [
     "set_num_threads",
     "set_default_device",
     "checkpoint",
+    "Tensor",
     "DataLoader",
     "Dataset",
     "TensorDataset",
@@ -119,6 +120,7 @@ def _patch_backward(tensor_cls):
 _patch_numpy(_core.PyTensor)
 _patch_backward(_core.PyTensor)
 
+Tensor = _core.PyTensor
 zeros = _core.zeros
 ones = _core.ones
 full = _core.full
