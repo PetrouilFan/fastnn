@@ -1,10 +1,12 @@
-use std::time::Instant;
-use fastnn::Tensor;
 use fastnn::kernels::blas;
+use fastnn::Tensor;
+use std::time::Instant;
 
 /// Generate deterministic random-like data for benchmarking
 fn generate_data(size: usize) -> Vec<f32> {
-    (0..size).map(|i| ((i as f32 * 0.001).sin() * 1000.0).sin()).collect()
+    (0..size)
+        .map(|i| ((i as f32 * 0.001).sin() * 1000.0).sin())
+        .collect()
 }
 
 fn main() {

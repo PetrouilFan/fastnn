@@ -329,7 +329,12 @@ unsafe fn gemv_row_u8x4_avx512(
             bytes[2] as i8 as f32,
             bytes[3] as i8 as f32,
         ];
-        let acts = [activation[act_idx], activation[act_idx + 1], activation[act_idx + 2], activation[act_idx + 3]];
+        let acts = [
+            activation[act_idx],
+            activation[act_idx + 1],
+            activation[act_idx + 2],
+            activation[act_idx + 3],
+        ];
 
         // Use 128-bit FMA
         let w_vec = _mm_loadu_ps(weights_f32.as_ptr());
@@ -911,12 +916,19 @@ fn gemv_packed_inner<T: PackedWord>(
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
                 let start_row = chunk_idx * rows_per_chunk;
-    // Pre-allocate aligned buffer for unpacking
-    let mut unpack_buf = AlignedScratchBuffer::new();
-    unpack_buf.resize(k_packed * T::ITEMS);
+                // Pre-allocate aligned buffer for unpacking
+                let mut unpack_buf = AlignedScratchBuffer::new();
+                unpack_buf.resize(k_packed * T::ITEMS);
                 for (local_row, out) in out_chunk.iter_mut().enumerate() {
                     let row = start_row + local_row;
-                    let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf.as_mut_slice());
+                    let dot = gemv_row::<T>(
+                        weights,
+                        activation,
+                        row,
+                        k,
+                        k_packed,
+                        unpack_buf.as_mut_slice(),
+                    );
                     *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
                 }
             });
@@ -928,7 +940,14 @@ fn gemv_packed_inner<T: PackedWord>(
         let mut unpack_buf = AlignedScratchBuffer::new();
         unpack_buf.resize(k_packed * T::ITEMS);
         for row in 0.._m {
-            let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf.as_mut_slice());
+            let dot = gemv_row::<T>(
+                weights,
+                activation,
+                row,
+                k,
+                k_packed,
+                unpack_buf.as_mut_slice(),
+            );
             output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
     }

@@ -1,5 +1,5 @@
-use std::time::Instant;
 use fastnn::kernels::blas;
+use std::time::Instant;
 
 fn main() {
     println!("=== fastnn BLAS MatMul Benchmark ===\n");
