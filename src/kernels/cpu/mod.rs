@@ -1812,21 +1812,23 @@ mod tests {
         let mut out = vec![0.0f32; batch * m * n];
         let total_rows = batch * m;
         for row in 0..total_rows {
-            blocked_row_matmul(
-                a.as_ptr(),
-                b.as_ptr(),
-                out.as_mut_ptr(),
-                row,
-                m,
-                n,
-                k,
-                a_bs,
-                a_s0,
-                a_s1,
-                b_bs,
-                b_s0,
-                b_s1,
-            );
+            unsafe {
+                blocked_row_matmul(
+                    a.as_ptr(),
+                    b.as_ptr(),
+                    out.as_mut_ptr(),
+                    row,
+                    m,
+                    n,
+                    k,
+                    a_bs,
+                    a_s0,
+                    a_s1,
+                    b_bs,
+                    b_s0,
+                    b_s1,
+                );
+            }
         }
         let expected =
             reference_matmul_strided(a, b, batch, m, n, k, a_bs, a_s0, a_s1, b_bs, b_s0, b_s1);
@@ -1982,21 +1984,23 @@ mod tests {
 
         fn blocked_matmul_row(a: &[f32], b: &[f32], out: &mut [f32], m: usize, n: usize, k: usize) {
             for row in 0..m {
-                blocked_row_matmul(
-                    a.as_ptr(),
-                    b.as_ptr(),
-                    out.as_mut_ptr(),
-                    row,
-                    m,
-                    n,
-                    k,
-                    m * k,
-                    k,
-                    1,
-                    k * n,
-                    n,
-                    1,
-                );
+                unsafe {
+                    blocked_row_matmul(
+                        a.as_ptr(),
+                        b.as_ptr(),
+                        out.as_mut_ptr(),
+                        row,
+                        m,
+                        n,
+                        k,
+                        m * k,
+                        k,
+                        1,
+                        k * n,
+                        n,
+                        1,
+                    );
+                }
             }
         }
 
@@ -2090,21 +2094,23 @@ mod tests {
         let mut out = vec![0.0f32; m * n];
         let total_rows = m;
         for row in 0..total_rows {
-            blocked_row_matmul(
-                a.as_ptr(),
-                b.as_ptr(),
-                out.as_mut_ptr(),
-                row,
-                m,
-                n,
-                k,
-                m * k,
-                k,
-                1,
-                k * n * b_stride_1,
-                n * b_stride_1,
-                b_stride_1,
-            );
+            unsafe {
+                blocked_row_matmul(
+                    a.as_ptr(),
+                    b.as_ptr(),
+                    out.as_mut_ptr(),
+                    row,
+                    m,
+                    n,
+                    k,
+                    m * k,
+                    k,
+                    1,
+                    k * n * b_stride_1,
+                    n * b_stride_1,
+                    b_stride_1,
+                );
+            }
         }
         // Verify against reference scalar matmul with same strides
         let expected = reference_matmul_strided(

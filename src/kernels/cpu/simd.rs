@@ -2564,6 +2564,20 @@ pub unsafe fn gelu_parallel_neon(
     }
 }
 
+    fn reference_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut c = vec![0.0f32; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0f32;
+                for kk in 0..k {
+                    sum += a[i * k + kk] * b[kk * n + j];
+                }
+                c[i * n + j] = sum;
+            }
+        }
+        c
+    }
+
     #[test]
     pub fn test_parallel_matmul_fallback_3d_batched() {
         // Exercise the parallel_matmul fallback path with 3D batched tensors
@@ -2609,6 +2623,19 @@ pub unsafe fn gelu_parallel_neon(
 
     #[test]
     pub fn test_parallel_matmul_fallback_2d_small() {
+        fn reference_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+            let mut c = vec![0.0f32; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for kk in 0..k {
+                        sum += a[i * k + kk] * b[kk * n + j];
+                    }
+                    c[i * n + j] = sum;
+                }
+            }
+            c
+        }
         // Exercise the parallel_matmul fallback path with 2D matrices
         // below BLAS threshold
         let m: usize = 8;

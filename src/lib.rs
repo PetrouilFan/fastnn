@@ -5,10 +5,12 @@ mod dispatcher;
 mod io;
 mod iterator;
 pub mod kernels;
+mod llm;
 mod nn;
 mod optim;
 mod python;
 mod residual;
+mod quants;
 mod storage;
 mod storage_pool;
 mod storage_quantized;
@@ -20,6 +22,18 @@ pub use storage_quantized::QuantizedTensor;
 // Re-export core types
 pub use storage::{DType, Device};
 pub use tensor::Tensor;
+
+// Re-export GGUF loader and quantized types
+pub use io::gguf::{GgufError, GgufFile, GgufTensorInfo};
+pub use quants::{GgmlQuantizedTensor, QuantizedDType, QuantizedGemm};
+pub use quants::{Q4_0, Q4_K, Q6K};
+
+// Re-export LLM types
+pub use llm::config::{LlmConfig, LayerConfig};
+pub use llm::model::LlmModel;
+pub use llm::embedding::Embedding;
+pub use llm::attention::AttentionLayer;
+pub use llm::model::TransformerLayer;
 
 // Native packed precision modules
 pub mod backends;

@@ -11,7 +11,6 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
-use pyo3::PyAny;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -89,6 +88,7 @@ include!("ops.rs");
 include!("nn.rs");
 include!("optim.rs");
 include!("io.rs");
+include!("llm.rs");
 
 #[pymodule]
 pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -225,6 +225,9 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flash_attention, py)?)?;
     m.add_function(wrap_pyfunction!(clip_grad_norm_, py)?)?;
     m.add_function(wrap_pyfunction!(clip_grad_value_, py)?)?;
+
+    // Register LLM module
+    register_llm_module(&m)?;
 
     Ok(())
 }
