@@ -39,14 +39,15 @@ parallel = []
 simd = []
 prefetch = []
 simd_avx512 = []
+debug = []
 
 [profile.release]
 lto = true
 codegen-units = 1
 opt-level = 3
-debug = false
-strip = true
-panic = "abort"
+debug = true
+strip = false
+panic = "unwind"
 
 [[bench]]
 name = "quantized_vs_pytorch"
