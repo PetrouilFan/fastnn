@@ -101,6 +101,17 @@ impl AutogradMeta {
             is_leaf: false,
         }
     }
+
+    /// Zero the gradient (true = zero-fill without deallocating, false = deallocate).
+    pub fn zero_grad(&mut self, zero_fill: bool) {
+        if zero_fill {
+            if let Some(grad) = &mut self.grad {
+                grad.zero_data();
+            }
+        } else {
+            self.grad = None;
+        }
+    }
 }
 
 #[derive(Clone)]
