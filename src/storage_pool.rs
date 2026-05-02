@@ -14,11 +14,30 @@ impl StoragePool {
         }
     }
 
-    pub fn acquire(&self, nbytes: usize, device: Device) -> Arc<Storage> {
+    /// Acquire a buffer without zeroing (caller will initialize).
+    pub fn acquire_uninit(&self, nbytes: usize, device: Device) -> Arc<Storage> {
         match device {
             Device::Cpu => {
                 let key = nbytes;
+                if let Some(mut storages) = self.buffers.get_mut(&key) {
+                    if let Some(storage) = storages.pop() {
+                        match Arc::try_unwrap(storage) {
+                            Ok(owned_storage) => return Arc::new(owned_storage),
+                            Err(storage) => { storages.push(storage); }
+                        }
+                    }
+                }
+                Arc::new(Storage::new_cpu(DType::F32, nbytes))
+            }
+            Device::Wgpu(_) => Arc::new(Storage::new_cpu(DType::F32, nbytes)),
+        }
+    }
 
+    /// Acquire a zeroed buffer (for ops requiring zero-init).
+    pub fn acquire_zeroed(&self, nbytes: usize, device: Device) -> Arc<Storage> {
+        match device {
+            Device::Cpu => {
+                let key = nbytes;
                 if let Some(mut storages) = self.buffers.get_mut(&key) {
                     if let Some(storage) = storages.pop() {
                         match Arc::try_unwrap(storage) {
@@ -32,17 +51,19 @@ impl StoragePool {
                                 }
                                 return Arc::new(owned_storage);
                             }
-                            Err(storage) => {
-                                storages.push(storage);
-                            }
+                            Err(storage) => { storages.push(storage); }
                         }
                     }
                 }
-
                 Arc::new(Storage::new_cpu(DType::F32, nbytes))
             }
             Device::Wgpu(_) => Arc::new(Storage::new_cpu(DType::F32, nbytes)),
         }
+    }
+
+    /// Backward-compatible: zero-fills by default.
+    pub fn acquire(&self, nbytes: usize, device: Device) -> Arc<Storage> {
+        self.acquire_zeroed(nbytes, device)
     }
 
     pub fn release(&self, storage: Arc<Storage>) {
