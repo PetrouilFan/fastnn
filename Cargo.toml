@@ -48,6 +48,14 @@ debug = false
 strip = true
 panic = "abort"
 
+[profile.bench]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = false
+strip = true
+panic = "abort"
+
 [[bench]]
 name = "quantized_vs_pytorch"
 path = "benches/quantized_vs_pytorch.rs"
@@ -66,6 +74,11 @@ harness = false
 [[bench]]
 name = "matmul_bench"
 path = "benches/matmul_bench.rs"
+harness = false
+
+[[bench]]
+name = "perf_optimizations"
+path = "benches/perf_optimizations.rs"
 harness = false
 
 [[bin]]

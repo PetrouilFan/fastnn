@@ -624,6 +624,22 @@ impl TensorImpl {
         self.version_counter.load(Ordering::Relaxed)
     }
 
+    /// Zero-fill the tensor's data buffer (reuse without reallocation).
+    pub fn zero_data(&mut self) {
+        let storage = Arc::make_mut(&mut self.storage);
+        match storage {
+            Storage::Cpu(cpu) => {
+                let data = Arc::make_mut(&mut cpu.data);
+                data.fill(0);
+            }
+            Storage::Wgpu(_) => {
+                // For GPU, recreate the storage
+                let nbytes = storage.nbytes();
+                *storage = Storage::new_cpu(self.dtype, nbytes);
+            }
+        }
+    }
+
     #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
         match &self.storage.as_ref() {
@@ -887,7 +903,7 @@ impl Tensor {
         let nbytes = (numel * dtype.size() as i64) as usize;
 
         let storage = match device {
-            Device::Cpu => get_storage_pool().acquire(nbytes, device),
+            Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
             Device::Wgpu(device_id) => {
                 use crate::kernels::gpu::get_context;
                 let ctx = get_context(device_id);
@@ -920,7 +936,7 @@ impl Tensor {
         let nbytes = (numel * dtype.size() as i64) as usize;
 
         let storage = match device {
-            Device::Cpu => get_storage_pool().acquire(nbytes, device),
+            Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
             Device::Wgpu(device_id) => {
                 // For GPU empty, we create a new buffer (uninitialized)
                 // Note: GPU buffers are not zeroed by default
@@ -1243,6 +1259,12 @@ impl Tensor {
 
     pub fn to_device(&self, device: Device) -> Tensor {
         self.inner.to_device(device)
+    }
+
+    /// Zero-fill the tensor's data buffer (reuse without reallocation).
+    pub fn zero_data(&mut self) {
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.zero_data();
     }
 
     pub fn requires_grad(&self) -> bool {
