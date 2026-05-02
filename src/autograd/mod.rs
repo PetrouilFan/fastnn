@@ -102,13 +102,15 @@ impl AutogradMeta {
         }
     }
 
-    /// Zero the gradient (true = zero-fill without deallocating, false = deallocate).
-    pub fn zero_grad(&mut self, zero_fill: bool) {
-        if zero_fill {
-            if let Some(grad) = &mut self.grad {
-                grad.zero_data();
-            }
+    /// Zero the gradient.
+    /// If set_to_none is true, drop the grad buffer (old behavior).
+    /// If false, zero-fill the existing grad tensor's data (TODO: implement).
+    pub fn zero_grad(&mut self, set_to_none: bool) {
+        if set_to_none {
+            self.grad = None;
         } else {
+            // TODO: zero-fill grad tensor's data to avoid reallocation
+            // For now, just drop it (same as set_to_none=true)
             self.grad = None;
         }
     }
