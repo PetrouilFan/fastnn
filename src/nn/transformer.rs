@@ -207,7 +207,7 @@ impl TransformerEncoder {
         )
         .requires_grad_(false);
 
-        TransformerEncoder {
+        let mut transformer = TransformerEncoder {
             embedding,
             pos_embedding,
             layers,
@@ -217,8 +217,10 @@ impl TransformerEncoder {
             max_seq_len,
             num_classes,
             training: AtomicBool::new(true),
-            pos_cache: OnceLock::new(Some(pos_tensor)),
-        }
+            pos_cache: OnceLock::new(),
+        };
+        let _ = transformer.pos_cache.set(Some(pos_tensor));
+        transformer
     }
 
     pub fn forward(&self, token_ids: &Tensor) -> Tensor {
@@ -245,11 +247,9 @@ impl TransformerEncoder {
         let x = self.embedding.forward(token_ids);
 
         // Use precomputed position tensor, slice to actual seq_len
-        let pos_1d = {
-            let cache = self.pos_cache.lock().unwrap();
-            cache.as_ref().unwrap().slice(0, seq_len as i64)
-        };
-        let pos_expanded = pos_1d.expand(&[batch, seq_len, self.d_model]);
+        let pos_tensor = self.pos_cache.get().unwrap().as_ref().unwrap();
+        let pos_1d = pos_tensor.slice(0, 0, seq_len as i64, 1);
+        let pos_expanded = pos_1d.expand(vec![batch, seq_len, self.d_model]);
         let pos_emb = self.pos_embedding.forward(&pos_expanded);
         let x = x.add(&pos_emb);
 
@@ -263,58 +263,6 @@ impl TransformerEncoder {
 
         // Extract CLS token (first token of sequence)
         let cls_token = x.slice(1, 0, 1, 1).squeeze(Some(1));
-        self.classifier.forward(&cls_token)
-    }
-}
-        let batch = shape[0];
-        let seq_len = shape[1];
-
-        if seq_len > self.max_seq_len {
-            panic!(
-                "Sequence length {} exceeds maximum sequence length {}",
-                seq_len, self.max_seq_len
-            );
-        }
-        if seq_len == 0 {
-            panic!("Sequence length cannot be 0");
-        }
-
-        let x = self.embedding.forward(token_ids);
-
-        // Cached positional encoding - reuse for same (batch, seq_len, d_model)
-        let cache_key = (batch, seq_len, self.pos_embedding.weight.shape()[1]);
-        let positions_expanded = {
-            let mut cache = pos_encoding_cache().lock().unwrap();
-            if let Some(cached) = cache.get(&cache_key) {
-                cached.clone()
-            } else {
-                let positions: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
-                let mut repeated_positions = Vec::with_capacity(batch as usize * seq_len as usize);
-                for _ in 0..batch {
-                    repeated_positions.extend_from_slice(&positions);
-                }
-                let t = Tensor::from_vec(repeated_positions, vec![batch, seq_len])
-                    .requires_grad_(false);
-                cache.insert(cache_key, t.clone());
-                t
-            }
-        };
-
-        let pos_emb = self.pos_embedding.forward(&positions_expanded);
-        let x = x.add(&pos_emb);
-
-        // Process layers
-        let mut x = x;
-        for layer in &self.layers {
-            x = layer.forward(&x);
-        }
-
-        x = self.norm.forward(&x);
-
-        // Extract CLS token (first token of sequence)
-        let cls_token = x.slice(1, 0, 1, 1);
-        let cls_token = cls_token.squeeze(Some(1));
-
         self.classifier.forward(&cls_token)
     }
 }
