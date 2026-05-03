@@ -595,6 +595,13 @@ impl FusedConvBn {
     fn eval(&mut self) {
         self.inner.eval_mode();
     }
+
+    #[staticmethod]
+    fn from_conv_bn(conv: &Conv2d, bn: &BatchNorm2d) -> Self {
+        FusedConvBn {
+            inner: core_nn::fused::FusedConvBn::from_conv_bn(&conv.inner, &bn.inner),
+        }
+    }
 }
 
 #[pyclass]
