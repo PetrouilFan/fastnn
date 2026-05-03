@@ -21,6 +21,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b = args[1];
 
     let dtype = a.dtype();
+    let dtype_size = dtype.size();
 
     let a_shape = a.inner.sizes.as_slice();
     let b_shape = b.inner.sizes.as_slice();
@@ -28,7 +29,10 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if dtype == DType::F32 && a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+    // Use smart threshold for parallelization
+    let (should_par, chunk_size) = should_parallel(a_numel, dtype_size, "elementwise");
+    
+    if dtype == DType::F32 && a_contig && b_contig && a_shape == b_shape && should_par {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
@@ -48,7 +52,6 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            let chunk_size = CHUNK_MEMBOUND;
             let num_chunks = numel.div_ceil(chunk_size);
 
             let a_usize = a_ptr as usize;
@@ -66,6 +69,45 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                             );
                         });
                 }
+                SimdLevel::Avx2 => {
+                    (0..num_chunks)
+                        .into_par_iter()
+                        .for_each(|chunk_idx| unsafe {
+                            add_parallel_avx2(
+                                chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                            );
+                        });
+                }
+                SimdLevel::Scalar => {
+                    (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                        add_parallel_scalar(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                        );
+                    });
+                }
+            }
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+            {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk_idx| unsafe {
+                        add_parallel_neon(
+                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
+                        );
+                    });
+            }
+            #[cfg(not(any(
+                all(feature = "simd", target_arch = "x86_64"),
+                all(feature = "simd", target_arch = "aarch64")
+            )))]
+            {
+                (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                    add_parallel_scalar(
+                        chunk_idx, chunk_size, numel, a_ptr, b_ptr, out_ptr,
+                    );
+                });
+            }
+        }
                 SimdLevel::Avx2 => {
                     (0..num_chunks)
                         .into_par_iter()
@@ -216,84 +258,70 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return vec![output];
     }
 
-    let iter = TensorIterator::build_for_binary(a, b);
-    let output_shape = iter.output_shape.to_vec();
-    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
-    let numel = output_shape.iter().product::<i64>() as usize;
+    // Non-contiguous or broadcast path
+    let (should_par, chunk_size) = should_parallel(numel, dtype.size(), "elementwise");
+    let numel = numel as usize;
+    
+    if should_par {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let num_chunks = numel.div_ceil(chunk_size);
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                // ... parallel broadcast implementation
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            // fallback to scalar
+            let iter = TensorIterator::build_for_binary(a, b);
+            // ...
+        }
+    } else {
+        let iter = TensorIterator::build_for_binary(a, b);
+        let output_shape = iter.output_shape.to_vec();
+        let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    // Get raw byte pointers
-    let a_ptr = a.data_ptr();
-    let b_ptr = b.data_ptr();
-    let output_inner = Arc::make_mut(&mut output.inner);
-    let output_storage = Arc::make_mut(&mut output_inner.storage);
-    let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
-    };
-    let out_data = Arc::make_mut(&mut cpu_storage.data);
-    let out_ptr = out_data.as_mut_ptr();
+        let output_inner = Arc::make_mut(&mut output.inner);
+        let output_storage = Arc::make_mut(&mut output_inner.storage);
+        let Storage::Cpu(cpu_storage) = output_storage else {
+            panic!("Expected CPU storage");
+        };
+        let out_data = Arc::make_mut(&mut cpu_storage.data);
+        let out_ptr = out_data.as_mut_ptr() as usize;
 
-    // Prepare shape/stride info for broadcasting
-    let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
-    let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
-    let out_shape = output_shape.clone();
-    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
-    let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
-    let a_storage_offset = a.inner.storage_offset as usize;
-    let b_storage_offset = b.inner.storage_offset as usize;
-
-    let out_shape_usize: smallvec::SmallVec<[usize; 8]> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: smallvec::SmallVec<[usize; 8]> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: smallvec::SmallVec<[usize; 8]> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: smallvec::SmallVec<[usize; 8]> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: smallvec::SmallVec<[usize; 8]> = b_strides.iter().map(|&x| x as usize).collect();
-
-    for idx in 0..numel {
-        let a_idx = broadcast_index_decomposition(
-            idx,
-            &out_shape_usize,
-            &a_shape_usize,
-            &a_strides_usize,
-            a_storage_offset,
-        );
-        let b_idx = broadcast_index_decomposition(
-            idx,
-            &out_shape_usize,
-            &b_shape_usize,
-            &b_strides_usize,
-            b_storage_offset,
-        );
-
-        unsafe {
-            // Load and convert based on dtype
-            let a_val = match dtype {
-                DType::F32 => *((a_ptr as *const f32).add(a_idx)),
-                DType::F16 => half::f16::to_f32(*((a_ptr as *const half::f16).add(a_idx))),
-                DType::BF16 => half::bf16::to_f32(*((a_ptr as *const half::bf16).add(a_idx))),
-                _ => panic!("Unsupported dtype for add"),
-            };
-            let b_val = match dtype {
-                DType::F32 => *((b_ptr as *const f32).add(b_idx)),
-                DType::F16 => half::f16::to_f32(*((b_ptr as *const half::f16).add(b_idx))),
-                DType::BF16 => half::bf16::to_f32(*((b_ptr as *const half::bf16).add(b_idx))),
-                _ => panic!("Unsupported dtype for add"),
-            };
-            let sum = a_val + b_val;
-            match dtype {
-                DType::F32 => {
-                    *((out_ptr as *mut f32).add(idx)) = sum;
+        let mut indices = vec![0usize; iter.output_shape.len()];
+        for idx in 0..numel {
+            let mut a_lin = a.inner.storage_offset as usize;
+            let mut b_lin = b.inner.storage_offset as usize;
+            let mut o_lin = 0usize;
+            for d in 0..iter.output_shape.len() {
+                let d_usize = d as usize;
+                if d_usize < iter.inputs[0].sizes.len() && iter.inputs[0].sizes[d] != 1 {
+                    a_lin += indices[d] * iter.inputs[0].strides[d] as usize;
                 }
-                DType::F16 => {
-                    *((out_ptr as *mut half::f16).add(idx)) = half::f16::from_f32(sum);
+                if d_usize < iter.inputs[1].sizes.len() && iter.inputs[1].sizes[d] != 1 {
+                    b_lin += indices[d] * iter.inputs[1].strides[d] as usize;
                 }
-                DType::BF16 => {
-                    *((out_ptr as *mut half::bf16).add(idx)) = half::bf16::from_f32(sum);
+                o_lin += indices[d] * iter.inner_strides[d] as usize;
+            }
+            unsafe {
+                let a_ptr = a.inner.storage.as_ref().as_ptr().add(a_lin) as *const f32;
+                let b_ptr = b.inner.storage.as_ref().as_ptr().add(b_lin) as *const f32;
+                let out_ptr = out_ptr as *mut f32;
+                *out_ptr.add(o_lin) = *a_ptr + *b_ptr;
+            }
+            // Increment indices
+            for d in (0..iter.output_shape.len()).rev() {
+                indices[d] += 1;
+                if indices[d] < iter.output_shape[d] as usize {
+                    break;
                 }
-                _ => {}
+                indices[d] = 0;
             }
         }
     }
-
-    vec![output]
+    return vec![output];
 }
 
 pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
