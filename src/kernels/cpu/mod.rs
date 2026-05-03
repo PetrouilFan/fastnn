@@ -922,6 +922,11 @@ fn register_kernels() {
         DispatchKey::Cpu,
         fused_conv_bn_silu_kernel as KernelFn,
     );
+    register(
+        "fused_conv_bn",
+        DispatchKey::Cpu,
+        fused_conv_bn_kernel as KernelFn,
+    );
     register("sum", DispatchKey::Cpu, sum_kernel as KernelFn);
     register("mean", DispatchKey::Cpu, mean_kernel as KernelFn);
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);
