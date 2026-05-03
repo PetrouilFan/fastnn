@@ -172,6 +172,8 @@ pub struct TransformerEncoder {
     #[allow(dead_code)]
     pub num_classes: i64,
     training: AtomicBool,
+    // Precomputed position tensor for max_seq_len, sliced for actual seq_len
+    pos_cache: OnceLock<Option<Tensor>>,
 }
 
 impl TransformerEncoder {
@@ -197,6 +199,14 @@ impl TransformerEncoder {
         let norm = LayerNorm::new(d_model, 1e-5);
         let classifier = Linear::new(d_model, num_classes, true);
 
+        // Precompute max-length position tensor for fast slice
+        let positions: Vec<f32> = (0..max_seq_len).map(|i| i as f32).collect();
+        let pos_tensor = Tensor::from_vec(
+            positions,
+            vec![1, max_seq_len],
+        )
+        .requires_grad_(false);
+
         TransformerEncoder {
             embedding,
             pos_embedding,
@@ -207,6 +217,7 @@ impl TransformerEncoder {
             max_seq_len,
             num_classes,
             training: AtomicBool::new(true),
+            pos_cache: OnceLock::new(Some(pos_tensor)),
         }
     }
 
@@ -218,6 +229,43 @@ impl TransformerEncoder {
                 shape
             );
         }
+        let batch = shape[0];
+        let seq_len = shape[1];
+
+        if seq_len > self.max_seq_len {
+            panic!(
+                "Sequence length {} exceeds maximum sequence length {}",
+                seq_len, self.max_seq_len
+            );
+        }
+        if seq_len == 0 {
+            panic!("Sequence length cannot be 0");
+        }
+
+        let x = self.embedding.forward(token_ids);
+
+        // Use precomputed position tensor, slice to actual seq_len
+        let pos_1d = {
+            let cache = self.pos_cache.lock().unwrap();
+            cache.as_ref().unwrap().slice(0, seq_len as i64)
+        };
+        let pos_expanded = pos_1d.expand(&[batch, seq_len, self.d_model]);
+        let pos_emb = self.pos_embedding.forward(&pos_expanded);
+        let x = x.add(&pos_emb);
+
+        // Process layers
+        let mut x = x;
+        for layer in &self.layers {
+            x = layer.forward(&x);
+        }
+
+        x = self.norm.forward(&x);
+
+        // Extract CLS token (first token of sequence)
+        let cls_token = x.slice(1, 0, 1, 1).squeeze(Some(1));
+        self.classifier.forward(&cls_token)
+    }
+}
         let batch = shape[0];
         let seq_len = shape[1];
 
