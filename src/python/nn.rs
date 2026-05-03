@@ -530,6 +530,74 @@ impl ResidualBlock {
 }
 
 #[pyclass]
+struct FusedConvBn {
+    inner: core_nn::fused::FusedConvBn,
+}
+
+#[pymethods]
+impl FusedConvBn {
+    #[new]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, eps=1e-5, bias=true))]
+    fn new(
+        in_channels: i64,
+        out_channels: i64,
+        kernel_size: i64,
+        stride: i64,
+        padding: i64,
+        dilation: i64,
+        groups: i64,
+        eps: f64,
+        bias: bool,
+    ) -> Self {
+        FusedConvBn {
+            inner: core_nn::fused::FusedConvBn::new(
+                in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
+            ),
+        }
+    }
+
+    fn __call__(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn forward(&self, x: &PyTensor) -> PyTensor {
+        PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
+    }
+
+    fn set_conv_weight(&mut self, weight: PyTensor) {
+        self.inner.set_conv_weight(weight.inner);
+    }
+
+    fn set_bn_weight(&mut self, weight: PyTensor) {
+        self.inner.set_bn_weight(weight.inner);
+    }
+
+    fn set_bn_bias(&mut self, bias: PyTensor) {
+        self.inner.set_bn_bias(bias.inner);
+    }
+
+    fn set_bn_running_mean(&mut self, mean: PyTensor) {
+        self.inner.set_bn_running_mean(mean.inner);
+    }
+
+    fn set_bn_running_var(&mut self, var: PyTensor) {
+        self.inner.set_bn_running_var(var.inner);
+    }
+
+    fn eval(&mut self) {
+        self.inner.eval_mode();
+    }
+}
+
+#[pyclass]
 struct LayerNorm {
     inner: core_nn::norm::LayerNorm,
 }
