@@ -172,6 +172,8 @@ pub struct TransformerEncoder {
     #[allow(dead_code)]
     pub num_classes: i64,
     training: AtomicBool,
+    // Precomputed position tensor for max_seq_len, sliced for actual seq_len
+    pos_cache: OnceLock<Option<Tensor>>,
 }
 
 impl TransformerEncoder {
@@ -197,7 +199,15 @@ impl TransformerEncoder {
         let norm = LayerNorm::new(d_model, 1e-5);
         let classifier = Linear::new(d_model, num_classes, true);
 
-        TransformerEncoder {
+        // Precompute max-length position tensor for fast slice
+        let positions: Vec<f32> = (0..max_seq_len).map(|i| i as f32).collect();
+        let pos_tensor = Tensor::from_vec(
+            positions,
+            vec![1, max_seq_len],
+        )
+        .requires_grad_(false);
+
+        let mut transformer = TransformerEncoder {
             embedding,
             pos_embedding,
             layers,
@@ -207,7 +217,10 @@ impl TransformerEncoder {
             max_seq_len,
             num_classes,
             training: AtomicBool::new(true),
-        }
+            pos_cache: OnceLock::new(),
+        };
+        let _ = transformer.pos_cache.set(Some(pos_tensor));
+        transformer
     }
 
     pub fn forward(&self, token_ids: &Tensor) -> Tensor {
@@ -233,26 +246,11 @@ impl TransformerEncoder {
 
         let x = self.embedding.forward(token_ids);
 
-        // Cached positional encoding - reuse for same (batch, seq_len, d_model)
-        let cache_key = (batch, seq_len, self.pos_embedding.weight.shape()[1]);
-        let positions_expanded = {
-            let mut cache = pos_encoding_cache().lock().unwrap();
-            if let Some(cached) = cache.get(&cache_key) {
-                cached.clone()
-            } else {
-                let positions: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
-                let mut repeated_positions = Vec::with_capacity(batch as usize * seq_len as usize);
-                for _ in 0..batch {
-                    repeated_positions.extend_from_slice(&positions);
-                }
-                let t = Tensor::from_vec(repeated_positions, vec![batch, seq_len])
-                    .requires_grad_(false);
-                cache.insert(cache_key, t.clone());
-                t
-            }
-        };
-
-        let pos_emb = self.pos_embedding.forward(&positions_expanded);
+        // Use precomputed position tensor, slice to actual seq_len
+        let pos_tensor = self.pos_cache.get().unwrap().as_ref().unwrap();
+        let pos_1d = pos_tensor.slice(0, 0, seq_len as i64, 1);
+        let pos_expanded = pos_1d.expand(vec![batch, seq_len, self.d_model]);
+        let pos_emb = self.pos_embedding.forward(&pos_expanded);
         let x = x.add(&pos_emb);
 
         // Process layers
@@ -264,9 +262,7 @@ impl TransformerEncoder {
         x = self.norm.forward(&x);
 
         // Extract CLS token (first token of sequence)
-        let cls_token = x.slice(1, 0, 1, 1);
-        let cls_token = cls_token.squeeze(Some(1));
-
+        let cls_token = x.slice(1, 0, 1, 1).squeeze(Some(1));
         self.classifier.forward(&cls_token)
     }
 }
