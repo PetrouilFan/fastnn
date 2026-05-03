@@ -27,7 +27,7 @@ fn bench_autograd_chain() -> Duration {
     let mut total = Duration::ZERO;
     for _ in 0..ITERS {
         let x = a.clone();
-        let y = black_box(x.clone() + x.clone());
+        let y = black_box(x.exp().relu());
         let start = Instant::now();
         backward(&y, None);
         total += start.elapsed();
@@ -42,7 +42,7 @@ fn main() {
     let d = bench_elementwise_broadcast();
     println!("  Avg time: {:.3} ms", d.as_secs_f64() * 1000.0);
 
-    println!("\nAutograd Chain (add.backward):");
+    println!("\nAutograd Chain (exp.relu.backward):");
     let d = bench_autograd_chain();
     println!("  Avg time: {:.3} ms", d.as_secs_f64() * 1000.0);
 }
