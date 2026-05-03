@@ -182,7 +182,7 @@ impl TensorIterator {
                 }
                 for (inp_idx, input) in self.inputs.iter().enumerate() {
                     if d < input.strides.len() && d < input.sizes.len() && input.sizes[d] != 1 {
-                        input_offsets[inp_idx] -= input.sizes[d] * input.strides[d];
+                        input_offsets[inp_idx] -= (self.output_shape[d] - 1) * input.strides[d];
                     }
                 }
                 indices[d] = 0;
@@ -237,7 +237,7 @@ impl TensorIterator {
                 }
                 for (inp_idx, input) in self.inputs.iter().enumerate() {
                     if d < input.strides.len() && d < input.sizes.len() && input.sizes[d] != 1 {
-                        input_offsets[inp_idx] -= input.sizes[d] * input.strides[d];
+                        input_offsets[inp_idx] -= (self.output_shape[d] - 1) * input.strides[d];
                     }
                 }
                 indices[d] = 0;
