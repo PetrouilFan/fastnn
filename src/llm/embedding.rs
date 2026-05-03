@@ -45,7 +45,7 @@ impl Embedding {
             output[i] = row[i] * scale;
         }
 
-        llm_debug!("[Embedding] token_idx={}, hidden_size={}", token_idx, self.hidden_size);
+        llm_debug!("[Embedding] token_idx={}, hidden_size={}, scale={}", token_idx, self.hidden_size, scale);
 
         Ok(())
     }

@@ -18,6 +18,12 @@ pub struct FFNParams {
 pub struct Kernels;
 
 impl Kernels {
+    const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
+    const GELU_COEF_A: f32 = 0.044715;
+
+    pub fn gelu(x: f32) -> f32 {
+        0.5 * x * (1.0 + (Self::SQRT_2_OVER_PI * x * (1.0 + Self::GELU_COEF_A * x * x)).tanh())
+    }
     pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
         let n = x.len();
         let mut sum_squares = 0.0f32;
@@ -43,12 +49,12 @@ impl Kernels {
 
         let scale = 1.0 / (sum_squares / n as f32 + eps).sqrt();
 
-        for (i, val) in x.iter_mut().enumerate() {
+        for (i, val) in x.iter_mut(). enumerate() {
             *val = *val * scale * weight[i];
         }
     }
 
-    pub fn rope(x: &mut [f32], theta: f32, pos: usize, head_dim: usize) {
+    pub fn rope(x: &mut [f32], theta: f32, pos: usize, head_dim: usize, freq_factors: Option<&[f32]>) {
         let inv_theta = 1.0 / theta;
 
         for i in (0..head_dim).step_by(2) {
@@ -57,7 +63,8 @@ impl Kernels {
             }
 
             let freq = inv_theta.powf(2.0 * (i as f32) / head_dim as f32);
-            let angle = freq * pos as f32;
+            let ff = freq_factors.map_or(1.0f32, |f| f[i / 2]);
+            let angle = (freq / ff) * pos as f32;
             let cos = angle.cos();
             let sin = angle.sin();
 
@@ -149,6 +156,25 @@ impl Kernels {
             let scale = 1.0 / (sum_sq / head_dim as f32 + 1e-6).sqrt();
             for i in 0..head_dim {
                 slice[i] = slice[i] * scale * q_norm[i];
+            }
+        }
+    }
+
+    pub fn apply_v_norm(x: &mut [f32], head_dim: usize) {
+        if head_dim == 0 {
+            return;
+        }
+        let num_heads = x.len() / head_dim;
+        for h in 0..num_heads {
+            let offset = h * head_dim;
+            let slice = &mut x[offset..offset + head_dim];
+            let mut sum_sq = 0.0f32;
+            for v in slice.iter() {
+                sum_sq += v * v;
+            }
+            let scale = 1.0 / (sum_sq / head_dim as f32 + 1e-6).sqrt();
+            for v in slice.iter_mut() {
+                *v *= scale;
             }
         }
     }

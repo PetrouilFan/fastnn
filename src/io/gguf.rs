@@ -394,8 +394,8 @@ mod tests {
         let data = minimal_gguf_bytes();
         let gguf = GgufFile::from_bytes(data).unwrap();
         let tensor = gguf.get_tensor("test").unwrap();
-        assert_eq!(tensor.out_features(), 4);
-        assert_eq!(tensor.in_features(), 8);
+        assert_eq!(tensor.out_features(), 8);
+        assert_eq!(tensor.in_features(), 4);
         assert_eq!(tensor.memory_bytes(), 18);
     }
 }

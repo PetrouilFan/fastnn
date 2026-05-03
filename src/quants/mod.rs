@@ -14,12 +14,16 @@
 
 pub mod q4_0;
 pub mod q4_k;
+pub mod q5_k;
 pub mod q6_k;
+pub mod bf16;
 pub mod quantized_tensor;
 
 pub use q4_0::Q4_0;
 pub use q4_k::Q4_K;
+pub use q5_k::Q5K;
 pub use q6_k::Q6K;
+pub use bf16::BF16;
 pub use quantized_tensor::GgmlQuantizedTensor;
 
 /// Identifiers for every GGUF quantization flavour.

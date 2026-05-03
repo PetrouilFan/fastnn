@@ -1,5 +1,4 @@
-use crate::io::gguf::{GgufFile, GgufTensorInfo};
-use crate::quants::QuantizedDType;
+use crate::io::gguf::GgufFile;
 
 #[derive(Debug, Clone)]
 pub struct LayerConfig {
@@ -12,6 +11,8 @@ pub struct LayerConfig {
     pub has_q_norm: bool,
     pub has_k_norm: bool,
     pub qkv_shared: bool,
+    pub has_own_kv: bool,
+    pub kv_source_layer: i32,
     pub sliding_window: usize,
     pub rope_theta: f32,
 }
@@ -29,6 +30,8 @@ pub struct LlmConfig {
     pub rope_theta: f32,
     pub sliding_window: usize,
     pub shared_kv_layers: usize,
+    pub n_layer_kv_from_start: usize,
+    pub logit_softcapping: f32,
     pub layers: Vec<LayerConfig>,
 }
 
@@ -43,6 +46,7 @@ impl LlmConfig {
         let rms_norm_eps = Self::get_metadata_f32(gguf, "gemma4.attention.layer_norm_rms_epsilon").unwrap_or(1e-6);
         let sliding_window = Self::get_metadata_u32(gguf, "gemma4.attention.sliding_window").unwrap_or(512) as usize;
         let shared_kv_layers = Self::get_metadata_u32(gguf, "gemma4.attention.shared_kv_layers").unwrap_or(20) as usize;
+        let n_layer_kv_from_start = num_layers - shared_kv_layers;
 
         let rope_dim = match Self::get_metadata_u32(gguf, "gemma4.rope.dimension_count") {
             Some(v) => v as usize,
@@ -52,56 +56,76 @@ impl LlmConfig {
             Some(v) => v as usize,
             None => 512,  // Default if missing
         };
-        let rope_theta = 10000.0;
+        let rope_theta_full = Self::get_metadata_f32(gguf, "gemma4.rope.freq_base").unwrap_or(1000000.0);
+        let rope_theta_swa = Self::get_metadata_f32(gguf, "gemma4.rope.freq_base_swa").unwrap_or(10000.0);
 
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
-            let head_dim = if Self::is_full_attention_layer(gguf, i) {
+            let is_full = Self::is_full_attention_layer(gguf, i);
+            let head_dim = if is_full {
                 rope_dim  // Full attention: head_dim = 512
             } else {
                 rope_dim_swa  // SWA: head_dim = 256
             };
 
-            let q_shape = Self::get_tensor_shape(gguf, &format!("blk.{}.attn_q.weight", i));
-            let k_shape = Self::get_tensor_shape(gguf, &format!("blk.{}.attn_k.weight", i));
-            let ffn_shape = Self::get_tensor_shape(gguf, &format!("blk.{}.ffn_gate.weight", i));
+            let rope_theta = if is_full { rope_theta_full } else { rope_theta_swa };
 
-            let intermediate_size = ffn_shape.map(|(out, _)| out).unwrap_or(6144);
+        let ffn_shape = Self::get_tensor_shape(gguf, &format!("blk.{}.ffn_gate.weight", i));
+
+        let intermediate_size = ffn_shape.map(|(out, _)| out).unwrap_or(6144);
 
             let has_q_norm = Self::tensor_exists(gguf, &format!("blk.{}.attn_q_norm.weight", i));
             let has_k_norm = Self::tensor_exists(gguf, &format!("blk.{}.attn_k_norm.weight", i));
 
-            let qkv_shared = i < shared_kv_layers;
+        let qkv_shared = i < shared_kv_layers;
 
-            layers.push(LayerConfig {
-                layer_idx: i,
-                hidden_size,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-                intermediate_size,
-                has_q_norm,
-                has_k_norm,
-                qkv_shared,
-                sliding_window,
-                rope_theta,
-            });
-        }
+        let has_own_kv = i < n_layer_kv_from_start;
+        let kv_source_layer = if has_own_kv {
+            -1
+        } else {
+            let is_swa = !is_full;
+            if is_swa {
+                (n_layer_kv_from_start as i32) - 2
+            } else {
+                (n_layer_kv_from_start as i32) - 1
+            }
+        };
 
-        LlmConfig {
-            vocab_size,
+        layers.push(LayerConfig {
+            layer_idx: i,
             hidden_size,
-            num_layers,
             num_heads,
             num_kv_heads,
-            head_dim: rope_dim,
-            intermediate_size: layers.first().map(|l| l.intermediate_size).unwrap_or(6144),
-            rms_norm_eps,
-            rope_theta,
+            head_dim,
+            intermediate_size,
+            has_q_norm,
+            has_k_norm,
+            qkv_shared,
+            has_own_kv,
+            kv_source_layer,
             sliding_window,
-            shared_kv_layers,
-            layers,
+            rope_theta,
+        });
         }
+
+        let logit_softcapping = Self::get_metadata_f32(gguf, "gemma4.final_logit_softcapping").unwrap_or(30.0);
+
+    LlmConfig {
+        vocab_size,
+        hidden_size,
+        num_layers,
+        num_heads,
+        num_kv_heads,
+        head_dim: rope_dim,
+        intermediate_size: layers.first().map(|l| l.intermediate_size).unwrap_or(6144),
+        rms_norm_eps,
+        rope_theta: rope_theta_swa,
+        sliding_window,
+        shared_kv_layers,
+        n_layer_kv_from_start,
+        logit_softcapping,
+        layers,
+    }
     }
 
 fn get_vocab_size(gguf: &GgufFile) -> usize {
