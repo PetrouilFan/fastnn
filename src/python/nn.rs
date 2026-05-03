@@ -537,7 +537,7 @@ struct FusedConvBn {
 #[pymethods]
 impl FusedConvBn {
     #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, eps=1e-5, bias=true))]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
     fn new(
         in_channels: i64,
         out_channels: i64,

@@ -166,6 +166,7 @@ silu = _core.silu
 softmax = _core.softmax
 log_softmax = _core.log_softmax
 fused_conv_bn_silu = _core.fused_conv_bn_silu
+FusedConvBn = _core.FusedConvBn
 argmax = _core.argmax
 argmin = _core.argmin
 cat = _core.cat
