@@ -22,7 +22,7 @@ use wide::f32x8;
 #[inline]
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 pub fn from_slice_unaligned_f32x8(slice: &[f32]) -> f32x8 {
-    let arr: [f32; 8] = slice.try_into().unwrap();
+    let arr: [f32; 8] = slice[..8].try_into().unwrap();
     f32x8::new(arr)
 }
 

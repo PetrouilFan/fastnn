@@ -24,6 +24,7 @@ impl PyLlmModel {
         Ok(result)
     }
 
+    #[pyo3(signature = (token_idx, pos))]
     fn forward_token(&mut self, token_idx: usize, pos: usize) -> PyResult<Vec<f32>> {
         let result = self.model.forward_token(token_idx, pos)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;

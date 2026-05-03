@@ -3,6 +3,50 @@ use crate::llm::kv_cache::KVCache;
 use crate::llm::ops::Kernels;
 use crate::quants::quantized_tensor::GgmlQuantizedTensor;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use crate::kernels::cpu::from_slice_unaligned_f32x8;
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use wide::f32x8;
+
+#[inline]
+fn dot_product(q: &[f32], q_offset: usize, k: &[f32], k_offset: usize, len: usize) -> f32 {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let mut sum = 0.0f32;
+        let mut i = 0;
+        while i + 8 <= len {
+            if q.len() < q_offset + i + 8 {
+                eprintln!("ERROR in dot_product: q.len={}, q_offset={}, i={}, len={}", q.len(), q_offset, i, len);
+                break;
+            }
+            if k.len() < k_offset + i + 8 {
+                eprintln!("ERROR in dot_product: k.len={}, k_offset={}, i={}, len={}", k.len(), k_offset, i, len);
+                break;
+            }
+            let q_vec = from_slice_unaligned_f32x8(&q[q_offset + i..]);
+            let k_vec = from_slice_unaligned_f32x8(&k[k_offset + i..]);
+            sum += (q_vec * k_vec).to_array().iter().sum::<f32>();
+            i += 8;
+        }
+        while i < len {
+            sum += q[q_offset + i] * k[k_offset + i];
+            i += 1;
+        }
+        sum
+    }
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        let mut sum = 0.0f32;
+        for i in 0..len {
+            sum += q[q_offset + i] * k[k_offset + i];
+        }
+        sum
+    }
+}
+
 #[cfg(feature = "debug")]
 macro_rules! llm_debug {
     ($($arg:tt)*) => { eprintln!($($arg)*) };
@@ -131,50 +175,182 @@ impl AttentionLayer {
         let sliding_window = self.layer_config.sliding_window;
         let window_start = if pos >= sliding_window { pos - sliding_window + 1 } else { 0 };
 
-        for qh in 0..num_heads {
-            let kv_h = qh / gqa_ratio;
-            let q_offset = qh * head_dim;
-            let kv_offset = kv_h * head_dim;
-
-            let mut max_score = f32::NEG_INFINITY;
-            let mut scores = vec![0.0f32; kv_len];
-
+        #[cfg(feature = "parallel")]
+        {
+            let q_slice: &[f32] = &q;
+            let k_ref_slice: &[f32] = k_ref;
+            let v_ref_slice: &[f32] = v_ref;
             let scale = 1.0f32;
 
-            for t in 0..kv_len {
-                if t < window_start {
-                    scores[t] = f32::NEG_INFINITY;
-                    continue;
-                }
+            attn_output.par_chunks_mut(head_dim).enumerate().for_each(move |(qh, chunk)| {
+                let kv_h = qh / gqa_ratio;
+                let q_offset = qh * head_dim;
+                let kv_offset = kv_h * head_dim;
 
-                let mut score = 0.0f32;
-                let k_row_offset = t * kv_dim + kv_offset;
-                for d in 0..head_dim {
-                    score += q[q_offset + d] * k_ref[k_row_offset + d];
-                }
-                let scaled = score * scale;
-                scores[t] = scaled;
-                if scaled > max_score {
-                    max_score = scaled;
-                }
-            }
+                let mut max_score = f32::NEG_INFINITY;
+                let mut scores = vec![0.0f32; kv_len];
 
-            let mut sum = 0.0f32;
-            for s in scores.iter_mut() {
-                *s = (*s - max_score).exp();
-                sum += *s;
-            }
-            for s in scores.iter_mut() {
-                *s /= sum;
-            }
-
-            for d in 0..head_dim {
-                let mut val = 0.0f32;
                 for t in 0..kv_len {
-                    let v_row_offset = t * kv_dim + kv_offset;
-                    val += scores[t] * v_ref[v_row_offset + d];
+                    if t < window_start {
+                        scores[t] = f32::NEG_INFINITY;
+                        continue;
+                    }
+
+                    let k_row_offset = t * kv_dim + kv_offset;
+                    let score = dot_product(q_slice, q_offset, k_ref_slice, k_row_offset, head_dim);
+                    let scaled = score * scale;
+                    scores[t] = scaled;
+                    if scaled > max_score {
+                        max_score = scaled;
+                    }
                 }
-                attn_output[q_offset + d] += val;
+
+                let mut sum = 0.0f32;
+                for s in scores.iter_mut() {
+                    *s = (*s - max_score).exp();
+                    sum += *s;
+                }
+                for s in scores.iter_mut() {
+                    *s /= sum;
+                }
+
+                // V accumulation (SIMD on x86_64)
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    let mut d = 0;
+                    while d + 8 <= head_dim {
+                        let mut vals = f32x8::splat(0.0f32);
+                        for t in 0..kv_len {
+                            let v_row_offset = t * kv_dim + kv_offset;
+                            let slice = &v_ref_slice[v_row_offset + d..];
+                            if slice.len() < 8 {
+                                eprintln!("ERROR: v_row_offset={}, d={}, head_dim={}, kv_dim={}, kv_len={}, t={}, slice.len={}, v_ref_slice.len={}",
+                                    v_row_offset, d, head_dim, kv_dim, kv_len, t, slice.len(), v_ref_slice.len());
+                                // Fall back to scalar
+                                let mut val = 0.0f32;
+                                for t2 in 0..kv_len {
+                                    let v_row_offset2 = t2 * kv_dim + kv_offset;
+                                    val += scores[t2] * v_ref_slice[v_row_offset2 + d];
+                                }
+                                chunk[d] = val;
+                                d += 1;
+                                continue;
+                            }
+                            let v_vec = from_slice_unaligned_f32x8(slice);
+                            vals = vals + v_vec * f32x8::splat(scores[t]);
+                        }
+                        chunk[d..d+8].copy_from_slice(&vals.to_array());
+                        d += 8;
+                    }
+                    while d < head_dim {
+                        let mut val = 0.0f32;
+                        for t in 0..kv_len {
+                            let v_row_offset = t * kv_dim + kv_offset;
+                            val += scores[t] * v_ref_slice[v_row_offset + d];
+                        }
+                        chunk[d] = val;
+                        d += 1;
+                    }
+                }
+                #[cfg(any(not(feature = "simd"), not(target_arch = "x86_64")))]
+                {
+                    for d in 0..head_dim {
+                        let mut val = 0.0f32;
+                        for t in 0..kv_len {
+                            let v_row_offset = t * kv_dim + kv_offset;
+                            val += scores[t] * v_ref_slice[v_row_offset + d];
+                        }
+                        chunk[d] = val;
+                    }
+                }
+            });
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            for qh in 0..num_heads {
+                let kv_h = qh / gqa_ratio;
+                let q_offset = qh * head_dim;
+                let kv_offset = kv_h * head_dim;
+
+                let mut max_score = f32::NEG_INFINITY;
+                let mut scores = vec![0.0f32; kv_len];
+
+                let scale = 1.0f32;
+
+                for t in 0..kv_len {
+                    if t < window_start {
+                        scores[t] = f32::NEG_INFINITY;
+                        continue;
+                    }
+
+                    let k_row_offset = t * kv_dim + kv_offset;
+                    let score = dot_product(&q, q_offset, k_ref, k_row_offset, head_dim);
+                    let scaled = score * scale;
+                    scores[t] = scaled;
+                    if scaled > max_score {
+                        max_score = scaled;
+                    }
+                }
+
+                let mut sum = 0.0f32;
+                for s in scores.iter_mut() {
+                    *s = (*s - max_score).exp();
+                    sum += *s;
+                }
+                for s in scores.iter_mut() {
+                    *s /= sum;
+                }
+
+                // V accumulation (SIMD on x86_64)
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    let mut d = 0;
+                    while d + 8 <= head_dim {
+                        let mut vals = f32x8::splat(0.0f32);
+                        for t in 0..kv_len {
+                            let v_row_offset = t * kv_dim + kv_offset;
+                            let slice = &v_ref[v_row_offset + d..];
+                            if slice.len() < 8 {
+                                eprintln!("ERROR: v_row_offset={}, d={}, head_dim={}, kv_dim={}, kv_len={}, t={}, slice.len={}, v_ref.len={}",
+                                    v_row_offset, d, head_dim, kv_dim, kv_len, t, slice.len(), v_ref.len());
+                                // Fall back to scalar
+                                let mut val = 0.0f32;
+                                for t2 in 0..kv_len {
+                                    let v_row_offset2 = t2 * kv_dim + kv_offset;
+                                    val += scores[t2] * v_ref[v_row_offset2 + d];
+                                }
+                                attn_output[q_offset + d] = val;
+                                d += 1;
+                                continue;
+                            }
+                            let v_vec = from_slice_unaligned_f32x8(slice);
+                            vals = vals + v_vec * f32x8::splat(scores[t]);
+                        }
+                        attn_output[q_offset + d..q_offset + d + 8].copy_from_slice(&vals.to_array());
+                        d += 8;
+                    }
+                    while d < head_dim {
+                        let mut val = 0.0f32;
+                        for t in 0..kv_len {
+                            let v_row_offset = t * kv_dim + kv_offset;
+                            val += scores[t] * v_ref[v_row_offset + d];
+                        }
+                        attn_output[q_offset + d] = val;
+                        d += 1;
+                    }
+                }
+                #[cfg(any(not(feature = "simd"), not(target_arch = "x86_64")))]
+                {
+                    for d in 0..head_dim {
+                        let mut val = 0.0f32;
+                        for t in 0..kv_len {
+                            let v_row_offset = t * kv_dim + kv_offset;
+                            val += scores[t] * v_ref[v_row_offset + d];
+                        }
+                        attn_output[q_offset + d] += val;
+                    }
+                }
             }
         }
 
