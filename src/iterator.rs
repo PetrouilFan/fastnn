@@ -222,6 +222,7 @@ impl TensorIterator {
                 ptrs.push(slice);
             }
 
+            println!("DEBUG: inputs.len()={}, ptrs.len()={}", self.inputs.len(), ptrs.len());
             f(idx, &ptrs);
 
             // Increment indices and update offsets (carry-based)
