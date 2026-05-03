@@ -18,33 +18,6 @@ pub use pooling::*;
 pub use reductions::*;
 pub use simd::*;
 
-use crate::dispatcher::{register_op, OpId, DispatchKey, KernelFn};
-
-/// Determine if an operation should use parallel execution.
-/// Considers operation type, data size, and available parallelism.
-/// Returns (should_parallel, chunk_size) for Rayon iteration.
-pub fn should_parallel(numel: usize, dtype_size: usize, op_type: &str) -> (bool, usize) {
-    let num_bytes = numel * dtype_size;
-    
-    // Memory-bandwidth-bound ops (elementwise: add, sub, mul, div, relu, etc.) 
-    // These benefit from parallelization only for larger sizes.
-    let (threshold_bytes, chunk_mem) = match op_type {
-        "elementwise" => (64 * 1024, 16 * 1024),  // 64KB threshold, 16KB chunks
-        "matmul" => (8 * 1024, 32 * 1024),      // 8KB threshold, 32KB chunks (compute-bound)
-        "reduction" => (32 * 1024, 8 * 1024),    // 32KB threshold, 8KB chunks
-        "conv" => (16 * 1024, 32 * 1024),       // 16KB threshold, 32KB chunks
-        _ => (32 * 1024, 16 * 1024),             // Default: 32KB threshold
-    };
-    
-    if num_bytes < threshold_bytes {
-        return (false, 0);
-    }
-    
-    // Calculate chunk size based on memory footprint
-    let chunk_size = (chunk_mem / (dtype_size)) max 1;
-    (true, chunk_size)
-}
-
 // Aligned buffer for SIMD operations
 #[repr(align(32))]
 struct AlignedBuffer {

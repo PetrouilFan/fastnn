@@ -39,6 +39,17 @@ impl ResidualBlock {
         });
         ResidualBlock { conv1, bn1, conv2, bn2, downsample }
     }
+
+    /// Create ResidualBlock from existing modules (for Python BasicBlock integration).
+    pub fn from_modules(
+        conv1: Conv2d,
+        bn1: BatchNorm2d,
+        conv2: Conv2d,
+        bn2: BatchNorm2d,
+        downsample: Option<(Conv2d, BatchNorm2d)>,
+    ) -> Self {
+        ResidualBlock { conv1, bn1, conv2, bn2, downsample }
+    }
 }
 
 impl Module for ResidualBlock {
