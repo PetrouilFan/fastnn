@@ -1,4 +1,4 @@
-use crate::autograd::{self, AutogradMeta, Edge, Node};
+use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
@@ -171,7 +171,11 @@ impl Module for FusedConvBnSilu {
 
         // Attach a backward node that panics if gradient is requested.
         // This layer is intended for inference only.
-        if self.conv_weight.requires_grad() || self.bn_weight.requires_grad() || self.bn_bias.requires_grad() || self.conv_bias.as_ref().map_or(false, |b| b.requires_grad()) {
+        if self.conv_weight.requires_grad()
+            || self.bn_weight.requires_grad()
+            || self.bn_bias.requires_grad()
+            || self.conv_bias.as_ref().map_or(false, |b| b.requires_grad())
+        {
             let backward = Arc::new(FusedConvBnSiluBackward);
             let mut meta = AutogradMeta::new_non_leaf(false);
             meta.grad_fn = Some(backward);
@@ -265,8 +269,6 @@ pub struct FusedConvBn {
     padding_scalar: Tensor,
     dilation_scalar: Tensor,
     groups_scalar: Tensor,
-    bn_training_true: Tensor,
-    bn_training_false: Tensor,
 }
 
 impl FusedConvBn {
@@ -333,8 +335,6 @@ impl FusedConvBn {
             padding_scalar: Tensor::from_scalar(padding as f32),
             dilation_scalar: Tensor::from_scalar(dilation as f32),
             groups_scalar: Tensor::from_scalar(groups as f32),
-            bn_training_true: Tensor::from_scalar(1.0),
-            bn_training_false: Tensor::from_scalar(0.0),
         }
     }
 
@@ -405,8 +405,6 @@ impl FusedConvBn {
             padding_scalar: Tensor::from_scalar(padding as f32),
             dilation_scalar: Tensor::from_scalar(dilation as f32),
             groups_scalar: Tensor::from_scalar(groups as f32),
-            bn_training_true: Tensor::from_scalar(1.0),
-            bn_training_false: Tensor::from_scalar(0.0),
         }
     }
 }
@@ -429,36 +427,20 @@ impl Module for FusedConvBn {
         let bias_ref = self.conv_bias.as_ref().unwrap_or(&default_bias);
 
         let result = dispatch(
-            "conv2d",
+            "fused_conv_bn",
             DispatchKey::Cpu,
             &[
                 x,
                 &self.conv_weight,
                 bias_ref,
-                &self.stride_scalar,
-                &self.padding_scalar,
-                &self.dilation_scalar,
-                &self.groups_scalar,
-            ],
-        );
-
-        let conv_out = result.into_iter().next().unwrap();
-
-        let default_bn_weight = Tensor::from_scalar(1.0);
-        let default_bn_bias = Tensor::from_scalar(0.0);
-        let w_ref = &self.bn_weight;
-        let b_ref = &self.bn_bias;
-
-        let result = dispatch(
-            "batch_norm",
-            DispatchKey::Cpu,
-            &[
-                &conv_out,
                 &self.bn_weight,
                 &self.bn_bias,
                 &self.bn_running_mean,
                 &self.bn_running_var,
-                &self.bn_training_false,
+                &self.stride_scalar,
+                &self.padding_scalar,
+                &self.dilation_scalar,
+                &self.groups_scalar,
                 &self.eps_scalar,
             ],
         );
