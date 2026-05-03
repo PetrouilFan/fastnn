@@ -16,31 +16,34 @@ impl GgmlQuantizedTensor {
 
     /// Return a boxed `QuantizedGemm` impl for this tensor.
     pub fn as_gemm(&self) -> Box<dyn QuantizedGemm> {
-        use crate::quants::{Q4_0, Q4_K, Q6K, QuantizedDType as DT};
+        use crate::quants::{Q4_0, Q4_K, Q5K, Q6K, BF16, QuantizedDType as DT};
         match self.dtype {
             DT::Q4_0 => Box::new(Q4_0::from_bytes(&self.data, self.shape)),
             DT::Q4_K => Box::new(Q4_K::from_bytes(&self.data, self.shape)),
+            DT::Q5_K => Box::new(Q5K::from_bytes(&self.data, self.shape)),
             DT::Q6_K => Box::new(Q6K::from_bytes(&self.data, self.shape)),
+            DT::Bf16 => Box::new(BF16::from_bytes(&self.data, self.shape)),
             _ => unimplemented!("{:?} not yet implemented", self.dtype),
         }
     }
 
     /// Convenience wrapper: GEMV through the owned dispatch.
     pub fn gemv(&self, activation: &[f32], output: &mut [f32]) {
-        if self.dtype == QuantizedDType::F32 {
-            let data: &[f32] = bytemuck::cast_slice(&self.data);
-            let in_feat = self.shape[1];
-            let out_feat = self.shape[0];
-            for row in 0..out_feat {
-                let mut sum = 0.0f32;
-                let row_offset = row * in_feat;
-                for col in 0..in_feat {
-                    sum += data[row_offset + col] * activation[col];
+        match self.dtype {
+            QuantizedDType::F32 => {
+                let data: &[f32] = bytemuck::cast_slice(&self.data);
+                let in_feat = self.shape[1];
+                let out_feat = self.shape[0];
+                for row in 0..out_feat {
+                    let mut sum = 0.0f32;
+                    let row_offset = row * in_feat;
+                    for col in 0..in_feat {
+                        sum += data[row_offset + col] * activation[col];
+                    }
+                    output[row] = sum;
                 }
-                output[row] = sum;
             }
-        } else {
-            self.as_gemm().gemv(activation, output);
+            _ => self.as_gemm().gemv(activation, output),
         }
     }
 
