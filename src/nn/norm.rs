@@ -553,10 +553,8 @@ impl Module for BatchNorm2d {
 
         let x_reshaped = x.reshape(vec![batch, channels, spatial]);
         let batch_mean = x_reshaped.mean(2, false).mean(0, false);
-        let batch_var = x_reshaped
-            .mean(2, false)
-            .sub(&batch_mean.pow(2.0))
-            .mean(0, false);
+        let centered = x_reshaped.sub(&batch_mean.reshape(vec![1, channels, 1]));
+        let batch_var = centered.mul(&centered).mean(2, false).mean(0, false);
 
         let is_training = self.training.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -574,15 +572,17 @@ impl Module for BatchNorm2d {
             }
             {
                 let mut rv = self.running_var.write();
-                let new_var = rv.mul_scalar(mom).add(&batch_var_clone.mul_scalar(inv_mom));
+                // PyTorch uses unbiased variance (Bessel correction) for running_var update
+                let n = spatial as f32;
+                let unbiased_var = batch_var_clone.mul_scalar(n / (n - 1.0));
+                let new_var = rv.mul_scalar(mom).add(&unbiased_var.mul_scalar(inv_mom));
                 *rv = new_var;
             }
             (batch_mean, batch_var)
         } else {
-            (
-                self.running_mean.read().clone(),
-                self.running_var.read().clone(),
-            )
+            let rm = self.running_mean.read().clone();
+            let rv = self.running_var.read().clone();
+            (rm, rv)
         };
 
         let mean_reshaped = mean.reshape(vec![1, channels, 1]);
