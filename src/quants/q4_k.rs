@@ -215,7 +215,6 @@ unsafe fn gemv_q4_k_avx2(q: &Q4_K, activation: &[f32], output: &mut [f32]) {
 
     let blocks_per_row = q.blocks_per_row();
     let in_features = q.shape[1];
-    let mut scratch: [f32; QK4_K] = [0.0; QK4_K];
 
     for out_idx in 0..q.shape[0] {
         let mut acc0 = _mm256_setzero_ps();
@@ -229,57 +228,95 @@ unsafe fn gemv_q4_k_avx2(q: &Q4_K, activation: &[f32], output: &mut [f32]) {
             let elem_base = block_idx * QK4_K;
             let k = (elem_base + QK4_K).min(in_features) - elem_base;
 
-            block.dequantize(&mut scratch);
+            let d = _mm256_set1_ps(block.d.to_f32());
+            let dmin = _mm256_set1_ps(block.dmin.to_f32());
+
+            // Load scales: 12 bytes packed as described in get_scale_min_k4
+            // We need to expand them into vectors for each group of 32 weights
+            let scales = block.scales;
 
             let mut j = 0usize;
-            while j + 32 <= k {
-                let w0 = _mm256_loadu_ps(scratch.as_ptr().add(j));
-                let a0 = _mm256_loadu_ps(activation.as_ptr().add(elem_base + j));
-                acc0 = _mm256_fmadd_ps(w0, a0, acc0);
+            let mut is = 0usize;
+            let mut ql_offset = 0usize;
 
-                let w1 = _mm256_loadu_ps(scratch.as_ptr().add(j + 8));
-                let a1 = _mm256_loadu_ps(activation.as_ptr().add(elem_base + j + 8));
-                acc1 = _mm256_fmadd_ps(w1, a1, acc1);
+            // Process 64 elements at a time (2 groups of 32)
+            while j + 64 <= k {
+                // Get scales for this group of 64
+                let (sc1, m1) = BlockQ4_K::get_scale_min_k4(is, &scales);
+                let (sc2, m2) = BlockQ4_K::get_scale_min_k4(is + 1, &scales);
+                let d1 = _mm256_mul_ps(d, _mm256_set1_ps(sc1 as f32));
+                let dmin1 = _mm256_mul_ps(dmin, _mm256_set1_ps(m1 as f32));
+                let d2 = _mm256_mul_ps(d, _mm256_set1_ps(sc2 as f32));
+                let dmin2 = _mm256_mul_ps(dmin, _mm256_set1_ps(m2 as f32));
 
-                let w2 = _mm256_loadu_ps(scratch.as_ptr().add(j + 16));
-                let a2 = _mm256_loadu_ps(activation.as_ptr().add(elem_base + j + 16));
-                acc2 = _mm256_fmadd_ps(w2, a2, acc2);
+                // Load 32 bytes of quantized weights (64 4-bit values)
+                let qs = &block.qs[ql_offset..ql_offset + 32];
 
-                let w3 = _mm256_loadu_ps(scratch.as_ptr().add(j + 24));
-                let a3 = _mm256_loadu_ps(activation.as_ptr().add(elem_base + j + 24));
-                acc3 = _mm256_fmadd_ps(w3, a3, acc3);
+                // Load 32 bytes of activations as 8 floats each = 256 bytes total
+                // We'll process in 4 chunks of 8 floats
+                for chunk in 0..4 {
+                    let a0 = _mm256_loadu_ps(activation.as_ptr().add(elem_base + j + chunk * 8));
 
-                j += 32;
+                    // Extract low and high 4-bit values from 8 bytes
+                    let q8 = _mm_loadl_epi64(qs.as_ptr().add(chunk * 8) as *const __m128i);
+                    let q8_32 = _mm256_cvtepu8_epi32(q8);
+
+                    // Low 4 bits: q8_32 & 0x0F
+                    let q_low = _mm256_and_si256(q8_32, _mm256_set1_epi32(0x0F));
+                    // High 4 bits: (q8_32 >> 4) & 0x0F
+                    let q_high = _mm256_and_si256(_mm256_srli_epi32(q8_32, 4), _mm256_set1_epi32(0x0F));
+
+                    // Convert to f32 vectors
+                    let q_low_f = _mm256_cvtepi32_ps(q_low);
+                    let q_high_f = _mm256_cvtepi32_ps(q_high);
+
+                    // First group (low nibbles): d1 * q - dmin1
+                    let w1 = _mm256_fmadd_ps(d1, q_low_f, _mm256_sub_ps(_mm256_setzero_ps(), dmin1));
+                    acc0 = _mm256_fmadd_ps(w1, a0, acc0);
+
+                    // Second group (high nibbles): d2 * q - dmin2  
+                    let w2 = _mm256_fmadd_ps(d2, q_high_f, _mm256_sub_ps(_mm256_setzero_ps(), dmin2));
+                    acc1 = _mm256_fmadd_ps(w2, a0, acc1);
+                }
+
+                j += 64;
+                is += 2;
+                ql_offset += 32;
             }
-            while j + 8 <= k {
-                let w = _mm256_loadu_ps(scratch.as_ptr().add(j));
-                let a = _mm256_loadu_ps(activation.as_ptr().add(elem_base + j));
-                acc0 = _mm256_fmadd_ps(w, a, acc0);
-                j += 8;
-            }
+
+            // Handle remaining elements with scalar fallback
             while j < k {
-                let w = scratch[j];
+                let (sc, m) = BlockQ4_K::get_scale_min_k4(is, &scales);
+                let mut d_arr: [f32; 8] = [0.0; 8];
+                let mut dmin_arr: [f32; 8] = [0.0; 8];
+                _mm256_storeu_ps(d_arr.as_mut_ptr(), d);
+                _mm256_storeu_ps(dmin_arr.as_mut_ptr(), dmin);
+                let d_s = d_arr[0] * sc as f32;
+                let m_s = dmin_arr[0] * m as f32;
+
+                let q_byte = block.qs[ql_offset + j / 2];
+                let q_val = if j % 2 == 0 {
+                    (q_byte & 0x0F) as f32
+                } else {
+                    (q_byte >> 4) as f32
+                };
+                let w = d_s * q_val - m_s;
                 let a = activation[elem_base + j];
+
                 let mut arr: [f32; 8] = [0.0; 8];
-                std::ptr::copy_nonoverlapping(
-                    &acc0 as *const __m256 as *const f32,
-                    arr.as_mut_ptr(),
-                    8,
-                );
+                _mm256_storeu_ps(arr.as_mut_ptr(), acc2);
                 arr[0] += w * a;
-                acc0 = std::ptr::read_unaligned(arr.as_ptr() as *const __m256);
+                acc2 = _mm256_loadu_ps(arr.as_ptr());
+
                 j += 1;
+                if j % 64 == 0 { is += 2; ql_offset += 32; }
             }
         }
 
         let mut total = 0.0f32;
         for acc in [acc0, acc1, acc2, acc3] {
             let mut arr: [f32; 8] = [0.0; 8];
-            std::ptr::copy_nonoverlapping(
-                &acc as *const __m256 as *const f32,
-                arr.as_mut_ptr(),
-                8,
-            );
+            _mm256_storeu_ps(arr.as_mut_ptr(), acc);
             for v in arr {
                 total += v;
             }

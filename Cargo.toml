@@ -45,8 +45,8 @@ debug = []
 lto = true
 codegen-units = 1
 opt-level = 3
-debug = true
-strip = false
+debug = false
+strip = true
 panic = "unwind"
 
 [profile.bench]
