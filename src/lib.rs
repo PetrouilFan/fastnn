@@ -1,21 +1,21 @@
 #![allow(clippy::needless_range_loop)]
 
-mod autograd;
-mod dispatcher;
-mod io;
-mod iterator;
+pub mod autograd;
+pub mod dispatcher;
+pub mod io;
+pub mod iterator;
 pub mod kernels;
-mod llm;
-mod nn;
-mod optim;
-mod python;
-mod residual;
-mod quants;
-mod storage;
-mod storage_pool;
-mod storage_quantized;
-mod tensor;
-mod train;
+pub mod llm;
+pub mod nn;
+pub mod optim;
+pub mod python;
+pub mod residual;
+pub mod quants;
+pub mod storage;
+pub mod storage_pool;
+pub mod storage_quantized;
+pub mod tensor;
+pub mod train;
 
 pub use storage_quantized::QuantizedTensor;
 

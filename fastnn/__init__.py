@@ -205,59 +205,63 @@ class MaxPool2d:
         return_indices=False,
         ceil_mode=False,
     ):
+        # Process kernel_size
+        if isinstance(kernel_size, tuple):
+            if kernel_size[0] != kernel_size[1]:
+                raise NotImplementedError("Non-square kernel_size not supported yet")
+            kernel_size_val = kernel_size[0]
+        else:
+            kernel_size_val = kernel_size
         self.kernel_size = (
             kernel_size
             if isinstance(kernel_size, tuple)
             else (kernel_size, kernel_size)
         )
+
+        # Process stride
+        if stride is None:
+            stride_val = kernel_size_val
+        else:
+            if isinstance(stride, tuple):
+                if stride[0] != stride[1]:
+                    raise NotImplementedError("Non-square stride not supported yet")
+                stride_val = stride[0]
+            else:
+                stride_val = stride
         self.stride = stride if stride is not None else kernel_size
         if isinstance(self.stride, int):
             self.stride = (self.stride, self.stride)
+
+        # Process padding
+        if isinstance(padding, tuple):
+            if padding[0] != padding[1]:
+                raise NotImplementedError("Non-square padding not supported yet")
+            padding_val = padding[0]
+        else:
+            padding_val = padding
         self.padding = padding if isinstance(padding, tuple) else (padding, padding)
+
+        # Process dilation
+        if isinstance(dilation, tuple):
+            if dilation[0] != dilation[1]:
+                raise NotImplementedError("Non-square dilation not supported yet")
+            dilation_val = dilation[0]
+        else:
+            dilation_val = dilation
         self.dilation = (
             dilation if isinstance(dilation, tuple) else (dilation, dilation)
         )
+
         self.return_indices = return_indices
         self.ceil_mode = ceil_mode
 
+        # Create Rust MaxPool2d once
+        self.rust_maxpool = _core.MaxPool2d(kernel_size_val, stride_val, padding_val, dilation_val)
+
     def __call__(self, x):
         # x shape: (batch, channels, height, width)
-        # Use Rust implementation for performance
-        import fastnn._core as _core
-
-        # For now, only support symmetric kernel_size, stride, padding, dilation
-        # Check if they are tuples and convert to single value if possible
-        if isinstance(self.kernel_size, tuple):
-            if self.kernel_size[0] != self.kernel_size[1]:
-                raise NotImplementedError("Non-square kernel_size not supported yet")
-            kernel_size = self.kernel_size[0]
-        else:
-            kernel_size = self.kernel_size
-
-        if isinstance(self.stride, tuple):
-            if self.stride[0] != self.stride[1]:
-                raise NotImplementedError("Non-square stride not supported yet")
-            stride = self.stride[0]
-        else:
-            stride = self.stride
-
-        if isinstance(self.padding, tuple):
-            if self.padding[0] != self.padding[1]:
-                raise NotImplementedError("Non-square padding not supported yet")
-            padding = self.padding[0]
-        else:
-            padding = self.padding
-
-        if isinstance(self.dilation, tuple):
-            if self.dilation[0] != self.dilation[1]:
-                raise NotImplementedError("Non-square dilation not supported yet")
-            dilation = self.dilation[0]
-        else:
-            dilation = self.dilation
-
-        # Call the Rust implementation
-        rust_maxpool = _core.MaxPool2d(kernel_size, stride, padding, dilation)
-        return rust_maxpool(x)
+        # Use pre-created Rust implementation
+        return self.rust_maxpool(x)
 
     def train(self):
         pass

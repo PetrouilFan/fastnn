@@ -247,51 +247,36 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_strides_usize: smallvec::SmallVec<[usize; 8]> = a_strides.iter().map(|&x| x as usize).collect();
     let b_strides_usize: smallvec::SmallVec<[usize; 8]> = b_strides.iter().map(|&x| x as usize).collect();
 
-    for idx in 0..numel {
-        let a_idx = broadcast_index_decomposition(
-            idx,
-            &out_shape_usize,
-            &a_shape_usize,
-            &a_strides_usize,
-            a_storage_offset,
-        );
-        let b_idx = broadcast_index_decomposition(
-            idx,
-            &out_shape_usize,
-            &b_shape_usize,
-            &b_strides_usize,
-            b_storage_offset,
-        );
-
+    let out_usize = out_ptr as usize;
+    iter.for_each_with_index(|idx, input_ptrs| {
         unsafe {
-            // Load and convert based on dtype
             let a_val = match dtype {
-                DType::F32 => *((a_ptr as *const f32).add(a_idx)),
-                DType::F16 => half::f16::to_f32(*((a_ptr as *const half::f16).add(a_idx))),
-                DType::BF16 => half::bf16::to_f32(*((a_ptr as *const half::bf16).add(a_idx))),
+                DType::F32 => *(input_ptrs[0].as_ptr() as *const f32),
+                DType::F16 => half::f16::to_f32(*(input_ptrs[0].as_ptr() as *const half::f16)),
+                DType::BF16 => half::bf16::to_f32(*(input_ptrs[0].as_ptr() as *const half::bf16)),
                 _ => panic!("Unsupported dtype for add"),
             };
             let b_val = match dtype {
-                DType::F32 => *((b_ptr as *const f32).add(b_idx)),
-                DType::F16 => half::f16::to_f32(*((b_ptr as *const half::f16).add(b_idx))),
-                DType::BF16 => half::bf16::to_f32(*((b_ptr as *const half::bf16).add(b_idx))),
+                DType::F32 => *(input_ptrs[1].as_ptr() as *const f32),
+                DType::F16 => half::f16::to_f32(*(input_ptrs[1].as_ptr() as *const half::f16)),
+                DType::BF16 => half::bf16::to_f32(*(input_ptrs[1].as_ptr() as *const half::bf16)),
                 _ => panic!("Unsupported dtype for add"),
             };
             let sum = a_val + b_val;
             match dtype {
                 DType::F32 => {
-                    *((out_ptr as *mut f32).add(idx)) = sum;
+                    *((out_usize as *mut f32).add(idx)) = sum;
                 }
                 DType::F16 => {
-                    *((out_ptr as *mut half::f16).add(idx)) = half::f16::from_f32(sum);
+                    *((out_usize as *mut half::f16).add(idx)) = half::f16::from_f32(sum);
                 }
                 DType::BF16 => {
-                    *((out_ptr as *mut half::bf16).add(idx)) = half::bf16::from_f32(sum);
+                    *((out_usize as *mut half::bf16).add(idx)) = half::bf16::from_f32(sum);
                 }
                 _ => {}
             }
         }
-    }
+    });
 
     vec![output]
 }
@@ -518,29 +503,14 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
         b_strides.iter().map(|&x| x as usize).collect();
 
-    // Broadcast loop should always run when shapes differ or tensors are non-contiguous
-    for idx in 0..numel {
-        let a_idx = broadcast_index_decomposition(
-            idx,
-            &out_shape_usize,
-            &a_shape_usize,
-            &a_strides_usize,
-            a_storage_offset,
-        );
-        let b_idx = broadcast_index_decomposition(
-            idx,
-            &out_shape_usize,
-            &b_shape_usize,
-            &b_strides_usize,
-            b_storage_offset,
-        );
-
+    let out_usize = out_ptr as usize;
+    iter.for_each_with_index(|idx, input_ptrs| {
         unsafe {
-            let a_val = *a_ptr.add(a_idx);
-            let b_val = *b_ptr.add(b_idx);
-            *out_ptr.add(idx) = a_val - b_val;
+            let a_val = *(input_ptrs[0].as_ptr() as *const f32);
+            let b_val = *(input_ptrs[1].as_ptr() as *const f32);
+            *((out_usize as *mut f32).add(idx)) = a_val - b_val;
         }
-    }
+    });
 
     vec![output]
 }
@@ -781,28 +751,14 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
         b_strides.iter().map(|&x| x as usize).collect();
 
-    for idx in 0..numel {
-        let a_idx = broadcast_index_decomposition(
-            idx,
-            &out_shape_usize,
-            &a_shape_usize,
-            &a_strides_usize,
-            a_storage_offset,
-        );
-        let b_idx = broadcast_index_decomposition(
-            idx,
-            &out_shape_usize,
-            &b_shape_usize,
-            &b_strides_usize,
-            b_storage_offset,
-        );
-
+    let out_usize = out_ptr as usize;
+    iter.for_each_with_index(|idx, input_ptrs| {
         unsafe {
-            let a_val = *a_ptr.add(a_idx);
-            let b_val = *b_ptr.add(b_idx);
-            *out_ptr.add(idx) = a_val * b_val;
+            let a_val = *(input_ptrs[0].as_ptr() as *const f32);
+            let b_val = *(input_ptrs[1].as_ptr() as *const f32);
+            *((out_usize as *mut f32).add(idx)) = a_val * b_val;
         }
-    }
+    });
 
     vec![output]
 }
@@ -1023,28 +979,14 @@ pub unsafe fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
         }
     } else {
-        for idx in 0..numel {
-            let a_idx = broadcast_index_decomposition(
-                idx,
-                &out_shape_usize,
-                &a_shape_usize,
-                &a_strides_usize,
-                a_storage_offset,
-            );
-            let b_idx = broadcast_index_decomposition(
-                idx,
-                &out_shape_usize,
-                &b_shape_usize,
-                &b_strides_usize,
-                b_storage_offset,
-            );
-
+        let out_usize = out_ptr as usize;
+        iter.for_each_with_index(|idx, input_ptrs| {
             unsafe {
-                let a_val = *a_ptr.add(a_idx);
-                let b_val = *b_ptr.add(b_idx);
-                *out_ptr.add(idx) = a_val / b_val;
+                let a_val = *(input_ptrs[0].as_ptr() as *const f32);
+                let b_val = *(input_ptrs[1].as_ptr() as *const f32);
+                *((out_usize as *mut f32).add(idx)) = a_val / b_val;
             }
-        }
+        });
     }
 
     vec![output]
