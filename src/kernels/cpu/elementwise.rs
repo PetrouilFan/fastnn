@@ -3046,7 +3046,8 @@ pub unsafe fn minimum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b = args[1];
     let out_shape = broadcast_shapes_simple(&a.shape(), &b.shape());
     let numel = out_shape.iter().product::<i64>() as usize;
-    let mut output = Tensor::zeros(out_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(out_shape.clone(), a.dtype(), a.device());
+
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
