@@ -1,23 +1,25 @@
 use crate::autograd::Node;
 use crate::tensor::Tensor;
+use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 struct BackwardWorkspace {
-    grads: HashMap<usize, Tensor>,
-    node_deps: HashMap<usize, usize>,
+    grads: FxHashMap<usize, Tensor>,
+    node_deps: FxHashMap<usize, usize>,
     queue: VecDeque<(Arc<dyn Node>, usize)>,
-    visited: HashSet<usize>,
+    visited: FxHashSet<usize>,
 }
 
 impl BackwardWorkspace {
     fn new() -> Self {
         Self {
-            grads: HashMap::new(),
-            node_deps: HashMap::new(),
+            grads: FxHashMap::default(),
+            node_deps: FxHashMap::default(),
             queue: VecDeque::new(),
-            visited: HashSet::new(),
+            visited: FxHashSet::default(),
         }
     }
 
