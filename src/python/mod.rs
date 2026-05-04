@@ -117,6 +117,7 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tensor_factory, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_from_list, py)?)?;
     m.add_function(wrap_pyfunction!(zeros, py)?)?;
+    m.add_function(wrap_pyfunction!(empty, py)?)?;
     m.add_function(wrap_pyfunction!(ones, py)?)?;
     m.add_function(wrap_pyfunction!(full, py)?)?;
     m.add_function(wrap_pyfunction!(arange, py)?)?;
