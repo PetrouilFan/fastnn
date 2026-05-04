@@ -1010,6 +1010,11 @@ fn register_kernels() {
         rms_norm_kernel as KernelFn,
     );
     register(
+        "fused_rms_norm_gelu",
+        DispatchKey::Cpu,
+        fused_rms_norm_gelu_kernel as KernelFn,
+    );
+    register(
         "fused_conv_bn_relu",
         DispatchKey::Cpu,
         fused_conv_bn_relu_kernel as KernelFn,
