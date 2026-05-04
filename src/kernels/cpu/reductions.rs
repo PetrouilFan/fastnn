@@ -762,7 +762,7 @@ pub fn log_softmax_last_dim_fused(x: &Tensor, dim_size: usize) -> Tensor {
     let x_ptr = x.data_ptr() as *const f32;
     let numel = x.numel() as usize;
 
-    let mut output = Tensor::zeros(x_shape.to_vec(), x.dtype(), x.device());
+    let mut output = Tensor::empty(x_shape.to_vec(), x.dtype(), x.device());
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
