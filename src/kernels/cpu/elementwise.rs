@@ -3105,13 +3105,56 @@ pub unsafe fn minimum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 pub unsafe fn leaky_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let slope = args[1].item();
-    let mut output = x.clone();
-    let numel = output.inner.numel() as usize;
-    let ptr = output.data_ptr_f32_mut();
+    let numel = x.numel() as usize;
+
+    // Fast path: contiguous + large tensor
+    if x.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        *(out_usize as *mut f32).add(i) = if v > 0.0 { v } else { v * slope };
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    *out_ptr.add(i) = if v > 0.0 { v } else { v * slope };
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback: TensorIterator for non-contiguous / small tensors
+    let iter = TensorIterator::build_for_unary(x);
+    let output_shape = iter.output_shape.to_vec();
+    let mut output = Tensor::empty(output_shape, x.dtype(), x.device());
+    let numel = output.numel() as usize;
+    let a_ptr = x.data_ptr() as *const f32;
+    let out_ptr = output.data_ptr_f32_mut();
+
     for i in 0..numel {
         unsafe {
-            let v = *ptr.add(i);
-            *ptr.add(i) = if v > 0.0 { v } else { v * slope };
+            let v = *a_ptr.add(i);
+            *out_ptr.add(i) = if v > 0.0 { v } else { v * slope };
         }
     }
     vec![output]
@@ -3122,9 +3165,48 @@ pub unsafe fn prelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let weight = args[1];
     let w_data = weight.as_f32_slice();
     let x_shape = x.shape();
-    let numel = x.inner.numel() as usize;
+    let numel = x.numel() as usize;
     let ndim = x.ndim();
     let w_numel = w_data.len();
+
+    // Fast path: contiguous + large tensor + single weight
+    if x.is_contiguous() && numel > 2048 && w_numel == 1 {
+        let w = w_data[0];
+        let mut output = Tensor::empty(x_shape.to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        *(out_usize as *mut f32).add(i) = if v > 0.0 { v } else { v * w };
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    *out_ptr.add(i) = if v > 0.0 { v } else { v * w };
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback
     let mut output = x.clone();
     let ptr = output.data_ptr_f32_mut();
     let mut indices = vec![0i64; ndim];
@@ -3154,6 +3236,51 @@ pub unsafe fn softplus_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let beta = args[1].item();
     let threshold = args[2].item();
+    let numel = x.numel() as usize;
+
+    // Fast path: contiguous + large tensor
+    if x.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        let bx = beta * v;
+                        *(out_usize as *mut f32).add(i) = if bx > threshold {
+                            v
+                        } else {
+                            (1.0_f32 + (bx).exp()).ln() / beta
+                        };
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    let bx = beta * v;
+                    *out_ptr.add(i) = if bx > threshold { v } else { (1.0_f32 + (bx).exp()).ln() / beta };
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback
     let numel = x.inner.numel() as usize;
     let mut output_data = vec![0.0f32; numel];
     let x_data = x.as_f32_slice();
@@ -3170,6 +3297,47 @@ pub unsafe fn softplus_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 pub unsafe fn hardswish_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
+    let numel = x.numel() as usize;
+
+    // Fast path: contiguous + large tensor
+    if x.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        let relu6 = v.clamp(0.0, 6.0);
+                        *(out_usize as *mut f32).add(i) = v * relu6 / 6.0;
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    let relu6 = v.clamp(0.0, 6.0);
+                    *out_ptr.add(i) = v * relu6 / 6.0;
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback
     let numel = x.inner.numel() as usize;
     let mut output_data = vec![0.0f32; numel];
     let x_data = x.as_f32_slice();
@@ -3184,6 +3352,45 @@ pub unsafe fn hardswish_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 pub unsafe fn lt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let threshold = args[1].item();
+    let numel = x.numel() as usize;
+
+    // Fast path: contiguous + large tensor
+    if x.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        *(out_usize as *mut f32).add(i) = if v < threshold { 1.0 } else { 0.0 };
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    *out_ptr.add(i) = if v < threshold { 1.0 } else { 0.0 };
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback
     let numel = x.inner.numel() as usize;
     let x_data = x.as_f32_slice();
     let mut output_data = vec![0.0f32; numel];
@@ -3196,6 +3403,45 @@ pub unsafe fn lt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 pub unsafe fn add_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let scalar = args[1].item();
+    let numel = x.numel() as usize;
+
+    // Fast path: contiguous + large tensor
+    if x.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        *(out_usize as *mut f32).add(i) = v + scalar;
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    *out_ptr.add(i) = v + scalar;
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback
     let numel = x.inner.numel() as usize;
     let x_data = x.as_f32_slice();
     let mut output_data = vec![0.0f32; numel];
@@ -3208,6 +3454,45 @@ pub unsafe fn add_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 pub unsafe fn div_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let scalar = args[1].item();
+    let numel = x.numel() as usize;
+
+    // Fast path: contiguous + large tensor
+    if x.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        *(out_usize as *mut f32).add(i) = v / scalar;
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    *out_ptr.add(i) = v / scalar;
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback
     let numel = x.inner.numel() as usize;
     let x_data = x.as_f32_slice();
     let mut output_data = vec![0.0f32; numel];
@@ -3219,6 +3504,45 @@ pub unsafe fn div_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 pub unsafe fn logical_not_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
+    let numel = x.numel() as usize;
+
+    // Fast path: contiguous + large tensor
+    if x.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        *(out_usize as *mut f32).add(i) = if v == 0.0 { 1.0 } else { 0.0 };
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    *out_ptr.add(i) = if v == 0.0 { 1.0 } else { 0.0 };
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback
     let numel = x.inner.numel() as usize;
     let x_data = x.as_f32_slice();
     let mut output_data = vec![0.0f32; numel];
@@ -3231,6 +3555,45 @@ pub unsafe fn logical_not_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 pub unsafe fn elu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let alpha = args[1].item();
+    let numel = x.numel() as usize;
+
+    // Fast path: contiguous + large tensor
+    if x.is_contiguous() && numel > 2048 {
+        let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+        let a_ptr = x.data_ptr_f32();
+        let out_ptr = output.data_ptr_f32_mut();
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
+            let a_usize = a_ptr as usize;
+            let out_usize = out_ptr as usize;
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = ((chunk_idx + 1) * chunk_size).min(numel);
+                for i in start..end {
+                    unsafe {
+                        let v = *(a_usize as *const f32).add(i);
+                        *(out_usize as *mut f32).add(i) = if v > 0.0 { v } else { alpha * (v.exp() - 1.0) };
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let v = *a_ptr.add(i);
+                    *out_ptr.add(i) = if v > 0.0 { v } else { alpha * (v.exp() - 1.0) };
+                }
+            }
+        }
+        return vec![output];
+    }
+
+    // Fallback
     let numel = x.inner.numel() as usize;
     let x_data = x.as_f32_slice();
     let mut output_data = vec![0.0f32; numel];
