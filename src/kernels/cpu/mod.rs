@@ -999,6 +999,11 @@ fn register_kernels() {
         DispatchKey::Cpu,
         batch_norm_kernel as KernelFn,
     );
+    register(
+        "rms_norm",
+        DispatchKey::Cpu,
+        rms_norm_kernel as KernelFn,
+    );
     register("embedding", DispatchKey::Cpu, embedding_kernel as KernelFn);
     register("zeros", DispatchKey::Cpu, zeros_kernel as KernelFn);
     register("ones", DispatchKey::Cpu, ones_kernel as KernelFn);
