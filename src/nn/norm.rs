@@ -340,6 +340,7 @@ pub struct RMSNorm {
     pub weight: Tensor,
     pub eps: f32,
     pub normalized_shape: i64,
+    eps_scalar: Tensor,
 }
 
 impl RMSNorm {
@@ -355,25 +356,19 @@ impl RMSNorm {
             weight: w,
             eps,
             normalized_shape,
+            eps_scalar: Tensor::from_scalar(eps),
         }
     }
 }
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let x_sq = x.mul(x);
-        let ndim = x.ndim();
-        let norm_dim = ndim as i32 - 1;
-        let mean_sq = x_sq.mean(norm_dim, true);
-        let rms = mean_sq.add_scalar(self.eps).sqrt();
-        let x_norm = x.div(&rms);
-        let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
-        for _ in 0..ndim - 1 {
-            weight_shape.push(1);
-        }
-        weight_shape.push(self.normalized_shape);
-        let weight_reshaped = self.weight.reshape(weight_shape.into_vec());
-        x_norm.mul(&weight_reshaped)
+        let result = crate::dispatcher::dispatch(
+            "rms_norm",
+            crate::dispatcher::DispatchKey::Cpu,
+            &[x, &self.weight, &self.eps_scalar],
+        );
+        result[0].clone()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
