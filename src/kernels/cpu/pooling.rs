@@ -47,7 +47,7 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_height = (in_height + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
     let out_width = (in_width + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
-    let output = Tensor::zeros(
+    let output = Tensor::empty(
         vec![batch_size, channels, out_height, out_width],
         x.dtype(),
         x.device(),
