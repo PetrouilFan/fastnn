@@ -2669,7 +2669,7 @@ pub unsafe fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         .chain(std::iter::once(&embedding_dim))
         .copied()
         .collect();
-    let mut output = Tensor::zeros(output_shape.clone(), weight.dtype(), weight.device());
+    let mut output = Tensor::empty(output_shape.clone(), weight.dtype(), weight.device());
 
     let indices_ptr = indices.data_ptr() as *const f32;
     let weight_ptr = weight.data_ptr() as *const f32;
