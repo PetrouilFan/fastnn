@@ -1004,6 +1004,16 @@ fn register_kernels() {
         DispatchKey::Cpu,
         rms_norm_kernel as KernelFn,
     );
+    register(
+        "fused_conv_bn_relu",
+        DispatchKey::Cpu,
+        fused_conv_bn_relu_kernel as KernelFn,
+    );
+    register(
+        "fused_conv_bn_gelu",
+        DispatchKey::Cpu,
+        fused_conv_bn_gelu_kernel as KernelFn,
+    );
     register("embedding", DispatchKey::Cpu, embedding_kernel as KernelFn);
     register("zeros", DispatchKey::Cpu, zeros_kernel as KernelFn);
     register("ones", DispatchKey::Cpu, ones_kernel as KernelFn);
