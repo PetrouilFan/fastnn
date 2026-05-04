@@ -2768,7 +2768,7 @@ pub unsafe fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
 
-    let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
+    let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
     let numel = output_shape.iter().product::<i64>() as usize;
     let a_ptr = a.data_ptr() as *const f32;
