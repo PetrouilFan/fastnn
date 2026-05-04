@@ -41,6 +41,19 @@ fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTe
 
 #[pyfunction]
 #[pyo3(signature = (shape, dtype = None, device = None))]
+fn empty(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
+    let dtype = dtype
+        .and_then(|s| DType::from_str_label(&s))
+        .unwrap_or(DType::F32);
+    let device = device
+        .as_ref()
+        .and_then(|s| Device::from_str_label(s))
+        .unwrap_or_else(get_default_device);
+    PyTensor::from_tensor(Tensor::empty(shape, dtype, device))
+}
+
+#[pyfunction]
+#[pyo3(signature = (shape, dtype = None, device = None))]
 fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype
         .and_then(|s| DType::from_str_label(&s))
