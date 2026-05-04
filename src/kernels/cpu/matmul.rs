@@ -1145,8 +1145,10 @@ pub unsafe fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let batch_size = batch_size as usize;
     let in_features = in_features as usize;
     let out_features = out_features as usize;
-    let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
-    let coeff = 0.044715f32;
+    const SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    const GELU_COEFF: f32 = 0.044715;
+    let sqrt_2_over_pi = SQRT_2_OVER_PI;
+    let coeff = GELU_COEFF;
 
     let use_blas = x.is_contiguous()
         && w.is_contiguous()

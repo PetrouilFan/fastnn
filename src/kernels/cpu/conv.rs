@@ -15,6 +15,9 @@ use crate::tensor::Tensor;
 use std::sync::Arc;
 use super::*;
 
+const GELU_SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+const GELU_COEFF: f32 = 0.044715;
+
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn im2col_kernel(
@@ -1220,8 +1223,11 @@ pub unsafe fn fused_conv_bn_3x3_direct(
     in_height: usize,
     in_width: usize,
     out_height: usize,
-    out_width: usize,
+out_width: usize,
 ) -> Tensor {
+    const GELU_SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    const GELU_COEFF: f32 = 0.044715;
+    
     let output_shape = vec![
         batch_size as i64,
         out_channels as i64,
@@ -1243,7 +1249,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
     let bn_weight_ptr = bn_weight.data_ptr() as *const f32;
     let bn_bias_ptr = bn_bias.data_ptr() as *const f32;
     let bn_mean_ptr = bn_running_mean.data_ptr() as *const f32;
-    let bn_var_ptr = bn_running_var.data_ptr() as *const f32;
+     let bn_var_ptr = bn_running_var.data_ptr() as *const f32;
 
     let bias_scalar: Option<f32> = bias.and_then(|b| if b.numel() == 1 { Some(b.item()) } else { None });
     let bias_data: Option<Vec<f32>> = bias.filter(|b| b.numel() > 1).map(|b| {
@@ -3300,7 +3306,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             let var = unsafe { *bn_var_ptr.add(oc_i) };
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
-                            v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                             let out_idx = out_idx_base + i * spatial_stride;
                             unsafe {
                                 *out_ptr.add(out_idx) = v;
@@ -3351,7 +3357,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             let var = unsafe { *bn_var_ptr.add(oc_i) };
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
-                            v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                             let out_idx = out_idx_base + i * spatial_stride;
                             unsafe { *out_ptr.add(out_idx) = v; }
                         }
@@ -3364,7 +3370,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             let var = unsafe { *bn_var_ptr.add(oc_i) };
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
-                            v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                             let out_idx = out_idx_base + (4 + i) * spatial_stride;
                             unsafe { *out_ptr.add(out_idx) = v; }
                         }
@@ -3386,7 +3392,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             let var = unsafe { *bn_var_ptr.add(oc_i) };
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
-                            v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                             let out_idx = ((n * out_channels + oc_i) * out_height + oh) * out_width + ow;
                             unsafe { *out_ptr.add(out_idx) = v; }
                         }
@@ -3408,7 +3414,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                     let var = unsafe { *bn_var_ptr.add(oc) };
                     let inv_std = 1.0 / (var + bn_eps).sqrt();
                     v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc) } + unsafe { *bn_bias_ptr.add(oc) };
-                    v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                    v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                     let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
                     unsafe { *out_ptr.add(out_idx) = v; }
                     oc += 1;
@@ -3484,7 +3490,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             let var = unsafe { *bn_var_ptr.add(oc_i) };
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
-                            v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                             let out_idx = out_idx_base + i * spatial_stride;
                             unsafe {
                                 *out_ptr.add(out_idx) = v;
@@ -3535,7 +3541,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             let var = unsafe { *bn_var_ptr.add(oc_i) };
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
-                            v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                             let out_idx = out_idx_base + i * spatial_stride;
                             unsafe { *out_ptr.add(out_idx) = v; }
                         }
@@ -3548,7 +3554,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             let var = unsafe { *bn_var_ptr.add(oc_i) };
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
-                            v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                             let out_idx = out_idx_base + (4 + i) * spatial_stride;
                             unsafe { *out_ptr.add(out_idx) = v; }
                         }
@@ -3570,7 +3576,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             let var = unsafe { *bn_var_ptr.add(oc_i) };
                             let inv_std = 1.0 / (var + bn_eps).sqrt();
                             v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
-                            v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                             let out_idx = ((n * out_channels + oc_i) * out_height + oh) * out_width + ow;
                             unsafe { *out_ptr.add(out_idx) = v; }
                         }
@@ -3592,7 +3598,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                     let var = unsafe { *bn_var_ptr.add(oc) };
                     let inv_std = 1.0 / (var + bn_eps).sqrt();
                     v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc) } + unsafe { *bn_bias_ptr.add(oc) };
-                    v = v * 0.5 * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh()); // GELU activation
+                    v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
                     let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
                     unsafe { *out_ptr.add(out_idx) = v; }
                     oc += 1;
