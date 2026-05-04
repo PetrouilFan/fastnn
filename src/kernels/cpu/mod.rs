@@ -995,6 +995,11 @@ fn register_kernels() {
         layer_norm_kernel as KernelFn,
     );
     register(
+        "fused_layer_norm_gelu",
+        DispatchKey::Cpu,
+        fused_layer_norm_gelu_kernel as KernelFn,
+    );
+    register(
         "batch_norm",
         DispatchKey::Cpu,
         batch_norm_kernel as KernelFn,
