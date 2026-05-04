@@ -83,9 +83,11 @@ impl TransformerBlock {
         // Layer 2: Feed-forward with residual connection and dropout
         let x_norm2 = self.norm2.forward(&x);
 
-        // Fused feed-forward: linear -> gelu -> linear
-        let ff_hidden = self.ff1.forward(&x_norm2);
-        let ff_gelu = ff_hidden.gelu();
+        // Fused feed-forward: linear -> gelu
+        let ff_gelu = x_norm2.fused_linear_gelu(
+            &self.ff1.weight,
+            self.ff1.bias.as_ref(),
+        );
         let ff_out = self.ff2.forward(&ff_gelu);
         let ff_dropped = self.dropout.forward(&ff_out);
 
