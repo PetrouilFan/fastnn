@@ -83,7 +83,7 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     #[cfg(feature = "parallel")]
     {
-        if total_blocks > 256 && dim_size > 32 {
+        if total_blocks > 64 && dim_size > 8 {
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
             let results: Vec<f32> = (0..total_blocks)
                 .into_par_iter()
@@ -198,7 +198,7 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     #[cfg(feature = "parallel")]
     {
-        if total_blocks > 256 && dim_size > 32 {
+        if total_blocks > 64 && dim_size > 8 {
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
             let results: Vec<f32> = (0..total_blocks)
                 .into_par_iter()
