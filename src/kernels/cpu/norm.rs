@@ -157,6 +157,100 @@ pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output, mean, var, x_hat]
 }
 
+/// Fused RMSNorm kernel: single-pass computation combining x^2, mean, add(eps), sqrt, div, mul(weight).
+/// Eliminates 6+ intermediate operations and allocations.
+/// Returns [output].
+pub unsafe fn rms_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let weight = if args.len() > 1 && args[1].numel() > 0 {
+        Some(args[1])
+    } else {
+        None
+    };
+    let eps = if args.len() > 2 {
+        args[2].item()
+    } else {
+        1e-5
+    };
+
+    let x_shape = x.shape();
+    let ndim = x_shape.len();
+    let norm_dim = x_shape[ndim - 1] as usize;
+
+    // Number of outer dimensions (product of all dims except last)
+    let outer_size: usize = x_shape[..ndim - 1].iter().map(|&d| d as usize).product();
+    let total = outer_size * norm_dim;
+
+    let x_data = x.as_f32_slice();
+    let mut output_data = vec![0.0f32; total];
+
+    let w_data = weight.map(|w| w.as_f32_slice());
+    let nd = norm_dim;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let x_usize = x_data.as_ptr() as usize;
+        let out_usize = output_data.as_mut_ptr() as usize;
+
+        (0..outer_size).into_par_iter().for_each(|row| {
+            let base = row * nd;
+
+            // Compute mean of squares
+            let mut sum_sq = 0.0f32;
+            for j in 0..nd {
+                unsafe {
+                    let val = *((x_usize + (base + j) * 4) as *const f32);
+                    sum_sq += val * val;
+                }
+            }
+            let mean_sq = sum_sq / nd as f32;
+            let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+
+            // Normalize and apply weight in one pass
+            for j in 0..nd {
+                unsafe {
+                    let val = *((x_usize + (base + j) * 4) as *const f32);
+                    let mut out_val = val * inv_rms;
+                    if let Some(w) = w_data {
+                        out_val *= w[j];
+                    }
+                    *((out_usize + (base + j) * 4) as *mut f32) = out_val;
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for row in 0..outer_size {
+            let base = row * nd;
+
+            // Compute mean of squares
+            let mut sum_sq = 0.0f32;
+            for j in 0..nd {
+                let val = x_data[base + j];
+                sum_sq += val * val;
+            }
+            let mean_sq = sum_sq / nd as f32;
+            let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+
+            // Normalize and apply weight in one pass
+            for j in 0..nd {
+                let val = x_data[base + j];
+                let mut out_val = val * inv_rms;
+                if let Some(w) = w_data {
+                    out_val *= w[j];
+                }
+                output_data[base + j] = out_val;
+            }
+        }
+    }
+
+    let output = Tensor::from_vec(output_data, x_shape.clone());
+    vec![output]
+}
+
 pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let weight = if args.len() > 1 && args[1].numel() > 0 {
