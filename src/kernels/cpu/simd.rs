@@ -2637,3 +2637,49 @@ pub unsafe fn gelu_parallel_neon(
         }
     }
 
+
+#[cfg(test)]
+/// Reference scalar matmul for a single batch: C = A @ B
+/// A is [m, k], B is [k, n], C is [m, n]
+pub fn reference_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    let mut c = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for kk in 0..k {
+                sum += a[i * k + kk] * b[kk * n + j];
+            }
+            c[i * n + j] = sum;
+        }
+    }
+    c
+}
+
+#[cfg(test)]
+/// Reference scalar matmul with explicit strides
+pub fn reference_matmul_strided(
+    a: &[f32],
+    b: &[f32],
+    _batch: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    a_batch_stride: usize,
+    a_s0: usize,
+    a_s1: usize,
+    b_batch_stride: usize,
+    b_s0: usize,
+    b_s1: usize,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for kk in 0..k {
+                sum += a[i * a_s0 + kk * a_s1] * b[kk * b_s0 + j * b_s1];
+            }
+            out[i * n + j] = sum;
+        }
+    }
+    out
+}

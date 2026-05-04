@@ -222,11 +222,8 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_binary(a, b);
     let output_shape = iter.output_shape.to_vec();
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
-    let numel = output_shape.iter().product::<i64>() as usize;
 
     // Get raw byte pointers
-    let a_ptr = a.data_ptr();
-    let b_ptr = b.data_ptr();
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
@@ -234,21 +231,6 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr();
-
-    // Prepare shape/stride info for broadcasting
-    let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
-    let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
-    let out_shape = output_shape.clone();
-    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
-    let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
-    let a_storage_offset = a.inner.storage_offset as usize;
-    let b_storage_offset = b.inner.storage_offset as usize;
-
-    let out_shape_usize: smallvec::SmallVec<[usize; 8]> = out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: smallvec::SmallVec<[usize; 8]> = a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: smallvec::SmallVec<[usize; 8]> = b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: smallvec::SmallVec<[usize; 8]> = a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: smallvec::SmallVec<[usize; 8]> = b_strides.iter().map(|&x| x as usize).collect();
 
     let out_usize = out_ptr as usize;
     iter.for_each_with_index(|idx, input_ptrs| {
@@ -473,10 +455,6 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_shape = iter.output_shape.to_vec();
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-    let b_ptr = b.data_ptr() as *const f32;
-
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
@@ -484,27 +462,6 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-    let a_shape: Vec<i64> = a.inner.sizes.iter().copied().collect();
-    let b_shape: Vec<i64> = b.inner.sizes.iter().copied().collect();
-    let out_shape = output_shape.clone();
-
-    let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
-    let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
-    let a_storage_offset = a.inner.storage_offset as usize;
-    let b_storage_offset = b.inner.storage_offset as usize;
-
-    // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
-    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
-        out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
-        a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
-        b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
-        a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
-        b_strides.iter().map(|&x| x as usize).collect();
 
     let out_usize = out_ptr as usize;
     iter.for_each_with_index(|idx, input_ptrs| {
@@ -721,9 +678,9 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-    let b_ptr = b.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
+    let _b_ptr = b.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -739,19 +696,19 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
     let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
-    let a_storage_offset = a.inner.storage_offset as usize;
-    let b_storage_offset = b.inner.storage_offset as usize;
+    let _a_storage_offset = a.inner.storage_offset as usize;
+    let _b_storage_offset = b.inner.storage_offset as usize;
 
     // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
-    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+    let _out_shape_usize: smallvec::SmallVec<[usize; 8]> =
         out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+    let _a_shape_usize: smallvec::SmallVec<[usize; 8]> =
         a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+    let _b_shape_usize: smallvec::SmallVec<[usize; 8]> =
         b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+    let _a_strides_usize: smallvec::SmallVec<[usize; 8]> =
         a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+    let _b_strides_usize: smallvec::SmallVec<[usize; 8]> =
         b_strides.iter().map(|&x| x as usize).collect();
 
     let out_usize = out_ptr as usize;
@@ -775,9 +732,9 @@ pub unsafe fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-    let b_ptr = b.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
+    let _b_ptr = b.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -793,19 +750,19 @@ pub unsafe fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let a_strides: Vec<i64> = a.inner.strides.iter().copied().collect();
     let b_strides: Vec<i64> = b.inner.strides.iter().copied().collect();
-    let a_storage_offset = a.inner.storage_offset as usize;
-    let b_storage_offset = b.inner.storage_offset as usize;
+    let _a_storage_offset = a.inner.storage_offset as usize;
+    let _b_storage_offset = b.inner.storage_offset as usize;
 
     // Convert to usize for the helper function (use SmallVec to avoid heap alloc)
-    let out_shape_usize: smallvec::SmallVec<[usize; 8]> =
+    let _out_shape_usize: smallvec::SmallVec<[usize; 8]> =
         out_shape.iter().map(|&x| x as usize).collect();
-    let a_shape_usize: smallvec::SmallVec<[usize; 8]> =
+    let _a_shape_usize: smallvec::SmallVec<[usize; 8]> =
         a_shape.iter().map(|&x| x as usize).collect();
-    let b_shape_usize: smallvec::SmallVec<[usize; 8]> =
+    let _b_shape_usize: smallvec::SmallVec<[usize; 8]> =
         b_shape.iter().map(|&x| x as usize).collect();
-    let a_strides_usize: smallvec::SmallVec<[usize; 8]> =
+    let _a_strides_usize: smallvec::SmallVec<[usize; 8]> =
         a_strides.iter().map(|&x| x as usize).collect();
-    let b_strides_usize: smallvec::SmallVec<[usize; 8]> =
+    let _b_strides_usize: smallvec::SmallVec<[usize; 8]> =
         b_strides.iter().map(|&x| x as usize).collect();
 
     // Check if broadcasting is needed - only use parallel path when shapes are equal
@@ -1003,8 +960,8 @@ pub unsafe fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -1172,8 +1129,8 @@ pub unsafe fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -1298,8 +1255,8 @@ pub unsafe fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -1421,8 +1378,8 @@ pub unsafe fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -1544,8 +1501,8 @@ pub unsafe fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -1673,7 +1630,7 @@ pub unsafe fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 panic!()
             };
             let out_data = Arc::make_mut(&mut cpu_storage.data);
-            let a_ptr = a.data_ptr() as *const f32;
+            let _a_ptr = a.data_ptr() as *const f32;
             let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
             #[cfg(feature = "parallel")]
@@ -1749,8 +1706,8 @@ pub unsafe fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let iter = TensorIterator::build_for_unary(a);
     let output_shape = iter.output_shape.to_vec();
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -1780,9 +1737,9 @@ pub unsafe fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-    let b_ptr = b.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
+    let _b_ptr = b.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2017,9 +1974,9 @@ pub unsafe fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-    let b_ptr = b.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
+    let _b_ptr = b.data_ptr() as *const f32;
     let c_ptr = c.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
@@ -2217,8 +2174,8 @@ pub unsafe fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2349,8 +2306,8 @@ pub unsafe fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2471,8 +2428,8 @@ pub unsafe fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2589,8 +2546,8 @@ pub unsafe fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2717,8 +2674,8 @@ pub unsafe fn clamp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2770,8 +2727,8 @@ pub unsafe fn pow_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2823,8 +2780,8 @@ pub unsafe fn gt_scalar_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -2921,8 +2878,8 @@ pub unsafe fn sign_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
