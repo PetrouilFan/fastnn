@@ -2369,7 +2369,7 @@ pub unsafe fn conv1d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let l_out = ((l_in + 2 * padding - dilation * (kernel_l - 1) - 1) / stride) + 1;
     let output_shape = vec![batch, out_channels, l_out];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
 
     let x_data = x.as_f32_slice();
     let w_data = weight.as_f32_slice();
