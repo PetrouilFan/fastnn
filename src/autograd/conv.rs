@@ -51,7 +51,7 @@ impl Node for Conv2dBackward {
         let kernel_w = weight_shape[3];
 
         let input_shape = input.shape();
-        let _batch_size = input_shape[0];
+        let batch_size = input_shape[0];
         let in_channels = input_shape[1];
         let in_h = input_shape[2];
         let in_w = input_shape[3];
