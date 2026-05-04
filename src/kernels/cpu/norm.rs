@@ -567,3 +567,128 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+
+/// Fused layer norm + GELU: single-pass with GELU activation.
+/// Returns [output].
+pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let weight = if args.len() > 1 && args[1].numel() > 0 {
+        Some(args[1])
+    } else {
+        None
+    };
+    let bias = if args.len() > 2 && args[2].numel() > 0 {
+        Some(args[2])
+    } else {
+        None
+    };
+    let eps = if args.len() > 3 { args[3].item() } else { 1e-5 };
+
+    let x_shape = x.shape();
+    let ndim = x_shape.len();
+    let norm_dim = x_shape[ndim - 1] as usize;
+
+    let outer_size: usize = x_shape[..ndim - 1].iter().map(|&d| d as usize).product();
+    let total = outer_size * norm_dim;
+
+    let x_data = x.as_f32_slice();
+    let mut output_data = vec![0.0f32; total];
+
+    let w_data = weight.map(|w| w.as_f32_slice());
+    let b_data = bias.map(|b| b.as_f32_slice());
+
+    const SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    const GELU_COEFF: f32 = 0.044715;
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let x_usize = x_data.as_ptr() as usize;
+        let out_usize = output_data.as_mut_ptr() as usize;
+
+        (0..outer_size).into_par_iter().for_each(|row| {
+            let base = row * norm_dim;
+
+            // Compute mean
+            let mut sum = 0.0f32;
+            for j in 0..norm_dim {
+                unsafe {
+                    sum += *((x_usize as *const f32).add(base + j));
+                }
+            }
+            let mean = sum / norm_dim as f32;
+
+            // Compute variance
+            let mut sum_sq = 0.0f32;
+            for j in 0..norm_dim {
+                unsafe {
+                    let diff = *((x_usize as *const f32).add(base + j)) - mean;
+                    sum_sq += diff * diff;
+                }
+            }
+            let var = sum_sq / norm_dim as f32;
+            let inv_std = 1.0 / (var + eps).sqrt();
+
+            // Normalize, apply weight/bias, then GELU
+            for j in 0..norm_dim {
+                unsafe {
+                    let val = *((x_usize as *const f32).add(base + j));
+                    let xn = (val - mean) * inv_std;
+                    let mut out_val = xn;
+                    if let Some(w) = w_data {
+                        out_val *= w[j];
+                    }
+                    if let Some(b) = b_data {
+                        out_val += b[j];
+                    }
+                    // GELU activation
+                    let x3 = out_val * out_val * out_val;
+                    let t = (SQRT_2_OVER_PI * (out_val + GELU_COEFF * x3)).tanh();
+                    let gelu = 0.5 * out_val * (1.0 + t);
+                    *((out_usize as *mut f32).add(base + j)) = gelu;
+                }
+            }
+        });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for row in 0..outer_size {
+            let base = row * norm_dim;
+
+            // Compute mean
+            let mut sum = 0.0f32;
+            for j in 0..norm_dim {
+                sum += x_data[base + j];
+            }
+            let mean = sum / norm_dim as f32;
+
+            // Compute variance
+            let mut sum_sq = 0.0f32;
+            for j in 0..norm_dim {
+                let diff = x_data[base + j] - mean;
+                sum_sq += diff * diff;
+            }
+            let var = sum_sq / norm_dim as f32;
+            let inv_std = 1.0 / (var + eps).sqrt();
+
+            // Normalize, apply weight/bias, then GELU
+            for j in 0..norm_dim {
+                let xn = (x_data[base + j] - mean) * inv_std;
+                let mut out_val = xn;
+                if let Some(w) = w_data {
+                    out_val *= w[j];
+                }
+                if let Some(b) = b_data {
+                    out_val += b[j];
+                }
+                // GELU activation
+                let x3 = out_val * out_val * out_val;
+                let t = (SQRT_2_OVER_PI * (out_val + GELU_COEFF * x3)).tanh();
+                output_data[base + j] = 0.5 * out_val * (1.0 + t);
+            }
+        }
+    }
+
+    let mut output_shape = x_shape.to_vec();
+    vec![Tensor::from_vec(output_data, output_shape)]
+}
