@@ -1459,4 +1459,3 @@ pub unsafe fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
     }
     sum
 }
-
