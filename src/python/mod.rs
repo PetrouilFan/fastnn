@@ -183,6 +183,8 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Conv3d>()?;
     m.add_class::<ResidualBlock>()?;
     m.add_class::<FusedConvBn>()?;
+    m.add_class::<FusedConvBnRelu>()?;
+    m.add_class::<FusedConvBnGelu>()?;
     m.add_class::<LayerNorm>()?;
     m.add_class::<BatchNorm1d>()?;
     m.add_class::<RMSNorm>()?;
