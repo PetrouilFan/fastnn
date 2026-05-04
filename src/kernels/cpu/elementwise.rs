@@ -31,7 +31,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if dtype == DType::F32 && a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+    if dtype == DType::F32 && a_contig && b_contig && a_shape == b_shape  {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
@@ -276,7 +276,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+    if a_contig && b_contig && a_shape == b_shape  {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
@@ -485,7 +485,7 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_contig = b.is_contiguous();
     let a_numel = a.inner.numel() as usize;
 
-    if a_contig && b_contig && a_shape == b_shape && a_numel > 2048 {
+    if a_contig && b_contig && a_shape == b_shape  {
         let output_shape = a_shape.to_vec();
         let numel = a_numel;
 
