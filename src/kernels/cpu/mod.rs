@@ -885,6 +885,11 @@ fn register_kernels() {
     register("tanh", DispatchKey::Cpu, tanh_kernel as KernelFn);
     register("silu", DispatchKey::Cpu, silu_kernel as KernelFn);
     register(
+        "gelu_backward",
+        DispatchKey::Cpu,
+        gelu_backward_kernel as KernelFn,
+    );
+    register(
         "leaky_relu",
         DispatchKey::Cpu,
         leaky_relu_kernel as KernelFn,
