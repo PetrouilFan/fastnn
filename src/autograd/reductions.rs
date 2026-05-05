@@ -452,14 +452,15 @@ impl Node for SiLUBackward {
 
 #[allow(dead_code)]
 pub struct SoftmaxBackward {
+    pub input: Tensor,
     pub output: Tensor,
     pub dim: usize,
     pub edges: Vec<Edge>,
 }
 
 impl SoftmaxBackward {
-    pub fn new(output: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
-        SoftmaxBackward { output, dim, edges }
+    pub fn new(input: Tensor, output: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
+        SoftmaxBackward { input, output, dim, edges }
     }
 }
 
@@ -467,11 +468,14 @@ impl Node for SoftmaxBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let s = &self.output;
-        let dim_i32 = self.dim as i32;
-        // TODO: Use fused kernel once autograd integration is debugged
-        let dot = grad.mul(s).sum(dim_i32, true);
-        let grad_input = s.mul(&grad.sub(&dot));
-        vec![Some(grad_input)]
+        // Use fused kernel to avoid 3 intermediate tensor allocations
+        let dim_tensor = Tensor::from_scalar(self.dim as f32);
+        let result = crate::dispatcher::dispatch(
+            "softmax_backward",
+            crate::dispatcher::DispatchKey::Cpu,
+            &[s, &grad, &dim_tensor],
+        );
+        vec![result.get(0).cloned()]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -487,7 +491,7 @@ impl Node for SoftmaxBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        std::slice::from_ref(&self.output)
+        std::slice::from_ref(&self.input)
     }
 }
 
