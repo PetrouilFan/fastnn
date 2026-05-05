@@ -11,6 +11,7 @@ import time
 import queue
 from collections import deque
 from typing import Any, Callable, Iterator, List, Optional, Sequence
+import numpy as np
 
 
 class Dataset:
@@ -53,11 +54,8 @@ class TensorDataset(Dataset):
                         f"tensor 0 has {first_len}, tensor {i} has {t.shape[0]}"
                     )
 
-        # Convert to numpy arrays for pickling support in multiprocessing
-        self._numpy_tensors = tuple(
-            t.numpy() if hasattr(t, "numpy") else t for t in tensors
-        )
         self.tensors = tensors
+        self._numpy_tensors = None  # Lazy conversion
 
     def __len__(self) -> int:
         return self.tensors[0].shape[0]
@@ -66,7 +64,11 @@ class TensorDataset(Dataset):
         return tuple(t[idx] for t in self.tensors)
 
     def __getstate__(self):
-        """Return state for pickling - use numpy arrays."""
+        """Return state for pickling - use numpy arrays (convert lazily)."""
+        if self._numpy_tensors is None:
+            self._numpy_tensors = tuple(
+                t.numpy() if hasattr(t, "numpy") else t for t in self.tensors
+            )
         return {"numpy_tensors": self._numpy_tensors}
 
     def __setstate__(self, state):
@@ -76,18 +78,32 @@ class TensorDataset(Dataset):
         self.tensors = self._numpy_tensors
 
 
-def _worker_fetch_batch(
-    dataset: "Dataset",
-    batch_indices: List[int],
-    collate_fn: Callable,
-) -> tuple:
-    """Worker function to fetch a batch from the dataset.
+class CachedDataset(Dataset):
+    """Dataset wrapper that caches items in memory for faster access.
 
-    This is a module-level function to ensure it can be pickled
-    when using multiprocessing with ProcessPoolExecutor.
+    Useful for small to medium-sized datasets or frequently accessed items.
+    Items are cached on first access and retained up to cache_size.
+
+    Args:
+        dataset: The dataset to wrap.
+        cache_size: Maximum number of items to cache (default: 1000).
     """
-    samples = [dataset[i] for i in batch_indices]
-    return collate_fn(samples)
+
+    def __init__(self, dataset: Dataset, cache_size: int = 1000):
+        self.dataset = dataset
+        self.cache: dict[int, Any] = {}
+        self.cache_size = cache_size
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> Any:
+        if idx in self.cache:
+            return self.cache[idx]
+        item = self.dataset[idx]
+        if len(self.cache) < self.cache_size:
+            self.cache[idx] = item
+        return item
 
 
 def _convert_to_numpy(tensor):
@@ -143,11 +159,16 @@ class RandomSampler(Sampler):
             raise NotImplementedError("RandomSampler does not support replacement")
         self.num_samples = num_samples or len(data_source)
         self.generator = generator or random.Random()
+        self._indices_buffer = None
 
     def __iter__(self) -> Iterator[int]:
-        indices = list(range(len(self.data_source)))
-        self.generator.shuffle(indices)
-        return iter(indices[: self.num_samples])
+        n = len(self.data_source)
+        if self._indices_buffer is None or len(self._indices_buffer) != n:
+            self._indices_buffer = np.arange(n, dtype=np.int64)
+        else:
+            self._indices_buffer[:] = np.arange(n)
+        self.generator.shuffle(self._indices_buffer)
+        return iter(self._indices_buffer[: self.num_samples].tolist())
 
 
 class SubsetRandomSampler(Sampler):
@@ -232,16 +253,16 @@ def default_collate(batch: list) -> tuple:
     elem = batch[0]
 
     if isinstance(elem, tuple):
-        return tuple(default_collate([b[i] for b in batch]) for i in range(len(elem)))
+        return tuple(map(default_collate, zip(*batch)))
 
     if hasattr(elem, "numpy"):
         arrays = [b.numpy() for b in batch]
         result_np = np.stack(arrays, axis=0)
-        return fnn.tensor(result_np.flatten().tolist(), list(result_np.shape))
+        return fnn.tensor(np.ascontiguousarray(result_np).ravel().tolist(), list(result_np.shape))
 
     if isinstance(elem, np.ndarray):
         result_np = np.stack(batch, axis=0)
-        return fnn.tensor(result_np.flatten().tolist(), list(result_np.shape))
+        return fnn.tensor(np.ascontiguousarray(result_np).ravel().tolist(), list(result_np.shape))
 
     if isinstance(elem, (int, float)):
         return fnn.tensor(batch, [len(batch)])
@@ -253,6 +274,7 @@ class _Metrics:
     """Thread-safe metrics tracking for adaptive data loading.
 
     Tracks wait times and batch times to inform auto-tuning decisions.
+    Uses running sums for O(1) mean computation.
     """
 
     def __init__(self, window: int = 200):
@@ -260,28 +282,37 @@ class _Metrics:
         self._wait_times: deque[float] = deque(maxlen=window)
         self._batch_times: deque[float] = deque(maxlen=window)
         self._lock = threading.Lock()
+        self._wait_sum = 0.0
+        self._batch_sum = 0.0
 
     def record(self, wait_ms: float, batch_ms: float) -> None:
         with self._lock:
+            if len(self._wait_times) == self._window:
+                self._wait_sum -= self._wait_times[0]
+                self._batch_sum -= self._batch_times[0]
             self._wait_times.append(wait_ms)
             self._batch_times.append(batch_ms)
+            self._wait_sum += wait_ms
+            self._batch_sum += batch_ms
 
     def mean_wait_ms(self) -> float:
         with self._lock:
             if not self._wait_times:
                 return 0.0
-            return sum(self._wait_times) / len(self._wait_times)
+            return self._wait_sum / len(self._wait_times)
 
     def mean_batch_ms(self) -> float:
         with self._lock:
             if not self._batch_times:
                 return 0.0
-            return sum(self._batch_times) / len(self._batch_times)
+            return self._batch_sum / len(self._batch_times)
 
     def reset(self) -> None:
         with self._lock:
             self._wait_times.clear()
             self._batch_times.clear()
+            self._wait_sum = 0.0
+            self._batch_sum = 0.0
 
 
 class _AutoTuner:
@@ -416,6 +447,15 @@ class _PrefetchIterator:
         if self.thread.is_alive():
             self.thread.join(timeout=5)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+
+    def __del__(self):
+        self.cleanup()
+
 
 class _MultiProcessIterator:
     """Multi-threaded iterator for parallel data loading.
@@ -511,6 +551,15 @@ class _MultiProcessIterator:
         if self._executor is not None:
             self._executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+
+    def __del__(self):
+        self.cleanup()
 
 
 def _worker_fetch_batch(
@@ -682,3 +731,12 @@ class DataLoader:
             self.batch_sampler = BatchSampler(
                 self.sampler, self.batch_size, self.drop_last
             )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def __del__(self):
+        pass

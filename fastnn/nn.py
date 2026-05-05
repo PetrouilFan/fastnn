@@ -1,4 +1,16 @@
-"""Neural network module aliases exported by the Rust core."""
+"""Neural network module aliases exported by the Rust core.
+
+.. deprecated::
+    Use `fastnn.layers` or direct imports from `fastnn` instead.
+    This module is kept for backward compatibility.
+"""
+
+import warnings
+warnings.warn(
+    "fastnn.nn is deprecated, use fastnn.layers or direct fastnn imports instead",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import fastnn._core as _core
 

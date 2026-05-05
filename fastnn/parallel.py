@@ -177,51 +177,58 @@ class DataParallel:
         if not hasattr(self, "_performance_ema"):
             self._performance_ema = self.epoch_times.copy()
         else:
-            alpha = 0.3  # Smoothing factor for EMA
+            alpha_ema = 0.3  # Smoothing factor for EMA
             self._performance_ema = [
-                alpha * new + (1 - alpha) * old
+                alpha_ema * new + (1 - alpha_ema) * old
                 for new, old in zip(self.epoch_times, self._performance_ema)
             ]
 
-        # Use EMA times for weight adjustment
         ema_times = self._performance_ema
+        alpha = 0.3  # Smoothing factor for weight adjustment
 
-        # Inverse proportional: weight = (1/time) / sum(1/time)
-        # Faster GPU should get more data
-        inv_times = [1.0 / t for t in ema_times]
-        total_inv = sum(inv_times)
+        # Single pass: calculate inverse times and total
+        inv_times = []
+        total_inv = 0.0
+        for t in ema_times:
+            inv = 1.0 / t
+            inv_times.append(inv)
+            total_inv += inv
 
-        if total_inv > 0:
-            target_weights = [inv / total_inv for inv in inv_times]
+        if total_inv <= 0:
+            return
 
+        # Single pass: calculate new weights with target, smoothing, min/max, and renormalization
+        target_weights = [inv / total_inv for inv in inv_times]
+        old_weights = getattr(self, "_last_weights", self.weights)
+
+        new_weights = []
+        total_new = 0.0
+        significant_change = False
+
+        for i, (target, current) in enumerate(zip(target_weights, self.weights)):
             # Smooth with previous weights
-            alpha = 0.3  # Smoothing factor for weight adjustment
-            new_weights = [
-                alpha * target + (1 - alpha) * current
-                for target, current in zip(target_weights, self.weights)
-            ]
+            w = alpha * target + (1 - alpha) * current
+            # Ensure minimum weight (avoid starvation)
+            w = max(w, 0.1)
+            # Ensure maximum weight (avoid overloading)
+            w = min(w, 0.9)
+            new_weights.append(w)
+            total_new += w
 
-            # Ensure minimum weight for each GPU (avoid starvation)
-            min_weight = 0.1  # At least 10% for each GPU
-            new_weights = [max(w, min_weight) for w in new_weights]
+            # Check for significant change
+            if abs(w - old_weights[i]) > 0.05:
+                significant_change = True
 
-            # Ensure maximum weight doesn't exceed 0.9 (avoid overloading one GPU)
-            max_weight = 0.9
-            new_weights = [min(w, max_weight) for w in new_weights]
-
-            # Renormalize to sum to 1.0
-            total_new = sum(new_weights)
+        # Renormalize to sum to 1.0
+        if total_new > 0:
             self.weights = [w / total_new for w in new_weights]
 
-            # Log adjustment for debugging (only if significant change)
-            old_weights = getattr(self, "_last_weights", self.weights)
-            if any(
-                abs(new - old) > 0.05 for new, old in zip(self.weights, old_weights)
-            ):
-                print(
-                    f"Adjusted weights: {self.weights} (GPU times: {self.epoch_times}, EMA: {ema_times})"
-                )
-                self._last_weights = self.weights.copy()
+        # Log adjustment for debugging
+        if significant_change:
+            print(
+                f"Adjusted weights: {self.weights} (GPU times: {self.epoch_times}, EMA: {ema_times})"
+            )
+            self._last_weights = self.weights.copy()
 
     def get_current_weights(self):
         """Return current workload weights."""
