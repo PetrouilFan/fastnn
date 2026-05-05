@@ -3569,3 +3569,110 @@ pub unsafe fn elu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![Tensor::from_vec(output_data, x.shape())]
 }
 
+
+pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let grad = args[0];
+    let x = args[1];
+
+    let output_shape = grad.shape().to_vec();
+    let mut output = Tensor::empty(output_shape.clone(), grad.dtype(), grad.device());
+
+    let numel = grad.numel() as usize;
+    
+    let grad_ptr = grad.data_ptr() as *const f32;
+    let x_ptr = x.data_ptr() as *const f32;
+    
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    const SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    const COEFF: f32 = 0.044715;
+
+    if grad.is_contiguous() && x.is_contiguous() && numel > 256 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_TRANSCENDENTAL;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            let grad_usize = grad_ptr as usize;
+            let x_usize = x_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = std::cmp::min(start + chunk_size, numel);
+
+                for i in start..end {
+                    unsafe {
+                        let x_val = *((x_usize + i * 4) as *const f32);
+                        let grad_val = *((grad_usize + i * 4) as *const f32);
+                        
+                        // Compute gelu'(x)
+                        let x2 = x_val * x_val;
+                        let x3 = x2 * x_val;
+                        let inner = SQRT_2_OVER_PI * (x_val + COEFF * x3);
+                        let t = inner.tanh();
+                        let t2 = t * t;
+                        let sech2 = 1.0 - t2;
+                        let d_inner_dx = SQRT_2_OVER_PI * (1.0 + 3.0 * COEFF * x2);
+                        let derivative = 0.5 * (1.0 + t) + 0.5 * x_val * sech2 * d_inner_dx;
+                        
+                        *((out_usize + i * 4) as *mut f32) = grad_val * derivative;
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let x_val = *x_ptr.add(i);
+                    let grad_val = *grad_ptr.add(i);
+                    
+                    // Compute gelu'(x)
+                    let x2 = x_val * x_val;
+                    let x3 = x2 * x_val;
+                    let inner = SQRT_2_OVER_PI * (x_val + COEFF * x3);
+                    let t = inner.tanh();
+                    let t2 = t * t;
+                    let sech2 = 1.0 - t2;
+                    let d_inner_dx = SQRT_2_OVER_PI * (1.0 + 3.0 * COEFF * x2);
+                    let derivative = 0.5 * (1.0 + t) + 0.5 * x_val * sech2 * d_inner_dx;
+                    
+                    *out_ptr.add(i) = grad_val * derivative;
+                }
+            }
+        }
+    } else {
+        // Fallback to TensorIterator for broadcasting
+        let iter = TensorIterator::build_for_binary(grad, x);
+        let out_usize = out_ptr as usize;
+        
+        iter.for_each_with_index(|idx, input_ptrs| {
+            unsafe {
+                let grad_val = *(input_ptrs[0].as_ptr() as *const f32);
+                let x_val = *(input_ptrs[1].as_ptr() as *const f32);
+                
+                // Compute gelu'(x)
+                let x2 = x_val * x_val;
+                let x3 = x2 * x_val;
+                let inner = SQRT_2_OVER_PI * (x_val + COEFF * x3);
+                let t = inner.tanh();
+                let t2 = t * t;
+                let sech2 = 1.0 - t2;
+                let d_inner_dx = SQRT_2_OVER_PI * (1.0 + 3.0 * COEFF * x2);
+                let derivative = 0.5 * (1.0 + t) + 0.5 * x_val * sech2 * d_inner_dx;
+                
+                *((out_usize as *mut f32).add(idx)) = grad_val * derivative;
+            }
+        });
+    }
+
+    vec![output]
+}
