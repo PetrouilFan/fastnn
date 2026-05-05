@@ -75,20 +75,18 @@ impl Node for Conv2dBackward {
         let grad_input_padding_h = dilation * (kernel_h - 1) - padding;
         let grad_input_padding_w = dilation * (kernel_w - 1) - padding;
 
-        // grad_input has same shape as input
+        // OPTIMIZATION: grad_input computation
+        // Avoid .to_cpu() when already CPU, use raw pointers
         let grad_input = if groups == 1 {
             // Standard convolution backward
-            // Use the dispatched conv2d with rotated weight
-            let stride_scalar = Tensor::from_scalar(1.0);
-            let padding_h_scalar = Tensor::from_scalar(grad_input_padding_h as f32);
-            let _padding_w_scalar = Tensor::from_scalar(grad_input_padding_w as f32);
-            let dilation_scalar = Tensor::from_scalar(dilation as f32);
-            let groups_scalar = Tensor::from_scalar(1.0);
-
-            // Transposed conv: stride=1, padding computed above, dilation same
-            // But we need to handle the original stride by inserting zeros
-            // For simplicity, use the existing conv2d kernel with adjusted parameters
             if stride == 1 {
+                // Use conv2d with adjusted parameters
+                let stride_scalar = Tensor::from_scalar(1.0);
+                let padding_h_scalar = Tensor::from_scalar(grad_input_padding_h as f32);
+                let _padding_w_scalar = Tensor::from_scalar(grad_input_padding_w as f32);
+                let dilation_scalar = Tensor::from_scalar(dilation as f32);
+                let groups_scalar = Tensor::from_scalar(1.0);
+
                 dispatch(
                     "conv2d",
                     crate::dispatcher::DispatchKey::Cpu,
@@ -104,45 +102,54 @@ impl Node for Conv2dBackward {
                 )[0]
                 .clone()
             } else {
-                // For stride > 1, we need to dilate grad_output first
-                // Insert (stride-1) zeros between each element
-                let mut dilated_grad_data =
-                    vec![
-                        0.0f32;
-                        batch_size as usize
-                            * out_channels as usize
-                            * (out_h as usize + (out_h as usize - 1) * (stride as usize - 1))
-                            * (out_w as usize + (out_w as usize - 1) * (stride as usize - 1))
-                    ];
-                let dilated_h = out_h as usize + (out_h as usize - 1) * (stride as usize - 1);
-                let dilated_w = out_w as usize + (out_w as usize - 1) * (stride as usize - 1);
+                // For stride > 1, dilate grad_output first
+                // Get CPU copy of grad_output (avoid unnecessary copy if already CPU)
+                let grad_cpu = if grad.inner.is_cpu() {
+                    None
+                } else {
+                    Some(grad.to_cpu())
+                };
+                let grad_data = if let Some(ref t) = grad_cpu {
+                    t.data_ptr_f32()
+                } else {
+                    grad.data_ptr_f32()
+                };
+                let grad_h = out_h;
+                let grad_w = out_w;
+                let dilated_h = grad_h + (grad_h - 1) * (stride - 1);
+                let dilated_w = grad_w + (grad_w - 1) * (stride - 1);
 
-                let grad_cpu = grad.to_cpu();
-                let grad_data = grad_cpu.as_f32_slice();
+                // OPTIMIZATION: Use Tensor::empty() + raw pointer instead of vec![] + Tensor::from_vec()
+                let mut dilated_grad = Tensor::empty(
+                    vec![batch_size, out_channels, dilated_h, dilated_w],
+                    grad.dtype(),
+                    grad.device(),
+                );
+                let dilated_data = dilated_grad.data_ptr_f32_mut();
 
-                for b in 0..batch_size as usize {
-                    for c in 0..out_channels as usize {
-                        for oh in 0..out_h as usize {
-                            for ow in 0..out_w as usize {
-                                let src_idx = b
-                                    * (out_channels as usize * out_h as usize * out_w as usize)
-                                    + c * (out_h as usize * out_w as usize)
-                                    + oh * out_w as usize
+                // Fill dilated grad with (stride-1) zero rows/cols inserted
+                for b in 0..batch_size {
+                    for c in 0..out_channels {
+                        for oh in 0..grad_h {
+                            for ow in 0..grad_w {
+                                let src_idx = (b * out_channels + c) * grad_h * grad_w
+                                    + oh * grad_w
                                     + ow;
-                                let dst_idx = b * (out_channels as usize * dilated_h * dilated_w)
-                                    + c * (dilated_h * dilated_w)
-                                    + (oh * stride as usize) * dilated_w
-                                    + (ow * stride as usize);
-                                dilated_grad_data[dst_idx] = grad_data[src_idx];
+                                let dst_idx = (b * out_channels + c) * dilated_h * dilated_w
+                                    + (oh * stride) * dilated_w
+                                    + (ow * stride);
+                                unsafe {
+                                    *dilated_data.add(dst_idx as usize) = *grad_data.add(src_idx as usize);
+                                }
                             }
                         }
                     }
                 }
+                // grad_cpu (if any) gets dropped here when it goes out of scope
 
-                let dilated_grad = Tensor::from_vec(
-                    dilated_grad_data,
-                    vec![batch_size, out_channels, dilated_h as i64, dilated_w as i64],
-                );
+                let padding_h_scalar = Tensor::from_scalar(grad_input_padding_h as f32);
+                let dilation_scalar = Tensor::from_scalar(dilation as f32);
+                let groups_scalar = Tensor::from_scalar(1.0);
 
                 dispatch(
                     "conv2d",
@@ -151,7 +158,7 @@ impl Node for Conv2dBackward {
                         &dilated_grad,
                         &weight_rotated,
                         &Tensor::from_scalar(0.0),
-                        &stride_scalar,
+                        &Tensor::from_scalar(1.0),
                         &padding_h_scalar,
                         &dilation_scalar,
                         &groups_scalar,
