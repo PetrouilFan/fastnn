@@ -145,75 +145,31 @@ impl Optimizer for AdamW {
             let beta1_c = 1.0 - beta1;
             let beta2_c = 1.0 - beta2;
 
-            let numel = param.inner.numel() as usize;
-            let param_ptr = param.data_ptr_f32_mut();
-            let grad_ptr = grad.data_ptr_f32();
-            let m_ptr = self.m[i].data_ptr_f32_mut();
-            let v_ptr = self.v[i].data_ptr_f32_mut();
+            let m = &mut self.m[i];
+            let v = &mut self.v[i];
 
-            if self.amsgrad {
-                let v_hat_ptr = self.v_hat[i].data_ptr_f32_mut();
-                for j in 0..numel {
-                    unsafe {
-                        let g = *grad_ptr.add(j);
-                        let mut m_val = *m_ptr.add(j);
-                        let mut v_val = *v_ptr.add(j);
+            let g = grad.mul_scalar(beta1_c);
+            let m_update = m.mul_scalar(beta1).add(&g);
+            *m = m_update;
 
-                        m_val = beta1 * m_val + beta1_c * g;
-                        *m_ptr.add(j) = m_val;
+            let g_sq = grad.pow(2.0);
+            let v_update = v.mul_scalar(beta2).add(&g_sq.mul_scalar(beta2_c));
+            *v = v_update;
 
-                        let g_sq = g * g;
-                        v_val = beta2 * v_val + beta2_c * g_sq;
-                        *v_ptr.add(j) = v_val;
+            let bias_correction1 = self.bias_correction1[i] as f32;
+            let bias_correction2 = self.bias_correction2[i] as f32;
 
-                        let m_hat = m_val / self.bias_correction1[i] as f32;
+            let m_hat = m.div_scalar(bias_correction1);
+            let v_hat = v.div_scalar(bias_correction2);
 
-                        let mut v_hat_val = v_val / self.bias_correction2[i] as f32;
-                        let existing_v_hat = *v_hat_ptr.add(j);
-                        if v_hat_val > existing_v_hat {
-                            *v_hat_ptr.add(j) = v_hat_val;
-                        } else {
-                            v_hat_val = existing_v_hat;
-                        }
+            let update = m_hat.div(&v_hat.add_scalar(eps).sqrt());
 
-                        let update = m_hat / (v_hat_val.sqrt() + eps);
-
-                        let mut p_val = *param_ptr.add(j);
-                        if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
-                            p_val *= 1.0 - lr * weight_decay;
-                        }
-
-                        p_val -= lr * update;
-                        *param_ptr.add(j) = p_val;
-                    }
-                }
+            let no_decay = self.no_decay.get(i).copied().unwrap_or(false);
+            if weight_decay != 0.0 && !no_decay {
+                let p_update = param.mul_scalar(1.0 - lr * weight_decay);
+                param.clone_from(&p_update.sub(&update.mul_scalar(lr)));
             } else {
-                for j in 0..numel {
-                    unsafe {
-                        let g = *grad_ptr.add(j);
-                        let mut m_val = *m_ptr.add(j);
-                        let mut v_val = *v_ptr.add(j);
-
-                        m_val = beta1 * m_val + beta1_c * g;
-                        *m_ptr.add(j) = m_val;
-
-                        let g_sq = g * g;
-                        v_val = beta2 * v_val + beta2_c * g_sq;
-                        *v_ptr.add(j) = v_val;
-
-                        let m_hat = m_val / self.bias_correction1[i] as f32;
-                        let v_hat_val = v_val / self.bias_correction2[i] as f32;
-                        let update = m_hat / (v_hat_val.sqrt() + eps);
-
-                        let mut p_val = *param_ptr.add(j);
-                        if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
-                            p_val *= 1.0 - lr * weight_decay;
-                        }
-
-                        p_val -= lr * update;
-                        *param_ptr.add(j) = p_val;
-                    }
-                }
+                param.clone_from(&param.sub(&update.mul_scalar(lr)));
             }
 
             param.set_grad(None);

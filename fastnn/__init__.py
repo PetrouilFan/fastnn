@@ -28,10 +28,10 @@ from fastnn.callbacks import (  # noqa: E402
     CSVLogger,
 )
 from fastnn.parallel import DataParallel  # noqa: E402
-from fastnn.tensor import _flatten
-from fastnn.tensor import from_numpy as tensor_from_numpy
-from fastnn.layers import Flatten, PySequential, BasicBlock, MaxPool2d
-from fastnn.io import (  # noqa: E402
+from fastnn.tensor import _flatten  # noqa: F401
+from fastnn.tensor import from_numpy as tensor_from_numpy  # noqa: F401
+from fastnn.layers import Flatten, PySequential, BasicBlock, MaxPool2d  # noqa: F401, E402
+from fastnn.io import (  # noqa: E402, F403
     save as io_save,
     load as io_load,
     convert_from_pytorch,
@@ -404,7 +404,7 @@ def load_optimizer(opt, path):
                 step_list[i] = struct.unpack("<Q", f.read(8))[0]
 
 
-from fastnn.schedulers import LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau
+from fastnn.schedulers import LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau  # noqa: F401
 
 allocator_stats = _core.allocator_stats
 list_registered_ops = _core.list_registered_ops

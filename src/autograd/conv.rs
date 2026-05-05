@@ -119,8 +119,8 @@ impl Node for Conv2dBackward {
                 let dilated_h = grad_h + (grad_h - 1) * (stride - 1);
                 let dilated_w = grad_w + (grad_w - 1) * (stride - 1);
 
-                // OPTIMIZATION: Use Tensor::empty() + raw pointer instead of vec![] + Tensor::from_vec()
-                let mut dilated_grad = Tensor::empty(
+                // Use zeros to ensure inserted stride gaps are zero-initialized
+                let mut dilated_grad = Tensor::zeros(
                     vec![batch_size, out_channels, dilated_h, dilated_w],
                     grad.dtype(),
                     grad.device(),
