@@ -228,7 +228,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 layer_info["axis"] = axis
 
             elif op_type == "Reshape":
-                shape = _get_initializer(model, node.input[1])
+                shape = _get_initializer(node.input[1])
                 if shape is not None:
                     layer_info["shape"] = shape.tolist()
 

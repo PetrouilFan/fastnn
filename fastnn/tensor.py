@@ -22,7 +22,13 @@ def _flatten(nested):
             stack.pop()
     return result
 
-def tensor(data, shape, device=None):
+def tensor(data, shape, device=None, dtype=None):
+    if isinstance(data, np.ndarray):
+        if not data.flags['C_CONTIGUOUS']:
+            data = np.ascontiguousarray(data)
+        if data.dtype != np.float32:
+            data = data.astype(np.float32)
+        return _core.tensor_from_buffer(data)
     flat_data = _flatten(data)
     return _core.tensor_from_data(flat_data, shape, device)
 
