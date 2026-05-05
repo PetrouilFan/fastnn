@@ -14,7 +14,7 @@ def benchmark_tensor_creation(num_iters=1000):
     # Benchmark: create tensors in loop (should hit pool)
     start = time.perf_counter()
     for _ in range(num_iters):
-        t = fnn.randn([256, 256])
+        fnn.randn([256, 256])
     elapsed = time.perf_counter() - start
     return elapsed / num_iters * 1000  # ms per creation
 
@@ -23,14 +23,14 @@ def benchmark_zeros_vs_empty(num_iters=1000):
     # Benchmark zeros
     start = time.perf_counter()
     for _ in range(num_iters):
-        t = fnn.zeros([256, 256])
+        fnn.zeros([256, 256])
     zeros_time = time.perf_counter() - start
     
     # Benchmark empty (if available, otherwise skip)
     try:
         start = time.perf_counter()
         for _ in range(num_iters):
-            t = fnn.empty([256, 256])
+            fnn.empty([256, 256])
         empty_time = time.perf_counter() - start
         empty_ms = empty_time / num_iters * 1000
     except AttributeError:
