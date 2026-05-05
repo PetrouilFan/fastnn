@@ -309,10 +309,10 @@ impl Node for GeluBackward {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let x = &self.input;
 
-        // Use fused kernel to eliminate ~9 intermediate tensor allocations
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(
             "gelu_backward",
-            crate::dispatcher::DispatchKey::Cpu,
+            dispatch_key,
             &[x, &grad],
         );
         vec![Some(result[0].clone())]
@@ -423,13 +423,13 @@ impl Node for SiLUBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let s = self.input.sigmoid();
-        // Use fused kernel to avoid intermediate tensors
+
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(self.input.device());
         let result = crate::dispatcher::dispatch(
             "silu_backward",
-            crate::dispatcher::DispatchKey::Cpu,
+            dispatch_key,
             &[&self.input, &s, &grad],
         );
-        // result is Vec<Tensor>, get the first element as Option<Tensor>
         vec![result.get(0).cloned()]
     }
 
@@ -468,11 +468,11 @@ impl Node for SoftmaxBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let s = &self.output;
-        // Use fused kernel to avoid 3 intermediate tensor allocations
         let dim_tensor = Tensor::from_scalar(self.dim as f32);
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(s.device());
         let result = crate::dispatcher::dispatch(
             "softmax_backward",
-            crate::dispatcher::DispatchKey::Cpu,
+            dispatch_key,
             &[s, &grad, &dim_tensor],
         );
         vec![result.get(0).cloned()]

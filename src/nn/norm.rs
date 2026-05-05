@@ -363,9 +363,10 @@ impl RMSNorm {
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(
             "rms_norm",
-            crate::dispatcher::DispatchKey::Cpu,
+            dispatch_key,
             &[x, &self.weight, &self.eps_scalar],
         );
         result[0].clone()
@@ -559,9 +560,10 @@ impl Module for BatchNorm2d {
         let running_mean = self.running_mean.read().clone();
         let running_var = self.running_var.read().clone();
 
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(
             "batch_norm",
-            crate::dispatcher::DispatchKey::Cpu,
+            dispatch_key,
             &[
                 x,
                 &self.weight,
@@ -600,8 +602,13 @@ impl Module for BatchNorm2d {
 
             let mut running_var_lock = self.running_var.write();
             // PyTorch uses unbiased variance (Bessel correction) for running_var update
-            let n = spatial as f32;
-            let unbiased_var = batch_var.mul_scalar(n / (n - 1.0));
+            // batch_var is averaged over both batch and spatial dimensions
+            let n = (batch * spatial) as f32;
+            let unbiased_var = if n > 1.0 {
+                batch_var.mul_scalar(n / (n - 1.0))
+            } else {
+                batch_var
+            };
             let new_var = running_var_lock
                 .mul_scalar(mom)
                 .add(&unbiased_var.mul_scalar(inv_mom));

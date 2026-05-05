@@ -152,8 +152,6 @@ impl StoragePool {
                         return;
                     }
                     // Cache is full, fall through to global pool
-                    // But storage was already moved above... need to handle this
-                    return;
                 }
 
                 let key = nbytes;
