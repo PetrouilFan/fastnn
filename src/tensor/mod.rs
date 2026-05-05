@@ -2835,7 +2835,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = autograd::SoftmaxBackward::new(output.clone(), dim as usize, edges);
+            let backward = autograd::SoftmaxBackward::new(self.clone(), output.clone(), dim as usize, edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
