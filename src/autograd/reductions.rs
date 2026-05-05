@@ -309,20 +309,13 @@ impl Node for GeluBackward {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let x = &self.input;
 
-        let x2 = x.mul(x);
-        let x3 = x2.mul(x);
-        let inner = self.sqrt_2_over_pi.mul(&x.add(&self.coeff.mul(&x3)));
-        let t = inner.tanh();
-        let t2 = t.mul(&t);
-        let sech2 = self.one.sub(&t2);
-        let d_inner_dx = self
-            .sqrt_2_over_pi
-            .mul(&self.one.add(&self.d_inner_coeff.mul(&x2)));
-        let derivative = self
-            .half
-            .mul(&self.one.add(&t))
-            .add(&self.half.mul(x).mul(&sech2).mul(&d_inner_dx));
-        vec![Some(grad.mul(&derivative))]
+        // Use fused kernel to eliminate ~9 intermediate tensor allocations
+        let result = crate::dispatcher::dispatch(
+            "gelu_backward",
+            crate::dispatcher::DispatchKey::Cpu,
+            &[x, &grad],
+        );
+        vec![Some(result[0].clone())]
     }
 
     fn next_edges(&self) -> &[Edge] {
