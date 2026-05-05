@@ -23,18 +23,17 @@ def benchmark_zeros_vs_empty():
         numel = 1
         for s in size:
             numel *= s
-        nbytes = numel * 4  # f32
         
         # Benchmark zeros()
         start = time.perf_counter()
         for _ in range(100):
-            t = ft._core.zeros(shape=list(size))
+            ft._core.zeros(shape=list(size))
         zeros_time = (time.perf_counter() - start) * 1000 / 100
         
         # Benchmark empty()
         start = time.perf_counter()
         for _ in range(100):
-            t = ft._core.empty(shape=list(size))
+            ft._core.empty(shape=list(size))
         empty_time = (time.perf_counter() - start) * 1000 / 100
         
         speedup = zeros_time / empty_time if empty_time > 0 else float('inf')

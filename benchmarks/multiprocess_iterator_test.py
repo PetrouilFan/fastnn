@@ -1,7 +1,7 @@
 """Test MultiProcessIterator with multiple workers."""
 import time
 import fastnn as fnn
-from fastnn.data import DataLoader, TensorDataset
+from fastnn.data import DataLoader
 
 def slow_fetch(idx):
     """Simulate slow data loading."""

@@ -1,7 +1,6 @@
 """Benchmark MaxPool2d reuse fix."""
 import time
 import fastnn as fnn
-import numpy as np
 
 def benchmark_maxpool2d(num_iters=2000):
     """Benchmark MaxPool2d forward passes with reuse."""
@@ -51,5 +50,5 @@ if __name__ == "__main__":
     print(f"  Fixed (reuse module): {reuse_time:.3f} ms/forward")
     print(f"  Old (create every call): {old_time:.3f} ms/forward")
     print(f"  Ratio (old/new): {old_time/reuse_time:.2f}x")
-    print(f"  ✓ Fix eliminates redundant module construction in __call__")
-    print(f"  Note: Timings may vary based on Rust module creation cost")
+    print("  ✓ Fix eliminates redundant module construction in __call__")
+    print("  Note: Timings may vary based on Rust module creation cost")
