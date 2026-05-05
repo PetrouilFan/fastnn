@@ -890,6 +890,11 @@ fn register_kernels() {
         gelu_backward_kernel as KernelFn,
     );
     register(
+        "silu_backward",
+        DispatchKey::Cpu,
+        silu_backward_kernel as KernelFn,
+    );
+    register(
         "leaky_relu",
         DispatchKey::Cpu,
         leaky_relu_kernel as KernelFn,

@@ -423,9 +423,14 @@ impl Node for SiLUBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let s = self.input.sigmoid();
-        let one_minus_s = s.mul_scalar(1.0).sub(&s);
-        let derivative = s.mul(&self.input.mul(&one_minus_s).add_scalar(1.0));
-        vec![Some(grad.mul(&derivative))]
+        // Use fused kernel to avoid intermediate tensors
+        let result = crate::dispatcher::dispatch(
+            "silu_backward",
+            crate::dispatcher::DispatchKey::Cpu,
+            &[&self.input, &s, &grad],
+        );
+        // result is Vec<Tensor>, get the first element as Option<Tensor>
+        vec![result.get(0).cloned()]
     }
 
     fn next_edges(&self) -> &[Edge] {
