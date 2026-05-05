@@ -463,6 +463,7 @@ impl Node for SoftmaxBackward {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let s = &self.output;
         let dim_i32 = self.dim as i32;
+        // TODO: Use fused kernel once autograd integration is debugged
         let dot = grad.mul(s).sum(dim_i32, true);
         let grad_input = s.mul(&grad.sub(&dot));
         vec![Some(grad_input)]

@@ -835,3 +835,122 @@ pub fn log_softmax_last_dim_fused(x: &Tensor, dim_size: usize) -> Tensor {
     output
 }
 
+/// Fused SoftmaxBackward kernel: computes grad_input = s * (grad - sum(grad * s))
+/// where s is the softmax output from forward pass.
+/// This eliminates 3 intermediate tensor allocations.
+pub unsafe fn softmax_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    println!("DEBUG: softmax_backward_kernel called!");
+    let s = args[0]; // softmax output
+    let grad = args[1]; // gradient from next layer
+    let dim = if args.len() > 2 {
+        args[2].item() as usize
+    } else {
+        0
+    };
+
+    let s_shape = s.shape();
+    let ndim = s_shape.len();
+    let dim = if dim >= ndim { ndim - 1 } else { dim };
+    let dim_size = s_shape[dim] as usize;
+
+    // For last dimension case with contiguous memory, use optimized version
+    if dim == ndim - 1 && s.is_contiguous() && grad.is_contiguous() {
+        return vec![softmax_backward_last_dim(s, grad, dim_size)];
+    }
+
+    // General case: iterate over all elements
+    let numel = s.numel() as usize;
+    let mut output = Tensor::empty(s_shape.to_vec(), s.dtype(), s.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+
+    // Use raw pointers for parallel access (raw pointers are Copy + Send)
+    let s_ptr = s.data_ptr() as *const f32;
+    let grad_ptr = grad.data_ptr() as *const f32;
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    // Compute outer_size (all dimensions before dim) and inner_size (all after dim)
+    let outer_size: usize = s_shape[..dim].iter().map(|&d| d as usize).product();
+    let inner_size: usize = s_shape[dim + 1..].iter().map(|&d| d as usize).product();
+    let stride_dim = dim_size * inner_size;
+
+    // Sequential implementation (raw pointers are not Sync, so we can't parallelize directly)
+    for outer in 0..outer_size {
+        for inner in 0..inner_size {
+            let base = outer * stride_dim + inner;
+
+            // Compute dot = sum(grad * s) over the dim dimension
+            let mut dot = 0.0f32;
+            for i in 0..dim_size {
+                let offset = base + i * inner_size;
+                unsafe {
+                    dot += *grad_ptr.add(offset) * *s_ptr.add(offset);
+                }
+            }
+
+            // Compute grad_input = s * (grad - dot)
+            for i in 0..dim_size {
+                let offset = base + i * inner_size;
+                unsafe {
+                    let s_val = *s_ptr.add(offset);
+                    let g_val = *grad_ptr.add(offset);
+                    *out_ptr.add(offset) = s_val * (g_val - dot);
+                }
+            }
+        }
+    }
+
+    vec![output]
+}
+
+/// Optimized softmax backward for last dimension using SIMD
+#[inline]
+fn softmax_backward_last_dim(s: &Tensor, grad: &Tensor, dim_size: usize) -> Tensor {
+    let s_shape = s.shape();
+    let outer_size: usize = s_shape[..s_shape.len() - 1].iter().map(|&d| d as usize).product();
+    let numel = s.numel() as usize;
+
+    let mut output = Tensor::empty(s_shape.to_vec(), s.dtype(), s.device());
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+
+    // Use raw pointers for parallel access (raw pointers are Copy + Send)
+    let s_ptr = s.data_ptr() as *const f32;
+    let grad_ptr = grad.data_ptr() as *const f32;
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    // Sequential implementation (raw pointers are not Sync, so we can't parallelize directly)
+    for batch in 0..outer_size {
+        let base = batch * dim_size;
+
+        // Compute dot = sum(grad * s)
+        let mut dot = 0.0f32;
+        for i in 0..dim_size {
+            let offset = base + i;
+            unsafe {
+                dot += *grad_ptr.add(offset) * *s_ptr.add(offset);
+            }
+        }
+
+        // Compute grad_input = s * (grad - dot)
+        for i in 0..dim_size {
+            let offset = base + i;
+            unsafe {
+                let s_val = *s_ptr.add(offset);
+                let g_val = *grad_ptr.add(offset);
+                *out_ptr.add(offset) = s_val * (g_val - dot);
+            }
+        }
+    }
+
+    output
+}
+

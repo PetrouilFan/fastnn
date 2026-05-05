@@ -944,6 +944,11 @@ fn register_kernels() {
         DispatchKey::Cpu,
         log_softmax_kernel as KernelFn,
     );
+    register(
+        "softmax_backward",
+        DispatchKey::Cpu,
+        softmax_backward_kernel as KernelFn,
+    );
     register("mse_loss", DispatchKey::Cpu, mse_loss_kernel as KernelFn);
     register(
         "bce_with_logits",
