@@ -6,7 +6,8 @@ import fastnn as nn
 import numpy as np
 
 def benchmark(name, fn, iters=50, warmup=5):
-    for _ in range(warmup): fn()
+    for _ in range(warmup):
+        fn()
     times = []
     for _ in range(iters):
         t0 = time.perf_counter()
