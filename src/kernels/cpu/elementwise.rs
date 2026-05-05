@@ -3676,3 +3676,41 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     vec![output]
 }
+
+/// Fused SiLUBackward kernel: computes grad_input = grad * sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+/// This eliminates ~4 intermediate tensor allocations.
+pub unsafe fn silu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0]; // input tensor
+    let s = args[1]; // sigmoid(x) (output of forward pass)
+    let grad = args[2]; // gradient from next layer
+
+    let numel = x.numel() as usize;
+    let mut output = Tensor::empty(x.shape().to_vec(), x.dtype(), x.device());
+
+    // Input tensors are read-only, just get data pointers
+    let x_ptr = x.data_ptr() as *const f32;
+    let s_ptr = s.data_ptr() as *const f32;
+    let grad_ptr = grad.data_ptr() as *const f32;
+
+    // Output needs mutable access
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(out_cpu) = output_storage else {
+        panic!("Expected CPU storage for output");
+    };
+    let out_data = Arc::make_mut(&mut out_cpu.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    for i in 0..numel {
+        unsafe {
+            let x_val = *x_ptr.add(i);
+            let s_val = *s_ptr.add(i);
+            let g_val = *grad_ptr.add(i);
+            // derivative = s * (1 + x * (1 - s))
+            let derivative = s_val * (1.0 + x_val * (1.0 - s_val));
+            *out_ptr.add(i) = g_val * derivative;
+        }
+    }
+
+    vec![output]
+}
