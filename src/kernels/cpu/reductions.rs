@@ -839,7 +839,6 @@ pub fn log_softmax_last_dim_fused(x: &Tensor, dim_size: usize) -> Tensor {
 /// where s is the softmax output from forward pass.
 /// This eliminates 3 intermediate tensor allocations.
 pub unsafe fn softmax_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    println!("DEBUG: softmax_backward_kernel called!");
     let s = args[0]; // softmax output
     let grad = args[1]; // gradient from next layer
     let dim = if args.len() > 2 {
