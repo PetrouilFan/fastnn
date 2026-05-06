@@ -83,3 +83,4 @@ tests/test_threading.py
 *FIXES_SUMMARY.md
 *_SUMMARY.md
 *_REPORT.md
+.ruff_cache/
