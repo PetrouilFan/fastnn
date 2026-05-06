@@ -1,9 +1,10 @@
 
+#[allow(unused_imports)]
 use pyo3::prelude::*;
 
 #[pyclass(from_py_object)]
 #[derive(Clone)]
-struct PyTensor {
+pub(crate) struct PyTensor {
     inner: crate::tensor::Tensor,
 }
 
@@ -315,7 +316,8 @@ impl PyTensor {
 }
 
 #[pyfunction]
-pub fn tensor_from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+#[allow(private_interfaces)]
+pub(crate) fn tensor_from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
     use pyo3::buffer::PyBuffer;
     let buffer = PyBuffer::<f32>::get(buf)?;
     let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();

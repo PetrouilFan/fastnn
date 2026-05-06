@@ -167,6 +167,9 @@ extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
 
 /// Create a Tensor from a DLPack managed tensor (zero-copy).
 /// Takes ownership of the DLPack capsule.
+///
+/// # Safety
+/// The capsule must be valid and properly managed by a DLManagedTensor sentinel.
 #[allow(dead_code)]
 pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> Result<Tensor, String> {
     if capsule.is_null() {

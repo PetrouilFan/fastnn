@@ -173,6 +173,12 @@ impl StoragePool {
     }
 }
 
+impl Default for StoragePool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Use OnceLock to initialize the static pool
 use std::sync::OnceLock;
 static STORAGE_POOL_INSTANCE: OnceLock<StoragePool> = OnceLock::new();
