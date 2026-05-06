@@ -444,7 +444,7 @@ def save_model(model, path, version=None):
         stacklevel=2
     )
     from fastnn.serialization import save_model as _save_model
-    _save_model(model, path, version or 2)
+    _save_model(model, path, version if version is not None else 2)
 
 
 def load_model(path, version=None):
@@ -466,7 +466,7 @@ def save_optimizer(opt, path, version=None):
         stacklevel=2
     )
     from fastnn.serialization import save_optimizer as _save_opt
-    _save_opt(opt, path, version or 1)
+    _save_opt(opt, path, version if version is not None else 1)
 
 
 def save_state_dict(model, path, version=None):
@@ -477,7 +477,7 @@ def save_state_dict(model, path, version=None):
         stacklevel=2
     )
     from fastnn.serialization import save_state_dict as _save_sd
-    _save_sd(model, path, version or 2)
+    _save_sd(model, path, version if version is not None else 2)
 
 
 def load_state_dict(path):

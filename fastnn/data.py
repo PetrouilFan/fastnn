@@ -245,7 +245,6 @@ def default_collate(batch: list) -> tuple:
         Tuple of batched tensors/arrays/lists.
     """
     import fastnn as fnn
-    import numpy as np
 
     if not batch:
         return ()

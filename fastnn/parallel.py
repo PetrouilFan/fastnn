@@ -162,7 +162,7 @@ class DataParallel:
 
     def adjust_weights_based_on_performance(self):
         """Adjust workload weights based on measured GPU performance.
-
+        
         This method uses historical performance data to adjust weights,
         favoring faster GPUs while ensuring all GPUs are utilized.
         """
@@ -186,42 +186,33 @@ class DataParallel:
         ema_times = self._performance_ema
         alpha = 0.3  # Smoothing factor for weight adjustment
 
-        # Single pass: calculate inverse times and total
-        inv_times = []
-        total_inv = 0.0
-        for t in ema_times:
-            inv = 1.0 / t
-            inv_times.append(inv)
-            total_inv += inv
+        # Calculate inverse times and total
+        inv_times = [1.0 / t for t in ema_times]
+        total_inv = sum(inv_times)
 
         if total_inv <= 0:
             return
 
-        # Single pass: calculate new weights with target, smoothing, min/max, and renormalization
+        # Calculate target weights proportional to inverse time (faster GPU -> higher weight)
         target_weights = [inv / total_inv for inv in inv_times]
         old_weights = getattr(self, "_last_weights", self.weights)
 
+        # Smooth target weights with current weights and apply min/max bounds
         new_weights = []
-        total_new = 0.0
-        significant_change = False
-
-        for i, (target, current) in enumerate(zip(target_weights, self.weights)):
-            # Smooth with previous weights
+        for target, current in zip(target_weights, self.weights):
             w = alpha * target + (1 - alpha) * current
-            # Ensure minimum weight (avoid starvation)
-            w = max(w, 0.1)
-            # Ensure maximum weight (avoid overloading)
-            w = min(w, 0.9)
+            w = max(w, 0.1)  # Avoid starvation
+            w = min(w, 0.9)  # Avoid overloading
             new_weights.append(w)
-            total_new += w
-
-            # Check for significant change
-            if abs(w - old_weights[i]) > 0.05:
-                significant_change = True
 
         # Renormalize to sum to 1.0
-        if total_new > 0:
-            self.weights = [w / total_new for w in new_weights]
+        total_new = sum(new_weights)
+        self.weights = [w / total_new for w in new_weights]
+
+        # Check for significant change compared to previous weights
+        significant_change = any(
+            abs(w - old_w) > 0.05 for w, old_w in zip(self.weights, old_weights)
+        )
 
         # Log adjustment for debugging
         if significant_change:
