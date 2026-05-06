@@ -101,41 +101,25 @@ class MaxPool2dPy:
     def __call__(self, x):
         # x shape: (batch, channels, height, width)
         # Use Rust implementation for performance
-        import fastnn._core as _core
-        
         # For now, only support symmetric kernel_size, stride, padding, dilation
         # Check if they are tuples and convert to single value if possible
-        if isinstance(self.kernel_size, tuple):
-            if self.kernel_size[0] != self.kernel_size[1]:
-                raise NotImplementedError("Non-square kernel_size not supported yet")
-            kernel_size = self.kernel_size[0]
-        else:
-            kernel_size = self.kernel_size
-        
-        if isinstance(self.stride, tuple):
-            if self.stride[0] != self.stride[1]:
-                raise NotImplementedError("Non-square stride not supported yet")
-            stride = self.stride[0]
-        else:
-            stride = self.stride
-        
-        if isinstance(self.padding, tuple):
-            if self.padding[0] != self.padding[1]:
-                raise NotImplementedError("Non-square padding not supported yet")
-            padding = self.padding[0]
-        else:
-            padding = self.padding
-        
-        if isinstance(self.dilation, tuple):
-            if self.dilation[0] != self.dilation[1]:
-                raise NotImplementedError("Non-square dilation not supported yet")
-            dilation = self.dilation[0]
-        else:
-            dilation = self.dilation
+        kernel_size = self._as_single_value(self.kernel_size, "kernel_size")
+        stride = self._as_single_value(self.stride, "stride")
+        padding = self._as_single_value(self.padding, "padding")
+        dilation = self._as_single_value(self.dilation, "dilation")
         
         # Call the Rust implementation
         rust_maxpool = _core.MaxPool2d(kernel_size, stride, padding, dilation)
         return rust_maxpool(x)
+    
+    @staticmethod
+    def _as_single_value(value, name):
+        """Convert a value to a single number if it is a symmetric pair."""
+        if isinstance(value, tuple):
+            if value[0] != value[1]:
+                raise NotImplementedError(f"Non-square {name} not supported yet")
+            return value[0]
+        return value
     
     def train(self):
         pass

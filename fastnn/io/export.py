@@ -929,8 +929,8 @@ def load_fnn_model(path: str) -> Any:
                 if key not in tensors:
                     return None
                 arr = tensors[key]
-                # Convert to flat list and shape
-                return fnn.tensor(arr.flatten().tolist(), list(arr.shape))
+                # Convert directly to tensor without intermediate list
+                return fnn.tensor(arr, arr.shape)
 
             # Only process parameters for the current tensor
             # Extract the parameter name from the tensor name
@@ -945,14 +945,14 @@ def load_fnn_model(path: str) -> Any:
                         # Transpose
                         weight_arr = weight_arr.T
                         weight = fnn.tensor(
-                            weight_arr.flatten().tolist(), list(weight_arr.shape)
+                            weight_arr, list(weight_arr.shape)
                         )
                         layer.set_weight(weight)
                 elif param_name == "bias":
                     bias_arr = tensors.get(f"{layer_name}.bias")
                     if bias_arr is not None:
                         bias = fnn.tensor(
-                            bias_arr.flatten().tolist(), list(bias_arr.shape)
+                            bias_arr, list(bias_arr.shape)
                         )
                         layer.set_bias(bias)
             elif ltype == "BasicBlock":
@@ -964,44 +964,44 @@ def load_fnn_model(path: str) -> Any:
                     conv1_weight = tensors.get(tensor_name)
                     if conv1_weight is not None:
                         weight = fnn.tensor(
-                            conv1_weight.flatten().tolist(), list(conv1_weight.shape)
+                            conv1_weight, list(conv1_weight.shape)
                         )
                         layer.conv1.set_weight(weight)
                 elif tensor_name.endswith(".conv1.bias"):
                     conv1_bias = tensors.get(tensor_name)
                     if conv1_bias is not None:
                         bias = fnn.tensor(
-                            conv1_bias.flatten().tolist(), list(conv1_bias.shape)
+                            conv1_bias, list(conv1_bias.shape)
                         )
                         layer.conv1.set_bias(bias)
                 elif tensor_name.endswith(".bn1.weight"):
                     bn1_weight = tensors.get(tensor_name)
                     if bn1_weight is not None:
                         weight = fnn.tensor(
-                            bn1_weight.flatten().tolist(), list(bn1_weight.shape)
+                            bn1_weight, list(bn1_weight.shape)
                         )
                         layer.bn1.set_weight(weight)
                 elif tensor_name.endswith(".bn1.bias"):
                     bn1_bias = tensors.get(tensor_name)
                     if bn1_bias is not None:
                         bias = fnn.tensor(
-                            bn1_bias.flatten().tolist(), list(bn1_bias.shape)
+                            bn1_bias, list(bn1_bias.shape)
                         )
                         layer.bn1.set_bias(bias)
                 elif tensor_name.endswith(".bn1.running_mean"):
                     bn1_running_mean = tensors.get(tensor_name)
                     if bn1_running_mean is not None:
                         running_mean = fnn.tensor(
-                            bn1_running_mean.flatten().tolist(),
-                            list(bn1_running_mean.shape),
+bn1_running_mean,
+                             bn1_running_mean.shape,
                         )
                         layer.bn1.set_running_mean(running_mean)
                 elif tensor_name.endswith(".bn1.running_var"):
                     bn1_running_var = tensors.get(tensor_name)
                     if bn1_running_var is not None:
                         running_var = fnn.tensor(
-                            bn1_running_var.flatten().tolist(),
-                            list(bn1_running_var.shape),
+bn1_running_var,
+                             bn1_running_var.shape,
                         )
                         layer.bn1.set_running_var(running_var)
                 elif tensor_name.endswith(".bn1.num_batches_tracked"):
@@ -1011,44 +1011,44 @@ def load_fnn_model(path: str) -> Any:
                     conv2_weight = tensors.get(tensor_name)
                     if conv2_weight is not None:
                         weight = fnn.tensor(
-                            conv2_weight.flatten().tolist(), list(conv2_weight.shape)
+                            conv2_weight, list(conv2_weight.shape)
                         )
                         layer.conv2.set_weight(weight)
                 elif tensor_name.endswith(".conv2.bias"):
                     conv2_bias = tensors.get(tensor_name)
                     if conv2_bias is not None:
                         bias = fnn.tensor(
-                            conv2_bias.flatten().tolist(), list(conv2_bias.shape)
+                            conv2_bias, list(conv2_bias.shape)
                         )
                         layer.conv2.set_bias(bias)
                 elif tensor_name.endswith(".bn2.weight"):
                     bn2_weight = tensors.get(tensor_name)
                     if bn2_weight is not None:
                         weight = fnn.tensor(
-                            bn2_weight.flatten().tolist(), list(bn2_weight.shape)
+                            bn2_weight, list(bn2_weight.shape)
                         )
                         layer.bn2.set_weight(weight)
                 elif tensor_name.endswith(".bn2.bias"):
                     bn2_bias = tensors.get(tensor_name)
                     if bn2_bias is not None:
                         bias = fnn.tensor(
-                            bn2_bias.flatten().tolist(), list(bn2_bias.shape)
+                            bn2_bias, list(bn2_bias.shape)
                         )
                         layer.bn2.set_bias(bias)
                 elif tensor_name.endswith(".bn2.running_mean"):
                     bn2_running_mean = tensors.get(tensor_name)
                     if bn2_running_mean is not None:
                         running_mean = fnn.tensor(
-                            bn2_running_mean.flatten().tolist(),
-                            list(bn2_running_mean.shape),
+bn2_running_mean,
+                             bn2_running_mean.shape,
                         )
                         layer.bn2.set_running_mean(running_mean)
                 elif tensor_name.endswith(".bn2.running_var"):
                     bn2_running_var = tensors.get(tensor_name)
                     if bn2_running_var is not None:
                         running_var = fnn.tensor(
-                            bn2_running_var.flatten().tolist(),
-                            list(bn2_running_var.shape),
+bn2_running_var,
+                             bn2_running_var.shape,
                         )
                         layer.bn2.set_running_var(running_var)
                 elif tensor_name.endswith(".downsample.0.weight"):
@@ -1056,37 +1056,37 @@ def load_fnn_model(path: str) -> Any:
                     down_weight = tensors.get(tensor_name)
                     if down_weight is not None:
                         weight = fnn.tensor(
-                            down_weight.flatten().tolist(), list(down_weight.shape)
+                            down_weight, list(down_weight.shape)
                         )
                         layer.downsample[0].set_weight(weight)
                 elif tensor_name.endswith(".downsample.1.weight"):
                     down_weight = tensors.get(tensor_name)
                     if down_weight is not None:
                         weight = fnn.tensor(
-                            down_weight.flatten().tolist(), list(down_weight.shape)
+                            down_weight, list(down_weight.shape)
                         )
                         layer.downsample[1].set_weight(weight)
                 elif tensor_name.endswith(".downsample.1.bias"):
                     down_bias = tensors.get(tensor_name)
                     if down_bias is not None:
                         bias = fnn.tensor(
-                            down_bias.flatten().tolist(), list(down_bias.shape)
+                            down_bias, list(down_bias.shape)
                         )
                         layer.downsample[1].set_bias(bias)
                 elif tensor_name.endswith(".downsample.1.running_mean"):
                     down_run_mean = tensors.get(tensor_name)
                     if down_run_mean is not None:
                         running_mean = fnn.tensor(
-                            down_run_mean.flatten().tolist(),
-                            list(down_run_mean.shape),
+down_run_mean,
+                             down_run_mean.shape,
                         )
                         layer.downsample[1].set_running_mean(running_mean)
                 elif tensor_name.endswith(".downsample.1.running_var"):
                     down_run_var = tensors.get(tensor_name)
                     if down_run_var is not None:
                         running_var = fnn.tensor(
-                            down_run_var.flatten().tolist(),
-                            list(down_run_var.shape),
+down_run_var,
+                             down_run_var.shape,
                         )
                         layer.downsample[1].set_running_var(running_var)
                 elif tensor_name.endswith(".downsample.1.num_batches_tracked"):
@@ -1096,30 +1096,30 @@ def load_fnn_model(path: str) -> Any:
                     bn2_weight = tensors.get(f"{layer_name}.bn2.weight")
                     if bn2_weight is not None:
                         weight = fnn.tensor(
-                            bn2_weight.flatten().tolist(), list(bn2_weight.shape)
+                            bn2_weight, list(bn2_weight.shape)
                         )
                         layer.bn2.set_weight(weight)
                 elif param_name == "bn2.bias":
                     bn2_bias = tensors.get(f"{layer_name}.bn2.bias")
                     if bn2_bias is not None:
                         bias = fnn.tensor(
-                            bn2_bias.flatten().tolist(), list(bn2_bias.shape)
+                            bn2_bias, list(bn2_bias.shape)
                         )
                         layer.bn2.set_bias(bias)
                 elif param_name == "bn2.running_mean":
                     bn2_running_mean = tensors.get(f"{layer_name}.bn2.running_mean")
                     if bn2_running_mean is not None:
                         running_mean = fnn.tensor(
-                            bn2_running_mean.flatten().tolist(),
-                            list(bn2_running_mean.shape),
+bn2_running_mean,
+                             bn2_running_mean.shape,
                         )
                         layer.bn2.set_running_mean(running_mean)
                 elif param_name == "bn2.running_var":
                     bn2_running_var = tensors.get(f"{layer_name}.bn2.running_var")
                     if bn2_running_var is not None:
                         running_var = fnn.tensor(
-                            bn2_running_var.flatten().tolist(),
-                            list(bn2_running_var.shape),
+bn2_running_var,
+                             bn2_running_var.shape,
                         )
                         layer.bn2.set_running_var(running_var)
                 elif param_name.startswith("downsample."):
@@ -1136,8 +1136,8 @@ def load_fnn_model(path: str) -> Any:
                             )
                             if weight_tensor is not None:
                                 weight = fnn.tensor(
-                                    weight_tensor.flatten().tolist(),
-                                    list(weight_tensor.shape),
+weight_tensor,
+                                     weight_tensor.shape,
                                 )
                                 layer.downsample.layers[downsample_idx].set_weight(
                                     weight
@@ -1148,8 +1148,8 @@ def load_fnn_model(path: str) -> Any:
                             )
                             if bias_tensor is not None:
                                 bias = fnn.tensor(
-                                    bias_tensor.flatten().tolist(),
-                                    list(bias_tensor.shape),
+bias_tensor,
+                                     bias_tensor.shape,
                                 )
                                 layer.downsample.layers[downsample_idx].set_bias(bias)
                         elif downsample_param == "running_mean":
@@ -1158,8 +1158,8 @@ def load_fnn_model(path: str) -> Any:
                             )
                             if running_mean_tensor is not None:
                                 running_mean = fnn.tensor(
-                                    running_mean_tensor.flatten().tolist(),
-                                    list(running_mean_tensor.shape),
+running_mean_tensor,
+                                     running_mean_tensor.shape,
                                 )
                                 layer.downsample.layers[
                                     downsample_idx
@@ -1170,8 +1170,8 @@ def load_fnn_model(path: str) -> Any:
                             )
                             if running_var_tensor is not None:
                                 running_var = fnn.tensor(
-                                    running_var_tensor.flatten().tolist(),
-                                    list(running_var_tensor.shape),
+running_var_tensor,
+                                     running_var_tensor.shape,
                                 )
                                 layer.downsample.layers[downsample_idx].set_running_var(
                                     running_var
