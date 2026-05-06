@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 use crate::autograd::{no_grad_enter, no_grad_exit};
 use crate::dispatcher::list_registered_ops as dispatcher_list_ops;
 use crate::nn::{self as core_nn, Module};
