@@ -591,7 +591,7 @@ impl Module for BatchNorm2d {
             let batch_var = centered.mul(&centered).mean(2, false).mean(0, false);
 
             // Update running stats: running = momentum * running + (1 - momentum) * batch
-            let mom = self.momentum as f32;
+            let mom = self.momentum;
             let inv_mom = 1.0 - mom;
 
             let mut running_mean_lock = self.running_mean.write();

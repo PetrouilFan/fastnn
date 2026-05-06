@@ -174,7 +174,7 @@ impl Module for FusedConvBnSilu {
         if self.conv_weight.requires_grad()
             || self.bn_weight.requires_grad()
             || self.bn_bias.requires_grad()
-            || self.conv_bias.as_ref().map_or(false, |b| b.requires_grad())
+            || self.conv_bias.as_ref().is_some_and(|b| b.requires_grad())
         {
             let backward = Arc::new(FusedConvBnSiluBackward);
             let mut meta = AutogradMeta::new_non_leaf(false);
@@ -667,7 +667,7 @@ impl Module for FusedConvBnRelu {
         if self.conv_weight.requires_grad()
             || self.bn_weight.requires_grad()
             || self.bn_bias.requires_grad()
-            || self.conv_bias.as_ref().map_or(false, |b| b.requires_grad())
+            || self.conv_bias.as_ref().is_some_and(|b| b.requires_grad())
         {
             let backward = Arc::new(FusedConvBnReluBackward);
             let mut meta = AutogradMeta::new_non_leaf(false);
@@ -888,7 +888,7 @@ impl Module for FusedConvBnGelu {
         if self.conv_weight.requires_grad()
             || self.bn_weight.requires_grad()
             || self.bn_bias.requires_grad()
-            || self.conv_bias.as_ref().map_or(false, |b| b.requires_grad())
+            || self.conv_bias.as_ref().is_some_and(|b| b.requires_grad())
         {
             let backward = Arc::new(FusedConvBnGeluBackward);
             let mut meta = AutogradMeta::new_non_leaf(false);
