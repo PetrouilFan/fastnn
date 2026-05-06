@@ -92,11 +92,15 @@ class EarlyStopping(Callback):
         if self.best_value is None:
             self.best_value = value
             self.counter = 0
-        elif abs(value - self.best_value) > self.min_delta:
-            if value < self.best_value:
-                self.best_value = value
+            return
+
+        # Check for improvement beyond min_delta
+        improved = value < self.best_value - self.min_delta
+        if improved:
+            self.best_value = value
             self.counter = 0
         else:
+            # No significant improvement; count patience
             self.counter += 1
             if self.counter >= self.patience:
                 print(f"Early stopping triggered at epoch {epoch}!")
@@ -128,7 +132,7 @@ class LearningRateScheduler:
                 / 2
             )
         else:
-            new_lr = self.lr
+            raise ValueError(f"Unknown schedule: {self.schedule}")
 
         logs["lr"] = new_lr
 

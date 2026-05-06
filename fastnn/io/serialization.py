@@ -148,7 +148,7 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
                     shape = [_unpack_i64(f.read(8)) for _ in range(shape_len)]
                     data_len = _unpack_u64(f.read(8))
                     data = np.frombuffer(f.read(data_len * 4), dtype=np.float32)
-                    result[name] = tensor(data.copy(), list(shape))
+                    result[name] = tensor(data, list(shape))
                 return result
             
             elif file_version == 2:
@@ -158,15 +158,15 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
                     tensor_version = _unpack_u32(f.read(4))
                     if tensor_version != 2:
                         raise SerializationError(f"Unsupported tensor version: {tensor_version}")
-                    name, data = read_tensor(f)
-                    result[name] = tensor(data.copy().flatten().tolist(), list(data.shape))
+name, data = read_tensor(f)
+                     result[name] = tensor(data, list(data.shape))
                     # Read gradient flag
                     has_grad = _unpack_u8(f.read(1))
                     if has_grad:
                         grad_name = name + ".grad"
-                        _, grad_data = read_tensor(f)
-                        # Attach gradient to the tensor
-                        grad_tensor = tensor(grad_data.copy().flatten().tolist(), list(grad_data.shape))
+_, grad_data = read_tensor(f)
+                         # Attach gradient to the tensor
+                         grad_tensor = tensor(grad_data, list(grad_data.shape))
                         # Store gradient in autograd metadata if available
                         if hasattr(result[name], 'inner') and hasattr(result[name].inner, 'autograd_meta'):
                             meta = result[name].inner.autograd_meta

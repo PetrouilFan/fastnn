@@ -85,10 +85,6 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
     initializer_map = {init.name: onnx.numpy_helper.to_array(init)
                        for init in model.graph.initializer}
 
-    def _get_initializer(name: str) -> Optional[np.ndarray]:
-        """Get initializer tensor by name (O(1) lookup)."""
-        return initializer_map.get(name)
-
     # Build a mapping of node outputs to their consumers
     output_to_node = {}
     for node in model.graph.node:
@@ -96,8 +92,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             output_to_node[output] = node
 
     # Open output file and write header
-    f = open(fnn_path, "wb")
-    try:
+    with open(fnn_path, "wb") as f:
         f.write(MODEL_MAGIC)
         f.write(struct.pack("<I", MODEL_VERSION))
         # Placeholder for parameter count - will seek back to update
@@ -112,10 +107,8 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             layer_index += 1
 
             if op_type == "Conv":
-                weight = _get_initializer(node.input[1])
-                bias = (
-                    _get_initializer(node.input[2]) if len(node.input) > 2 else None
-                )
+                weight = initializer_map.get(node.input[1])
+                bias = initializer_map.get(node.input[2]) if len(node.input) > 2 else None
 
                 out_channels, in_channels = weight.shape[:2]
                 kernel_h, _kernel_w = weight.shape[2], weight.shape[3]
@@ -142,10 +135,8 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                     param_count += 1
 
             elif op_type == "Gemm":
-                weight = _get_initializer(node.input[1])
-                bias = (
-                    _get_initializer(node.input[2]) if len(node.input) > 2 else None
-                )
+                weight = initializer_map.get(node.input[1])
+                bias = initializer_map.get(node.input[2]) if len(node.input) > 2 else None
 
                 _get_attr(node, "alpha", 1.0)
                 _get_attr(node, "beta", 1.0)
@@ -173,10 +164,10 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 pass  # No parameters
 
             elif op_type == "BatchNormalization":
-                scale = _get_initializer(node.input[1])
-                bias = _get_initializer(node.input[2])
-                mean = _get_initializer(node.input[3])
-                var = _get_initializer(node.input[4])
+                scale = initializer_map.get(node.input[1])
+                bias = initializer_map.get(node.input[2])
+                mean = initializer_map.get(node.input[3])
+                var = initializer_map.get(node.input[4])
 
                 layer_info["type"] = "BatchNorm2d"
                 layer_info["num_features"] = scale.shape[0]
@@ -221,7 +212,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
 
             elif op_type == "Add":
                 # Check if it's a bias add (one input is a constant)
-                bias = _get_initializer(node.input[1])
+                bias = initializer_map.get(node.input[1])
                 if bias is not None:
                     layer_info["type"] = "BiasAdd"
                     write_tensor(f, f"{node.name}.bias", bias)
@@ -240,7 +231,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 layer_info["axis"] = axis
 
             elif op_type == "Reshape":
-                shape = _get_initializer(node.input[1])
+                shape = initializer_map.get(node.input[1])
                 if shape is not None:
                     layer_info["shape"] = shape.tolist()
 
@@ -274,8 +265,8 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 layer_info["beta"] = _get_attr(node, "beta", 0.75)
 
             elif op_type == "InstanceNormalization":
-                scale = _get_initializer(node.input[1])
-                bias = _get_initializer(node.input[2])
+                scale = initializer_map.get(node.input[1])
+                bias = initializer_map.get(node.input[2])
                 layer_info["type"] = "InstanceNorm"
                 layer_info["num_features"] = scale.shape[0]
                 layer_info["eps"] = _get_attr(node, "epsilon", 1e-5)
@@ -293,11 +284,6 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
         # Seek back to update parameter count
         f.seek(param_count_offset)
         f.write(struct.pack("<Q", param_count))
-
-    except Exception:
-        raise
-    finally:
-        f.close()
 
     # Get input/output shapes
     input_shape = None
