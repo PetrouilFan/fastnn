@@ -25,6 +25,12 @@ impl TrainLogs {
     }
 }
 
+impl Default for TrainLogs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[allow(dead_code)]
 pub trait Callback: Send + Sync {
     fn on_epoch_begin(&mut self, _epoch: usize, _logs: &mut TrainLogs) {}

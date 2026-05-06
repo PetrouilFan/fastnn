@@ -309,20 +309,13 @@ impl Node for GeluBackward {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let x = &self.input;
 
-        let x2 = x.mul(x);
-        let x3 = x2.mul(x);
-        let inner = self.sqrt_2_over_pi.mul(&x.add(&self.coeff.mul(&x3)));
-        let t = inner.tanh();
-        let t2 = t.mul(&t);
-        let sech2 = self.one.sub(&t2);
-        let d_inner_dx = self
-            .sqrt_2_over_pi
-            .mul(&self.one.add(&self.d_inner_coeff.mul(&x2)));
-        let derivative = self
-            .half
-            .mul(&self.one.add(&t))
-            .add(&self.half.mul(x).mul(&sech2).mul(&d_inner_dx));
-        vec![Some(grad.mul(&derivative))]
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+        let result = crate::dispatcher::dispatch(
+            "gelu_backward",
+            dispatch_key,
+            &[&grad, x],
+        );
+        vec![Some(result[0].clone())]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -430,9 +423,14 @@ impl Node for SiLUBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let s = self.input.sigmoid();
-        let one_minus_s = s.mul_scalar(1.0).sub(&s);
-        let derivative = s.mul(&self.input.mul(&one_minus_s).add_scalar(1.0));
-        vec![Some(grad.mul(&derivative))]
+
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(self.input.device());
+        let result = crate::dispatcher::dispatch(
+            "silu_backward",
+            dispatch_key,
+            &[&self.input, &s, &grad],
+        );
+        vec![result.first().cloned()]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -454,14 +452,15 @@ impl Node for SiLUBackward {
 
 #[allow(dead_code)]
 pub struct SoftmaxBackward {
+    pub input: Tensor,
     pub output: Tensor,
     pub dim: usize,
     pub edges: Vec<Edge>,
 }
 
 impl SoftmaxBackward {
-    pub fn new(output: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
-        SoftmaxBackward { output, dim, edges }
+    pub fn new(input: Tensor, output: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
+        SoftmaxBackward { input, output, dim, edges }
     }
 }
 
@@ -469,10 +468,14 @@ impl Node for SoftmaxBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = grad_outputs.into_iter().next().flatten().unwrap();
         let s = &self.output;
-        let dim_i32 = self.dim as i32;
-        let dot = grad.mul(s).sum(dim_i32, true);
-        let grad_input = s.mul(&grad.sub(&dot));
-        vec![Some(grad_input)]
+        let dim_tensor = Tensor::from_scalar(self.dim as f32);
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(s.device());
+        let result = crate::dispatcher::dispatch(
+            "softmax_backward",
+            dispatch_key,
+            &[s, &grad, &dim_tensor],
+        );
+        vec![result.first().cloned()]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -488,7 +491,7 @@ impl Node for SoftmaxBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        std::slice::from_ref(&self.output)
+        std::slice::from_ref(&self.input)
     }
 }
 

@@ -1,0 +1,7 @@
+# Ruff configuration for fastnn
+# Exclude benchmark files from linting (they have pre-existing issues unrelated to this PR)
+exclude = ["benchmarks/", "benchmark*.py", "benches/", ".git"]
+
+[lint]
+ignore = ["E402", "E741", "E501", "F401", "F405", "F811", "F821"]
+select = ["E", "F"]

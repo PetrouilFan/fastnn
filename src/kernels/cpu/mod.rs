@@ -343,6 +343,7 @@ fn broadcast_shapes_simple(a: &[i64], b: &[i64]) -> Vec<i64> {
 // Section 7: Optimized broadcast index decomposition
 // Precomputes multipliers to map output index to input index without loops
 #[inline]
+#[allow(dead_code)]
 fn broadcast_index_decomposition(
     idx: usize,
     out_shape: &[usize],
@@ -885,6 +886,16 @@ fn register_kernels() {
     register("tanh", DispatchKey::Cpu, tanh_kernel as KernelFn);
     register("silu", DispatchKey::Cpu, silu_kernel as KernelFn);
     register(
+        "gelu_backward",
+        DispatchKey::Cpu,
+        gelu_backward_kernel as KernelFn,
+    );
+    register(
+        "silu_backward",
+        DispatchKey::Cpu,
+        silu_backward_kernel as KernelFn,
+    );
+    register(
         "leaky_relu",
         DispatchKey::Cpu,
         leaky_relu_kernel as KernelFn,
@@ -922,6 +933,11 @@ fn register_kernels() {
         DispatchKey::Cpu,
         fused_conv_bn_silu_kernel as KernelFn,
     );
+    register(
+        "fused_conv_bn",
+        DispatchKey::Cpu,
+        fused_conv_bn_kernel as KernelFn,
+    );
     register("sum", DispatchKey::Cpu, sum_kernel as KernelFn);
     register("mean", DispatchKey::Cpu, mean_kernel as KernelFn);
     register("max", DispatchKey::Cpu, max_kernel as KernelFn);
@@ -933,6 +949,11 @@ fn register_kernels() {
         "log_softmax",
         DispatchKey::Cpu,
         log_softmax_kernel as KernelFn,
+    );
+    register(
+        "softmax_backward",
+        DispatchKey::Cpu,
+        softmax_backward_kernel as KernelFn,
     );
     register("mse_loss", DispatchKey::Cpu, mse_loss_kernel as KernelFn);
     register(
@@ -990,9 +1011,34 @@ fn register_kernels() {
         layer_norm_kernel as KernelFn,
     );
     register(
+        "fused_layer_norm_gelu",
+        DispatchKey::Cpu,
+        fused_layer_norm_gelu_kernel as KernelFn,
+    );
+    register(
         "batch_norm",
         DispatchKey::Cpu,
         batch_norm_kernel as KernelFn,
+    );
+    register(
+        "rms_norm",
+        DispatchKey::Cpu,
+        rms_norm_kernel as KernelFn,
+    );
+    register(
+        "fused_rms_norm_gelu",
+        DispatchKey::Cpu,
+        fused_rms_norm_gelu_kernel as KernelFn,
+    );
+    register(
+        "fused_conv_bn_relu",
+        DispatchKey::Cpu,
+        fused_conv_bn_relu_kernel as KernelFn,
+    );
+    register(
+        "fused_conv_bn_gelu",
+        DispatchKey::Cpu,
+        fused_conv_bn_gelu_kernel as KernelFn,
     );
     register("embedding", DispatchKey::Cpu, embedding_kernel as KernelFn);
     register("zeros", DispatchKey::Cpu, zeros_kernel as KernelFn);
@@ -1812,21 +1858,23 @@ mod tests {
         let mut out = vec![0.0f32; batch * m * n];
         let total_rows = batch * m;
         for row in 0..total_rows {
-            blocked_row_matmul(
-                a.as_ptr(),
-                b.as_ptr(),
-                out.as_mut_ptr(),
-                row,
-                m,
-                n,
-                k,
-                a_bs,
-                a_s0,
-                a_s1,
-                b_bs,
-                b_s0,
-                b_s1,
-            );
+            unsafe {
+                blocked_row_matmul(
+                    a.as_ptr(),
+                    b.as_ptr(),
+                    out.as_mut_ptr(),
+                    row,
+                    m,
+                    n,
+                    k,
+                    a_bs,
+                    a_s0,
+                    a_s1,
+                    b_bs,
+                    b_s0,
+                    b_s1,
+                );
+            }
         }
         let expected =
             reference_matmul_strided(a, b, batch, m, n, k, a_bs, a_s0, a_s1, b_bs, b_s0, b_s1);
@@ -1982,21 +2030,23 @@ mod tests {
 
         fn blocked_matmul_row(a: &[f32], b: &[f32], out: &mut [f32], m: usize, n: usize, k: usize) {
             for row in 0..m {
-                blocked_row_matmul(
-                    a.as_ptr(),
-                    b.as_ptr(),
-                    out.as_mut_ptr(),
-                    row,
-                    m,
-                    n,
-                    k,
-                    m * k,
-                    k,
-                    1,
-                    k * n,
-                    n,
-                    1,
-                );
+                unsafe {
+                    blocked_row_matmul(
+                        a.as_ptr(),
+                        b.as_ptr(),
+                        out.as_mut_ptr(),
+                        row,
+                        m,
+                        n,
+                        k,
+                        m * k,
+                        k,
+                        1,
+                        k * n,
+                        n,
+                        1,
+                    );
+                }
             }
         }
 
@@ -2090,21 +2140,23 @@ mod tests {
         let mut out = vec![0.0f32; m * n];
         let total_rows = m;
         for row in 0..total_rows {
-            blocked_row_matmul(
-                a.as_ptr(),
-                b.as_ptr(),
-                out.as_mut_ptr(),
-                row,
-                m,
-                n,
-                k,
-                m * k,
-                k,
-                1,
-                k * n * b_stride_1,
-                n * b_stride_1,
-                b_stride_1,
-            );
+            unsafe {
+                blocked_row_matmul(
+                    a.as_ptr(),
+                    b.as_ptr(),
+                    out.as_mut_ptr(),
+                    row,
+                    m,
+                    n,
+                    k,
+                    m * k,
+                    k,
+                    1,
+                    k * n * b_stride_1,
+                    n * b_stride_1,
+                    b_stride_1,
+                );
+            }
         }
         // Verify against reference scalar matmul with same strides
         let expected = reference_matmul_strided(

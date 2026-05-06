@@ -1,4 +1,5 @@
-from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d, Sequential as Seq
+from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d
+from fastnn.layers import PySequential as Seq
 import fastnn as fnn
 
 

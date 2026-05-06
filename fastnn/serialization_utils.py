@@ -8,6 +8,12 @@ import struct
 from typing import Tuple
 import numpy as np
 
+# Canonical constants for fastnn serialization formats
+MODEL_MAGIC = b"FNN\x00"
+OPTIMIZER_MAGIC = b"FNO\x00"
+MODEL_VERSION = 2
+OPTIMIZER_VERSION = 1
+
 
 def _pack_u64(value: int) -> bytes:
     """Pack a 64-bit unsigned integer (little-endian)."""

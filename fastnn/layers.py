@@ -15,6 +15,7 @@ Examples:
 from typing import Optional, Tuple, List, Any, Union
 
 import fastnn._core as _core
+from fastnn.module import Module
 
 # Re-export Rust layer classes with improved naming (remove 'Py' prefix)
 # We'll keep the original names but also provide aliases without 'Py' for consistency.
@@ -183,7 +184,7 @@ class Flatten:
         pass
 
 
-class PySequential:
+class PySequential(Module):
     """Sequential container (Python implementation).
     
     A simple sequential container that applies layers in order.
@@ -205,6 +206,10 @@ class PySequential:
     
     def __init__(self, layers: List[Any]):
         self.layers = layers
+        self._param_layers = [l for l in layers if hasattr(l, "parameters")]
+        self._gpu_layers = [l for l in layers if hasattr(l, "to_gpu")]
+        self._train_layers = [l for l in layers if hasattr(l, "train")]
+        self._eval_layers = [l for l in layers if hasattr(l, "eval")]
     
     def __call__(self, x):
         for layer in self.layers:
@@ -218,28 +223,24 @@ class PySequential:
     
     def parameters(self):
         params = []
-        for layer in self.layers:
-            if hasattr(layer, "parameters"):
-                params.extend(layer.parameters())
+        for layer in self._param_layers:
+            params.extend(layer.parameters())
         return params
     
     def to_gpu(self, device_id: int):
-        for layer in self.layers:
-            if hasattr(layer, "to_gpu"):
-                layer.to_gpu(device_id)
+        for layer in self._gpu_layers:
+            layer.to_gpu(device_id)
     
     def train(self):
-        for layer in self.layers:
-            if hasattr(layer, "train"):
-                layer.train()
+        for layer in self._train_layers:
+            layer.train()
     
     def eval(self):
-        for layer in self.layers:
-            if hasattr(layer, "eval"):
-                layer.eval()
+        for layer in self._eval_layers:
+            layer.eval()
 
 
-class BasicBlock:
+class BasicBlock(Module):
     """ResNet BasicBlock with skip connection.
     
     This is a building block for ResNet architectures.
@@ -265,6 +266,19 @@ class BasicBlock:
         self.conv2 = conv2
         self.bn2 = bn2
         self.downsample = downsample
+        self._sublayers = [conv1, bn1, conv2, bn2]
+        if downsample is not None:
+            self._sublayers.append(downsample)
+        self._param_layers = [l for l in self._sublayers if hasattr(l, "parameters")]
+        self._named_param_pairs = []
+        for name, layer in [("conv1", conv1), ("bn1", bn1), ("conv2", conv2), ("bn2", bn2)]:
+            if hasattr(layer, "named_parameters"):
+                self._named_param_pairs.append((name, layer))
+        if downsample is not None and hasattr(downsample, "named_parameters"):
+            self._named_param_pairs.append(("downsample", downsample))
+        self._zero_grad_layers = [l for l in self._sublayers if hasattr(l, "zero_grad")]
+        self._train_layers = [l for l in self._sublayers if hasattr(l, "train")]
+        self._eval_layers = [l for l in self._sublayers if hasattr(l, "eval")]
     
     def __call__(self, x):
         identity = x
@@ -286,54 +300,28 @@ class BasicBlock:
     
     def parameters(self):
         params = []
-        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
-            if hasattr(layer, "parameters"):
-                params.extend(layer.parameters())
-        if self.downsample is not None:
-            if hasattr(self.downsample, "parameters"):
-                params.extend(self.downsample.parameters())
+        for layer in self._param_layers:
+            params.extend(layer.parameters())
         return params
     
     def named_parameters(self):
         params = []
-        for name, layer in [
-            ("conv1", self.conv1),
-            ("bn1", self.bn1),
-            ("conv2", self.conv2),
-            ("bn2", self.bn2),
-        ]:
-            if hasattr(layer, "named_parameters"):
-                for n, p in layer.named_parameters():
-                    params.append((f"{name}.{n}", p))
-        if self.downsample is not None:
-            if hasattr(self.downsample, "named_parameters"):
-                for n, p in self.downsample.named_parameters():
-                    params.append((f"downsample.{n}", p))
+        for name, layer in self._named_param_pairs:
+            for n, p in layer.named_parameters():
+                params.append((f"{name}.{n}", p))
         return params
     
     def zero_grad(self):
-        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
-            if hasattr(layer, "zero_grad"):
-                layer.zero_grad()
-        if self.downsample is not None:
-            if hasattr(self.downsample, "zero_grad"):
-                self.downsample.zero_grad()
+        for layer in self._zero_grad_layers:
+            layer.zero_grad()
     
     def train(self):
-        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
-            if hasattr(layer, "train"):
-                layer.train()
-        if self.downsample is not None:
-            if hasattr(self.downsample, "train"):
-                self.downsample.train()
+        for layer in self._train_layers:
+            layer.train()
     
     def eval(self):
-        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
-            if hasattr(layer, "eval"):
-                layer.eval()
-        if self.downsample is not None:
-            if hasattr(self.downsample, "eval"):
-                self.downsample.eval()
+        for layer in self._eval_layers:
+            layer.eval()
 
 
 # Alias for backward compatibility
