@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 use crate::nn::Module;
 use crate::tensor::Tensor;
 
