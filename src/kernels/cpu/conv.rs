@@ -1225,9 +1225,6 @@ pub unsafe fn fused_conv_bn_3x3_direct(
     out_height: usize,
 out_width: usize,
 ) -> Tensor {
-    const GELU_SQRT_2_OVER_PI: f32 = 0.7978845608028654;
-    const GELU_COEFF: f32 = 0.044715;
-    
     let output_shape = vec![
         batch_size as i64,
         out_channels as i64,
@@ -3140,7 +3137,6 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
 }
 
 #[allow(clippy::too_many_arguments)]
-
 // --- FusedConvBnGELU (copied from SiLU, activation changed) ---
 pub unsafe fn fused_conv_bn_gelu_3x3_direct(
     x: &Tensor,
@@ -3611,7 +3607,6 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
 }
 
 #[allow(clippy::too_many_arguments)]
-
 // --- ReLU kernel (dispatch entry) ---
 pub unsafe fn fused_conv_bn_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];

@@ -430,7 +430,7 @@ impl Node for SiLUBackward {
             dispatch_key,
             &[&self.input, &s, &grad],
         );
-        vec![result.get(0).cloned()]
+        vec![result.first().cloned()]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -475,7 +475,7 @@ impl Node for SoftmaxBackward {
             dispatch_key,
             &[s, &grad, &dim_tensor],
         );
-        vec![result.get(0).cloned()]
+        vec![result.first().cloned()]
     }
 
     fn next_edges(&self) -> &[Edge] {
