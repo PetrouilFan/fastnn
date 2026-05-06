@@ -678,9 +678,9 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let numel = output_shape.iter().product::<i64>() as usize;
-    let a_ptr = a.data_ptr() as *const f32;
-    let b_ptr = b.data_ptr() as *const f32;
+    let _numel = output_shape.iter().product::<i64>() as usize;
+    let _a_ptr = a.data_ptr() as *const f32;
+    let _b_ptr = b.data_ptr() as *const f32;
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);

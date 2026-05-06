@@ -326,7 +326,7 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         num_channels: usize,
         spatial_size: usize,
         channel: usize,
-        batch_size: usize,
+        _batch_size: usize,
         total_per_channel: usize,
     ) -> (f32, f32) {
         use std::arch::x86_64::*;
@@ -689,7 +689,7 @@ pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
 
-    let mut output_shape = x_shape.to_vec();
+    let output_shape = x_shape.to_vec();
     vec![Tensor::from_vec(output_data, output_shape)]
 }
 
