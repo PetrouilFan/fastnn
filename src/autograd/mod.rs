@@ -60,6 +60,12 @@ impl Drop for NoGradGuard {
     }
 }
 
+impl Default for NoGradGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Convenience function to run a closure with gradient computation disabled.
 ///
 /// # Example
@@ -99,6 +105,19 @@ impl AutogradMeta {
             grad: None,
             grad_fn: None,
             is_leaf: false,
+        }
+    }
+
+    /// Zero the gradient.
+    /// If set_to_none is true, drop the grad buffer (old behavior).
+    /// If false, zero-fill the existing grad tensor's data (TODO: implement).
+    pub fn zero_grad(&mut self, set_to_none: bool) {
+        if set_to_none {
+            self.grad = None;
+        } else {
+            // TODO: zero-fill grad tensor's data to avoid reallocation
+            // For now, just drop it (same as set_to_none=true)
+            self.grad = None;
         }
     }
 }

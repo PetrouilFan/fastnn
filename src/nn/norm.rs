@@ -340,6 +340,7 @@ pub struct RMSNorm {
     pub weight: Tensor,
     pub eps: f32,
     pub normalized_shape: i64,
+    eps_scalar: Tensor,
 }
 
 impl RMSNorm {
@@ -355,25 +356,20 @@ impl RMSNorm {
             weight: w,
             eps,
             normalized_shape,
+            eps_scalar: Tensor::from_scalar(eps),
         }
     }
 }
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let x_sq = x.mul(x);
-        let ndim = x.ndim();
-        let norm_dim = ndim as i32 - 1;
-        let mean_sq = x_sq.mean(norm_dim, true);
-        let rms = mean_sq.add_scalar(self.eps).sqrt();
-        let x_norm = x.div(&rms);
-        let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
-        for _ in 0..ndim - 1 {
-            weight_shape.push(1);
-        }
-        weight_shape.push(self.normalized_shape);
-        let weight_reshaped = self.weight.reshape(weight_shape.into_vec());
-        x_norm.mul(&weight_reshaped)
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+        let result = crate::dispatcher::dispatch(
+            "rms_norm",
+            dispatch_key,
+            &[x, &self.weight, &self.eps_scalar],
+        );
+        result[0].clone()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -503,6 +499,9 @@ pub struct BatchNorm2d {
     pub momentum: f32,
     pub num_features: i64,
     training: std::sync::atomic::AtomicBool,
+    eps_scalar: Tensor,
+    training_true_scalar: Tensor,
+    training_false_scalar: Tensor,
 }
 
 impl BatchNorm2d {
@@ -540,69 +539,83 @@ impl BatchNorm2d {
             momentum,
             num_features,
             training: std::sync::atomic::AtomicBool::new(true),
+            eps_scalar: Tensor::from_scalar(eps),
+            training_true_scalar: Tensor::from_scalar(1.0),
+            training_false_scalar: Tensor::from_scalar(0.0),
         }
     }
 }
 
 impl Module for BatchNorm2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let x_shape = x.shape();
-        let batch = x_shape[0];
-        let channels = x_shape[1];
-        let spatial: i64 = x_shape[2..].iter().product();
-
-        let x_reshaped = x.reshape(vec![batch, channels, spatial]);
-        let batch_mean = x_reshaped.mean(2, false).mean(0, false);
-        let batch_var = x_reshaped
-            .mean(2, false)
-            .sub(&batch_mean.pow(2.0))
-            .mean(0, false);
-
         let is_training = self.training.load(std::sync::atomic::Ordering::Relaxed);
 
-        let (mean, var) = if is_training {
-            let mom = self.momentum;
-            let inv_mom = 1.0 - mom;
-            let batch_mean_clone = batch_mean.clone();
-            let batch_var_clone = batch_var.clone();
-            {
-                let mut rm = self.running_mean.write();
-                let new_mean = rm
-                    .mul_scalar(mom)
-                    .add(&batch_mean_clone.mul_scalar(inv_mom));
-                *rm = new_mean;
-            }
-            {
-                let mut rv = self.running_var.write();
-                let new_var = rv.mul_scalar(mom).add(&batch_var_clone.mul_scalar(inv_mom));
-                *rv = new_var;
-            }
-            (batch_mean, batch_var)
+        let training_flag = if is_training {
+            &self.training_true_scalar
         } else {
-            (
-                self.running_mean.read().clone(),
-                self.running_var.read().clone(),
-            )
+            &self.training_false_scalar
         };
 
-        let mean_reshaped = mean.reshape(vec![1, channels, 1]);
-        let var_reshaped = var.reshape(vec![1, channels, 1]);
-        let x_norm = x_reshaped
-            .sub(&mean_reshaped)
-            .div(&var_reshaped.add_scalar(self.eps).sqrt());
-        let x_norm = x_norm.reshape(x_shape.clone());
+        // Read current running stats - clone tensors so guards are dropped before dispatch
+        let running_mean = self.running_mean.read().clone();
+        let running_var = self.running_var.read().clone();
 
-        let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
-        weight_shape.push(1);
-        weight_shape.push(self.num_features);
-        for _ in 2..x_shape.len() {
-            weight_shape.push(1);
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+        let result = crate::dispatcher::dispatch(
+            "batch_norm",
+            dispatch_key,
+            &[
+                x,
+                &self.weight,
+                &self.bias,
+                &running_mean,
+                &running_var,
+                training_flag,
+                &self.eps_scalar,
+            ],
+        );
+
+        let output = result[0].clone();
+
+        // In training mode, update the running stats
+        if is_training {
+            let x_shape = x.shape();
+            let batch = x_shape[0];
+            let channels = x_shape[1];
+            let spatial: i64 = x_shape[2..].iter().product();
+
+            let x_reshaped = x.reshape(vec![batch, channels, spatial]);
+            let batch_mean = x_reshaped.mean(2, false).mean(0, false);
+
+            let centered = x_reshaped.sub(&batch_mean.reshape(vec![1, channels, 1]));
+            let batch_var = centered.mul(&centered).mean(2, false).mean(0, false);
+
+            // Update running stats: running = momentum * running + (1 - momentum) * batch
+            let mom = self.momentum;
+            let inv_mom = 1.0 - mom;
+
+            let mut running_mean_lock = self.running_mean.write();
+            let new_mean = running_mean_lock
+                .mul_scalar(mom)
+                .add(&batch_mean.mul_scalar(inv_mom));
+            *running_mean_lock = new_mean;
+
+            let mut running_var_lock = self.running_var.write();
+            // PyTorch uses unbiased variance (Bessel correction) for running_var update
+            // batch_var is averaged over both batch and spatial dimensions
+            let n = (batch * spatial) as f32;
+            let unbiased_var = if n > 1.0 {
+                batch_var.mul_scalar(n / (n - 1.0))
+            } else {
+                batch_var
+            };
+            let new_var = running_var_lock
+                .mul_scalar(mom)
+                .add(&unbiased_var.mul_scalar(inv_mom));
+            *running_var_lock = new_var;
         }
-        let w_shape = weight_shape.clone().into_vec();
-        let b_shape = weight_shape.into_vec();
-        let w = self.weight.reshape(w_shape);
-        let b = self.bias.reshape(b_shape);
-        x_norm.mul(&w).add(&b)
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {

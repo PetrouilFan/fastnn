@@ -887,7 +887,7 @@ impl Tensor {
         let nbytes = (numel * dtype.size() as i64) as usize;
 
         let storage = match device {
-            Device::Cpu => get_storage_pool().acquire(nbytes, device),
+            Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
             Device::Wgpu(device_id) => {
                 use crate::kernels::gpu::get_context;
                 let ctx = get_context(device_id);
@@ -920,7 +920,7 @@ impl Tensor {
         let nbytes = (numel * dtype.size() as i64) as usize;
 
         let storage = match device {
-            Device::Cpu => get_storage_pool().acquire(nbytes, device),
+            Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
             Device::Wgpu(device_id) => {
                 // For GPU empty, we create a new buffer (uninitialized)
                 // Note: GPU buffers are not zeroed by default
@@ -2835,7 +2835,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = autograd::SoftmaxBackward::new(output.clone(), dim as usize, edges);
+            let backward = autograd::SoftmaxBackward::new(self.clone(), output.clone(), dim as usize, edges);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();

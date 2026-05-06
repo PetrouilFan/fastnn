@@ -139,61 +139,40 @@ impl Optimizer for AdamW {
 
             self.step[i] += 1;
 
-            // Update bias corrections incrementally
             self.bias_correction1[i] = 1.0 - beta1 as f64 * (1.0 - self.bias_correction1[i]);
             self.bias_correction2[i] = 1.0 - beta2 as f64 * (1.0 - self.bias_correction2[i]);
 
-            // m = beta1 * m + (1 - beta1) * grad
             let beta1_c = 1.0 - beta1;
-            self.m[i].mul_scalar_(beta1);
-            self.temp_grad_scaled[i] = grad.clone();
-            self.temp_grad_scaled[i].mul_scalar_(beta1_c);
-            self.m[i].add_(&self.temp_grad_scaled[i]);
-
-            // v = beta2 * v + (1 - beta2) * grad^2
             let beta2_c = 1.0 - beta2;
-            self.v[i].mul_scalar_(beta2);
-            self.temp_grad_sq[i] = grad.clone();
-            {
-                let numel = self.temp_grad_sq[i].inner.numel() as usize;
-                let ptr = self.temp_grad_sq[i].data_ptr_f32_mut();
-                for j in 0..numel {
-                    unsafe {
-                        let val = *ptr.add(j);
-                        *ptr.add(j) = val * val;
-                    }
-                }
-            }
-            self.temp_grad_sq[i].mul_scalar_(beta2_c);
-            self.v[i].add_(&self.temp_grad_sq[i]);
 
-            // m_hat = m / bias_correction1
-            self.temp_m_hat[i] = self.m[i].clone();
-            self.temp_m_hat[i].mul_scalar_((1.0 / self.bias_correction1[i]) as f32);
+            let m = &mut self.m[i];
+            let v = &mut self.v[i];
 
-            // v_hat = v / bias_correction2 (with optional amsgrad)
-            if self.amsgrad {
-                self.temp_v_hat[i] = self.v_hat[i].maximum(&self.v[i]);
-                self.v_hat[i] = self.temp_v_hat[i].clone();
+            let g = grad.mul_scalar(beta1_c);
+            let m_update = m.mul_scalar(beta1).add(&g);
+            *m = m_update;
+
+            let g_sq = grad.pow(2.0);
+            let v_update = v.mul_scalar(beta2).add(&g_sq.mul_scalar(beta2_c));
+            *v = v_update;
+
+            let bias_correction1 = self.bias_correction1[i] as f32;
+            let bias_correction2 = self.bias_correction2[i] as f32;
+
+            let m_hat = m.div_scalar(bias_correction1);
+            let v_hat = v.div_scalar(bias_correction2);
+
+            let update = m_hat.div(&v_hat.add_scalar(eps).sqrt());
+
+            let no_decay = self.no_decay.get(i).copied().unwrap_or(false);
+            if weight_decay != 0.0 && !no_decay {
+                let p_update = param.mul_scalar(1.0 - lr * weight_decay);
+                param.clone_from(&p_update.sub(&update.mul_scalar(lr)));
             } else {
-                self.temp_v_hat[i] = self.v[i].clone();
-            }
-            self.temp_v_hat[i].mul_scalar_((1.0 / self.bias_correction2[i]) as f32);
-
-            // update = m_hat / (sqrt(v_hat) + eps)
-            self.temp_update[i] = self.temp_m_hat[i].clone();
-            let denom = self.temp_v_hat[i].sqrt().add_scalar(eps);
-            self.temp_update[i].div_(&denom);
-
-            // AdamW: weight decay is applied directly to params (decoupled)
-            // Skip weight decay for parameters marked as no_decay (e.g., biases)
-            if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
-                param.mul_scalar_(1.0 - lr * weight_decay);
+                param.clone_from(&param.sub(&update.mul_scalar(lr)));
             }
 
-            // param = param - lr * update
-            self.temp_update[i].mul_scalar_(lr);
-            param.sub_(&self.temp_update[i]);
+            param.set_grad(None);
         }
     }
 

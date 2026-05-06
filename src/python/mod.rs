@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 use crate::autograd::{no_grad_enter, no_grad_exit};
 use crate::dispatcher::list_registered_ops as dispatcher_list_ops;
 use crate::nn::{self as core_nn, Module};
@@ -113,10 +114,12 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("IoError", py.get_type::<IoError>())?;
     m.add("CudaError", py.get_type::<CudaError>())?;
 
-    m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
+     m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
+     m.add_function(wrap_pyfunction!(tensor_from_buffer, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_factory, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_from_list, py)?)?;
     m.add_function(wrap_pyfunction!(zeros, py)?)?;
+    m.add_function(wrap_pyfunction!(empty, py)?)?;
     m.add_function(wrap_pyfunction!(ones, py)?)?;
     m.add_function(wrap_pyfunction!(full, py)?)?;
     m.add_function(wrap_pyfunction!(arange, py)?)?;
@@ -182,6 +185,9 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Conv1d>()?;
     m.add_class::<Conv3d>()?;
     m.add_class::<ResidualBlock>()?;
+    m.add_class::<FusedConvBn>()?;
+    m.add_class::<FusedConvBnRelu>()?;
+    m.add_class::<FusedConvBnGelu>()?;
     m.add_class::<LayerNorm>()?;
     m.add_class::<BatchNorm1d>()?;
     m.add_class::<RMSNorm>()?;
