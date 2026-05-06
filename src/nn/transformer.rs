@@ -209,7 +209,7 @@ impl TransformerEncoder {
         )
         .requires_grad_(false);
 
-        let mut transformer = TransformerEncoder {
+        let transformer = TransformerEncoder {
             embedding,
             pos_embedding,
             layers,
