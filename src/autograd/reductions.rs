@@ -313,7 +313,7 @@ impl Node for GeluBackward {
         let result = crate::dispatcher::dispatch(
             "gelu_backward",
             dispatch_key,
-            &[x, &grad],
+            &[&grad, x],
         );
         vec![Some(result[0].clone())]
     }
