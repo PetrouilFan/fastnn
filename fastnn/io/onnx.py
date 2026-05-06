@@ -4,26 +4,34 @@ Converts ONNX models (.onnx) to fastnn's native format.
 Supports common operators: Conv, Gemm, Relu, BatchNormalization, MaxPool, etc.
 """
 
-import onnx
-import numpy as np
-import struct
+from __future__ import annotations
+
 import logging
-from typing import Dict, Optional, Any
+import struct
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+import numpy as np
+
+if TYPE_CHECKING:
+    import onnx
+
 from fastnn.serialization_utils import MODEL_MAGIC, MODEL_VERSION, write_tensor
 
 logger = logging.getLogger(__name__)
 
 
-def _get_initializer(model: onnx.ModelProto, name: str) -> Optional[np.ndarray]:
+def _get_initializer(model: "onnx.ModelProto", name: str) -> Optional[np.ndarray]:
     """Get initializer tensor by name."""
+    import onnx
     for init in model.graph.initializer:
         if init.name == name:
             return onnx.numpy_helper.to_array(init)
     return None
 
 
-def _get_value_info(model: onnx.ModelProto, name: str) -> Optional[onnx.ValueInfoProto]:
+def _get_value_info(model: "onnx.ModelProto", name: str) -> Optional["onnx.ValueInfoProto"]:
     """Get value info by name."""
+    import onnx
     for vi in model.graph.value_info:
         if vi.name == name:
             return vi
@@ -36,8 +44,9 @@ def _get_value_info(model: onnx.ModelProto, name: str) -> Optional[onnx.ValueInf
     return None
 
 
-def _get_attr(node: onnx.NodeProto, name: str, default=None):
+def _get_attr(node: "onnx.NodeProto", name: str, default=None):
     """Get attribute value from node."""
+    import onnx
     for attr in node.attribute:
         if attr.name == name:
             if attr.HasField("f"):
@@ -63,6 +72,9 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
     Returns:
         Dictionary with model info (layers, input_shape, output_shape)
     """
+    import onnx
+    import onnx.numpy_helper
+
     model = onnx.load(onnx_path)
 
     layers = []
