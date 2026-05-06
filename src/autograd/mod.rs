@@ -60,6 +60,12 @@ impl Drop for NoGradGuard {
     }
 }
 
+impl Default for NoGradGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Convenience function to run a closure with gradient computation disabled.
 ///
 /// # Example

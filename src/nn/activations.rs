@@ -37,12 +37,24 @@ impl Module for ReLU {
     }
 }
 
+impl Default for ReLU {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[allow(dead_code)]
 pub struct Gelu;
 
 impl Gelu {
     pub fn new() -> Self {
         Gelu
+    }
+}
+
+impl Default for Gelu {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -68,6 +80,12 @@ impl Module for Gelu {
 
     fn is_training(&self) -> bool {
         false
+    }
+}
+
+impl Default for Sigmoid {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -114,6 +132,12 @@ impl Tanh {
     }
 }
 
+impl Default for Tanh {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Module for Tanh {
     fn forward(&self, x: &Tensor) -> Tensor {
         let result = dispatch("tanh", DispatchKey::Cpu, &[x]);
@@ -145,6 +169,12 @@ pub struct SiLU;
 impl SiLU {
     pub fn new() -> Self {
         SiLU
+    }
+}
+
+impl Default for SiLU {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -298,6 +328,12 @@ impl Hardswish {
     }
 }
 
+impl Default for Hardswish {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Module for Hardswish {
     fn forward(&self, x: &Tensor) -> Tensor {
         let result = dispatch("hardswish", DispatchKey::Cpu, &[x]);
@@ -364,6 +400,12 @@ pub struct Mish;
 impl Mish {
     pub fn new() -> Self {
         Mish
+    }
+}
+
+impl Default for Mish {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

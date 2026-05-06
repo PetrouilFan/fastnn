@@ -597,7 +597,7 @@ pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let w_data = weight.map(|w| w.as_f32_slice());
     let b_data = bias.map(|b| b.as_f32_slice());
 
-    const SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    const SQRT_2_OVER_PI: f32 = 0.7978846;
     const GELU_COEFF: f32 = 0.044715;
 
     #[cfg(feature = "parallel")]
@@ -720,7 +720,7 @@ pub unsafe fn fused_rms_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let w_data = weight.map(|w| w.as_f32_slice());
 
-    const SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    const SQRT_2_OVER_PI: f32 = 0.7978846;
     const GELU_COEFF: f32 = 0.044715;
 
     #[cfg(feature = "parallel")]
