@@ -858,7 +858,7 @@ pub unsafe fn softmax_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     }
 
     // General case: iterate over all elements
-    let numel = s.numel() as usize;
+    let _numel = s.numel() as usize;
     let mut output = Tensor::empty(s_shape.to_vec(), s.dtype(), s.device());
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -911,7 +911,7 @@ pub unsafe fn softmax_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 fn softmax_backward_last_dim(s: &Tensor, grad: &Tensor, dim_size: usize) -> Tensor {
     let s_shape = s.shape();
     let outer_size: usize = s_shape[..s_shape.len() - 1].iter().map(|&d| d as usize).product();
-    let numel = s.numel() as usize;
+    let _numel = s.numel() as usize;
 
     let mut output = Tensor::empty(s_shape.to_vec(), s.dtype(), s.device());
     let output_inner = Arc::make_mut(&mut output.inner);
