@@ -15,6 +15,9 @@ use crate::tensor::Tensor;
 use std::sync::Arc;
 use super::*;
 
+const GELU_SQRT_2_OVER_PI: f32 = 0.7978846;
+const GELU_COEFF: f32 = 0.044715;
+
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn im2col_kernel(
@@ -1204,6 +1207,455 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
     output
 }
 
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn fused_conv_bn_3x3_direct(
+    x: &Tensor,
+    w: &Tensor,
+    bias: Option<&Tensor>,
+    bn_weight: &Tensor,
+    bn_bias: &Tensor,
+    bn_running_mean: &Tensor,
+    bn_running_var: &Tensor,
+    bn_eps: f32,
+    batch_size: usize,
+    in_channels: usize,
+    out_channels: usize,
+    in_height: usize,
+    in_width: usize,
+    out_height: usize,
+out_width: usize,
+) -> Tensor {
+    let output_shape = vec![
+        batch_size as i64,
+        out_channels as i64,
+        out_height as i64,
+        out_width as i64,
+    ];
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    let x_ptr = x.data_ptr() as *const f32;
+    let w_ptr = w.data_ptr() as *const f32;
+    let bn_weight_ptr = bn_weight.data_ptr() as *const f32;
+    let bn_bias_ptr = bn_bias.data_ptr() as *const f32;
+    let bn_mean_ptr = bn_running_mean.data_ptr() as *const f32;
+     let bn_var_ptr = bn_running_var.data_ptr() as *const f32;
+
+    let bias_scalar: Option<f32> = bias.and_then(|b| if b.numel() == 1 { Some(b.item()) } else { None });
+    let bias_data: Option<Vec<f32>> = bias.filter(|b| b.numel() > 1).map(|b| {
+        let b_ptr = b.data_ptr() as *const f32;
+        unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
+    });
+
+    let spatial = out_height * out_width;
+    let total_rows = batch_size * spatial;
+    let in_h = in_height as isize;
+    let in_w = in_width as isize;
+
+    let k = in_channels * 9;
+    let n = out_channels;
+    let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
+        let needed = k * n;
+        let mut b = buf.borrow_mut();
+        let v = if let Some(ref mut v) = &mut *b {
+            v
+        } else {
+            let new_vec = vec![0.0f32; needed];
+            *b = Some(new_vec);
+            b.as_mut().unwrap()
+        };
+        if v.len() < needed {
+            v.resize(needed, 0.0);
+        }
+        for ic in 0..in_channels {
+            for kh in 0..3 {
+                for kw in 0..3 {
+                    let k_idx = ic * 9 + kh * 3 + kw;
+                    for oc in 0..out_channels {
+                        let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
+                        unsafe { *v.get_unchecked_mut(k_idx * n + oc) = *w_ptr.add(w_idx) };
+                    }
+                }
+            }
+        }
+        v.as_ptr()
+    });
+    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * n) };
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        let x_usize = x_ptr as usize;
+        let out_usize = out_ptr as usize;
+        let bn_weight_usize = bn_weight_ptr as usize;
+        let bn_bias_usize = bn_bias_ptr as usize;
+        let bn_mean_usize = bn_mean_ptr as usize;
+        let bn_var_usize = bn_var_ptr as usize;
+
+        (0..total_rows).into_par_iter().for_each(|row| {
+            let n = row / spatial;
+            let sp = row % spatial;
+            let oh = sp / out_width;
+            let ow = sp % out_width;
+            let x_ptr = x_usize as *const f32;
+            let out_ptr = out_usize as *mut f32;
+            let bn_weight_ptr = bn_weight_usize as *const f32;
+            let bn_bias_ptr = bn_bias_usize as *const f32;
+            let bn_mean_ptr = bn_mean_usize as *const f32;
+            let bn_var_ptr = bn_var_usize as *const f32;
+
+            S_BUF.with(|s| {
+                let mut s_buf = s.borrow_mut();
+                if s_buf.len() < k {
+                    s_buf.resize(k, 0.0);
+                }
+                let s = &mut s_buf[..k];
+                for k_idx in 0..k {
+                    let ic = k_idx / 9;
+                    let rem = k_idx % 9;
+                    let kh = rem / 3;
+                    let kw = rem % 3;
+                    let ih_s = (oh as isize) + (kh as isize) - 1;
+                    let iw_s = (ow as isize) + (kw as isize) - 1;
+                    s[k_idx] = if ih_s >= 0 && ih_s < in_h && iw_s >= 0 && iw_s < in_w {
+                        let ih = ih_s as usize;
+                        let iw = iw_s as usize;
+                        let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
+                        unsafe { *x_ptr.add(x_idx) }
+                    } else {
+                        0.0
+                    };
+                }
+
+                let mut oc = 0;
+                while oc + 8 <= out_channels {
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        use wide::f32x8;
+                        let mut acc = f32x8::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let w_ptr_k = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_simd = from_slice_unaligned_f32x8(unsafe { std::slice::from_raw_parts(w_ptr_k, 8) });
+                            acc += w_simd * f32x8::splat(x_val);
+                        }
+
+                        let bias_vec = if let Some(ref b) = bias_data {
+                            let b_slice = unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 8) };
+                            from_slice_unaligned_f32x8(b_slice)
+                        } else if let Some(b) = bias_scalar {
+                            f32x8::splat(b)
+                        } else {
+                            f32x8::ZERO
+                        };
+
+                        let res_arr = (acc + bias_vec).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        for i in 0..8 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_arr[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe {
+                                *out_ptr.add(out_idx) = v;
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+                    {
+                        use wide::f32x4;
+                        let mut acc_lo = f32x4::ZERO;
+                        let mut acc_hi = f32x4::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let base_ptr = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_lo = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr, 4) });
+                            acc_lo = acc_lo + w_lo * f32x4::splat(x_val);
+                            let w_hi = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr.add(4), 4) });
+                            acc_hi = acc_hi + w_hi * f32x4::splat(x_val);
+                        }
+
+                        let bias_lo = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+                        let bias_hi = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc + 4), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+
+                        let res_lo = (acc_lo + bias_lo).to_array();
+                        let res_hi = (acc_hi + bias_hi).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        for i in 0..4 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_lo[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                        for i in 0..4 {
+                            let oc_i = oc + 4 + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_hi[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+                    {
+                        for oc_off in 0..8 {
+                            let oc_i = oc + oc_off;
+                            if oc_i >= out_channels { break; }
+                            let mut sum = 0.0f32;
+                            for k_idx in 0..k {
+                                let x_val = s[k_idx];
+                                let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc_i) };
+                                sum += x_val * w_val;
+                            }
+                            let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc_i]).unwrap_or(0.0));
+                            let mut v = sum + bias_val;
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            let out_idx = ((n * out_channels + oc_i) * out_height + oh) * out_width + ow;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    oc += 8;
+                }
+
+                while oc < out_channels {
+                    let mut sum = 0.0f32;
+                    for k_idx in 0..k {
+                        let x_val = s[k_idx];
+                        let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                        sum += x_val * w_val;
+                    }
+                    let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0));
+                    let mut v = sum + bias_val;
+                    let mean = unsafe { *bn_mean_ptr.add(oc) };
+                    let var = unsafe { *bn_var_ptr.add(oc) };
+                    let inv_std = 1.0 / (var + bn_eps).sqrt();
+                    v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc) } + unsafe { *bn_bias_ptr.add(oc) };
+                    let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                    unsafe { *out_ptr.add(out_idx) = v; }
+                    oc += 1;
+                }
+            });
+        })
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for row in 0..total_rows {
+            let n = row / spatial;
+            let sp = row % spatial;
+            let oh = sp / out_width;
+            let ow = sp % out_width;
+
+            S_BUF.with(|s| {
+                let mut s_buf = s.borrow_mut();
+                if s_buf.len() < k {
+                    s_buf.resize(k, 0.0);
+                }
+                let s = &mut s_buf[..k];
+                for k_idx in 0..k {
+                    let ic = k_idx / 9;
+                    let rem = k_idx % 9;
+                    let kh = rem / 3;
+                    let kw = rem % 3;
+                    let ih_s = (oh as isize) + (kh as isize) - 1;
+                    let iw_s = (ow as isize) + (kw as isize) - 1;
+                    s[k_idx] = if ih_s >= 0 && ih_s < in_h && iw_s >= 0 && iw_s < in_w {
+                        let ih = ih_s as usize;
+                        let iw = iw_s as usize;
+                        let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
+                        unsafe { *x_ptr.add(x_idx) }
+                    } else {
+                        0.0
+                    };
+                }
+
+                let mut oc = 0;
+                while oc + 8 <= out_channels {
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        use wide::f32x8;
+                        let mut acc = f32x8::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let w_ptr_k = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_simd = from_slice_unaligned_f32x8(unsafe { std::slice::from_raw_parts(w_ptr_k, 8) });
+                            acc += w_simd * f32x8::splat(x_val);
+                        }
+
+                        let bias_vec = if let Some(ref b) = bias_data {
+                            let b_slice = unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 8) };
+                            from_slice_unaligned_f32x8(b_slice)
+                        } else if let Some(b) = bias_scalar {
+                            f32x8::splat(b)
+                        } else {
+                            f32x8::ZERO
+                        };
+
+                        let res_arr = (acc + bias_vec).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        for i in 0..8 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_arr[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe {
+                                *out_ptr.add(out_idx) = v;
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+                    {
+                        use wide::f32x4;
+                        let mut acc_lo = f32x4::ZERO;
+                        let mut acc_hi = f32x4::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let base_ptr = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_lo = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr, 4) });
+                            acc_lo = acc_lo + w_lo * f32x4::splat(x_val);
+                            let w_hi = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr.add(4), 4) });
+                            acc_hi = acc_hi + w_hi * f32x4::splat(x_val);
+                        }
+
+                        let bias_lo = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+                        let bias_hi = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc + 4), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+
+                        let res_lo = (acc_lo + bias_lo).to_array();
+                        let res_hi = (acc_hi + bias_hi).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        for i in 0..4 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_lo[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                        for i in 0..4 {
+                            let oc_i = oc + 4 + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_hi[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+                    {
+                        for oc_off in 0..8 {
+                            let oc_i = oc + oc_off;
+                            if oc_i >= out_channels { break; }
+                            let mut sum = 0.0f32;
+                            for k_idx in 0..k {
+                                let x_val = s[k_idx];
+                                let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc_i) };
+                                sum += x_val * w_val;
+                            }
+                            let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc_i]).unwrap_or(0.0));
+                            let mut v = sum + bias_val;
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            let out_idx = ((n * out_channels + oc_i) * out_height + oh) * out_width + ow;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    oc += 8;
+                }
+
+                while oc < out_channels {
+                    let mut sum = 0.0f32;
+                    for k_idx in 0..k {
+                        let x_val = s[k_idx];
+                        let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                        sum += x_val * w_val;
+                    }
+                    let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0));
+                    let mut v = sum + bias_val;
+                    let mean = unsafe { *bn_mean_ptr.add(oc) };
+                    let var = unsafe { *bn_var_ptr.add(oc) };
+                    let inv_std = 1.0 / (var + bn_eps).sqrt();
+                    v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc) } + unsafe { *bn_bias_ptr.add(oc) };
+                    let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                    unsafe { *out_ptr.add(out_idx) = v; }
+                    oc += 1;
+                }
+            });
+        }
+    }
+
+    output
+}
+
 pub unsafe fn fused_conv_bn_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let w = args[1];
@@ -1254,6 +1706,74 @@ pub unsafe fn fused_conv_bn_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_width = in_width;
 
     vec![fused_conv_bn_silu_3x3_direct(
+        x,
+        w,
+        bias,
+        bn_weight,
+        bn_bias,
+        bn_running_mean,
+        bn_running_var,
+        eps,
+        batch_size,
+        in_channels,
+        out_channels,
+        in_height,
+        in_width,
+        out_height,
+        out_width,
+     )]
+}
+
+pub unsafe fn fused_conv_bn_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let w = args[1];
+    let mut idx = 2;
+    let bias = if args.len() > idx && args[idx].numel() > 0 {
+        let b = Some(args[idx]);
+        idx += 1;
+        b
+    } else {
+        None
+    };
+    if args.len() < idx + 9 {
+        panic!("fused_conv_bn: insufficient arguments");
+    }
+    let bn_weight = args[idx]; idx += 1;
+    let bn_bias = args[idx]; idx += 1;
+    let bn_running_mean = args[idx]; idx += 1;
+    let bn_running_var = args[idx]; idx += 1;
+    let stride_t = args[idx]; idx += 1;
+    let padding_t = args[idx]; idx += 1;
+    let dilation_t = args[idx]; idx += 1;
+    let groups_t = args[idx]; idx += 1;
+    let eps_t = args[idx];
+
+    let stride = stride_t.item() as i64;
+    let padding = padding_t.item() as i64;
+    let dilation = dilation_t.item() as i64;
+    let groups = groups_t.item() as i64;
+    let eps = eps_t.item();
+
+    // Only support 3x3 kernel with stride=1, padding=1, dilation=1, groups=1
+    let w_shape = w.shape();
+    let kernel_h = w_shape[2] as usize;
+    let kernel_w = w_shape[3] as usize;
+    if kernel_h != 3 || kernel_w != 3 || stride != 1 || padding != 1 || dilation != 1 || groups != 1 {
+        panic!("fused_conv_bn: only 3x3 kernel with stride=1, padding=1, dilation=1, groups=1 is supported");
+    }
+
+    let x_shape = x.shape();
+    let batch_size = x_shape[0] as usize;
+    let in_channels = x_shape[1] as usize;
+    let in_height = x_shape[2] as usize;
+    let in_width = x_shape[3] as usize;
+    let out_channels = w_shape[0] as usize;
+
+    // Output spatial dimensions are the same as input for stride=1, padding=1, 3x3 kernel
+    let out_height = in_height;
+    let out_width = in_width;
+
+    vec![fused_conv_bn_3x3_direct(
         x,
         w,
         bias,
@@ -1782,7 +2302,7 @@ pub unsafe fn conv_transpose2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let w_out = (w_in - 1) * stride - 2 * padding + kernel_w;
 
     let output_shape = vec![batch, out_channels, h_out, w_out];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
 
     let x_data = x.as_f32_slice();
     let w_data = weight.as_f32_slice();
@@ -1846,7 +2366,7 @@ pub unsafe fn conv1d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let l_out = ((l_in + 2 * padding - dilation * (kernel_l - 1) - 1) / stride) + 1;
     let output_shape = vec![batch, out_channels, l_out];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
 
     let x_data = x.as_f32_slice();
     let w_data = weight.as_f32_slice();
@@ -1904,7 +2424,7 @@ pub unsafe fn conv3d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let w_out = ((w_in + 2 * padding - dilation * (kernel_w - 1) - 1) / stride) + 1;
 
     let output_shape = vec![batch, out_channels, d_out, h_out, w_out];
-    let mut output = Tensor::zeros(output_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
 
     let x_data = x.as_f32_slice();
     let w_data = weight.as_f32_slice();
@@ -2143,5 +2663,1052 @@ pub unsafe fn flash_attention_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         head_dim as i64,
     ];
     vec![Tensor::from_vec(output, output_shape)]
+}
+
+
+
+// --- FusedConvBnReLU (copied from SiLU, activation changed) ---
+#[allow(dead_code, clippy::too_many_arguments)]
+pub unsafe fn fused_conv_bn_relu_3x3_direct(
+    x: &Tensor,
+    w: &Tensor,
+    bias: Option<&Tensor>,
+    bn_weight: &Tensor,
+    bn_bias: &Tensor,
+    bn_running_mean: &Tensor,
+    bn_running_var: &Tensor,
+    bn_eps: f32,
+    batch_size: usize,
+    in_channels: usize,
+    out_channels: usize,
+    in_height: usize,
+    in_width: usize,
+    out_height: usize,
+    out_width: usize,
+) -> Tensor {
+    let output_shape = vec![
+        batch_size as i64,
+        out_channels as i64,
+        out_height as i64,
+        out_width as i64,
+    ];
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    let x_ptr = x.data_ptr() as *const f32;
+    let w_ptr = w.data_ptr() as *const f32;
+    let bn_weight_ptr = bn_weight.data_ptr() as *const f32;
+    let bn_bias_ptr = bn_bias.data_ptr() as *const f32;
+    let bn_mean_ptr = bn_running_mean.data_ptr() as *const f32;
+     let bn_var_ptr = bn_running_var.data_ptr() as *const f32;
+
+     let bias_scalar: Option<f32> = bias.and_then(|b| if b.numel() == 1 { Some(b.item()) } else { None });
+     let bias_data: Option<Vec<f32>> = bias.filter(|b| b.numel() > 1).map(|b| {
+         let b_ptr = b.data_ptr() as *const f32;
+         unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
+     });
+
+     let spatial = out_height * out_width;
+     let total_rows = batch_size * spatial;
+     let in_h = in_height as isize;
+     let in_w = in_width as isize;
+
+      // --- Step 1: Get transposed weights from thread-local buffer (recompute per call)
+      let k = in_channels * 9;
+      let n = out_channels;
+        let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
+           let needed = k * n;
+           let mut b = buf.borrow_mut();
+           let v = if let Some(ref mut v) = &mut *b {
+               v
+           } else {
+            let new_vec = vec![0.0f32; needed];
+               *b = Some(new_vec);
+               b.as_mut().unwrap()
+           };
+           if v.len() < needed {
+               v.resize(needed, 0.0);
+           }
+           for ic in 0..in_channels {
+               for kh in 0..3 {
+                   for kw in 0..3 {
+                       let k_idx = ic * 9 + kh * 3 + kw;
+                       for oc in 0..out_channels {
+                           let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
+                           unsafe { *v.get_unchecked_mut(k_idx * n + oc) = *w_ptr.add(w_idx) };
+                       }
+                   }
+               }
+           }
+            v.as_ptr()
+       });
+        let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * n) };
+
+     // --- Step 2: Main kernel (parallel over output spatial+batch positions)
+     #[cfg(feature = "parallel")]
+     {
+         use rayon::prelude::*;
+         let x_usize = x_ptr as usize;
+         let out_usize = out_ptr as usize;
+         let bn_weight_usize = bn_weight_ptr as usize;
+         let bn_bias_usize = bn_bias_ptr as usize;
+         let bn_mean_usize = bn_mean_ptr as usize;
+         let bn_var_usize = bn_var_ptr as usize;
+
+         (0..total_rows).into_par_iter().for_each(|row| {
+             let n = row / spatial;
+             let sp = row % spatial;
+             let oh = sp / out_width;
+             let ow = sp % out_width;
+             let x_ptr = x_usize as *const f32;
+             let out_ptr = out_usize as *mut f32;
+             let bn_weight_ptr = bn_weight_usize as *const f32;
+             let bn_bias_ptr = bn_bias_usize as *const f32;
+             let bn_mean_ptr = bn_mean_usize as *const f32;
+             let bn_var_ptr = bn_var_usize as *const f32;
+
+            S_BUF.with(|s| {
+                let mut s_buf = s.borrow_mut();
+                if s_buf.len() < k {
+                    s_buf.resize(k, 0.0);
+                }
+                let s = &mut s_buf[..k];
+                for k_idx in 0..k {
+                    let ic = k_idx / 9;
+                    let rem = k_idx % 9;
+                    let kh = rem / 3;
+                    let kw = rem % 3;
+                    let ih_s = (oh as isize) + (kh as isize) - 1;
+                    let iw_s = (ow as isize) + (kw as isize) - 1;
+                    s[k_idx] = if ih_s >= 0 && ih_s < in_h && iw_s >= 0 && iw_s < in_w {
+                        let ih = ih_s as usize;
+                        let iw = iw_s as usize;
+                        let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
+                        unsafe { *x_ptr.add(x_idx) }
+                    } else {
+                        0.0
+                    };
+                }
+
+                let mut oc = 0;
+                while oc + 8 <= out_channels {
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        use wide::f32x8;
+                        let mut acc = f32x8::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let w_ptr_k = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_simd = from_slice_unaligned_f32x8(unsafe { std::slice::from_raw_parts(w_ptr_k, 8) });
+                            acc += w_simd * f32x8::splat(x_val);
+                        }
+
+                        let bias_vec = if let Some(ref b) = bias_data {
+                            let b_slice = unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 8) };
+                            from_slice_unaligned_f32x8(b_slice)
+                        } else if let Some(b) = bias_scalar {
+                            f32x8::splat(b)
+                        } else {
+                            f32x8::ZERO
+                        };
+
+                        let res_arr = (acc + bias_vec).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        // Apply BN+SiLU per-element and store
+                        for i in 0..8 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_arr[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v.max(0.0); // ReLU activation
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe {
+                                *out_ptr.add(out_idx) = v;
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+                    {
+                        use wide::f32x4;
+                        let mut acc_lo = f32x4::ZERO;
+                        let mut acc_hi = f32x4::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let base_ptr = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_lo = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr, 4) });
+                            acc_lo = acc_lo + w_lo * f32x4::splat(x_val);
+                            let w_hi = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr.add(4), 4) });
+                            acc_hi = acc_hi + w_hi * f32x4::splat(x_val);
+                        }
+
+                        let bias_lo = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+                        let bias_hi = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc + 4), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+
+                        let res_lo = (acc_lo + bias_lo).to_array();
+                        let res_hi = (acc_hi + bias_hi).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        // Apply BN+SiLU for lo (4)
+                        for i in 0..4 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_lo[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v.max(0.0); // ReLU activation
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                        // Apply BN+SiLU for hi (4)
+                        for i in 0..4 {
+                            let oc_i = oc + 4 + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_hi[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v.max(0.0); // ReLU activation
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+                    {
+                        for oc_off in 0..8 {
+                            let oc_i = oc + oc_off;
+                            if oc_i >= out_channels { break; }
+                            let mut sum = 0.0f32;
+                            for k_idx in 0..k {
+                                let x_val = s[k_idx];
+                                let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc_i) };
+                                sum += x_val * w_val;
+                            }
+                            let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc_i]).unwrap_or(0.0));
+                            let mut v = sum + bias_val;
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v.max(0.0); // ReLU activation
+                            let out_idx = ((n * out_channels + oc_i) * out_height + oh) * out_width + ow;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    oc += 8;
+                }
+
+                // Remainder channels (scalar)
+                while oc < out_channels {
+                    let mut sum = 0.0f32;
+                    for k_idx in 0..k {
+                        let x_val = s[k_idx];
+                        let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                        sum += x_val * w_val;
+                    }
+                    let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0));
+                    let mut v = sum + bias_val;
+                    let mean = unsafe { *bn_mean_ptr.add(oc) };
+                    let var = unsafe { *bn_var_ptr.add(oc) };
+                    let inv_std = 1.0 / (var + bn_eps).sqrt();
+                    v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc) } + unsafe { *bn_bias_ptr.add(oc) };
+                    v = v.max(0.0); // ReLU activation
+                    let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                    unsafe { *out_ptr.add(out_idx) = v; }
+                    oc += 1;
+                }
+            });
+        })
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for row in 0..total_rows {
+            let n = row / spatial;
+            let sp = row % spatial;
+            let oh = sp / out_width;
+            let ow = sp % out_width;
+
+            S_BUF.with(|s| {
+                let mut s_buf = s.borrow_mut();
+                if s_buf.len() < k {
+                    s_buf.resize(k, 0.0);
+                }
+                let s = &mut s_buf[..k];
+                for k_idx in 0..k {
+                    let ic = k_idx / 9;
+                    let rem = k_idx % 9;
+                    let kh = rem / 3;
+                    let kw = rem % 3;
+                    let ih_s = (oh as isize) + (kh as isize) - 1;
+                    let iw_s = (ow as isize) + (kw as isize) - 1;
+                    s[k_idx] = if ih_s >= 0 && ih_s < in_h && iw_s >= 0 && iw_s < in_w {
+                        let ih = ih_s as usize;
+                        let iw = iw_s as usize;
+                        let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
+                        unsafe { *x_ptr.add(x_idx) }
+                    } else {
+                        0.0
+                    };
+                }
+
+                let mut oc = 0;
+                while oc + 8 <= out_channels {
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        use wide::f32x8;
+                        let mut acc = f32x8::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let w_ptr_k = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_simd = from_slice_unaligned_f32x8(unsafe { std::slice::from_raw_parts(w_ptr_k, 8) });
+                            acc += w_simd * f32x8::splat(x_val);
+                        }
+
+                        let bias_vec = if let Some(ref b) = bias_data {
+                            let b_slice = unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 8) };
+                            from_slice_unaligned_f32x8(b_slice)
+                        } else if let Some(b) = bias_scalar {
+                            f32x8::splat(b)
+                        } else {
+                            f32x8::ZERO
+                        };
+
+                        let res_arr = (acc + bias_vec).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        // Apply BN+SiLU per-element and store
+                        for i in 0..8 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_arr[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v.max(0.0); // ReLU activation
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe {
+                                *out_ptr.add(out_idx) = v;
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+                    {
+                        use wide::f32x4;
+                        let mut acc_lo = f32x4::ZERO;
+                        let mut acc_hi = f32x4::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let base_ptr = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_lo = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr, 4) });
+                            acc_lo = acc_lo + w_lo * f32x4::splat(x_val);
+                            let w_hi = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr.add(4), 4) });
+                            acc_hi = acc_hi + w_hi * f32x4::splat(x_val);
+                        }
+
+                        let bias_lo = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+                        let bias_hi = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc + 4), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+
+                        let res_lo = (acc_lo + bias_lo).to_array();
+                        let res_hi = (acc_hi + bias_hi).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        // Apply BN+SiLU for lo (4)
+                        for i in 0..4 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_lo[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v.max(0.0); // ReLU activation
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                        // Apply BN+SiLU for hi (4)
+                        for i in 0..4 {
+                            let oc_i = oc + 4 + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_hi[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v.max(0.0); // ReLU activation
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+                    {
+                        for oc_off in 0..8 {
+                            let oc_i = oc + oc_off;
+                            if oc_i >= out_channels { break; }
+                            let mut sum = 0.0f32;
+                            for k_idx in 0..k {
+                                let x_val = s[k_idx];
+                                let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc_i) };
+                                sum += x_val * w_val;
+                            }
+                            let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc_i]).unwrap_or(0.0));
+                            let mut v = sum + bias_val;
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v.max(0.0); // ReLU activation
+                            let out_idx = ((n * out_channels + oc_i) * out_height + oh) * out_width + ow;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    oc += 8;
+                }
+
+                // Remainder channels (scalar)
+                while oc < out_channels {
+                    let mut sum = 0.0f32;
+                    for k_idx in 0..k {
+                        let x_val = s[k_idx];
+                        let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                        sum += x_val * w_val;
+                    }
+                    let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0));
+                    let mut v = sum + bias_val;
+                    let mean = unsafe { *bn_mean_ptr.add(oc) };
+                    let var = unsafe { *bn_var_ptr.add(oc) };
+                    let inv_std = 1.0 / (var + bn_eps).sqrt();
+                    v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc) } + unsafe { *bn_bias_ptr.add(oc) };
+                    v = v.max(0.0); // ReLU activation
+                    let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                    unsafe { *out_ptr.add(out_idx) = v; }
+                    oc += 1;
+                }
+            });
+        }
+    }
+
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+// --- FusedConvBnGELU (copied from SiLU, activation changed) ---
+pub unsafe fn fused_conv_bn_gelu_3x3_direct(
+    x: &Tensor,
+    w: &Tensor,
+    bias: Option<&Tensor>,
+    bn_weight: &Tensor,
+    bn_bias: &Tensor,
+    bn_running_mean: &Tensor,
+    bn_running_var: &Tensor,
+    bn_eps: f32,
+    batch_size: usize,
+    in_channels: usize,
+    out_channels: usize,
+    in_height: usize,
+    in_width: usize,
+    out_height: usize,
+    out_width: usize,
+) -> Tensor {
+    let output_shape = vec![
+        batch_size as i64,
+        out_channels as i64,
+        out_height as i64,
+        out_width as i64,
+    ];
+    let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
+
+    let output_inner = Arc::make_mut(&mut output.inner);
+    let output_storage = Arc::make_mut(&mut output_inner.storage);
+    let Storage::Cpu(cpu_storage) = output_storage else {
+        panic!("Expected CPU storage");
+    };
+    let out_data = Arc::make_mut(&mut cpu_storage.data);
+    let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+    let x_ptr = x.data_ptr() as *const f32;
+    let w_ptr = w.data_ptr() as *const f32;
+    let bn_weight_ptr = bn_weight.data_ptr() as *const f32;
+    let bn_bias_ptr = bn_bias.data_ptr() as *const f32;
+    let bn_mean_ptr = bn_running_mean.data_ptr() as *const f32;
+     let bn_var_ptr = bn_running_var.data_ptr() as *const f32;
+
+     let bias_scalar: Option<f32> = bias.and_then(|b| if b.numel() == 1 { Some(b.item()) } else { None });
+     let bias_data: Option<Vec<f32>> = bias.filter(|b| b.numel() > 1).map(|b| {
+         let b_ptr = b.data_ptr() as *const f32;
+         unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() }
+     });
+
+     let spatial = out_height * out_width;
+     let total_rows = batch_size * spatial;
+     let in_h = in_height as isize;
+     let in_w = in_width as isize;
+
+      // --- Step 1: Get transposed weights from thread-local buffer (recompute per call)
+      let k = in_channels * 9;
+      let n = out_channels;
+        let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
+           let needed = k * n;
+           let mut b = buf.borrow_mut();
+           let v = if let Some(ref mut v) = &mut *b {
+               v
+           } else {
+            let new_vec = vec![0.0f32; needed];
+               *b = Some(new_vec);
+               b.as_mut().unwrap()
+           };
+           if v.len() < needed {
+               v.resize(needed, 0.0);
+           }
+           for ic in 0..in_channels {
+               for kh in 0..3 {
+                   for kw in 0..3 {
+                       let k_idx = ic * 9 + kh * 3 + kw;
+                       for oc in 0..out_channels {
+                           let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
+                           unsafe { *v.get_unchecked_mut(k_idx * n + oc) = *w_ptr.add(w_idx) };
+                       }
+                   }
+               }
+           }
+            v.as_ptr()
+       });
+        let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * n) };
+
+     // --- Step 2: Main kernel (parallel over output spatial+batch positions)
+     #[cfg(feature = "parallel")]
+     {
+         use rayon::prelude::*;
+         let x_usize = x_ptr as usize;
+         let out_usize = out_ptr as usize;
+         let bn_weight_usize = bn_weight_ptr as usize;
+         let bn_bias_usize = bn_bias_ptr as usize;
+         let bn_mean_usize = bn_mean_ptr as usize;
+         let bn_var_usize = bn_var_ptr as usize;
+
+         (0..total_rows).into_par_iter().for_each(|row| {
+             let n = row / spatial;
+             let sp = row % spatial;
+             let oh = sp / out_width;
+             let ow = sp % out_width;
+             let x_ptr = x_usize as *const f32;
+             let out_ptr = out_usize as *mut f32;
+             let bn_weight_ptr = bn_weight_usize as *const f32;
+             let bn_bias_ptr = bn_bias_usize as *const f32;
+             let bn_mean_ptr = bn_mean_usize as *const f32;
+             let bn_var_ptr = bn_var_usize as *const f32;
+
+            S_BUF.with(|s| {
+                let mut s_buf = s.borrow_mut();
+                if s_buf.len() < k {
+                    s_buf.resize(k, 0.0);
+                }
+                let s = &mut s_buf[..k];
+                for k_idx in 0..k {
+                    let ic = k_idx / 9;
+                    let rem = k_idx % 9;
+                    let kh = rem / 3;
+                    let kw = rem % 3;
+                    let ih_s = (oh as isize) + (kh as isize) - 1;
+                    let iw_s = (ow as isize) + (kw as isize) - 1;
+                    s[k_idx] = if ih_s >= 0 && ih_s < in_h && iw_s >= 0 && iw_s < in_w {
+                        let ih = ih_s as usize;
+                        let iw = iw_s as usize;
+                        let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
+                        unsafe { *x_ptr.add(x_idx) }
+                    } else {
+                        0.0
+                    };
+                }
+
+                let mut oc = 0;
+                while oc + 8 <= out_channels {
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        use wide::f32x8;
+                        let mut acc = f32x8::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let w_ptr_k = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_simd = from_slice_unaligned_f32x8(unsafe { std::slice::from_raw_parts(w_ptr_k, 8) });
+                            acc += w_simd * f32x8::splat(x_val);
+                        }
+
+                        let bias_vec = if let Some(ref b) = bias_data {
+                            let b_slice = unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 8) };
+                            from_slice_unaligned_f32x8(b_slice)
+                        } else if let Some(b) = bias_scalar {
+                            f32x8::splat(b)
+                        } else {
+                            f32x8::ZERO
+                        };
+
+                        let res_arr = (acc + bias_vec).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        // Apply BN+SiLU per-element and store
+                        for i in 0..8 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_arr[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe {
+                                *out_ptr.add(out_idx) = v;
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+                    {
+                        use wide::f32x4;
+                        let mut acc_lo = f32x4::ZERO;
+                        let mut acc_hi = f32x4::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let base_ptr = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_lo = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr, 4) });
+                            acc_lo = acc_lo + w_lo * f32x4::splat(x_val);
+                            let w_hi = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr.add(4), 4) });
+                            acc_hi = acc_hi + w_hi * f32x4::splat(x_val);
+                        }
+
+                        let bias_lo = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+                        let bias_hi = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc + 4), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+
+                        let res_lo = (acc_lo + bias_lo).to_array();
+                        let res_hi = (acc_hi + bias_hi).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        // Apply BN+SiLU for lo (4)
+                        for i in 0..4 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_lo[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                        // Apply BN+SiLU for hi (4)
+                        for i in 0..4 {
+                            let oc_i = oc + 4 + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_hi[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+                    {
+                        for oc_off in 0..8 {
+                            let oc_i = oc + oc_off;
+                            if oc_i >= out_channels { break; }
+                            let mut sum = 0.0f32;
+                            for k_idx in 0..k {
+                                let x_val = s[k_idx];
+                                let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc_i) };
+                                sum += x_val * w_val;
+                            }
+                            let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc_i]).unwrap_or(0.0));
+                            let mut v = sum + bias_val;
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                            let out_idx = ((n * out_channels + oc_i) * out_height + oh) * out_width + ow;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    oc += 8;
+                }
+
+                // Remainder channels (scalar)
+                while oc < out_channels {
+                    let mut sum = 0.0f32;
+                    for k_idx in 0..k {
+                        let x_val = s[k_idx];
+                        let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                        sum += x_val * w_val;
+                    }
+                    let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0));
+                    let mut v = sum + bias_val;
+                    let mean = unsafe { *bn_mean_ptr.add(oc) };
+                    let var = unsafe { *bn_var_ptr.add(oc) };
+                    let inv_std = 1.0 / (var + bn_eps).sqrt();
+                    v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc) } + unsafe { *bn_bias_ptr.add(oc) };
+                    v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                    let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                    unsafe { *out_ptr.add(out_idx) = v; }
+                    oc += 1;
+                }
+            });
+        })
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for row in 0..total_rows {
+            let n = row / spatial;
+            let sp = row % spatial;
+            let oh = sp / out_width;
+            let ow = sp % out_width;
+
+            S_BUF.with(|s| {
+                let mut s_buf = s.borrow_mut();
+                if s_buf.len() < k {
+                    s_buf.resize(k, 0.0);
+                }
+                let s = &mut s_buf[..k];
+                for k_idx in 0..k {
+                    let ic = k_idx / 9;
+                    let rem = k_idx % 9;
+                    let kh = rem / 3;
+                    let kw = rem % 3;
+                    let ih_s = (oh as isize) + (kh as isize) - 1;
+                    let iw_s = (ow as isize) + (kw as isize) - 1;
+                    s[k_idx] = if ih_s >= 0 && ih_s < in_h && iw_s >= 0 && iw_s < in_w {
+                        let ih = ih_s as usize;
+                        let iw = iw_s as usize;
+                        let x_idx = ((n * in_channels + ic) * in_height + ih) * in_width + iw;
+                        unsafe { *x_ptr.add(x_idx) }
+                    } else {
+                        0.0
+                    };
+                }
+
+                let mut oc = 0;
+                while oc + 8 <= out_channels {
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        use wide::f32x8;
+                        let mut acc = f32x8::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let w_ptr_k = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_simd = from_slice_unaligned_f32x8(unsafe { std::slice::from_raw_parts(w_ptr_k, 8) });
+                            acc += w_simd * f32x8::splat(x_val);
+                        }
+
+                        let bias_vec = if let Some(ref b) = bias_data {
+                            let b_slice = unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 8) };
+                            from_slice_unaligned_f32x8(b_slice)
+                        } else if let Some(b) = bias_scalar {
+                            f32x8::splat(b)
+                        } else {
+                            f32x8::ZERO
+                        };
+
+                        let res_arr = (acc + bias_vec).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        // Apply BN+SiLU per-element and store
+                        for i in 0..8 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_arr[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe {
+                                *out_ptr.add(out_idx) = v;
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+                    {
+                        use wide::f32x4;
+                        let mut acc_lo = f32x4::ZERO;
+                        let mut acc_hi = f32x4::ZERO;
+
+                        for k_idx in 0..k {
+                            let x_val = s[k_idx];
+                            let base_ptr = unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                            let w_lo = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr, 4) });
+                            acc_lo = acc_lo + w_lo * f32x4::splat(x_val);
+                            let w_hi = from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(base_ptr.add(4), 4) });
+                            acc_hi = acc_hi + w_hi * f32x4::splat(x_val);
+                        }
+
+                        let bias_lo = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+                        let bias_hi = if let Some(ref b) = bias_data {
+                            from_slice_unaligned_f32x4(unsafe { std::slice::from_raw_parts(b.as_ptr().add(oc + 4), 4) })
+                        } else if let Some(b) = bias_scalar {
+                            f32x4::splat(b)
+                        } else {
+                            f32x4::ZERO
+                        };
+
+                        let res_lo = (acc_lo + bias_lo).to_array();
+                        let res_hi = (acc_hi + bias_hi).to_array();
+                        let out_idx_base = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        let spatial_stride = out_height * out_width;
+
+                        // Apply BN+SiLU for lo (4)
+                        for i in 0..4 {
+                            let oc_i = oc + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_lo[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                            let out_idx = out_idx_base + i * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                        // Apply BN+SiLU for hi (4)
+                        for i in 0..4 {
+                            let oc_i = oc + 4 + i;
+                            if oc_i >= out_channels { break; }
+                            let mut v = res_hi[i];
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                            let out_idx = out_idx_base + (4 + i) * spatial_stride;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+                    {
+                        for oc_off in 0..8 {
+                            let oc_i = oc + oc_off;
+                            if oc_i >= out_channels { break; }
+                            let mut sum = 0.0f32;
+                            for k_idx in 0..k {
+                                let x_val = s[k_idx];
+                                let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc_i) };
+                                sum += x_val * w_val;
+                            }
+                            let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc_i]).unwrap_or(0.0));
+                            let mut v = sum + bias_val;
+                            let mean = unsafe { *bn_mean_ptr.add(oc_i) };
+                            let var = unsafe { *bn_var_ptr.add(oc_i) };
+                            let inv_std = 1.0 / (var + bn_eps).sqrt();
+                            v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc_i) } + unsafe { *bn_bias_ptr.add(oc_i) };
+                            v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                            let out_idx = ((n * out_channels + oc_i) * out_height + oh) * out_width + ow;
+                            unsafe { *out_ptr.add(out_idx) = v; }
+                        }
+                    }
+                    oc += 8;
+                }
+
+                // Remainder channels (scalar)
+                while oc < out_channels {
+                    let mut sum = 0.0f32;
+                    for k_idx in 0..k {
+                        let x_val = s[k_idx];
+                        let w_val = unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                        sum += x_val * w_val;
+                    }
+                    let bias_val = bias_scalar.unwrap_or_else(|| bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0));
+                    let mut v = sum + bias_val;
+                    let mean = unsafe { *bn_mean_ptr.add(oc) };
+                    let var = unsafe { *bn_var_ptr.add(oc) };
+                    let inv_std = 1.0 / (var + bn_eps).sqrt();
+                    v = (v - mean) * inv_std * unsafe { *bn_weight_ptr.add(oc) } + unsafe { *bn_bias_ptr.add(oc) };
+                    v = v * 0.5 * (1.0 + (GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v)).tanh()); // GELU activation
+                    let out_idx = ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                    unsafe { *out_ptr.add(out_idx) = v; }
+                    oc += 1;
+                }
+            });
+        }
+    }
+
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+// --- ReLU kernel (dispatch entry) ---
+pub unsafe fn fused_conv_bn_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let w = args[1];
+    let mut idx = 2;
+    let bias = if args.len() > idx && args[idx].numel() > 0 {
+        let b = Some(args[idx]);
+        idx += 1;
+        b
+    } else {
+        None
+    };
+    if args.len() < idx + 9 {
+        panic!("fused_conv_bn_relu: insufficient arguments");
+    }
+    let bn_weight = args[idx]; idx += 1;
+    let bn_bias = args[idx]; idx += 1;
+    let bn_running_mean = args[idx]; idx += 1;
+    let bn_running_var = args[idx]; idx += 1;
+    let stride_t = args[idx]; idx += 1;
+    let padding_t = args[idx]; idx += 1;
+    let dilation_t = args[idx]; idx += 1;
+    let groups_t = args[idx]; idx += 1;
+    let eps_t = args[idx];
+
+    let stride = stride_t.item() as i64;
+    let padding = padding_t.item() as i64;
+    let dilation = dilation_t.item() as i64;
+    let groups = groups_t.item() as i64;
+    let eps = eps_t.item();
+
+    if stride != 1 || padding != 1 || dilation != 1 || groups != 1 {
+        panic!("fused_conv_bn_relu: only 3x3 kernel with stride=1, padding=1, dilation=1, groups=1 is supported");
+    }
+
+    let x_shape = x.shape();
+    let w_shape = w.shape();
+    let batch_size = x_shape[0] as usize;
+    let in_channels = x_shape[1] as usize;
+    let in_height = x_shape[2] as usize;
+    let in_width = x_shape[3] as usize;
+    let out_channels = w_shape[0] as usize;
+    let out_height = in_height;
+    let out_width = in_width;
+
+    vec![fused_conv_bn_relu_3x3_direct(
+        x, w, bias, bn_weight, bn_bias, bn_running_mean, bn_running_var, eps,
+        batch_size, in_channels, out_channels, in_height, in_width, out_height, out_width,
+    )]
+}
+
+
+
+// --- GELU kernel (dispatch entry) ---
+pub unsafe fn fused_conv_bn_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let x = args[0];
+    let w = args[1];
+    let mut idx = 2;
+    let bias = if args.len() > idx && args[idx].numel() > 0 {
+        let b = Some(args[idx]);
+        idx += 1;
+        b
+    } else {
+        None
+    };
+    if args.len() < idx + 9 {
+        panic!("fused_conv_bn_gelu: insufficient arguments");
+    }
+    let bn_weight = args[idx]; idx += 1;
+    let bn_bias = args[idx]; idx += 1;
+    let bn_running_mean = args[idx]; idx += 1;
+    let bn_running_var = args[idx]; idx += 1;
+    let stride_t = args[idx]; idx += 1;
+    let padding_t = args[idx]; idx += 1;
+    let dilation_t = args[idx]; idx += 1;
+    let groups_t = args[idx]; idx += 1;
+    let eps_t = args[idx];
+
+    let stride = stride_t.item() as i64;
+    let padding = padding_t.item() as i64;
+    let dilation = dilation_t.item() as i64;
+    let groups = groups_t.item() as i64;
+    let eps = eps_t.item();
+
+    if stride != 1 || padding != 1 || dilation != 1 || groups != 1 {
+        panic!("fused_conv_bn_gelu: only 3x3 kernel with stride=1, padding=1, dilation=1, groups=1 is supported");
+    }
+
+    let x_shape = x.shape();
+    let w_shape = w.shape();
+    let batch_size = x_shape[0] as usize;
+    let in_channels = x_shape[1] as usize;
+    let in_height = x_shape[2] as usize;
+    let in_width = x_shape[3] as usize;
+    let out_channels = w_shape[0] as usize;
+    let out_height = in_height;
+    let out_width = in_width;
+
+    vec![fused_conv_bn_gelu_3x3_direct(
+        x, w, bias, bn_weight, bn_bias, bn_running_mean, bn_running_var, eps,
+        batch_size, in_channels, out_channels, in_height, in_width, out_height, out_width,
+    )]
 }
 

@@ -1,3 +1,4 @@
+import os
 import numpy as np
 
 
@@ -15,7 +16,7 @@ class Callback:
         pass
 
 
-class ModelCheckpoint:
+class ModelCheckpoint(Callback):
     def __init__(
         self,
         filepath,
@@ -70,7 +71,7 @@ class ModelCheckpoint:
             self.should_save = False
 
 
-class EarlyStopping:
+class EarlyStopping(Callback):
     def __init__(
         self, monitor="val_loss", patience=5, min_delta=0.0, restore_best_weights=True
     ):
@@ -132,18 +133,21 @@ class LearningRateScheduler:
         logs["lr"] = new_lr
 
 
-class CSVLogger:
+class CSVLogger(Callback):
     def __init__(self, filepath, fields=None):
         self.filepath = filepath
         self.fields = fields
-        self.epoch = 0
+        self._file = None
         self._initialized = False
 
-    def on_epoch_begin(self, epoch, logs):
-        self.epoch = epoch
-        if not self._initialized:
-            with open(self.filepath, "w"):
-                self._initialized = True
+    def on_train_begin(self, logs):
+        if self._initialized:
+            return
+        mode = "a" if os.path.exists(self.filepath) else "w"
+        self._file = open(self.filepath, mode)
+        if mode == "w" and self.fields is not None:
+            self._file.write(",".join(self.fields) + "\n")
+        self._initialized = True
 
     def on_epoch_end(self, epoch, logs):
         if not self._initialized:
@@ -162,13 +166,13 @@ class CSVLogger:
             extra_keys = sorted(set(logs.keys()) - set(field_order))
             fields.extend(extra_keys)
             self.fields = fields
-        else:
-            fields = self.fields
+            self._file.write(",".join(fields) + "\n")
 
-        if epoch == 0:
-            with open(self.filepath, "w") as f:
-                f.write(",".join(fields) + "\n")
+        values = [str(logs.get(field, "")) for field in self.fields]
+        self._file.write(",".join(values) + "\n")
+        self._file.flush()
 
-        with open(self.filepath, "a") as f:
-            values = [str(logs.get(field, "")) for field in fields]
-            f.write(",".join(values) + "\n")
+    def on_train_end(self, logs):
+        if self._file:
+            self._file.close()
+            self._file = None

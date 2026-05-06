@@ -29,6 +29,7 @@ pollster     = "0.4"
 openblas-src = { version = "0.10", optional = true }
 blas-src     = { version = "0.10", features = ["openblas"], optional = true }
 fnv          = "1.0"
+rustc-hash  = "2.0"
 ndarray      = { version = "0.16", features = ["blas"] }
 
 [features]
@@ -41,6 +42,14 @@ prefetch = []
 simd_avx512 = []
 
 [profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = false
+strip = true
+panic = "abort"
+
+[profile.bench]
 lto = true
 codegen-units = 1
 opt-level = 3
@@ -66,6 +75,11 @@ harness = false
 [[bench]]
 name = "matmul_bench"
 path = "benches/matmul_bench.rs"
+harness = false
+
+[[bench]]
+name = "perf_optimizations"
+path = "benches/perf_optimizations.rs"
 harness = false
 
 [[bin]]

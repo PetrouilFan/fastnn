@@ -1,7 +1,11 @@
+
+#[allow(unused_imports)]
+use pyo3::prelude::*;
+
 #[pyclass(from_py_object)]
 #[derive(Clone)]
-struct PyTensor {
-    inner: Tensor,
+pub(crate) struct PyTensor {
+    inner: crate::tensor::Tensor,
 }
 
 /// Destructor for DLPack PyCapsule - called when the capsule is garbage collected
@@ -18,7 +22,7 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject
 }
 
 impl PyTensor {
-    fn from_tensor(inner: Tensor) -> Self {
+    fn from_tensor(inner: crate::tensor::Tensor) -> Self {
         PyTensor { inner }
     }
 }
@@ -27,7 +31,19 @@ impl PyTensor {
 impl PyTensor {
     #[new]
     fn new(data: Vec<f32>, shape: Vec<i64>) -> Self {
-        PyTensor::from_tensor(Tensor::from_vec(data, shape))
+        PyTensor::from_tensor(crate::tensor::Tensor::from_vec(data, shape))
+    }
+
+    /// Create a tensor from a Python buffer object (zero-copy where possible)
+    #[staticmethod]
+    fn from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>) -> PyResult<Self> {
+        use pyo3::buffer::PyBuffer;
+        let buffer = PyBuffer::<f32>::get(buf)?;
+        let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
+        let data_len: usize = shape.iter().product::<i64>() as usize;
+        let mut data = vec![0.0f32; data_len];
+        buffer.copy_to_slice(py, &mut data)?;
+        Ok(PyTensor::from_tensor(crate::tensor::Tensor::from_vec(data, shape)))
     }
 
     #[getter]
@@ -297,5 +313,17 @@ impl PyTensor {
     fn contiguous(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.contiguous())
     }
+}
+
+#[pyfunction]
+#[allow(private_interfaces)]
+pub(crate) fn tensor_from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+    use pyo3::buffer::PyBuffer;
+    let buffer = PyBuffer::<f32>::get(buf)?;
+    let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
+    let data_len: usize = shape.iter().product::<i64>() as usize;
+    let mut data = vec![0.0f32; data_len];
+    buffer.copy_to_slice(py, &mut data)?;
+    Ok(PyTensor::from_tensor(Tensor::from_vec(data, shape)))
 }
 

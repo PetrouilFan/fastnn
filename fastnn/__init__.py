@@ -28,6 +28,21 @@ from fastnn.callbacks import (  # noqa: E402
     CSVLogger,
 )
 from fastnn.parallel import DataParallel  # noqa: E402
+from fastnn.tensor import _flatten  # noqa: F401
+from fastnn.tensor import from_numpy as tensor_from_numpy  # noqa: F401
+from fastnn.layers import Flatten, PySequential, BasicBlock, MaxPool2d  # noqa: F401, E402
+from fastnn.io import (  # noqa: E402, F403
+    save as io_save,
+    load as io_load,
+    convert_from_pytorch,
+    convert_from_onnx,
+    MODEL_MAGIC,
+    OPTIMIZER_MAGIC,
+    MODEL_VERSION,
+    OPTIMIZER_VERSION,
+    write_tensor,
+    read_tensor,
+)
 
 __all__ = [
     "no_grad",
@@ -72,19 +87,7 @@ except ImportError:
     pass
 
 
-def _flatten(nested):
-    result = []
-    for item in nested:
-        if isinstance(item, list):
-            result.extend(_flatten(item))
-        else:
-            result.append(item)
-    return result
 
-
-def tensor(data, shape, device=None):
-    flat_data = _flatten(data)
-    return _core.tensor_from_data(flat_data, shape, device)
 
 
 def _patch_numpy(tensor_cls):
@@ -166,6 +169,9 @@ silu = _core.silu
 softmax = _core.softmax
 log_softmax = _core.log_softmax
 fused_conv_bn_silu = _core.fused_conv_bn_silu
+FusedConvBn = _core.FusedConvBn
+FusedConvBnRelu = _core.FusedConvBnRelu
+FusedConvBnGelu = _core.FusedConvBnGelu
 argmax = _core.argmax
 argmin = _core.argmin
 cat = _core.cat
@@ -192,227 +198,6 @@ Tanh = _core.Tanh
 SiLU = _core.SiLU
 Sequential = _core.Sequential_
 
-
-class MaxPool2d:
-    """Max pooling 2D."""
-
-    def __init__(
-        self,
-        kernel_size,
-        stride=None,
-        padding=0,
-        dilation=1,
-        return_indices=False,
-        ceil_mode=False,
-    ):
-        self.kernel_size = (
-            kernel_size
-            if isinstance(kernel_size, tuple)
-            else (kernel_size, kernel_size)
-        )
-        self.stride = stride if stride is not None else kernel_size
-        if isinstance(self.stride, int):
-            self.stride = (self.stride, self.stride)
-        self.padding = padding if isinstance(padding, tuple) else (padding, padding)
-        self.dilation = (
-            dilation if isinstance(dilation, tuple) else (dilation, dilation)
-        )
-        self.return_indices = return_indices
-        self.ceil_mode = ceil_mode
-
-    def __call__(self, x):
-        # x shape: (batch, channels, height, width)
-        # Use Rust implementation for performance
-        import fastnn._core as _core
-
-        # For now, only support symmetric kernel_size, stride, padding, dilation
-        # Check if they are tuples and convert to single value if possible
-        if isinstance(self.kernel_size, tuple):
-            if self.kernel_size[0] != self.kernel_size[1]:
-                raise NotImplementedError("Non-square kernel_size not supported yet")
-            kernel_size = self.kernel_size[0]
-        else:
-            kernel_size = self.kernel_size
-
-        if isinstance(self.stride, tuple):
-            if self.stride[0] != self.stride[1]:
-                raise NotImplementedError("Non-square stride not supported yet")
-            stride = self.stride[0]
-        else:
-            stride = self.stride
-
-        if isinstance(self.padding, tuple):
-            if self.padding[0] != self.padding[1]:
-                raise NotImplementedError("Non-square padding not supported yet")
-            padding = self.padding[0]
-        else:
-            padding = self.padding
-
-        if isinstance(self.dilation, tuple):
-            if self.dilation[0] != self.dilation[1]:
-                raise NotImplementedError("Non-square dilation not supported yet")
-            dilation = self.dilation[0]
-        else:
-            dilation = self.dilation
-
-        # Call the Rust implementation
-        rust_maxpool = _core.MaxPool2d(kernel_size, stride, padding, dilation)
-        return rust_maxpool(x)
-
-    def train(self):
-        pass
-
-    def eval(self):
-        pass
-
-
-class Flatten:
-    """Flatten layer."""
-
-    def __init__(self, start_dim=1, end_dim=-1):
-        self.start_dim = start_dim
-        self.end_dim = end_dim
-
-    def __call__(self, x):
-        shape = x.shape
-        ndim = len(shape)
-        start = self.start_dim if self.start_dim >= 0 else ndim + self.start_dim
-        end = self.end_dim if self.end_dim >= 0 else ndim + self.end_dim
-        end = end + 1
-        new_shape = list(shape[:start])
-        flattened_size = 1
-        for dim in shape[start:end]:
-            flattened_size *= dim
-        new_shape.append(flattened_size)
-        new_shape.extend(shape[end:])
-        return x.view(new_shape)
-
-    def train(self):
-        pass
-
-    def eval(self):
-        pass
-
-
-class PySequential:
-    def __init__(self, layers):
-        self.layers = layers
-
-    def __call__(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-    def parameters(self):
-        params = []
-        for layer in self.layers:
-            if hasattr(layer, "parameters"):
-                params.extend(layer.parameters())
-        return params
-
-    def to_gpu(self, device_id):
-        for layer in self.layers:
-            if hasattr(layer, "to_gpu"):
-                layer.to_gpu(device_id)
-
-    def train(self):
-        for layer in self.layers:
-            if hasattr(layer, "train"):
-                layer.train()
-
-    def eval(self):
-        for layer in self.layers:
-            if hasattr(layer, "eval"):
-                layer.eval()
-
-
-class BasicBlock:
-    """ResNet BasicBlock with skip connection."""
-
-    def __init__(self, conv1, bn1, relu, conv2, bn2, downsample=None):
-        self.conv1 = conv1
-        self.bn1 = bn1
-        self.relu = relu
-        self.conv2 = conv2
-        self.bn2 = bn2
-        self.downsample = downsample
-
-    def __call__(self, x):
-        identity = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        if self.downsample is not None:
-            identity = self.downsample(x)
-
-        out = out + identity
-        out = self.relu(out)
-
-        return out
-
-    def parameters(self):
-        params = []
-        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
-            if hasattr(layer, "parameters"):
-                params.extend(layer.parameters())
-        if self.downsample is not None:
-            if hasattr(self.downsample, "parameters"):
-                params.extend(self.downsample.parameters())
-        return params
-
-    def named_parameters(self):
-        params = []
-        for name, layer in [
-            ("conv1", self.conv1),
-            ("bn1", self.bn1),
-            ("conv2", self.conv2),
-            ("bn2", self.bn2),
-        ]:
-            if hasattr(layer, "named_parameters"):
-                for n, p in layer.named_parameters():
-                    params.append((f"{name}.{n}", p))
-        if self.downsample is not None:
-            if hasattr(self.downsample, "named_parameters"):
-                for n, p in self.downsample.named_parameters():
-                    params.append((f"downsample.{n}", p))
-        return params
-
-    def zero_grad(self):
-        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
-            if hasattr(layer, "zero_grad"):
-                layer.zero_grad()
-        if self.downsample is not None:
-            if hasattr(self.downsample, "zero_grad"):
-                self.downsample.zero_grad()
-
-    def train(self):
-        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
-            if hasattr(layer, "train"):
-                layer.train()
-        if self.downsample is not None:
-            if hasattr(self.downsample, "train"):
-                self.downsample.train()
-
-    def eval(self):
-        for layer in [self.conv1, self.bn1, self.conv2, self.bn2]:
-            if hasattr(layer, "eval"):
-                layer.eval()
-        if self.downsample is not None:
-            if hasattr(self.downsample, "eval"):
-                self.downsample.eval()
-
-
-Sequential = PySequential
 ModuleList = _core.ModuleList
 SGD = _core.PySGD
 Adam = _core.PyAdam
@@ -462,8 +247,6 @@ def import_onnx(onnx_path: str, fnn_path: str):
 def save_model(model, path):
     import struct
 
-    MAGIC = b"FNN\x00"
-    VERSION = 1
     params = model.parameters() if hasattr(model, "parameters") else []
     named = model.named_parameters() if hasattr(model, "named_parameters") else []
     if named:
@@ -471,8 +254,8 @@ def save_model(model, path):
     else:
         param_list = [(f"param_{i}", p) for i, p in enumerate(params)]
     with open(path, "wb") as f:
-        f.write(MAGIC)
-        f.write(struct.pack("<I", VERSION))
+        f.write(MODEL_MAGIC)
+        f.write(struct.pack("<I", MODEL_VERSION))
         f.write(struct.pack("<Q", len(param_list)))
         for name, tensor in param_list:
             name_bytes = name.encode("utf-8")
@@ -490,14 +273,13 @@ def save_model(model, path):
 def load_model(path):
     import struct
 
-    MAGIC = b"FNN\x00"
     result = {}
     with open(path, "rb") as f:
         magic = f.read(4)
-        if magic != MAGIC:
+        if magic != MODEL_MAGIC:
             raise ValueError("Invalid file format: expected FNN magic bytes")
         version = struct.unpack("<I", f.read(4))[0]
-        if version > 1:
+        if version > MODEL_VERSION:
             raise ValueError(f"Unsupported format version: {version}")
         num_params = struct.unpack("<Q", f.read(8))[0]
         for _ in range(num_params):
@@ -525,8 +307,6 @@ def load_state_dict(model, state_dict):
 def save_state_dict(model, path):
     import struct
 
-    MAGIC = b"FNN\x00"
-    VERSION = 1
     named = model.named_parameters() if hasattr(model, "named_parameters") else []
     params = model.parameters() if hasattr(model, "parameters") else []
     if named:
@@ -534,8 +314,8 @@ def save_state_dict(model, path):
     else:
         param_list = [(f"param_{i}", p) for i, p in enumerate(params)]
     with open(path, "wb") as f:
-        f.write(MAGIC)
-        f.write(struct.pack("<I", VERSION))
+        f.write(MODEL_MAGIC)
+        f.write(struct.pack("<I", MODEL_VERSION))
         f.write(struct.pack("<Q", len(param_list)))
         for name, tensor in param_list:
             name_bytes = name.encode("utf-8")
@@ -559,21 +339,20 @@ def save_state_dict(model, path):
 def save_optimizer(opt, path):
     import struct
 
-    MAGIC = b"FNO\x00"
-    VERSION = 1
     with open(path, "wb") as f:
-        f.write(MAGIC)
-        f.write(struct.pack("<I", VERSION))
-        lr = opt.lr if hasattr(opt, "lr") else 0.0
+        f.write(OPTIMIZER_MAGIC)
+        f.write(struct.pack("<I", OPTIMIZER_VERSION))
+        lr = getattr(opt, "lr", 0.0)
         f.write(struct.pack("<d", lr))
-        betas = opt.betas if hasattr(opt, "betas") else (0.9, 0.999)
+        betas = getattr(opt, "betas", (0.9, 0.999))
         f.write(struct.pack("<d", betas[0]))
         f.write(struct.pack("<d", betas[1]))
-        eps = opt.eps if hasattr(opt, "eps") else 1e-8
+        eps = getattr(opt, "eps", 1e-8)
         f.write(struct.pack("<d", eps))
-        wd = opt.weight_decay if hasattr(opt, "weight_decay") else 0.0
+        wd = getattr(opt, "weight_decay", 0.0)
         f.write(struct.pack("<d", wd))
-        n = len(opt.params) if hasattr(opt, "params") else 0
+        params = getattr(opt, "params", [])
+        n = len(params)
         f.write(struct.pack("<Q", n))
         for i in range(n):
             for state_tensor_name in ["m", "v", "v_hat"]:
@@ -595,10 +374,9 @@ def save_optimizer(opt, path):
 def load_optimizer(opt, path):
     import struct
 
-    MAGIC = b"FNO\x00"
     with open(path, "rb") as f:
         magic = f.read(4)
-        if magic != MAGIC:
+        if magic != OPTIMIZER_MAGIC:
             raise ValueError("Invalid optimizer state file")
         struct.unpack("<I", f.read(4))[0]
         opt.lr = struct.unpack("<d", f.read(8))[0]
@@ -626,150 +404,97 @@ def load_optimizer(opt, path):
                 step_list[i] = struct.unpack("<Q", f.read(8))[0]
 
 
-class LRScheduler:
-    """Base class for learning rate schedulers.
-
-    Modifies the optimizer's learning rate in-place via state_dict.
-
-    Usage:
-        >>> scheduler = CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
-        >>> for epoch in range(100):
-        ...     for batch_x, batch_y in loader:
-        ...         ...
-        ...     scheduler.step()
-    """
-
-    def __init__(self, optimizer):
-        self.optimizer = optimizer
-        self.base_lr = self._get_lr()
-        self.last_epoch = -1
-
-    def _get_lr(self):
-        sd = self.optimizer.state_dict()
-        return sd.get("lr", 0.01)
-
-    def _set_lr(self, lr):
-        sd = self.optimizer.state_dict()
-        sd["lr"] = lr
-        self.optimizer.load_state_dict(sd)
-
-    def get_lr(self):
-        raise NotImplementedError
-
-    def step(self):
-        self.last_epoch += 1
-        lr = self.get_lr()
-        self._set_lr(lr)
-        return lr
-
-
-class StepLR(LRScheduler):
-    """Decays LR by gamma every step_size epochs.
-
-    Args:
-        optimizer: Optimizer to schedule.
-        step_size: Number of epochs between LR decay.
-        gamma: Multiplicative factor for LR decay.
-    """
-
-    def __init__(self, optimizer, step_size, gamma=0.1):
-        super().__init__(optimizer)
-        self.step_size = step_size
-        self.gamma = gamma
-
-    def get_lr(self):
-        return self.base_lr * self.gamma ** (self.last_epoch // self.step_size)
-
-
-class CosineAnnealingLR(LRScheduler):
-    """Cosine annealing LR schedule.
-
-    Args:
-        optimizer: Optimizer to schedule.
-        T_max: Maximum number of epochs (half cycle).
-        eta_min: Minimum learning rate.
-    """
-
-    def __init__(self, optimizer, T_max, eta_min=0):
-        super().__init__(optimizer)
-        self.T_max = T_max
-        self.eta_min = eta_min
-
-    def get_lr(self):
-        import math
-
-        return (
-            self.eta_min
-            + (self.base_lr - self.eta_min)
-            * (1 + math.cos(math.pi * self.last_epoch / self.T_max))
-            / 2
-        )
-
-
-class ExponentialLR(LRScheduler):
-    """Decays LR by gamma every epoch.
-
-    Args:
-        optimizer: Optimizer to schedule.
-        gamma: Multiplicative factor for LR decay.
-    """
-
-    def __init__(self, optimizer, gamma):
-        super().__init__(optimizer)
-        self.gamma = gamma
-
-    def get_lr(self):
-        return self.base_lr * self.gamma**self.last_epoch
-
-
-class ReduceLROnPlateau:
-    """Reduce LR when metric has stopped improving.
-
-    Args:
-        optimizer: Optimizer to schedule.
-        mode: 'min' or 'max'.
-        factor: Factor to multiply LR by.
-        patience: Number of epochs with no improvement.
-        min_lr: Minimum learning rate.
-    """
-
-    def __init__(self, optimizer, mode="min", factor=0.1, patience=10, min_lr=1e-6):
-        self.optimizer = optimizer
-        self.mode = mode
-        self.factor = factor
-        self.patience = patience
-        self.min_lr = min_lr
-        self.best = float("inf") if mode == "min" else float("-inf")
-        self.wait = 0
-        self.current_lr = self._get_lr()
-
-    def _get_lr(self):
-        sd = self.optimizer.state_dict()
-        return sd.get("lr", 0.01)
-
-    def _set_lr(self, lr):
-        sd = self.optimizer.state_dict()
-        sd["lr"] = lr
-        self.optimizer.load_state_dict(sd)
-        self.current_lr = lr
-
-    def step(self, metric):
-        improved = (metric < self.best) if self.mode == "min" else (metric > self.best)
-        if improved:
-            self.best = metric
-            self.wait = 0
-        else:
-            self.wait += 1
-            if self.wait >= self.patience:
-                self.wait = 0
-                new_lr = self.current_lr * self.factor
-                if new_lr < self.min_lr:
-                    new_lr = self.min_lr
-                self._set_lr(new_lr)
-                return new_lr
-        return self.current_lr
-
+from fastnn.schedulers import LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau  # noqa: F401
 
 allocator_stats = _core.allocator_stats
 list_registered_ops = _core.list_registered_ops
 batched_mlp_forward = _core.batched_mlp_forward
+
+
+# Make fastnn.tensor module callable (delegates to tensor.tensor function)
+class _TensorModuleWrapper:
+    """Wrapper that makes the tensor module callable."""
+
+    def __init__(self, module):
+        object.__setattr__(self, "_module", module)
+
+    def __call__(self, *args, **kwargs):
+        return self._module.tensor(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._module, name, value)
+
+    def __delattr__(self, name):
+        delattr(self._module, name)
+
+
+import sys
+
+import warnings
+
+
+def save_model(model, path, version=None):
+    """Deprecated: Use fastnn.io.save() instead."""
+    warnings.warn(
+        "fastnn.save_model() is deprecated, use fastnn.io.save() instead",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    from fastnn.serialization import save_model as _save_model
+    _save_model(model, path, version or 2)
+
+
+def load_model(path, version=None):
+    """Deprecated: Use fastnn.io.load() instead."""
+    warnings.warn(
+        "fastnn.load_model() is deprecated, use fastnn.io.load() instead",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    from fastnn.serialization import load_model as _load_model
+    return _load_model(path, version)
+
+
+def save_optimizer(opt, path, version=None):
+    """Deprecated: Use fastnn.io.save() instead."""
+    warnings.warn(
+        "fastnn.save_optimizer() is deprecated, use fastnn.io.save() instead",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    from fastnn.serialization import save_optimizer as _save_opt
+    _save_opt(opt, path, version or 1)
+
+
+def save_state_dict(model, path, version=None):
+    """Deprecated: Use fastnn.io.save() instead."""
+    warnings.warn(
+        "fastnn.save_state_dict() is deprecated, use fastnn.io.save() instead",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    from fastnn.serialization import save_state_dict as _save_sd
+    _save_sd(model, path, version or 2)
+
+
+def load_state_dict(path):
+    """Deprecated: Use fastnn.io.load() instead."""
+    warnings.warn(
+        "fastnn.load_state_dict() is deprecated, use fastnn.io.load() instead",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    from fastnn.serialization import load_state_dict as _load_sd
+    return _load_sd(path)
+
+
+_tensor_module = sys.modules.get("fastnn.tensor")
+if _tensor_module is not None:
+    _tensor_wrapper = _TensorModuleWrapper(_tensor_module)
+    sys.modules["fastnn.tensor"] = _tensor_wrapper
+    import fastnn
+
+    fastnn.__dict__["tensor"] = _tensor_wrapper
