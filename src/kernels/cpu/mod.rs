@@ -343,6 +343,7 @@ fn broadcast_shapes_simple(a: &[i64], b: &[i64]) -> Vec<i64> {
 // Section 7: Optimized broadcast index decomposition
 // Precomputes multipliers to map output index to input index without loops
 #[inline]
+#[allow(dead_code)]
 fn broadcast_index_decomposition(
     idx: usize,
     out_shape: &[usize],
