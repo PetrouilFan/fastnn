@@ -15,7 +15,7 @@ use crate::tensor::Tensor;
 use std::sync::Arc;
 use super::*;
 
-const GELU_SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+const GELU_SQRT_2_OVER_PI: f32 = 0.7978846;
 const GELU_COEFF: f32 = 0.044715;
 
 #[allow(dead_code)]
@@ -2668,6 +2668,7 @@ pub unsafe fn flash_attention_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 
 // --- FusedConvBnReLU (copied from SiLU, activation changed) ---
+#[allow(dead_code, clippy::too_many_arguments)]
 pub unsafe fn fused_conv_bn_relu_3x3_direct(
     x: &Tensor,
     w: &Tensor,

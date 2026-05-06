@@ -15,3 +15,9 @@ impl Trainer {
         }
     }
 }
+
+impl Default for Trainer {
+    fn default() -> Self {
+        Self::new()
+    }
+}

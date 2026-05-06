@@ -16,7 +16,7 @@ use half;
 use std::sync::Arc;
 use super::*;
 
-const GELU_SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+const GELU_SQRT_2_OVER_PI: f32 = 0.7978846;
 const GELU_COEFF: f32 = 0.044715;
 
 pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -3590,7 +3590,7 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
-    const SQRT_2_OVER_PI: f32 = 0.7978845608028654;
+    const SQRT_2_OVER_PI: f32 = 0.7978846;
     const COEFF: f32 = 0.044715;
 
     if grad.is_contiguous() && x.is_contiguous() && numel > 256 {
