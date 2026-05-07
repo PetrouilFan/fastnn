@@ -141,7 +141,7 @@ fnn.DataLoader(dataset, batch_size, shuffle, drop_last, num_workers)
 ```python
 fnn.EarlyStopping(monitor, patience, min_delta, restore_best_weights)
 fnn.ModelCheckpoint(dir_path, monitor, mode, save_best_only, verbose)
-fnn.LearningRateScheduler(schedule, lr, step_size, gamma, T_max, eta_min)
+fnn.LearningRateScheduler(scheduler, **kwargs)  # scheduler from fnn.schedulers, or string with optimizer
 fnn.CSVLogger(filepath)
 ```
 

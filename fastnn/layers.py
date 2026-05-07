@@ -14,9 +14,26 @@ Examples:
 
 from typing import Optional, Tuple, List, Any, Union
 
+import math
 import numpy as np
 import fastnn._core as _core
 from fastnn.module import Module
+
+class _BaseModule(Module):
+    """Base class for modules with common layer iteration logic."""
+    def parameters(self):
+        params = []
+        for layer in self._param_layers:
+            params.extend(layer.parameters())
+        return params
+
+    def train(self):
+        for layer in self._train_layers:
+            layer.train()
+
+    def eval(self):
+        for layer in self._eval_layers:
+            layer.eval()
 
 # Re-export Rust layer classes with improved naming (remove 'Py' prefix)
 # We'll keep the original names but also provide aliases without 'Py' for consistency.
@@ -54,7 +71,7 @@ ResidualBlock = _core.ResidualBlock
 
 # Python-implemented layers (for compatibility and educational purposes)
 
-class MaxPool2dPy:
+class MaxPool2dPy(Module):
     """Max pooling 2D layer (Python implementation).
     
     This is a pure-Python implementation of 2D max pooling, provided for
@@ -84,26 +101,47 @@ class MaxPool2dPy:
         return_indices: bool = False,
         ceil_mode: bool = False,
     ):
-        self.kernel_size = (
-            kernel_size
-            if isinstance(kernel_size, tuple)
-            else (kernel_size, kernel_size)
-        )
-        self.stride = stride if stride is not None else kernel_size
-        if isinstance(self.stride, int):
-            self.stride = (self.stride, self.stride)
-        self.padding = padding if isinstance(padding, tuple) else (padding, padding)
-        self.dilation = (
-            dilation if isinstance(dilation, tuple) else (dilation, dilation)
-        )
+        # Process kernel_size to scalar
+        if isinstance(kernel_size, tuple):
+            if kernel_size[0] != kernel_size[1]:
+                raise NotImplementedError(f"Non-square kernel_size not supported yet")
+            kernel_size_scalar = kernel_size[0]
+        else:
+            kernel_size_scalar = kernel_size
+        
+        # Process stride to scalar
+        if stride is None:
+            stride = kernel_size
+        if isinstance(stride, tuple):
+            if stride[0] != stride[1]:
+                raise NotImplementedError(f"Non-square stride not supported yet")
+            stride_scalar = stride[0]
+        else:
+            stride_scalar = stride
+        
+        # Process padding to scalar
+        if isinstance(padding, tuple):
+            if padding[0] != padding[1]:
+                raise NotImplementedError(f"Non-square padding not supported yet")
+            padding_scalar = padding[0]
+        else:
+            padding_scalar = padding
+        
+        # Process dilation to scalar
+        if isinstance(dilation, tuple):
+            if dilation[0] != dilation[1]:
+                raise NotImplementedError(f"Non-square dilation not supported yet")
+            dilation_scalar = dilation[0]
+        else:
+            dilation_scalar = dilation
+        
         self.return_indices = return_indices
         self.ceil_mode = ceil_mode
         
-        # Convert to scalar values once
-        self._kernel_size_scalar = self._as_single_value(self.kernel_size, "kernel_size")
-        self._stride_scalar = self._as_single_value(self.stride, "stride")
-        self._padding_scalar = self._as_single_value(self.padding, "padding")
-        self._dilation_scalar = self._as_single_value(self.dilation, "dilation")
+        self._kernel_size_scalar = kernel_size_scalar
+        self._stride_scalar = stride_scalar
+        self._padding_scalar = padding_scalar
+        self._dilation_scalar = dilation_scalar
         
         # Pre-create Rust object
         self._rust_maxpool = _core.MaxPool2d(
@@ -115,24 +153,9 @@ class MaxPool2dPy:
     
     def __call__(self, x):
         return self._rust_maxpool(x)
-    
-    @staticmethod
-    def _as_single_value(value, name):
-        """Convert a value to a single number if it is a symmetric pair."""
-        if isinstance(value, tuple):
-            if value[0] != value[1]:
-                raise NotImplementedError(f"Non-square {name} not supported yet")
-            return value[0]
-        return value
-    
-    def train(self):
-        pass
-    
-    def eval(self):
-        pass
 
 
-class Flatten:
+class Flatten(Module):
     """Flatten layer.
     
     Flattens the input tensor starting from a given dimension.
@@ -158,19 +181,15 @@ class Flatten:
         end = self.end_dim if self.end_dim >= 0 else ndim + self.end_dim
         end = end + 1
         new_shape = list(shape[:start])
-        flattened_size = int(np.prod(shape[start:end]))
+        flattened_size = math.prod(shape[start:end])
         new_shape.append(flattened_size)
         new_shape.extend(shape[end:])
         return x.view(new_shape)
-    
-    def train(self):
-        pass
-    
-    def eval(self):
-        pass
 
 
-class PySequential(Module):
+
+
+class PySequential(_BaseModule):
     """Sequential container (Python implementation).
     
     A simple sequential container that applies layers in order.
@@ -192,41 +211,30 @@ class PySequential(Module):
     
     def __init__(self, layers: List[Any]):
         self.layers = layers
-        self._param_layers = [l for l in layers if hasattr(l, "parameters")]
-        self._gpu_layers = [l for l in layers if hasattr(l, "to_gpu")]
-        self._train_layers = [l for l in layers if hasattr(l, "train")]
-        self._eval_layers = [l for l in layers if hasattr(l, "eval")]
+        self._param_layers = []
+        self._gpu_layers = []
+        self._train_layers = []
+        self._eval_layers = []
+        for l in layers:
+            if hasattr(l, "parameters"):
+                self._param_layers.append(l)
+            if hasattr(l, "to_gpu"):
+                self._gpu_layers.append(l)
+            if hasattr(l, "train"):
+                self._train_layers.append(l)
+            if hasattr(l, "eval"):
+                self._eval_layers.append(l)
     
     def __call__(self, x):
         for layer in self.layers:
             x = layer(x)
         return x
     
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-    
-    def parameters(self):
-        params = []
-        for layer in self._param_layers:
-            params.extend(layer.parameters())
-        return params
-    
     def to_gpu(self, device_id: int):
         for layer in self._gpu_layers:
             layer.to_gpu(device_id)
-    
-    def train(self):
-        for layer in self._train_layers:
-            layer.train()
-    
-    def eval(self):
-        for layer in self._eval_layers:
-            layer.eval()
 
-
-class BasicBlock(Module):
+class BasicBlock(_BaseModule):
     """ResNet BasicBlock with skip connection.
     
     This is a building block for ResNet architectures.
@@ -255,16 +263,29 @@ class BasicBlock(Module):
         self._sublayers = [conv1, bn1, conv2, bn2]
         if downsample is not None:
             self._sublayers.append(downsample)
-        self._param_layers = [l for l in self._sublayers if hasattr(l, "parameters")]
+        
+        # Single pass to initialize layer lists
+        self._param_layers = []
+        self._zero_grad_layers = []
+        self._train_layers = []
+        self._eval_layers = []
+        for l in self._sublayers:
+            if hasattr(l, "parameters"):
+                self._param_layers.append(l)
+            if hasattr(l, "zero_grad"):
+                self._zero_grad_layers.append(l)
+            if hasattr(l, "train"):
+                self._train_layers.append(l)
+            if hasattr(l, "eval"):
+                self._eval_layers.append(l)
+        
+        # Named parameters setup (unchanged)
         self._named_param_pairs = []
         for name, layer in [("conv1", conv1), ("bn1", bn1), ("conv2", conv2), ("bn2", bn2)]:
             if hasattr(layer, "named_parameters"):
                 self._named_param_pairs.append((name, layer))
         if downsample is not None and hasattr(downsample, "named_parameters"):
             self._named_param_pairs.append(("downsample", downsample))
-        self._zero_grad_layers = [l for l in self._sublayers if hasattr(l, "zero_grad")]
-        self._train_layers = [l for l in self._sublayers if hasattr(l, "train")]
-        self._eval_layers = [l for l in self._sublayers if hasattr(l, "eval")]
     
     def __call__(self, x):
         identity = x
@@ -283,12 +304,6 @@ class BasicBlock(Module):
         out = self.relu(out)
         
         return out
-    
-    def parameters(self):
-        params = []
-        for layer in self._param_layers:
-            params.extend(layer.parameters())
-        return params
     
     def named_parameters(self):
         params = []

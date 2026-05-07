@@ -159,6 +159,45 @@ pub trait Node: Send + Sync {
     }
 }
 
+/// Helper to sum a gradient tensor to match a target shape (handle broadcasting).
+/// This efficiently computes which dimensions need to be summed and does it in one pass.
+pub fn sum_to_shape(mut grad: Tensor, target_shape: &[i64]) -> Tensor {
+    let grad_shape = grad.shape();
+    if grad_shape == target_shape {
+        return grad;
+    }
+
+    let grad_ndim = grad_shape.len();
+    let target_ndim = target_shape.len();
+    let diff = grad_ndim as i32 - target_ndim as i32;
+
+    // Collect dims to sum
+    let mut dims_to_sum: Vec<i32> = Vec::new();
+    for i in 0..grad_ndim {
+        let target_dim = if i as i32 >= diff {
+            target_shape[(i as i32 - diff) as usize]
+        } else {
+            1
+        };
+        if target_dim != grad_shape[i] {
+            dims_to_sum.push(i as i32);
+        }
+    }
+
+    // Sum all dims at once from outermost to innermost
+    for &dim in dims_to_sum.iter().rev() {
+        grad = grad.sum(dim, false);
+    }
+
+    grad
+}
+
+/// Helper to extract the first gradient from grad_outputs, unwrapping it.
+/// This is a common pattern used in many backward implementations.
+pub fn extract_first_grad(grad_outputs: Vec<Option<Tensor>>) -> Tensor {
+    grad_outputs.into_iter().next().flatten().unwrap()
+}
+
 include!("elementwise.rs");
 include!("matmul.rs");
 include!("reductions.rs");

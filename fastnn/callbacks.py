@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import fastnn as fnn
 
 
 class Callback:
@@ -16,7 +17,19 @@ class Callback:
         pass
 
 
-class ModelCheckpoint(Callback):
+class MonitorCallback(Callback):
+    """Base class for callbacks that monitor a metric."""
+
+    def __init__(self, monitor):
+        super().__init__()
+        self.monitor = monitor
+
+    def get_monitor_value(self, logs):
+        """Get the monitor value from logs."""
+        return logs.get(self.monitor)
+
+
+class ModelCheckpoint(MonitorCallback):
     def __init__(
         self,
         filepath,
@@ -25,8 +38,8 @@ class ModelCheckpoint(Callback):
         save_best_only=True,
         verbose=True,
     ):
+        super().__init__(monitor)
         self.filepath = filepath
-        self.monitor = monitor
         self.mode = mode
         self.save_best_only = save_best_only
         self.verbose = verbose
@@ -34,7 +47,7 @@ class ModelCheckpoint(Callback):
         self.should_save = False
 
     def on_epoch_end(self, epoch, logs):
-        value = logs.get(self.monitor)
+        value = self.get_monitor_value(logs)
         if value is None:
             return
 
@@ -65,17 +78,15 @@ class ModelCheckpoint(Callback):
 
     def save_model(self, model):
         if self.should_save:
-            import fastnn as fnn
-
             fnn.save_model(model, self.filepath)
             self.should_save = False
 
 
-class EarlyStopping(Callback):
+class EarlyStopping(MonitorCallback):
     def __init__(
         self, monitor="val_loss", patience=5, min_delta=0.0, restore_best_weights=True
     ):
-        self.monitor = monitor
+        super().__init__(monitor)
         self.patience = patience
         self.min_delta = min_delta
         self.restore_best_weights = restore_best_weights
@@ -85,7 +96,7 @@ class EarlyStopping(Callback):
         self.should_stop = False
 
     def on_epoch_end(self, epoch, logs):
-        value = logs.get(self.monitor)
+        value = self.get_monitor_value(logs)
         if value is None:
             return
 
@@ -112,37 +123,48 @@ class EarlyStopping(Callback):
             # Model should handle restoring weights
 
 
-class LearningRateScheduler:
-    def __init__(self, schedule="cosine", **kwargs):
-        self.schedule = schedule
-        self.lr = kwargs.get("lr", 0.01)
-        self.step_size = kwargs.get("step_size", 10)
-        self.gamma = kwargs.get("gamma", 0.1)
-        self.T_max = kwargs.get("T_max", 100)
-        self.eta_min = kwargs.get("eta_min", 0.0001)
-        
-        self._schedule_funcs = {
-            "step": self._step_schedule,
-            "cosine": self._cosine_schedule,
-        }
-        
-    def _step_schedule(self, epoch):
-        return self.lr * (self.gamma ** (epoch // self.step_size))
-    
-    def _cosine_schedule(self, epoch):
-        return (
-            self.eta_min
-            + (self.lr - self.eta_min)
-            * (1 + np.cos(np.pi * epoch / self.T_max))
-            / 2
-        )
-    
+class LearningRateScheduler(Callback):
+    """Callback for learning rate scheduling.
+
+    Wraps a scheduler from fastnn.schedulers and calls its step() method
+    at the end of each epoch.
+
+    Args:
+        scheduler: A scheduler object from fastnn.schedulers (e.g., StepLR, CosineAnnealingLR).
+                   Or a string specifying the schedule type ("step" or "cosine").
+        **kwargs: Additional arguments for creating the scheduler from string.
+                  Required if scheduler is a string: optimizer, and schedule-specific args.
+    """
+
+    def __init__(self, scheduler, **kwargs):
+        super().__init__()
+        if isinstance(scheduler, str):
+            # Create scheduler from string
+            from fastnn.schedulers import StepLR, CosineAnnealingLR
+
+            if scheduler == "step":
+                optimizer = kwargs.get("optimizer")
+                if optimizer is None:
+                    raise ValueError("optimizer is required for step schedule")
+                step_size = kwargs.get("step_size", 10)
+                gamma = kwargs.get("gamma", 0.1)
+                self.scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
+            elif scheduler == "cosine":
+                optimizer = kwargs.get("optimizer")
+                if optimizer is None:
+                    raise ValueError("optimizer is required for cosine schedule")
+                T_max = kwargs.get("T_max", 100)
+                eta_min = kwargs.get("eta_min", 0.0001)
+                self.scheduler = CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+            else:
+                raise ValueError(f"Unknown schedule: {scheduler}")
+        else:
+            # Assume scheduler is a scheduler object
+            self.scheduler = scheduler
+
     def on_epoch_end(self, epoch, logs):
-        func = self._schedule_funcs.get(self.schedule)
-        if func is None:
-            raise ValueError(f"Unknown schedule: {self.schedule}")
-        
-        new_lr = func(epoch)
+        """Update learning rate and log the new value."""
+        new_lr = self.scheduler.step()
         logs["lr"] = new_lr
 
 
@@ -158,16 +180,9 @@ class CSVLogger(Callback):
             return
         mode = "a" if os.path.exists(self.filepath) else "w"
         self._file = open(self.filepath, mode)
-        if mode == "w" and self.fields is not None:
-            self._file.write(",".join(self.fields) + "\n")
-        self._initialized = True
-
-    def on_epoch_end(self, epoch, logs):
-        if not self._initialized:
-            return
 
         if self.fields is None:
-            field_order = [
+            self.fields = [
                 "epoch",
                 "loss",
                 "val_loss",
@@ -175,11 +190,15 @@ class CSVLogger(Callback):
                 "val_accuracy",
                 "lr",
             ]
-            fields = list(field_order)
-            extra_keys = sorted(set(logs.keys()) - set(field_order))
-            fields.extend(extra_keys)
-            self.fields = fields
-            self._file.write(",".join(fields) + "\n")
+
+        if mode == "w":
+            self._file.write(",".join(self.fields) + "\n")
+
+        self._initialized = True
+
+    def on_epoch_end(self, epoch, logs):
+        if not self._initialized:
+            return
 
         values = [str(logs.get(field, "")) for field in self.fields]
         self._file.write(",".join(values) + "\n")
