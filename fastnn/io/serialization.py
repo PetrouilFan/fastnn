@@ -82,7 +82,7 @@ def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
                     f.write(_pack_u64(len(shape)))
                     for d in shape:
                         f.write(_pack_i64(d))
-                    data = to_numpy(tensor).astype(np.float32).flatten()
+                    data = to_numpy(tensor).astype(np.float32, copy=False).ravel()
                     f.write(_pack_u64(len(data)))
                     f.write(data.tobytes())
             
@@ -92,12 +92,12 @@ def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
                 for name, tensor in param_list:
                     # Write tensor header with version
                     f.write(_pack_u32(2))  # tensor format version
-                    write_tensor(f, name, to_numpy(tensor).astype(np.float32))
+                    write_tensor(f, name, to_numpy(tensor))
                     # Write gradient if present
                     grad = tensor.grad
                     if grad is not None:
                         f.write(_pack_u8(1))
-                        write_tensor(f, name + ".grad", to_numpy(grad).astype(np.float32))
+                        write_tensor(f, name + ".grad", to_numpy(grad))
                     else:
                         f.write(_pack_u8(0))
             
@@ -158,15 +158,15 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
                     tensor_version = _unpack_u32(f.read(4))
                     if tensor_version != 2:
                         raise SerializationError(f"Unsupported tensor version: {tensor_version}")
-name, data = read_tensor(f)
-                     result[name] = tensor(data, list(data.shape))
+                    name, data = read_tensor(f)
+                    result[name] = tensor(data, list(data.shape))
                     # Read gradient flag
                     has_grad = _unpack_u8(f.read(1))
                     if has_grad:
                         grad_name = name + ".grad"
-_, grad_data = read_tensor(f)
-                         # Attach gradient to the tensor
-                         grad_tensor = tensor(grad_data, list(grad_data.shape))
+                        _, grad_data = read_tensor(f)
+                        # Attach gradient to the tensor
+                        grad_tensor = tensor(grad_data, list(grad_data.shape))
                         # Store gradient in autograd metadata if available
                         if hasattr(result[name], 'inner') and hasattr(result[name].inner, 'autograd_meta'):
                             meta = result[name].inner.autograd_meta
@@ -186,27 +186,20 @@ _, grad_data = read_tensor(f)
 def save_state_dict(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
     """Save model state dictionary (parameters and gradients) to a file.
     
-    Args:
-        model: Model object with `named_parameters()` method.
-        path: Path to output file.
-        version: Serialization format version.
-    
-    Examples:
-        >>> fnn.save_state_dict(model, "state.fnn")
+    Deprecated: Use save_model instead.
     """
-    # For now, same as save_model but only named parameters
+    import warnings
+    warnings.warn("save_state_dict is deprecated, use save_model instead", DeprecationWarning, stacklevel=2)
     save_model(model, path, version)
 
 
 def load_state_dict(path: str) -> Dict[str, Any]:
     """Load state dictionary from file.
     
-    Args:
-        path: Path to input file.
-    
-    Returns:
-        State dictionary.
+    Deprecated: Use load_model instead.
     """
+    import warnings
+    warnings.warn("load_state_dict is deprecated, use load_model instead", DeprecationWarning, stacklevel=2)
     return load_model(path)
 
 
@@ -244,7 +237,7 @@ def save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
                 for state_tensor_name in ["m", "v", "v_hat"]:
                     state_list = getattr(opt, state_tensor_name, None)
                     if state_list and i < len(state_list):
-                        data = to_numpy(state_list[i]).astype(np.float32).flatten()
+                        data = to_numpy(state_list[i]).astype(np.float32, copy=False).ravel()
                         f.write(_pack_u8(1))
                         f.write(_pack_u64(len(data)))
                         f.write(data.tobytes())

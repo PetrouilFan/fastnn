@@ -121,43 +121,37 @@ class ExponentialLR(LRScheduler):
         return self.base_lr * self.gamma ** self.last_epoch
 
 
-class ReduceLROnPlateau:
+class ReduceLROnPlateau(LRScheduler):
     """Reduce LR when metric has stopped improving.
-    
+
     Args:
         optimizer: Optimizer to schedule.
         mode: 'min' or 'max'.
         factor: Factor to multiply LR by.
         patience: Number of epochs with no improvement.
         min_lr: Minimum learning rate.
-    
+
     Examples:
         >>> scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
         >>> for epoch in range(100):
         ...     val_loss = validate(...)
         ...     scheduler.step(val_loss)
     """
-    
+
     def __init__(self, optimizer: Any, mode: str = "min", factor: float = 0.1, patience: int = 10, min_lr: float = 1e-6):
-        self.optimizer = optimizer
+        super().__init__(optimizer)
         self.mode = mode
         self.factor = factor
         self.patience = patience
         self.min_lr = min_lr
         self.best = float("inf") if mode == "min" else float("-inf")
         self.wait = 0
-        self.current_lr = self._get_lr()
-    
-    def _get_lr(self) -> float:
-        sd = self.optimizer.state_dict()
-        return sd.get("lr", 0.01)
-    
-    def _set_lr(self, lr: float) -> None:
-        sd = self.optimizer.state_dict()
-        sd["lr"] = lr
-        self.optimizer.load_state_dict(sd)
-        self.current_lr = lr
-    
+        self.current_lr = self.base_lr
+
+    def get_lr(self) -> float:
+        """Not used for ReduceLROnPlateau. Required by base class."""
+        return self.current_lr
+
     def step(self, metric: float) -> float:
         """Update learning rate based on metric value."""
         improved = (metric < self.best) if self.mode == "min" else (metric > self.best)
@@ -172,5 +166,6 @@ class ReduceLROnPlateau:
                 if new_lr < self.min_lr:
                     new_lr = self.min_lr
                 self._set_lr(new_lr)
+                self.current_lr = new_lr
                 return new_lr
         return self.current_lr

@@ -32,7 +32,7 @@ impl LayerNormBackward {
 
 impl Node for LayerNormBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+        let grad = crate::autograd::extract_first_grad(grad_outputs);
         let input = &self.inputs[0];
         let weight = &self.inputs[1];
         let _bias = &self.inputs[2];
@@ -45,7 +45,11 @@ impl Node for LayerNormBackward {
         let norm_dim: usize = shape[shape.len() - 1] as usize;
         let total = outer_size * norm_dim;
 
-        let grad_cpu = grad.to_cpu();
+        let grad_cpu = if grad.inner.is_cpu() {
+            grad
+        } else {
+            grad.to_cpu()
+        };
         let x_hat_cpu = self.normalized.to_cpu();
         let var_cpu = self.variance.to_cpu();
 
@@ -153,7 +157,7 @@ impl CrossEntropyBackward {
 
 impl Node for CrossEntropyBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output_tensor = grad_outputs.into_iter().next().flatten().unwrap();
+        let grad_output_tensor = crate::autograd::extract_first_grad(grad_outputs);
         let grad_out = grad_output_tensor.item();
 
         let logits = &self.logits;
@@ -235,7 +239,7 @@ impl MSELossBackward {
 
 impl Node for MSELossBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+        let grad = crate::autograd::extract_first_grad(grad_outputs);
         let diff = self.pred.sub(&self.target);
 
         let grad_loss = match self.reduction.as_str() {

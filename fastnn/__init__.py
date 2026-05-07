@@ -1,5 +1,6 @@
 import numpy as np
 import fastnn._core as _core
+import struct
 
 __version__ = "1.1.0"
 
@@ -90,22 +91,24 @@ except ImportError:
 
 
 
+_NUMPY_DTYPE_MAP = {
+    "f32": np.float32,
+    "f64": np.float64,
+    "i32": np.int32,
+    "i64": np.int64,
+    "bool": np.bool_,
+    "f16": np.float16,
+    "bf16": np.float32,
+}
+
+
 def _patch_numpy(tensor_cls):
     _original_numpy = tensor_cls.numpy
 
     def _new_numpy(self):
         data = _original_numpy(self)
         shape = self.shape
-        dtype_map = {
-            "f32": np.float32,
-            "f64": np.float64,
-            "i32": np.int32,
-            "i64": np.int64,
-            "bool": np.bool_,
-            "f16": np.float16,
-            "bf16": np.float32,
-        }
-        np_dtype = dtype_map.get(self.dtype, np.float32)
+        np_dtype = _NUMPY_DTYPE_MAP.get(self.dtype, np.float32)
         return np.array(data, dtype=np_dtype).reshape(shape)
 
     tensor_cls.numpy = _new_numpy
@@ -206,7 +209,6 @@ Muon = _core.PyMuon
 LeakyReLU = _core.LeakyReLU
 Softplus = _core.Softplus
 Hardswish = _core.Hardswish
-cat = _core.cat
 RMSNorm = _core.RMSNorm
 GroupNorm = _core.GroupNorm
 BatchNorm2d = _core.BatchNorm2d
@@ -245,8 +247,6 @@ def import_onnx(onnx_path: str, fnn_path: str):
 
 
 def save_model(model, path):
-    import struct
-
     params = model.parameters() if hasattr(model, "parameters") else []
     named = model.named_parameters() if hasattr(model, "named_parameters") else []
     if named:
@@ -271,8 +271,6 @@ def save_model(model, path):
 
 
 def load_model(path):
-    import struct
-
     result = {}
     with open(path, "rb") as f:
         magic = f.read(4)
@@ -305,8 +303,6 @@ def load_state_dict(model, state_dict):
 
 
 def save_state_dict(model, path):
-    import struct
-
     named = model.named_parameters() if hasattr(model, "named_parameters") else []
     params = model.parameters() if hasattr(model, "parameters") else []
     if named:
@@ -337,8 +333,6 @@ def save_state_dict(model, path):
 
 
 def save_optimizer(opt, path):
-    import struct
-
     with open(path, "wb") as f:
         f.write(OPTIMIZER_MAGIC)
         f.write(struct.pack("<I", OPTIMIZER_VERSION))
@@ -372,8 +366,6 @@ def save_optimizer(opt, path):
 
 
 def load_optimizer(opt, path):
-    import struct
-
     with open(path, "rb") as f:
         magic = f.read(4)
         if magic != OPTIMIZER_MAGIC:
@@ -433,62 +425,7 @@ class _TensorModuleWrapper:
 
 import sys
 
-import warnings
 
-
-def save_model(model, path, version=None):
-    """Deprecated: Use fastnn.io.save() instead."""
-    warnings.warn(
-        "fastnn.save_model() is deprecated, use fastnn.io.save() instead",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    from fastnn.serialization import save_model as _save_model
-    _save_model(model, path, version if version is not None else 2)
-
-
-def load_model(path, version=None):
-    """Deprecated: Use fastnn.io.load() instead."""
-    warnings.warn(
-        "fastnn.load_model() is deprecated, use fastnn.io.load() instead",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    from fastnn.serialization import load_model as _load_model
-    return _load_model(path, version)
-
-
-def save_optimizer(opt, path, version=None):
-    """Deprecated: Use fastnn.io.save() instead."""
-    warnings.warn(
-        "fastnn.save_optimizer() is deprecated, use fastnn.io.save() instead",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    from fastnn.serialization import save_optimizer as _save_opt
-    _save_opt(opt, path, version if version is not None else 1)
-
-
-def save_state_dict(model, path, version=None):
-    """Deprecated: Use fastnn.io.save() instead."""
-    warnings.warn(
-        "fastnn.save_state_dict() is deprecated, use fastnn.io.save() instead",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    from fastnn.serialization import save_state_dict as _save_sd
-    _save_sd(model, path, version if version is not None else 2)
-
-
-def load_state_dict(path):
-    """Deprecated: Use fastnn.io.load() instead."""
-    warnings.warn(
-        "fastnn.load_state_dict() is deprecated, use fastnn.io.load() instead",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    from fastnn.serialization import load_state_dict as _load_sd
-    return _load_sd(path)
 
 
 _tensor_module = sys.modules.get("fastnn.tensor")

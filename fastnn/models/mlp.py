@@ -2,6 +2,7 @@ from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d
 from fastnn.layers import PySequential as Seq
 import fastnn as fnn
 from fastnn._model_wrapper import ModuleWrapperMixin
+from fastnn.models.builder import create_mlp
 
 
 class MLP(ModuleWrapperMixin):

@@ -13,7 +13,7 @@ impl ViewBackward {
 
 impl Node for ViewBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+        let grad = crate::autograd::extract_first_grad(grad_outputs);
         let shape = self.input.shape();
         vec![Some(grad.reshape(shape))]
     }
@@ -67,7 +67,7 @@ impl SliceBackward {
 
 impl Node for SliceBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+        let grad = crate::autograd::extract_first_grad(grad_outputs);
 
         let input_shape = self.input.shape();
         let mut grad_input = Tensor::zeros(
@@ -185,27 +185,43 @@ impl CheckpointNode {
 }
 
 impl Node for CheckpointNode {
-    #[allow(clippy::unused_async)]
-    fn apply(&self, _grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        // For checkpointing, we need to recompute the forward pass
-        // to get the intermediate activations needed for backward
-
-        // Recompute forward pass with gradients enabled
-        let _outputs = (self.checkpoint_fn)(&self.inputs);
-
-        // The grad_outputs contain gradients from the output side.
-        // We need to propagate these gradients back through the recomputed graph.
-        // For now, we'll return zeros for all inputs as a placeholder.
-        // A proper implementation would:
-        // 1. Build a temporary computation graph from the recomputed outputs
-        // 2. Call backward on that graph with grad_outputs
-        // 3. Return the computed input gradients
-        //
-        // This is a simplified implementation that returns None for all inputs,
-        // which means gradients won't flow through checkpointed sections.
-        // TODO: Properly implement checkpointing by rebuilding the subgraph
-
-        vec![None; self.inputs.len()]
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+        // Temporarily enable gradient tracking to recompute forward pass with computation graph
+        let prev_grad_enabled = is_grad_enabled();
+        no_grad_enter();
+        
+        // Recompute the forward pass, storing outputs
+        let recomputed_outputs = (self.checkpoint_fn)(&self.inputs);
+        
+        // Restore previous gradient tracking state immediately after recomputation
+        if prev_grad_enabled {
+            // Do nothing - we already entered no_grad state
+        } else {
+            no_grad_exit(); // Exit no_grad to restore previous state
+        }
+        
+        // Validate that recomputed outputs match grad_outputs count
+        assert_eq!(
+            recomputed_outputs.len(),
+            grad_outputs.len(),
+            "Checkpoint recomputed output count doesn't match grad_outputs"
+        );
+        
+        // Backpropagate each gradient through corresponding recomputed output
+        for (output, grad_opt) in recomputed_outputs.iter().zip(grad_outputs.iter()) {
+            if let Some(grad) = grad_opt {
+                // Use the backward function to propagate gradients
+                crate::autograd::backward(output, Some(grad.clone()));
+            }
+        }
+        
+        // Collect gradients for each input tensor
+        let input_grads: Vec<Option<Tensor>> = self.inputs
+            .iter()
+            .map(|input| input.grad())
+            .collect();
+        
+        input_grads
     }
 
     fn next_edges(&self) -> &[Edge] {
