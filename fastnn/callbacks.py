@@ -120,20 +120,29 @@ class LearningRateScheduler:
         self.gamma = kwargs.get("gamma", 0.1)
         self.T_max = kwargs.get("T_max", 100)
         self.eta_min = kwargs.get("eta_min", 0.0001)
-
+        
+        self._schedule_funcs = {
+            "step": self._step_schedule,
+            "cosine": self._cosine_schedule,
+        }
+        
+    def _step_schedule(self, epoch):
+        return self.lr * (self.gamma ** (epoch // self.step_size))
+    
+    def _cosine_schedule(self, epoch):
+        return (
+            self.eta_min
+            + (self.lr - self.eta_min)
+            * (1 + np.cos(np.pi * epoch / self.T_max))
+            / 2
+        )
+    
     def on_epoch_end(self, epoch, logs):
-        if self.schedule == "step":
-            new_lr = self.lr * (self.gamma ** (epoch // self.step_size))
-        elif self.schedule == "cosine":
-            new_lr = (
-                self.eta_min
-                + (self.lr - self.eta_min)
-                * (1 + np.cos(np.pi * epoch / self.T_max))
-                / 2
-            )
-        else:
+        func = self._schedule_funcs.get(self.schedule)
+        if func is None:
             raise ValueError(f"Unknown schedule: {self.schedule}")
-
+        
+        new_lr = func(epoch)
         logs["lr"] = new_lr
 
 
@@ -180,3 +189,6 @@ class CSVLogger(Callback):
         if self._file:
             self._file.close()
             self._file = None
+
+    def __del__(self):
+        self.on_train_end(None)

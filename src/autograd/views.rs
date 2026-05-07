@@ -1,3 +1,5 @@
+use smallvec::SmallVec;
+
 pub struct ViewBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
@@ -93,13 +95,16 @@ impl Node for SliceBackward {
 
                 let ndim = grad_shape.len();
                 // Pre-allocate coordinate arrays once instead of per-element
-                let mut grad_coords = vec![0usize; ndim];
-                let mut input_coords = vec![0usize; ndim];
+                let mut grad_coords: SmallVec<[usize; 8]> = SmallVec::new();
+                grad_coords.resize(ndim, 0);
+                let mut input_coords: SmallVec<[usize; 8]> = SmallVec::new();
+                input_coords.resize(ndim, 0);
                 let start = self.start as usize;
                 let step = self.step as usize;
 
                 // Pre-compute shape strides for index decomposition
-                let mut shape_strides = vec![0usize; ndim];
+                let mut shape_strides: SmallVec<[usize; 8]> = SmallVec::new();
+                shape_strides.resize(ndim, 0);
                 let mut stride = 1usize;
                 for d in (0..ndim).rev() {
                     shape_strides[d] = stride;

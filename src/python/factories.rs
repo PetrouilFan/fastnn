@@ -145,13 +145,14 @@ fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyTensor {
 #[pyo3(signature = (shape, device = None))]
 fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     let numel: i64 = shape.iter().product();
-    let mut values = vec![0.0f32; numel as usize];
     let mut rng = rand::thread_rng();
-    for v in &mut values {
-        let u1: f32 = rng.gen();
-        let u2: f32 = rng.gen();
-        *v = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
-    }
+    let values: Vec<f32> = (0..numel as usize)
+        .map(|_| {
+            let u1 = rng.gen::<f32>();
+            let u2 = rng.gen::<f32>();
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+        })
+        .collect();
     let device = device
         .as_ref()
         .and_then(|s| Device::from_str_label(s))

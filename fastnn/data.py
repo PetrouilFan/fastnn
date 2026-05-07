@@ -257,11 +257,12 @@ def default_collate(batch: list) -> tuple:
     if hasattr(elem, "numpy"):
         arrays = [b.numpy() for b in batch]
         result_np = np.stack(arrays, axis=0)
-        return fnn.tensor(np.ascontiguousarray(result_np).ravel().tolist(), list(result_np.shape))
+        # tensor() accepts numpy arrays directly - no need for .ravel().tolist()
+        return fnn.tensor(result_np, result_np.shape)
 
     if isinstance(elem, np.ndarray):
         result_np = np.stack(batch, axis=0)
-        return fnn.tensor(np.ascontiguousarray(result_np).ravel().tolist(), list(result_np.shape))
+        return fnn.tensor(result_np, result_np.shape)
 
     if isinstance(elem, (int, float)):
         return fnn.tensor(batch, [len(batch)])
