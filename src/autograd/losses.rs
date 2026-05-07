@@ -45,11 +45,7 @@ impl Node for LayerNormBackward {
         let norm_dim: usize = shape[shape.len() - 1] as usize;
         let total = outer_size * norm_dim;
 
-        let grad_cpu = if grad.inner.is_cpu() {
-            grad
-        } else {
-            grad.to_cpu()
-        };
+        let grad_cpu = crate::autograd::ensure_cpu(&grad);
         let x_hat_cpu = self.normalized.to_cpu();
         let var_cpu = self.variance.to_cpu();
 
@@ -117,7 +113,7 @@ impl EmbeddingBackward {
 
 impl Node for EmbeddingBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        vec![grad_outputs.into_iter().next().flatten()]
+        vec![Some(crate::autograd::extract_first_grad(grad_outputs))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -165,12 +161,11 @@ impl Node for CrossEntropyBackward {
         let batch_size = logits.shape()[0] as usize;
         let num_classes = logits.shape()[1] as usize;
 
-        let logits_cpu = logits.to_cpu();
-
+        let logits_cpu = crate::autograd::ensure_cpu(&logits);
         let logits_data = logits_cpu.as_f32_slice();
 
         // Convert targets to integer indices
-        let targets_cpu = targets.to_cpu();
+        let targets_cpu = crate::autograd::ensure_cpu(&targets);
         let targets_i64 = targets_cpu.as_i64_slice();
 
         // Convert to f32 representation for kernel (kernel expects f32 bit patterns of indices)

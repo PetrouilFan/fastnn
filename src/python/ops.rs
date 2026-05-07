@@ -1,3 +1,40 @@
+/// Helper to dispatch a unary operation
+fn dispatch_unary(op: &str, tensor: &Tensor) -> Tensor {
+    let dispatch_key = dispatcher::device_to_dispatch_key(tensor.device());
+    let result = dispatcher::dispatch(op, dispatch_key, &[tensor]);
+    result.into_iter().next().unwrap()
+}
+
+/// Helper to dispatch a binary operation
+fn dispatch_binary(op: &str, a: &Tensor, b: &Tensor) -> Tensor {
+    let dispatch_key = dispatcher::device_to_dispatch_key(a.device());
+    let result = dispatcher::dispatch(op, dispatch_key, &[a, b]);
+    result.into_iter().next().unwrap()
+}
+
+/// Helper to dispatch an operation with variable number of arguments
+fn dispatch_op(op: &str, args: &[&Tensor]) -> Tensor {
+    let dispatch_key = dispatcher::device_to_dispatch_key(args[0].device());
+    let result = dispatcher::dispatch(op, dispatch_key, args);
+    result.into_iter().next().unwrap()
+}
+
+/// Helper to wrap loss function output with autograd support
+fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
+    if autograd::is_grad_enabled() && input.requires_grad() {
+        let edges = autograd::make_edge(input);
+        let backward = backward_fn();
+        let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+        meta.grad_fn = Some(backward);
+        let mut output = output.clone();
+        Arc::make_mut(&mut output.inner).autograd_meta =
+            Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+        PyTensor::from_tensor(output)
+    } else {
+        PyTensor::from_tensor(output)
+    }
+}
+
 #[pyfunction]
 fn full_like(tensor: &PyTensor, value: f32) -> PyTensor {
     PyTensor::from_tensor(Tensor::full(
@@ -56,22 +93,13 @@ fn batched_mlp_forward(
             let act = &activations[i];
             match act.as_str() {
                 "relu" => {
-                    use crate::dispatcher::dispatch;
-                    let dispatch_key = dispatcher::device_to_dispatch_key(x.device());
-                    let result = dispatch("relu", dispatch_key, &[&x]);
-                    x = result[0].clone();
+                    x = dispatch_unary("relu", &x);
                 }
                 "sigmoid" => {
-                    use crate::dispatcher::dispatch;
-                    let dispatch_key = dispatcher::device_to_dispatch_key(x.device());
-                    let result = dispatch("sigmoid", dispatch_key, &[&x]);
-                    x = result[0].clone();
+                    x = dispatch_unary("sigmoid", &x);
                 }
                 "tanh" => {
-                    use crate::dispatcher::dispatch;
-                    let dispatch_key = dispatcher::device_to_dispatch_key(x.device());
-                    let result = dispatch("tanh", dispatch_key, &[&x]);
-                    x = result[0].clone();
+                    x = dispatch_unary("tanh", &x);
                 }
                 _ => {}
             }
@@ -82,23 +110,27 @@ fn batched_mlp_forward(
 }
 
 #[pyfunction]
-fn neg(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.neg())
+fn neg(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.neg()))
 }
 
 #[pyfunction]
-fn abs(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.abs())
+fn abs(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.abs()))
 }
 
 #[pyfunction]
-fn exp(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.exp())
+fn exp(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.exp()))
 }
 
 #[pyfunction]
-fn log(a: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.ln())
+fn log(py: Python<'_>, a: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.ln()))
 }
 
 #[pyfunction]
@@ -115,34 +147,25 @@ fn relu(py: Python<'_>, a: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    use crate::dispatcher::{device_to_dispatch_key, dispatch};
-    let dispatch_key = device_to_dispatch_key(a.inner.device());
-    let result = dispatch("fused_add_relu", dispatch_key, &[&a.inner, &b.inner]);
-    PyTensor::from_tensor(result.into_iter().next().unwrap())
+    PyTensor::from_tensor(dispatch_binary("fused_add_relu", &a.inner, &b.inner))
 }
 
 #[pyfunction]
 fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    use crate::dispatcher::{device_to_dispatch_key, dispatch};
-    let dispatch_key = device_to_dispatch_key(x.inner.device());
     let args: Vec<_> = match bias {
         Some(b) => vec![&x.inner, &w.inner, &b.inner],
         None => vec![&x.inner, &w.inner],
     };
-    let result = dispatch("fused_linear_relu", dispatch_key, &args);
-    PyTensor::from_tensor(result.into_iter().next().unwrap())
+    PyTensor::from_tensor(dispatch_op("fused_linear_relu", &args))
 }
 
 #[pyfunction]
 fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    use crate::dispatcher::{device_to_dispatch_key, dispatch};
-    let dispatch_key = device_to_dispatch_key(x.inner.device());
     let args: Vec<_> = match bias {
         Some(b) => vec![&x.inner, &w.inner, &b.inner],
         None => vec![&x.inner, &w.inner],
     };
-    let result = dispatch("fused_linear_gelu", dispatch_key, &args);
-    PyTensor::from_tensor(result.into_iter().next().unwrap())
+    PyTensor::from_tensor(dispatch_op("fused_linear_gelu", &args))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -161,8 +184,6 @@ fn fused_conv_bn_silu(
     groups: &PyTensor,
     eps: &PyTensor,
 ) -> PyTensor {
-    use crate::dispatcher::{device_to_dispatch_key, dispatch};
-    let dispatch_key = device_to_dispatch_key(x.inner.device());
     let mut args: Vec<&Tensor> = Vec::new();
     args.push(&x.inner);
     args.push(&w.inner);
@@ -178,8 +199,7 @@ fn fused_conv_bn_silu(
     args.push(&dilation.inner);
     args.push(&groups.inner);
     args.push(&eps.inner);
-    let result = dispatch("fused_conv_bn_silu", dispatch_key, &args);
-    PyTensor::from_tensor(result.into_iter().next().unwrap())
+    PyTensor::from_tensor(dispatch_op("fused_conv_bn_silu", &args))
 }
 
 #[pyfunction]
@@ -214,14 +234,8 @@ fn softmax(py: Python<'_>, a: &PyTensor, dim: i32) -> PyTensor {
 
 #[pyfunction]
 fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    use crate::dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
-    let result = dispatch(
-        "log_softmax",
-        dispatch_key,
-        &[&a.inner, &Tensor::from_scalar(dim as f32)],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    let args = [&a.inner, &Tensor::from_scalar(dim as f32)];
+    PyTensor::from_tensor(dispatch_op("log_softmax", &args))
 }
 
 #[pyfunction]
@@ -261,61 +275,41 @@ fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let dim = dim.unwrap_or(0);
-    use crate::dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
-    let result = dispatch(
-        "min",
-        dispatch_key,
-        &[
-            &a.inner,
-            &Tensor::from_scalar(dim as f32),
-            &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
-        ],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    let args = [
+        &a.inner,
+        &Tensor::from_scalar(dim as f32),
+        &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
+    ];
+    PyTensor::from_tensor(dispatch_op("min", &args))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None))]
 fn argmax(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     let dim = dim.unwrap_or(0);
-    use crate::dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
-    let result = dispatch(
-        "max",
-        dispatch_key,
-        &[
-            &a.inner,
-            &Tensor::from_scalar(dim as f32),
-            &Tensor::from_scalar(1.0),
-        ],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    let args = [
+        &a.inner,
+        &Tensor::from_scalar(dim as f32),
+        &Tensor::from_scalar(1.0),
+    ];
+    PyTensor::from_tensor(dispatch_op("max", &args))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None))]
 fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     let dim = dim.unwrap_or(0);
-    use crate::dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(a.inner.device());
-    let result = dispatch(
-        "min",
-        dispatch_key,
-        &[
-            &a.inner,
-            &Tensor::from_scalar(dim as f32),
-            &Tensor::from_scalar(1.0),
-        ],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    let args = [
+        &a.inner,
+        &Tensor::from_scalar(dim as f32),
+        &Tensor::from_scalar(1.0),
+    ];
+    PyTensor::from_tensor(dispatch_op("min", &args))
 }
 
 #[pyfunction]
 #[pyo3(signature = (pred, target, reduction = None))]
 fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
-    use crate::dispatcher::dispatch;
-    let dispatch_key = dispatcher::device_to_dispatch_key(pred.inner.device());
     let reduction = reduction.unwrap_or_else(|| "mean".to_string());
     let reduction_code = match reduction.as_str() {
         "none" => 0.0,
@@ -323,45 +317,22 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
         "sum" => 2.0,
         _ => 1.0,
     };
-    let result = dispatch(
-        "mse_loss",
-        dispatch_key,
-        &[
-            &pred.inner,
-            &target.inner,
-            &Tensor::from_scalar(reduction_code),
-        ],
-    );
-    let output = result[0].clone();
+    let args = [&pred.inner, &target.inner, &Tensor::from_scalar(reduction_code)];
+    let output = dispatch_op("mse_loss", &args);
 
-    // Set up autograd tracking
-    if autograd::is_grad_enabled() && pred.inner.requires_grad() {
-        let edges = autograd::make_edge(&pred.inner);
-        let backward = autograd::MSELossBackward::new(
+    wrap_loss_with_autograd(output, &pred.inner, || {
+        std::sync::Arc::new(autograd::MSELossBackward::new(
             pred.inner.clone(),
             target.inner.clone(),
             reduction,
-            edges,
-        );
-        let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-        meta.grad_fn = Some(std::sync::Arc::new(backward));
-        let mut output = output.clone();
-        Arc::make_mut(&mut output.inner).autograd_meta =
-            Some(Arc::new(std::sync::Mutex::new(meta)));
-        PyTensor::from_tensor(output)
-    } else {
-        PyTensor::from_tensor(output)
-    }
+            autograd::make_edge(&pred.inner),
+        ))
+    })
 }
 
 #[pyfunction]
 #[pyo3(signature = (pred, target, reduction = None))]
 fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
-    use crate::autograd::AutogradMeta;
-    use crate::dispatcher::dispatch;
-    use std::sync::Arc;
-    let dispatch_key = dispatcher::device_to_dispatch_key(pred.inner.device());
-
     let reduction = reduction.unwrap_or_else(|| "mean".to_string());
     let reduction_code = match reduction.as_str() {
         "none" => 0.0,
@@ -369,34 +340,17 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
         "sum" => 2.0,
         _ => 1.0,
     };
-    let result = dispatch(
-        "cross_entropy_loss",
-        dispatch_key,
-        &[
-            &pred.inner,
-            &target.inner,
-            &Tensor::from_scalar(reduction_code),
-        ],
-    );
-    let output = result[0].clone();
+    let args = [&pred.inner, &target.inner, &Tensor::from_scalar(reduction_code)];
+    let output = dispatch_op("cross_entropy_loss", &args);
 
-    if pred.inner.requires_grad() {
-        let edges = autograd::make_edge(&pred.inner);
-        let backward = autograd::CrossEntropyBackward::new(
+    wrap_loss_with_autograd(output, &pred.inner, || {
+        std::sync::Arc::new(autograd::CrossEntropyBackward::new(
             pred.inner.clone(),
             target.inner.clone(),
-            reduction.clone(),
-            edges,
-        );
-        let mut meta = AutogradMeta::new_non_leaf(true);
-        meta.grad_fn = Some(std::sync::Arc::new(backward));
-        let mut output = output.clone();
-        Arc::make_mut(&mut output.inner).autograd_meta =
-            Some(Arc::new(std::sync::Mutex::new(meta)));
-        PyTensor::from_tensor(output)
-    } else {
-        PyTensor::from_tensor(output)
-    }
+            reduction,
+            autograd::make_edge(&pred.inner),
+        ))
+    })
 }
 
 #[pyfunction]
@@ -585,23 +539,15 @@ fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
 
 #[pyfunction]
 fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyTensor {
-    let result = dispatcher::dispatch(
-        "bce_with_logits",
-        dispatcher::DispatchKey::Cpu,
-        &[&input.inner, &target.inner],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    let args = [&input.inner, &target.inner];
+    PyTensor::from_tensor(dispatch_op("bce_with_logits", &args))
 }
 
 #[pyfunction]
 fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyTensor {
     let delta_t = core_tensor::Tensor::from_scalar(delta);
-    let result = dispatcher::dispatch(
-        "huber_loss",
-        dispatcher::DispatchKey::Cpu,
-        &[&input.inner, &target.inner, &delta_t],
-    );
-    PyTensor::from_tensor(result[0].clone())
+    let args = [&input.inner, &target.inner, &delta_t];
+    PyTensor::from_tensor(dispatch_op("huber_loss", &args))
 }
 
 #[pyfunction]
@@ -676,8 +622,7 @@ fn flash_attention(
         &core_tensor::Tensor::from_scalar(scale),
         &core_tensor::Tensor::from_scalar(causal),
     ];
-    let result = dispatcher::dispatch("flash_attention", dispatcher::DispatchKey::Cpu, &args);
-    PyTensor::from_tensor(result[0].clone())
+    PyTensor::from_tensor(dispatch_op("flash_attention", &args))
 }
 
 #[pyfunction]

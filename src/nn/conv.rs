@@ -1,6 +1,6 @@
 use crate::autograd::{self, AutogradMeta, Conv2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
-use crate::nn::Module;
+use crate::{impl_training_state, impl_zero_grad, nn::{Module, TrainingState}};
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ pub struct Conv2d {
     pub padding: i64,
     pub dilation: i64,
     pub groups: i64,
-    training: std::sync::atomic::AtomicBool,
+    training: TrainingState,
     // Pre-allocated scalar tensors to avoid per-forward allocation
     stride_scalar: Tensor,
     padding_scalar: Tensor,
@@ -68,7 +68,7 @@ impl Conv2d {
             padding,
             dilation,
             groups,
-            training: std::sync::atomic::AtomicBool::new(true),
+            training: TrainingState::new(),
             stride_scalar: Tensor::from_scalar(stride as f32),
             padding_scalar: Tensor::from_scalar(padding as f32),
             dilation_scalar: Tensor::from_scalar(dilation as f32),
@@ -141,35 +141,9 @@ impl Module for Conv2d {
         params
     }
 
-    fn zero_grad(&self) {
-        if let Some(meta) = &self.weight.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = None;
-            }
-        }
+    impl_zero_grad!(self, self.weight, self.bias);
 
-        if let Some(b) = &self.bias {
-            if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
-
-    fn train_mode(&self) {
-        self.training
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn eval_mode(&self) {
-        self.training
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::Relaxed)
-    }
+    impl_training_state!(self, self.training);
 }
 
 #[allow(dead_code)]
@@ -181,6 +155,10 @@ pub struct ConvTranspose2d {
     pub out_channels: i64,
     pub in_channels: i64,
     pub kernel_size: i64,
+    training: TrainingState,
+    // Pre-allocated scalars
+    stride_scalar: Tensor,
+    padding_scalar: Tensor,
 }
 
 impl ConvTranspose2d {
@@ -222,6 +200,9 @@ impl ConvTranspose2d {
             out_channels,
             in_channels,
             kernel_size,
+            training: TrainingState::new(),
+            stride_scalar: Tensor::from_scalar(stride as f32),
+            padding_scalar: Tensor::from_scalar(padding as f32),
         }
     }
 }
@@ -244,8 +225,8 @@ impl Module for ConvTranspose2d {
             &[
                 x,
                 &self.weight,
-                &Tensor::from_scalar(self.stride as f32),
-                &Tensor::from_scalar(self.padding as f32),
+                &self.stride_scalar,
+                &self.padding_scalar,
             ],
         );
         let mut output = result[0].clone();
@@ -303,28 +284,9 @@ impl Module for ConvTranspose2d {
         params
     }
 
-    fn zero_grad(&self) {
-        for t in [&self.weight] {
-            if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-        if let Some(ref b) = self.bias {
-            if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
+    impl_zero_grad!(self, self.weight, self.bias);
 
-    fn train_mode(&self) {}
-    fn eval_mode(&self) {}
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_training_state!(self, self.training);
 }
 
 #[allow(dead_code)]
@@ -337,6 +299,11 @@ pub struct Conv1d {
     pub in_channels: i64,
     pub out_channels: i64,
     pub kernel_size: i64,
+    training: TrainingState,
+    // Pre-allocated scalars
+    stride_scalar: Tensor,
+    padding_scalar: Tensor,
+    dilation_scalar: Tensor,
 }
 
 impl Conv1d {
@@ -377,6 +344,10 @@ impl Conv1d {
             in_channels,
             out_channels,
             kernel_size,
+            training: TrainingState::new(),
+            stride_scalar: Tensor::from_scalar(stride as f32),
+            padding_scalar: Tensor::from_scalar(padding as f32),
+            dilation_scalar: Tensor::from_scalar(dilation as f32),
         }
     }
 }
@@ -398,9 +369,9 @@ impl Module for Conv1d {
             &[
                 &x_4d,
                 &self.weight,
-                &Tensor::from_scalar(self.stride as f32),
-                &Tensor::from_scalar(self.padding as f32),
-                &Tensor::from_scalar(self.dilation as f32),
+                &self.stride_scalar,
+                &self.padding_scalar,
+                &self.dilation_scalar,
                 &Tensor::from_scalar(1.0), // groups
             ],
         );
@@ -436,28 +407,9 @@ impl Module for Conv1d {
         params
     }
 
-    fn zero_grad(&self) {
-        for t in [&self.weight] {
-            if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-        if let Some(ref b) = self.bias {
-            if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
+    impl_zero_grad!(self, self.weight, self.bias);
 
-    fn train_mode(&self) {}
-    fn eval_mode(&self) {}
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_training_state!(self, self.training);
 }
 
 #[allow(dead_code)]
@@ -470,6 +422,11 @@ pub struct Conv3d {
     pub in_channels: i64,
     pub out_channels: i64,
     pub kernel_size: i64,
+    training: TrainingState,
+    // Pre-allocated scalars
+    stride_scalar: Tensor,
+    padding_scalar: Tensor,
+    dilation_scalar: Tensor,
 }
 
 impl Conv3d {
@@ -520,6 +477,10 @@ impl Conv3d {
             in_channels,
             out_channels,
             kernel_size,
+            training: TrainingState::new(),
+            stride_scalar: Tensor::from_scalar(stride as f32),
+            padding_scalar: Tensor::from_scalar(padding as f32),
+            dilation_scalar: Tensor::from_scalar(dilation as f32),
         }
     }
 }
@@ -545,9 +506,9 @@ impl Module for Conv3d {
             &[
                 &x_4d,
                 &self.weight,
-                &Tensor::from_scalar(self.stride as f32),
-                &Tensor::from_scalar(self.padding as f32),
-                &Tensor::from_scalar(self.dilation as f32),
+                &self.stride_scalar,
+                &self.padding_scalar,
+                &self.dilation_scalar,
                 &Tensor::from_scalar(1.0), // groups
             ],
         );
@@ -584,26 +545,7 @@ impl Module for Conv3d {
         params
     }
 
-    fn zero_grad(&self) {
-        for t in [&self.weight] {
-            if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-        if let Some(ref b) = self.bias {
-            if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
+    impl_zero_grad!(self, self.weight, self.bias);
 
-    fn train_mode(&self) {}
-    fn eval_mode(&self) {}
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_training_state!(self, self.training);
 }

@@ -18,12 +18,7 @@ impl SumBackward {
 
 impl Node for SumBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = match grad_outputs.into_iter().next().flatten() {
-            Some(g) => g,
-            None => {
-                return vec![None];
-            }
-        };
+        let grad = crate::autograd::extract_first_grad(grad_outputs);
         let shape = self.input.shape();
         let grad_shape = grad.shape();
 
@@ -127,11 +122,16 @@ impl Node for MeanBackward {
 pub struct ExpBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    one: Tensor,
 }
 
 impl ExpBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        ExpBackward { input, edges }
+        ExpBackward {
+            input,
+            edges,
+            one: Tensor::from_scalar(1.0),
+        }
     }
 }
 
@@ -338,11 +338,16 @@ impl Node for GeluBackward {
 pub struct SigmoidBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    one: Tensor,
 }
 
 impl SigmoidBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        SigmoidBackward { input, edges }
+        SigmoidBackward {
+            input,
+            edges,
+            one: Tensor::from_scalar(1.0),
+        }
     }
 }
 
@@ -350,7 +355,7 @@ impl Node for SigmoidBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
         let grad = crate::autograd::extract_first_grad(grad_outputs);
         let sigmoid_x = self.input.sigmoid();
-        let derivative = sigmoid_x.mul(&sigmoid_x.neg().add_scalar(1.0));
+        let derivative = sigmoid_x.mul(&sigmoid_x.neg().add(&self.one));
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -374,11 +379,18 @@ impl Node for SigmoidBackward {
 pub struct TanhBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
+    one: Tensor,
+    neg_one: Tensor,
 }
 
 impl TanhBackward {
     pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
-        TanhBackward { input, edges }
+        TanhBackward {
+            input,
+            edges,
+            one: Tensor::from_scalar(1.0),
+            neg_one: Tensor::from_scalar(-1.0),
+        }
     }
 }
 
@@ -387,7 +399,7 @@ impl Node for TanhBackward {
         let grad = crate::autograd::extract_first_grad(grad_outputs);
         let tanh_x = self.input.tanh();
         let tanh_sq = tanh_x.pow(2.0);
-        let one_minus_tanh_sq = tanh_sq.mul_scalar(-1.0).add_scalar(1.0);
+        let one_minus_tanh_sq = tanh_sq.mul(&self.neg_one).add(&self.one);
         vec![Some(grad.mul(&one_minus_tanh_sq))]
     }
 

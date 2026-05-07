@@ -10,7 +10,7 @@ import struct
 
 from fastnn.tensor import tensor
 from fastnn._core import IoError
-from fastnn.serialization_utils import (
+from fastnn.io import (
     write_tensor,
     read_tensor,
     _pack_u64,

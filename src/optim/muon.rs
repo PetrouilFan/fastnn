@@ -1,4 +1,4 @@
-use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState};
+use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState, zeros_like};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,30 +26,12 @@ impl Muon {
         weight_decay: f64,
         nesterov: bool,
     ) -> Self {
-        let m: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_wd: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_eg: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_ortho: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_mom_ortho: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_update_dir: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let m = zeros_like(&params);
+        let temp_wd = zeros_like(&params);
+        let temp_eg = zeros_like(&params);
+        let temp_ortho = zeros_like(&params);
+        let temp_mom_ortho = zeros_like(&params);
+        let temp_update_dir = zeros_like(&params);
 
         Muon {
             params,
@@ -112,6 +94,10 @@ impl Muon {
 }
 
 impl Optimizer for Muon {
+    fn params_mut(&mut self) -> &mut Vec<Tensor> {
+        &mut self.params
+    }
+
     fn step(&mut self) {
         let lr = self.lr as f32;
         let momentum = self.momentum as f32;
@@ -171,42 +157,13 @@ impl Optimizer for Muon {
         }
     }
 
-    fn zero_grad(&mut self) {
-        for param in &mut self.params {
-            let inner = Arc::make_mut(&mut param.inner);
-            if let Some(meta) = &mut inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
-
     fn add_param_group(&mut self, params: Vec<Tensor>) {
-        let m: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_wd: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_eg: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_ortho: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_mom_ortho: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_update_dir: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let m = zeros_like(&params);
+        let temp_wd = zeros_like(&params);
+        let temp_eg = zeros_like(&params);
+        let temp_ortho = zeros_like(&params);
+        let temp_mom_ortho = zeros_like(&params);
+        let temp_update_dir = zeros_like(&params);
 
         self.m.extend(m);
         self.temp_wd.extend(temp_wd);

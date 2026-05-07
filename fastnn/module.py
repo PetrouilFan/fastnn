@@ -11,6 +11,9 @@ class Module(ABC):
     a consistent interface for parameters, training/eval modes, etc.
     """
     
+    def __init__(self):
+        self._training = True
+    
     @abstractmethod
     def parameters(self) -> List:
         """Return list of parameters."""
@@ -20,13 +23,21 @@ class Module(ABC):
         """Return list of (name, parameter) tuples."""
         return []
     
-    def train(self) -> None:
-        """Set module to training mode."""
-        pass
+    def train_mode(self) -> None:
+        """Set module to training mode (aligned with Rust Module trait)."""
+        self._training = True
     
-    def eval(self) -> None:
-        """Set module to evaluation mode."""
-        pass
+    def eval_mode(self) -> None:
+        """Set module to evaluation mode (aligned with Rust Module trait)."""
+        self._training = False
+    
+    def is_training(self) -> bool:
+        """Return True if module is in training mode."""
+        return self._training
+    
+    # Backward compatibility aliases
+    train = train_mode
+    eval = eval_mode
     
     def zero_grad(self) -> None:
         """Zero out gradients for all parameters."""

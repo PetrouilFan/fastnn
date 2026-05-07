@@ -1,5 +1,6 @@
 use crate::autograd::{self, AutogradMeta};
 use crate::dispatcher::{device_to_dispatch_key, dispatch};
+use crate::error::{FastnnError, FastnnResult};
 use crate::storage::{CpuStorage, DType, Device, GpuStorage, Storage};
 use crate::storage_pool::get_storage_pool;
 use parking_lot::RwLock;
@@ -1548,6 +1549,29 @@ impl Tensor {
         }
     }
 
+    /// Get a direct byte slice view of the tensor data for efficient serialization.
+    /// Only works for contiguous CPU tensors.
+    /// Returns None for GPU tensors or non-contiguous tensors.
+    pub fn as_byte_slice(&self) -> Option<&[u8]> {
+        match &self.inner.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                if !self.is_contiguous() {
+                    return None;
+                }
+                let data = cpu.data.as_ref();
+                let numel = self.inner.numel() as usize;
+                let elem_size = self.inner.dtype.size();
+                let byte_len = numel * elem_size;
+                // Ensure we don't read past the storage
+                if byte_len > data.len() {
+                    return None;
+                }
+                Some(&data[self.inner.storage_offset as usize * elem_size..][..byte_len])
+            }
+            Storage::Wgpu(_) => None,
+        }
+    }
+
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
         // For BF16/F16 types, we cannot directly get a mutable f32 slice
         // The data is stored in half-precision format
@@ -1683,7 +1707,7 @@ impl Tensor {
         }
     }
 
-    fn broadcast_shapes(a: &[i64], b: &[i64]) -> Result<Vec<i64>, String> {
+    fn broadcast_shapes(a: &[i64], b: &[i64]) -> FastnnResult<Vec<i64>> {
         let ndim = a.len().max(b.len());
         let mut out = vec![1i64; ndim];
         for i in 0..ndim {
@@ -1704,10 +1728,10 @@ impl Tensor {
             } else if b_dim == 1 {
                 out[i] = a_dim;
             } else {
-                return Err(format!(
+                return Err(FastnnError::Shape(format!(
                     "shapes {:?} and {:?} are not broadcast-compatible",
                     a, b
-                ));
+                )));
             }
         }
         Ok(out)

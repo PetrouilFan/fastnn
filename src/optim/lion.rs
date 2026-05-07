@@ -1,4 +1,4 @@
-use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState};
+use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState, zeros_like};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,24 +18,11 @@ pub struct Lion {
 
 impl Lion {
     pub fn new(params: Vec<Tensor>, lr: f64, betas: (f64, f64), weight_decay: f64) -> Self {
-        let n = params.len();
-        let m: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let step: Vec<u64> = vec![0; n];
-        let temp_grad_scaled: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_update: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_grad_scaled2: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let m = zeros_like(&params);
+        let step = vec![0u64; params.len()];
+        let temp_grad_scaled = zeros_like(&params);
+        let temp_update = zeros_like(&params);
+        let temp_grad_scaled2 = zeros_like(&params);
 
         Lion {
             params,
@@ -52,6 +39,10 @@ impl Lion {
 }
 
 impl Optimizer for Lion {
+    fn params_mut(&mut self) -> &mut Vec<Tensor> {
+        &mut self.params
+    }
+
     fn step(&mut self) {
         let beta1 = self.betas.0 as f32;
         let beta2 = self.betas.1 as f32;
@@ -96,34 +87,12 @@ impl Optimizer for Lion {
         }
     }
 
-    fn zero_grad(&mut self) {
-        for param in &mut self.params {
-            let inner = Arc::make_mut(&mut param.inner);
-            if let Some(meta) = &mut inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
-
     fn add_param_group(&mut self, params: Vec<Tensor>) {
-        let m: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_grad_scaled: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_update: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_grad_scaled2: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let m = zeros_like(&params);
+        let temp_grad_scaled = zeros_like(&params);
+        let temp_update = zeros_like(&params);
+        let temp_grad_scaled2 = zeros_like(&params);
+
         self.m.extend(m);
         self.step.extend(vec![0u64; params.len()]);
         self.temp_grad_scaled.extend(temp_grad_scaled);

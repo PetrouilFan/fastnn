@@ -15,9 +15,29 @@ import numpy as np
 if TYPE_CHECKING:
     import onnx
 
-from fastnn.serialization_utils import MODEL_MAGIC, MODEL_VERSION, write_tensor
+from fastnn.io import MODEL_MAGIC, MODEL_VERSION, write_tensor
 
 logger = logging.getLogger(__name__)
+
+
+def write_param(f, name, data, param_count):
+    """Write a tensor parameter and increment param count."""
+    write_tensor(f, name, data)
+    return param_count + 1
+
+
+def get_pooling_config(node, default_kernel=(2, 2)):
+    """Get pooling config (kernel, stride, padding) from ONNX node attributes."""
+    kernel = _get_attr(node, "kernel_shape", list(default_kernel))
+    stride = _get_attr(node, "strides", kernel)
+    padding = _get_attr(node, "pads", [0, 0, 0, 0])
+
+    config = {
+        "kernel_size": kernel[0] if isinstance(kernel, list) else kernel,
+        "stride": stride[0] if isinstance(stride, list) else stride,
+        "padding": padding[0] if isinstance(padding, list) else padding,
+    }
+    return config
 
 
 
@@ -107,11 +127,9 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 layer_info["groups"] = groups
                 layer_info["bias"] = bias is not None
 
-                write_tensor(f, f"{node.name}.weight", weight)
-                param_count += 1
+                param_count = write_param(f, f"{node.name}.weight", weight, param_count)
                 if bias is not None:
-                    write_tensor(f, f"{node.name}.bias", bias)
-                    param_count += 1
+                    param_count = write_param(f, f"{node.name}.bias", bias, param_count)
 
             elif op_type == "Gemm":
                 weight = initializer_map.get(node.input[1])
@@ -133,11 +151,9 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 layer_info["out_features"] = out_features
                 layer_info["bias"] = bias is not None
 
-                write_tensor(f, f"{node.name}.weight", weight)
-                param_count += 1
+                param_count = write_param(f, f"{node.name}.weight", weight, param_count)
                 if bias is not None:
-                    write_tensor(f, f"{node.name}.bias", bias)
-                    param_count += 1
+                    param_count = write_param(f, f"{node.name}.bias", bias, param_count)
 
             elif op_type == "Relu":
                 pass  # No parameters
@@ -153,34 +169,22 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 layer_info["eps"] = _get_attr(node, "epsilon", 1e-5)
                 layer_info["momentum"] = 1.0 - _get_attr(node, "momentum", 0.9)
 
-                write_tensor(f, f"{node.name}.weight", scale)
-                param_count += 1
-                write_tensor(f, f"{node.name}.bias", bias)
-                param_count += 1
-                write_tensor(f, f"{node.name}.running_mean", mean)
-                param_count += 1
-                write_tensor(f, f"{node.name}.running_var", var)
-                param_count += 1
+                param_count = write_param(f, f"{node.name}.weight", scale, param_count)
+                param_count = write_param(f, f"{node.name}.bias", bias, param_count)
+                param_count = write_param(f, f"{node.name}.running_mean", mean, param_count)
+                param_count = write_param(f, f"{node.name}.running_var", var, param_count)
 
             elif op_type == "MaxPool":
-                kernel = _get_attr(node, "kernel_shape", [2, 2])
-                stride = _get_attr(node, "strides", kernel)
-                padding = _get_attr(node, "pads", [0, 0, 0, 0])
-
-                layer_info["kernel_size"] = (
-                    kernel[0] if isinstance(kernel, list) else kernel
-                )
-                layer_info["stride"] = stride[0] if isinstance(stride, list) else stride
-                layer_info["padding"] = padding[0] if isinstance(padding, list) else padding
+                config = get_pooling_config(node)
+                layer_info["kernel_size"] = config["kernel_size"]
+                layer_info["stride"] = config["stride"]
+                layer_info["padding"] = config["padding"]
 
             elif op_type == "AveragePool":
-                kernel = _get_attr(node, "kernel_shape", [2, 2])
-                stride = _get_attr(node, "strides", kernel)
+                config = get_pooling_config(node)
                 layer_info["type"] = "AvgPool"
-                layer_info["kernel_size"] = (
-                    kernel[0] if isinstance(kernel, list) else kernel
-                )
-                layer_info["stride"] = stride[0] if isinstance(stride, list) else stride
+                layer_info["kernel_size"] = config["kernel_size"]
+                layer_info["stride"] = config["stride"]
 
             elif op_type == "GlobalAveragePool":
                 layer_info["type"] = "GlobalAvgPool"
@@ -194,8 +198,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 bias = initializer_map.get(node.input[1])
                 if bias is not None:
                     layer_info["type"] = "BiasAdd"
-                    write_tensor(f, f"{node.name}.bias", bias)
-                    param_count += 1
+                    param_count = write_param(f, f"{node.name}.bias", bias, param_count)
                 else:
                     layer_info["type"] = "ElementwiseAdd"
 
@@ -249,10 +252,8 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 layer_info["type"] = "InstanceNorm"
                 layer_info["num_features"] = scale.shape[0]
                 layer_info["eps"] = _get_attr(node, "epsilon", 1e-5)
-                write_tensor(f, f"{node.name}.weight", scale)
-                param_count += 1
-                write_tensor(f, f"{node.name}.bias", bias)
-                param_count += 1
+                param_count = write_param(f, f"{node.name}.weight", scale, param_count)
+                param_count = write_param(f, f"{node.name}.bias", bias, param_count)
 
             else:
                 logger.warning(f"Unsupported operator: {op_type}")

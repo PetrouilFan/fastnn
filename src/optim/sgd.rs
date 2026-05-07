@@ -1,4 +1,4 @@
-use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState};
+use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState, zeros_like};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,26 +29,11 @@ impl SGD {
         weight_decay: f64,
         nesterov: bool,
     ) -> Self {
-        let velocity: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_wd: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_nesterov_grad: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_mom_v: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_vel: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let velocity = zeros_like(&params);
+        let temp_wd = zeros_like(&params);
+        let temp_nesterov_grad = zeros_like(&params);
+        let temp_mom_v = zeros_like(&params);
+        let temp_vel = zeros_like(&params);
 
         SGD {
             params,
@@ -67,6 +52,10 @@ impl SGD {
 }
 
 impl Optimizer for SGD {
+    fn params_mut(&mut self) -> &mut Vec<Tensor> {
+        &mut self.params
+    }
+
     #[allow(clippy::needless_range_loop)]
     fn step(&mut self) {
         let lr = self.lr as f32;
@@ -122,38 +111,12 @@ impl Optimizer for SGD {
         }
     }
 
-    fn zero_grad(&mut self) {
-        for param in &mut self.params.iter_mut() {
-            let inner = Arc::make_mut(&mut param.inner);
-            if let Some(meta) = &mut inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
-
     fn add_param_group(&mut self, params: Vec<Tensor>) {
-        let velocity: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_wd: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_nesterov_grad: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_mom_v: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_vel: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let velocity = zeros_like(&params);
+        let temp_wd = zeros_like(&params);
+        let temp_nesterov_grad = zeros_like(&params);
+        let temp_mom_v = zeros_like(&params);
+        let temp_vel = zeros_like(&params);
 
         self.velocity.extend(velocity);
         self.temp_wd.extend(temp_wd);

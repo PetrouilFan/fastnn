@@ -1,6 +1,6 @@
 use crate::nn::conv::Conv2d;
 use crate::nn::norm::BatchNorm2d;
-use crate::nn::Module;
+use crate::nn::{clear_grad, Module};
 use crate::tensor::Tensor;
 
 pub struct ResidualBlock {
@@ -99,19 +99,11 @@ impl Module for ResidualBlock {
             .chain(self.conv2.parameters().iter())
             .chain(self.bn2.parameters().iter())
         {
-            if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
+            clear_grad(t);
         }
         if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
             for t in ds_conv.parameters().iter().chain(ds_bn.parameters().iter()) {
-                if let Some(meta) = &t.inner.autograd_meta {
-                    if let Ok(mut lock) = meta.lock() {
-                        lock.grad = None;
-                    }
-                }
+                clear_grad(t);
             }
         }
     }

@@ -26,23 +26,30 @@ macro_rules! impl_stateless_activation {
                 result[0].clone()
             }
 
-            fn parameters(&self) -> Vec<Tensor> {
-                vec![]
-            }
+            impl_stateless_activation_methods!();
+        }
+    };
+}
 
-            fn named_parameters(&self) -> Vec<(String, Tensor)> {
-                vec![]
-            }
+/// Macro to implement the standard empty methods for stateless modules.
+macro_rules! impl_stateless_activation_methods {
+    () => {
+        fn parameters(&self) -> Vec<Tensor> {
+            vec![]
+        }
 
-            fn zero_grad(&self) {}
+        fn named_parameters(&self) -> Vec<(String, Tensor)> {
+            vec![]
+        }
 
-            fn train_mode(&self) {}
+        fn zero_grad(&self) {}
 
-            fn eval_mode(&self) {}
+        fn train_mode(&self) {}
 
-            fn is_training(&self) -> bool {
-                false
-            }
+        fn eval_mode(&self) {}
+
+        fn is_training(&self) -> bool {
+            false
         }
     };
 }
@@ -73,23 +80,7 @@ impl Module for LeakyReLU {
         result[0].clone()
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_stateless_activation_methods!();
 }
 
 pub struct PReLU {
@@ -154,23 +145,7 @@ impl Module for Softplus {
         result[0].clone()
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_stateless_activation_methods!();
 }
 
 pub struct Elu {
@@ -190,23 +165,7 @@ impl Module for Elu {
         result[0].clone()
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_stateless_activation_methods!();
 }
 
 pub struct AdaptiveAvgPool2d {

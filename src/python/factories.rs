@@ -22,11 +22,6 @@ fn tensor_factory(data: Vec<f32>, shape: Vec<i64>) -> PyTensor {
 }
 
 #[pyfunction]
-fn tensor_from_list(data: Vec<f32>, shape: Vec<i64>) -> PyTensor {
-    PyTensor::from_tensor(Tensor::from_vec(data, shape))
-}
-
-#[pyfunction]
 #[pyo3(signature = (shape, dtype = None, device = None))]
 fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
     let dtype = dtype

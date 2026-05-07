@@ -1,4 +1,4 @@
-use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState};
+use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState, zeros_like};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,46 +32,25 @@ impl RMSprop {
         centered: bool,
     ) -> Self {
         let _n = params.len();
-        let square_avg: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let grad_avg: Vec<Tensor> = if centered {
-            params
-                .iter()
-                .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-                .collect()
+        let square_avg = zeros_like(&params);
+        let grad_avg = if centered {
+            zeros_like(&params)
         } else {
             vec![]
         };
-        let momentum_buf: Vec<Tensor> = if momentum != 0.0 {
-            params
-                .iter()
-                .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-                .collect()
+        let momentum_buf = if momentum != 0.0 {
+            zeros_like(&params)
         } else {
             vec![]
         };
-        let temp_grad_sq: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_grad_avg_sq: Vec<Tensor> = if centered {
-            params
-                .iter()
-                .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-                .collect()
+        let temp_grad_sq = zeros_like(&params);
+        let temp_grad_avg_sq = if centered {
+            zeros_like(&params)
         } else {
             vec![]
         };
-        let temp_denom: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_update: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let temp_denom = zeros_like(&params);
+        let temp_update = zeros_like(&params);
 
         RMSprop {
             params,
@@ -93,6 +72,10 @@ impl RMSprop {
 }
 
 impl Optimizer for RMSprop {
+    fn params_mut(&mut self) -> &mut Vec<Tensor> {
+        &mut self.params
+    }
+
     fn step(&mut self) {
         let lr = self.lr as f32;
         let alpha = self.alpha as f32;
@@ -152,58 +135,26 @@ impl Optimizer for RMSprop {
         }
     }
 
-    fn zero_grad(&mut self) {
-        for param in &mut self.params {
-            let inner = Arc::make_mut(&mut param.inner);
-            if let Some(meta) = &mut inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
-
     fn add_param_group(&mut self, params: Vec<Tensor>) {
-        let square_avg: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let grad_avg: Vec<Tensor> = if self.centered {
-            params
-                .iter()
-                .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-                .collect()
+        let square_avg = zeros_like(&params);
+        let grad_avg = if self.centered {
+            zeros_like(&params)
         } else {
             vec![]
         };
-        let momentum_buf: Vec<Tensor> = if self.momentum != 0.0 {
-            params
-                .iter()
-                .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-                .collect()
+        let momentum_buf = if self.momentum != 0.0 {
+            zeros_like(&params)
         } else {
             vec![]
         };
-        let temp_grad_sq: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_grad_avg_sq: Vec<Tensor> = if self.centered {
-            params
-                .iter()
-                .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-                .collect()
+        let temp_grad_sq = zeros_like(&params);
+        let temp_grad_avg_sq = if self.centered {
+            zeros_like(&params)
         } else {
             vec![]
         };
-        let temp_denom: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_update: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let temp_denom = zeros_like(&params);
+        let temp_update = zeros_like(&params);
 
         self.square_avg.extend(square_avg);
         self.grad_avg.extend(grad_avg);
