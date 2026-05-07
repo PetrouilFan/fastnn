@@ -1,12 +1,11 @@
 import torch
-import numpy as np
 import json
 import logging
 import struct
 from typing import Any, Tuple, Optional
 
 from fastnn._common import first_or_self
-from fastnn.io import write_tensor, read_tensor
+from fastnn.io import write_tensor, read_tensor, MODEL_MAGIC, MODEL_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +43,39 @@ def extract_module_parameters(module, name, param_names):
         if arr is not None:
             result.append((f"{name}.{param_name}", arr))
     return result
+
+
+def add_prefixed_config(config, prefix):
+    """Add config dictionary with prefix to layer_info."""
+    result = {}
+    for key, val in config.items():
+        result[f"{prefix}_{key}"] = val
+    return result
+
+
+def create_conv2d_from_config(layer_info, prefix):
+    """Create Conv2d layer from config with given prefix."""
+    import fastnn as fnn
+    return fnn.Conv2d(
+        layer_info[f"{prefix}_in_channels"],
+        layer_info[f"{prefix}_out_channels"],
+        layer_info[f"{prefix}_kernel_size"],
+        stride=layer_info.get(f"{prefix}_stride", 1),
+        padding=layer_info.get(f"{prefix}_padding", 0),
+        dilation=layer_info.get(f"{prefix}_dilation", 1),
+        groups=layer_info.get(f"{prefix}_groups", 1),
+        bias=layer_info.get(f"{prefix}_bias", False),
+    )
+
+
+def create_batchnorm_from_config(layer_info, prefix):
+    """Create BatchNorm1d layer from config with given prefix."""
+    import fastnn as fnn
+    return fnn.BatchNorm1d(
+        layer_info[f"{prefix}_num_features"],
+        eps=layer_info.get(f"{prefix}_eps", 1e-5),
+        momentum=layer_info.get(f"{prefix}_momentum", 0.1),
+    )
 
 
 def get_conv2d_config(module):
@@ -93,6 +125,12 @@ def export_pytorch_model(
     # Build a mapping of module names to modules for parent lookup
     module_dict = dict(model.named_modules())
 
+    # Build set of BasicBlock names for O(1) lookup
+    basicblock_names = set()
+    for name, module in model.named_modules():
+        if BasicBlock is not None and isinstance(module, BasicBlock):
+            basicblock_names.add(name)
+
     for name, module in model.named_modules():
         # Skip empty name (root module) only if it's a container
         if not name:
@@ -107,23 +145,12 @@ def export_pytorch_model(
             continue
 
         # Skip BasicBlock sub-layers (they are handled by the BasicBlock export)
-        # Check if this module is a sub-module of a BasicBlock
-        # Skip if it's a direct sub-module (parent is BasicBlock) but not the BasicBlock itself
-        if name and not isinstance(module, BasicBlock):
+        # Check if this module is a sub-module of a BasicBlock using pre-computed set
+        if name and not isinstance(module, BasicBlock if BasicBlock is not None else ()):
             parts = name.split(".")
             for i in range(len(parts) - 1, -1, -1):
                 parent_name = ".".join(parts[:i])
-                parent_module = module_dict.get(parent_name)
-                if parent_name == "":
-                    # Parent is the BasicBlock itself (root)
-                    if parent_module is not None and isinstance(
-                        parent_module, BasicBlock
-                    ):
-                        processed_names.add(name)
-                        break
-                elif parent_module is not None and isinstance(
-                    parent_module, BasicBlock
-                ):
+                if parent_name in basicblock_names:
                     processed_names.add(name)
                     break
             if name in processed_names:
@@ -145,8 +172,8 @@ def export_pytorch_model(
             parameters.extend(extract_module_parameters(module, name, ["weight", "bias"]))
 
         elif isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
-            # Map BatchNorm2d to BatchNorm1d (fastnn only has BatchNorm1d)
-            layer_info["type"] = "BatchNorm1d"
+            # Use BatchNorm2d for consistency with onnx.py
+            layer_info["type"] = "BatchNorm2d"
             layer_info.update(get_batchnorm_config(module))
             layer_info["affine"] = module.affine
             parameters.extend(extract_module_parameters(module, name, ["weight", "bias", "running_mean", "running_var"]))
@@ -226,23 +253,19 @@ def export_pytorch_model(
 
             # Store conv1 config using helper
             conv1_config = get_conv2d_config(conv1)
-            for key, val in conv1_config.items():
-                layer_info[f"conv1_{key}"] = val
+            layer_info.update(add_prefixed_config(conv1_config, "conv1"))
 
             # Store bn1 config using helper
             bn1_config = get_batchnorm_config(bn1)
-            for key, val in bn1_config.items():
-                layer_info[f"bn1_{key}"] = val
+            layer_info.update(add_prefixed_config(bn1_config, "bn1"))
 
             # Store conv2 config using helper
             conv2_config = get_conv2d_config(conv2)
-            for key, val in conv2_config.items():
-                layer_info[f"conv2_{key}"] = val
+            layer_info.update(add_prefixed_config(conv2_config, "conv2"))
 
             # Store bn2 config using helper
             bn2_config = get_batchnorm_config(bn2)
-            for key, val in bn2_config.items():
-                layer_info[f"bn2_{key}"] = val
+            layer_info.update(add_prefixed_config(bn2_config, "bn2"))
 
             # Handle downsample
             if hasattr(module, "downsample") and module.downsample is not None:
@@ -254,14 +277,12 @@ def export_pytorch_model(
                         if isinstance(sub_mod, torch.nn.Conv2d):
                             layer_info[f"downsample_{i}_type"] = "Conv2d"
                             config = get_conv2d_config(sub_mod)
-                            for key, val in config.items():
-                                layer_info[f"downsample_{i}_{key}"] = val
+                            layer_info.update(add_prefixed_config(config, f"downsample_{i}"))
                             parameters.extend(extract_module_parameters(sub_mod, f"{name}.downsample.{i}", ["weight", "bias"]))
                         elif isinstance(sub_mod, torch.nn.BatchNorm2d):
                             layer_info[f"downsample_{i}_type"] = "BatchNorm2d"
                             config = get_batchnorm_config(sub_mod)
-                            for key, val in config.items():
-                                layer_info[f"downsample_{i}_{key}"] = val
+                            layer_info.update(add_prefixed_config(config, f"downsample_{i}"))
                             parameters.extend(extract_module_parameters(sub_mod, f"{name}.downsample.{i}", ["weight", "bias", "running_mean", "running_var"]))
                 except TypeError:
                     pass
@@ -318,14 +339,20 @@ def export_pytorch_model(
         "format_version": 1,
     }
 
-    # Write .fnn file
+    # Write .fnn file with unified format
     with open(path, "wb") as f:
-        # Write header as JSON (UTF-8)
+        # Write magic bytes and version
+        f.write(MODEL_MAGIC)
+        f.write(_pack_u32(MODEL_VERSION))
+
+        # Write header metadata as length-prefixed JSON
         header_json = json.dumps(header, indent=2)
         header_bytes = header_json.encode("utf-8")
-        # Write length of header (4 bytes)
-        f.write(struct.pack("<I", len(header_bytes)))
+        f.write(_pack_u64(len(header_bytes)))
         f.write(header_bytes)
+
+        # Write number of parameters
+        f.write(_pack_u64(len(parameters)))
 
         # Write each parameter tensor using shared utility
         for name, arr in parameters:
@@ -362,14 +389,24 @@ def load_fnn_model(path: str) -> Any:
     Load a .fnn model file and return a fastnn model ready for inference.
     """
     with open(path, "rb") as f:
-        # Read header length
-        header_len_bytes = f.read(4)
-        if len(header_len_bytes) < 4:
-            raise ValueError("Invalid .fnn file: missing header length")
-        header_len = struct.unpack("<I", header_len_bytes)[0]
-        # Read header JSON
+        # Read and validate magic bytes
+        magic = f.read(4)
+        if magic != MODEL_MAGIC:
+            raise ValueError("Invalid .fnn file: missing magic bytes")
+
+        # Read format version
+        version_bytes = f.read(4)
+        if len(version_bytes) < 4:
+            raise ValueError("Invalid .fnn file: missing version")
+        file_version = _unpack_u32(version_bytes)
+
+        # Read header length and header JSON
+        header_len = _unpack_u64(f.read(8))
         header_bytes = f.read(header_len)
         header = json.loads(header_bytes.decode("utf-8"))
+
+        # Read number of parameters
+        num_params = _unpack_u64(f.read(8))
 
         # Pre-compute BasicBlock prefixes for O(1) sub-layer detection
         basicblock_prefixes = set()
@@ -405,7 +442,8 @@ def load_fnn_model(path: str) -> Any:
                     groups=layer_info["groups"],
                     bias=layer_info["bias"],
                 )
-            elif ltype == "BatchNorm1d":
+            elif ltype == "BatchNorm2d" or ltype == "BatchNorm1d":
+                # Map both BatchNorm types to fastnn.BatchNorm1d
                 layer = fnn.BatchNorm1d(
                     layer_info["num_features"],
                     eps=layer_info["eps"],
@@ -442,47 +480,12 @@ def load_fnn_model(path: str) -> Any:
             elif ltype == "Dropout":
                 layer = fnn.Dropout(layer_info["p"])
             elif ltype == "BasicBlock":
-                # Create sub-layers for BasicBlock
-                # conv1
-                conv1 = fnn.Conv2d(
-                    layer_info["conv1_in_channels"],
-                    layer_info["conv1_out_channels"],
-                    layer_info["conv1_kernel_size"],
-                    stride=layer_info["conv1_stride"],
-                    padding=layer_info["conv1_padding"],
-                    dilation=layer_info["conv1_dilation"],
-                    groups=layer_info["conv1_groups"],
-                    bias=layer_info["conv1_bias"],
-                )
-
-                # bn1
-                bn1 = fnn.BatchNorm1d(
-                    layer_info["bn1_num_features"],
-                    eps=layer_info["bn1_eps"],
-                    momentum=layer_info["bn1_momentum"],
-                )
-
-                # relu
+                # Create sub-layers for BasicBlock using factory functions
+                conv1 = create_conv2d_from_config(layer_info, "conv1")
+                bn1 = create_batchnorm_from_config(layer_info, "bn1")
                 relu = fnn.ReLU()
-
-                # conv2
-                conv2 = fnn.Conv2d(
-                    layer_info["conv2_in_channels"],
-                    layer_info["conv2_out_channels"],
-                    layer_info["conv2_kernel_size"],
-                    stride=layer_info["conv2_stride"],
-                    padding=layer_info["conv2_padding"],
-                    dilation=layer_info["conv2_dilation"],
-                    groups=layer_info["conv2_groups"],
-                    bias=layer_info["conv2_bias"],
-                )
-
-                # bn2
-                bn2 = fnn.BatchNorm1d(
-                    layer_info["bn2_num_features"],
-                    eps=layer_info["bn2_eps"],
-                    momentum=layer_info["bn2_momentum"],
-                )
+                conv2 = create_conv2d_from_config(layer_info, "conv2")
+                bn2 = create_batchnorm_from_config(layer_info, "bn2")
 
                 # downsample (if present)
                 downsample = None
@@ -492,24 +495,10 @@ def load_fnn_model(path: str) -> Any:
                     for i in range(num_downsample_layers):
                         sub_type = layer_info.get(f"downsample_{i}_type")
                         if sub_type == "Conv2d":
-                            sub_layer = fnn.Conv2d(
-                                layer_info[f"downsample_{i}_in_channels"],
-                                layer_info[f"downsample_{i}_out_channels"],
-                                layer_info[f"downsample_{i}_kernel_size"],
-                                stride=layer_info[f"downsample_{i}_stride"],
-                                padding=layer_info[f"downsample_{i}_padding"],
-                                dilation=layer_info[f"downsample_{i}_dilation"],
-                                groups=layer_info[f"downsample_{i}_groups"],
-                                bias=layer_info[f"downsample_{i}_bias"],
-                            )
+                            sub_layer = create_conv2d_from_config(layer_info, f"downsample_{i}")
                             downsample_layers.append(sub_layer)
-                        elif sub_type == "BatchNorm2d":
-                            # Map BatchNorm2d to BatchNorm1d
-                            sub_layer = fnn.BatchNorm1d(
-                                layer_info[f"downsample_{i}_num_features"],
-                                eps=layer_info[f"downsample_{i}_eps"],
-                                momentum=layer_info[f"downsample_{i}_momentum"],
-                            )
+                        elif sub_type == "BatchNorm2d" or sub_type == "BatchNorm1d":
+                            sub_layer = create_batchnorm_from_config(layer_info, f"downsample_{i}")
                             downsample_layers.append(sub_layer)
 
                     # Create Sequential for downsample
@@ -544,12 +533,9 @@ def load_fnn_model(path: str) -> Any:
 
         # Load tensors using shared utility
         tensors = {}
-        while True:
-            try:
-                name, arr = read_tensor(f)
-                tensors[name] = arr
-            except (struct.error, ValueError):
-                break
+        for _ in range(num_params):
+            name, arr = read_tensor(f)
+            tensors[name] = arr
 
         # Create a mapping from layer name to layer object in filtered_layers
         layer_name_to_layer = {}
@@ -639,7 +625,7 @@ def load_fnn_model(path: str) -> Any:
                                 if downsample_type_key in parent_info:
                                     if parent_info[downsample_type_key] == "Conv2d":
                                         ltype = "Conv2d"
-                                    elif parent_info[downsample_type_key] == "BatchNorm2d":
+                                    elif parent_info[downsample_type_key] == "BatchNorm2d" or parent_info[downsample_type_key] == "BatchNorm1d":
                                         ltype = "BatchNorm1d"
                         except ValueError:
                             pass
@@ -698,7 +684,7 @@ def load_fnn_model(path: str) -> Any:
                     load_tensor_to_layer(tensors, f"{layer_prefix}.weight", layer, layer.set_weight)
                 elif param_name == "bias":
                     load_tensor_to_layer(tensors, f"{layer_prefix}.bias", layer, layer.set_bias)
-            elif ltype == "BatchNorm1d":
+            elif ltype == "BatchNorm1d" or ltype == "BatchNorm2d":
                 if param_name == "weight":
                     load_tensor_to_layer(tensors, f"{layer_prefix}.weight", layer, layer.set_weight)
                 elif param_name == "bias":

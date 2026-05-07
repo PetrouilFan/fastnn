@@ -48,9 +48,3 @@ def test_format_exists():
     assert hasattr(fastnn, "load_model"), "load_model not found"
 
     print("  PASSED: Serialization API accessible")
-
-
-if __name__ == "__main__":
-    test_checkpoint_roundtrip_linear()
-    test_format_exists()
-    print("\n=== Checkpoint Round-Trip Tests PASSED ===")

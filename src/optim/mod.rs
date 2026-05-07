@@ -30,6 +30,57 @@ pub trait Optimizer: Send + Sync {
     fn load_state_dict(&mut self, state: OptimizerState);
 }
 
+/// Macro to implement duplicate `params_mut()` for all optimizers
+#[macro_export]
+macro_rules! impl_params_mut {
+    () => {
+        fn params_mut(&mut self) -> &mut Vec<Tensor> {
+            &mut self.params
+        }
+    };
+}
+
+/// Weight decay strategy enum to standardize inconsistent implementations
+#[derive(Debug, Clone, Copy)]
+pub enum WeightDecayType {
+    L2,         // Add weight_decay * param to gradient (SGD, Muon)
+    Decoupled,  // Scale param directly: param *= (1 - lr * weight_decay) (Adam, AdamW, etc.)
+    None,
+}
+
+/// Apply weight decay consistently across optimizers
+pub(crate) fn apply_weight_decay(
+    param: &mut Tensor,
+    grad: &Tensor,
+    weight_decay: f32,
+    lr: f32,
+    wd_type: WeightDecayType,
+) -> Tensor {
+    match wd_type {
+        WeightDecayType::L2 => {
+            let mut g = grad.clone();
+            g.add_(&param.mul_scalar(weight_decay));
+            g
+        }
+        WeightDecayType::Decoupled => {
+            param.mul_scalar_(1.0 - lr * weight_decay);
+            grad.clone()
+        }
+        WeightDecayType::None => grad.clone(),
+    }
+}
+
+/// Helper to retrieve gradient from a parameter, replacing duplicate retrieval patterns
+pub(crate) fn get_grad(param: &Tensor) -> Option<Tensor> {
+    let inner = &param.inner;
+    if let Some(meta) = &inner.autograd_meta {
+        if let Ok(lock) = meta.lock() {
+            return lock.grad.clone();
+        }
+    }
+    None
+}
+
 pub trait WeightDecayOptimizer {
     fn params(&self) -> &Vec<Tensor>;
     fn no_decay(&self) -> &Vec<bool>;

@@ -76,9 +76,3 @@ def test_adam_soak():
             print(f"  Step {step:>10,}: value={v:.6f}")
 
     print("  PASSED: No divergence over 500K steps")
-
-
-if __name__ == "__main__":
-    test_adamw_soak()
-    test_adam_soak()
-    print("\n=== Optimizer Soak Tests PASSED ===")

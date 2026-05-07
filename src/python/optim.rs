@@ -9,6 +9,18 @@ fn tensor_vec_to_pylist<'a>(py: Python<'a>, tensors: &[core_tensor::Tensor]) -> 
     PyList::new(py, items)
 }
 
+/// Helper to extract optional f64 value from state dict
+fn extract_optional_f64(state: &Bound<'_, PyAny>, key: &str) -> Option<f64> {
+    state.get_item(key).ok().and_then(|v| v.extract::<f64>().ok())
+}
+
+/// Helper to extract tensor vector from state dict
+fn extract_tensor_vec(state: &Bound<'_, PyAny>, key: &str) -> Option<Vec<core_tensor::Tensor>> {
+    state.get_item(key).ok()
+        .and_then(|v| v.extract::<Vec<PyTensor>>().ok())
+        .map(|v| v.into_iter().map(|p| p.inner).collect())
+}
+
 #[pyclass]
 struct PySGD {
     inner: core_optim::sgd::SGD,
@@ -46,14 +58,14 @@ impl PySGD {
 
     fn load_state_dict(&mut self, state: &Bound<'_, PyAny>) -> PyResult<()> {
         self.inner.lr = state.get_item("lr")?.extract()?;
-        if let Ok(m) = state.get_item("momentum")?.extract::<f64>() {
+        if let Some(m) = extract_optional_f64(state, "momentum") {
             self.inner.momentum = m;
         }
-        if let Ok(wd) = state.get_item("weight_decay")?.extract::<f64>() {
+        if let Some(wd) = extract_optional_f64(state, "weight_decay") {
             self.inner.weight_decay = wd;
         }
-        if let Ok(v_list) = state.get_item("velocity")?.extract::<Vec<PyTensor>>() {
-            self.inner.velocity = v_list.into_iter().map(|p| p.inner).collect();
+        if let Some(v_list) = extract_tensor_vec(state, "velocity") {
+            self.inner.velocity = v_list;
         }
         Ok(())
     }
@@ -91,14 +103,15 @@ impl PyAdam {
     }
 
     fn state_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        use pyo3::types::PyDict;
+        use pyo3::types::{PyDict, PyList};
         let dict = PyDict::new(py);
         dict.set_item("lr", self.inner.lr)?;
         dict.set_item("betas", self.inner.betas)?;
         dict.set_item("eps", self.inner.eps)?;
         dict.set_item("weight_decay", self.inner.weight_decay)?;
         dict.set_item("amsgrad", self.inner.amsgrad)?;
-        dict.set_item("step", self.inner.step)?;
+        let steps = PyList::new(py, self.inner.step.iter().copied())?;
+        dict.set_item("step", steps)?;
         let m_list = tensor_vec_to_pylist(py, &self.inner.m)?;
         dict.set_item("m", m_list)?;
         let v_list = tensor_vec_to_pylist(py, &self.inner.v)?;
@@ -111,22 +124,26 @@ impl PyAdam {
     fn load_state_dict(&mut self, _py: Python<'_>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         self.inner.lr = state.get_item("lr")?.extract()?;
         self.inner.betas = state.get_item("betas")?.extract()?;
-        self.inner.eps = state.get_item("eps")?.extract()?;
-        self.inner.weight_decay = state.get_item("weight_decay")?.extract()?;
+        if let Some(eps) = extract_optional_f64(state, "eps") {
+            self.inner.eps = eps;
+        }
+        if let Some(wd) = extract_optional_f64(state, "weight_decay") {
+            self.inner.weight_decay = wd;
+        }
         if let Ok(ams) = state.get_item("amsgrad")?.extract::<bool>() {
             self.inner.amsgrad = ams;
         }
-        if let Ok(step) = state.get_item("step")?.extract::<u64>() {
-            self.inner.step = step;
+        if let Ok(steps) = state.get_item("step")?.extract::<Vec<u64>>() {
+            self.inner.step = steps;
         }
-        if let Ok(m_list) = state.get_item("m")?.extract::<Vec<PyTensor>>() {
-            self.inner.m = m_list.into_iter().map(|p| p.inner).collect();
+        if let Some(m_list) = extract_tensor_vec(state, "m") {
+            self.inner.m = m_list;
         }
-        if let Ok(v_list) = state.get_item("v")?.extract::<Vec<PyTensor>>() {
-            self.inner.v = v_list.into_iter().map(|p| p.inner).collect();
+        if let Some(v_list) = extract_tensor_vec(state, "v") {
+            self.inner.v = v_list;
         }
-        if let Ok(v_hat_list) = state.get_item("v_hat")?.extract::<Vec<PyTensor>>() {
-            self.inner.v_hat = v_hat_list.into_iter().map(|p| p.inner).collect();
+        if let Some(v_hat_list) = extract_tensor_vec(state, "v_hat") {
+            self.inner.v_hat = v_hat_list;
         }
         Ok(())
     }
@@ -182,16 +199,20 @@ impl PyAdamW {
     fn load_state_dict(&mut self, state: &Bound<'_, PyAny>) -> PyResult<()> {
         self.inner.lr = state.get_item("lr")?.extract()?;
         self.inner.betas = state.get_item("betas")?.extract()?;
-        self.inner.eps = state.get_item("eps")?.extract()?;
-        self.inner.weight_decay = state.get_item("weight_decay")?.extract()?;
+        if let Some(eps) = extract_optional_f64(state, "eps") {
+            self.inner.eps = eps;
+        }
+        if let Some(wd) = extract_optional_f64(state, "weight_decay") {
+            self.inner.weight_decay = wd;
+        }
         if let Ok(steps) = state.get_item("step")?.extract::<Vec<u64>>() {
             self.inner.step = steps;
         }
-        if let Ok(m_list) = state.get_item("m")?.extract::<Vec<PyTensor>>() {
-            self.inner.m = m_list.into_iter().map(|p| p.inner).collect();
+        if let Some(m_list) = extract_tensor_vec(state, "m") {
+            self.inner.m = m_list;
         }
-        if let Ok(v_list) = state.get_item("v")?.extract::<Vec<PyTensor>>() {
-            self.inner.v = v_list.into_iter().map(|p| p.inner).collect();
+        if let Some(v_list) = extract_tensor_vec(state, "v") {
+            self.inner.v = v_list;
         }
         Ok(())
     }
@@ -241,17 +262,17 @@ impl PyMuon {
 
     fn load_state_dict(&mut self, state: &Bound<'_, PyAny>) -> PyResult<()> {
         self.inner.lr = state.get_item("lr")?.extract()?;
-        if let Ok(m) = state.get_item("momentum")?.extract::<f64>() {
+        if let Some(m) = extract_optional_f64(state, "momentum") {
             self.inner.momentum = m;
         }
-        if let Ok(wd) = state.get_item("weight_decay")?.extract::<f64>() {
+        if let Some(wd) = extract_optional_f64(state, "weight_decay") {
             self.inner.weight_decay = wd;
         }
         if let Ok(n) = state.get_item("nesterov")?.extract::<bool>() {
             self.inner.nesterov = n;
         }
-        if let Ok(m_list) = state.get_item("m")?.extract::<Vec<PyTensor>>() {
-            self.inner.m = m_list.into_iter().map(|p| p.inner).collect();
+        if let Some(m_list) = extract_tensor_vec(state, "m") {
+            self.inner.m = m_list;
         }
         Ok(())
     }
@@ -296,11 +317,11 @@ impl PyLion {
     fn load_state_dict(&mut self, state: &Bound<'_, PyAny>) -> PyResult<()> {
         self.inner.lr = state.get_item("lr")?.extract()?;
         self.inner.betas = state.get_item("betas")?.extract()?;
-        if let Ok(wd) = state.get_item("weight_decay")?.extract::<f64>() {
+        if let Some(wd) = extract_optional_f64(state, "weight_decay") {
             self.inner.weight_decay = wd;
         }
-        if let Ok(m_list) = state.get_item("m")?.extract::<Vec<PyTensor>>() {
-            self.inner.m = m_list.into_iter().map(|p| p.inner).collect();
+        if let Some(m_list) = extract_tensor_vec(state, "m") {
+            self.inner.m = m_list;
         }
         Ok(())
     }
@@ -348,7 +369,7 @@ impl PyRMSprop {
     }
 
     fn state_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyList, PyDict};
         let dict = PyDict::new(py);
         dict.set_item("lr", self.inner.lr)?;
         dict.set_item("alpha", self.inner.alpha)?;
@@ -371,22 +392,26 @@ impl PyRMSprop {
 
     fn load_state_dict(&mut self, state: &Bound<'_, PyAny>) -> PyResult<()> {
         self.inner.lr = state.get_item("lr")?.extract()?;
-        self.inner.alpha = state.get_item("alpha")?.extract()?;
-        self.inner.eps = state.get_item("eps")?.extract()?;
-        if let Ok(wd) = state.get_item("weight_decay")?.extract::<f64>() {
+        if let Some(alpha) = extract_optional_f64(state, "alpha") {
+            self.inner.alpha = alpha;
+        }
+        if let Some(eps) = extract_optional_f64(state, "eps") {
+            self.inner.eps = eps;
+        }
+        if let Some(wd) = extract_optional_f64(state, "weight_decay") {
             self.inner.weight_decay = wd;
         }
-        if let Ok(m) = state.get_item("momentum")?.extract::<f64>() {
+        if let Some(m) = extract_optional_f64(state, "momentum") {
             self.inner.momentum = m;
         }
-        if let Ok(sq_list) = state.get_item("square_avg")?.extract::<Vec<PyTensor>>() {
-            self.inner.square_avg = sq_list.into_iter().map(|p| p.inner).collect();
+        if let Some(sq_list) = extract_tensor_vec(state, "square_avg") {
+            self.inner.square_avg = sq_list;
         }
-        if let Ok(ga_list) = state.get_item("grad_avg")?.extract::<Vec<PyTensor>>() {
-            self.inner.grad_avg = ga_list.into_iter().map(|p| p.inner).collect();
+        if let Some(ga_list) = extract_tensor_vec(state, "grad_avg") {
+            self.inner.grad_avg = ga_list;
         }
-        if let Ok(mb_list) = state.get_item("momentum_buf")?.extract::<Vec<PyTensor>>() {
-            self.inner.momentum_buf = mb_list.into_iter().map(|p| p.inner).collect();
+        if let Some(mb_list) = extract_tensor_vec(state, "momentum_buf") {
+            self.inner.momentum_buf = mb_list;
         }
         Ok(())
     }

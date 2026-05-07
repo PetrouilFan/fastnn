@@ -23,13 +23,25 @@ class ModuleWrapperMixin:
         """Return parameters of the wrapped model."""
         return self._get_wrapped_model().parameters()
     
-    def train(self):
+    def train_mode(self):
         """Set wrapped model to training mode."""
-        return self._get_wrapped_model().train()
+        model = self._get_wrapped_model()
+        if hasattr(model, 'train_mode'):
+            return model.train_mode()
+        # Backward compatibility
+        return model.train()
     
-    def eval(self):
+    def eval_mode(self):
         """Set wrapped model to evaluation mode."""
-        return self._get_wrapped_model().eval()
+        model = self._get_wrapped_model()
+        if hasattr(model, 'eval_mode'):
+            return model.eval_mode()
+        # Backward compatibility
+        return model.eval()
+    
+    # Backward compatibility
+    train = train_mode
+    eval = eval_mode
     
     def zero_grad(self):
         """Zero gradients of the wrapped model."""

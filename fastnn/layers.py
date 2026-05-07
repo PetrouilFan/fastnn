@@ -14,26 +14,69 @@ Examples:
 from typing import Optional, Tuple, List, Any, Union
 
 import math
-import numpy as np
 import fastnn._core as _core
 from fastnn.module import Module
 
 
 class _BaseModule(Module):
     """Base class for modules with common layer iteration logic."""
+    
+    def __init__(self):
+        super().__init__()
+        self._param_layers = []
+        self._zero_grad_layers = []
+        self._train_layers = []
+        self._eval_layers = []
+        self._gpu_layers = []
+        self._named_param_pairs = []
+    
+    def _register_layer(self, layer, name=None):
+        """Register a layer for parameter iteration, training mode, etc."""
+        if hasattr(layer, "parameters"):
+            self._param_layers.append(layer)
+        if hasattr(layer, "zero_grad"):
+            self._zero_grad_layers.append(layer)
+        if hasattr(layer, "train_mode"):
+            self._train_layers.append(layer)
+        if hasattr(layer, "eval_mode"):
+            self._eval_layers.append(layer)
+        if hasattr(layer, "to_gpu"):
+            self._gpu_layers.append(layer)
+        if name and hasattr(layer, "named_parameters"):
+            self._named_param_pairs.append((name, layer))
+    
     def parameters(self):
         params = []
         for layer in self._param_layers:
             params.extend(layer.parameters())
         return params
-
+    
+    def named_parameters(self):
+        params = []
+        for name, layer in self._named_param_pairs:
+            for n, p in layer.named_parameters():
+                params.append((f"{name}.{n}", p))
+        return params
+    
+    def zero_grad(self):
+        for layer in self._zero_grad_layers:
+            layer.zero_grad()
+    
     def train_mode(self):
+        super().train_mode()
         for layer in self._train_layers:
-            layer.train_mode()
-
+            if hasattr(layer, 'train_mode'):
+                layer.train_mode()
+    
     def eval_mode(self):
+        super().eval_mode()
         for layer in self._eval_layers:
-            layer.eval_mode()
+            if hasattr(layer, 'eval_mode'):
+                layer.eval_mode()
+    
+    def to_gpu(self, device_id):
+        for layer in self._gpu_layers:
+            layer.to_gpu(device_id)
 
 
 # Python-implemented layers (for compatibility and educational purposes)
@@ -182,29 +225,15 @@ class PySequential(_BaseModule):
     """
     
     def __init__(self, layers: List[Any]):
+        super().__init__()
         self.layers = layers
-        self._param_layers = []
-        self._gpu_layers = []
-        self._train_layers = []
-        self._eval_layers = []
         for l in layers:
-            if hasattr(l, "parameters"):
-                self._param_layers.append(l)
-            if hasattr(l, "to_gpu"):
-                self._gpu_layers.append(l)
-            if hasattr(l, "train"):
-                self._train_layers.append(l)
-            if hasattr(l, "eval"):
-                self._eval_layers.append(l)
+            self._register_layer(l)
     
     def __call__(self, x):
         for layer in self.layers:
             x = layer(x)
         return x
-    
-    def to_gpu(self, device_id: int):
-        for layer in self._gpu_layers:
-            layer.to_gpu(device_id)
 
 
 class BasicBlock(_BaseModule):
@@ -227,38 +256,21 @@ class BasicBlock(_BaseModule):
     """
     
     def __init__(self, conv1, bn1, relu, conv2, bn2, downsample=None):
+        super().__init__()
         self.conv1 = conv1
         self.bn1 = bn1
         self.relu = relu
         self.conv2 = conv2
         self.bn2 = bn2
         self.downsample = downsample
-        self._sublayers = [conv1, bn1, conv2, bn2]
+        
+        # Register layers with names for named_parameters
+        self._register_layer(conv1, "conv1")
+        self._register_layer(bn1, "bn1")
+        self._register_layer(conv2, "conv2")
+        self._register_layer(bn2, "bn2")
         if downsample is not None:
-            self._sublayers.append(downsample)
-        
-        # Single pass to initialize layer lists
-        self._param_layers = []
-        self._zero_grad_layers = []
-        self._train_layers = []
-        self._eval_layers = []
-        for l in self._sublayers:
-            if hasattr(l, "parameters"):
-                self._param_layers.append(l)
-            if hasattr(l, "zero_grad"):
-                self._zero_grad_layers.append(l)
-            if hasattr(l, "train"):
-                self._train_layers.append(l)
-            if hasattr(l, "eval"):
-                self._eval_layers.append(l)
-        
-        # Named parameters setup
-        self._named_param_pairs = []
-        for name, layer in [("conv1", conv1), ("bn1", bn1), ("conv2", conv2), ("bn2", bn2)]:
-            if hasattr(layer, "named_parameters"):
-                self._named_param_pairs.append((name, layer))
-        if downsample is not None and hasattr(downsample, "named_parameters"):
-            self._named_param_pairs.append(("downsample", downsample))
+            self._register_layer(downsample, "downsample")
     
     def __call__(self, x):
         identity = x
@@ -277,29 +289,6 @@ class BasicBlock(_BaseModule):
         out = self.relu(out)
         
         return out
-    
-    def named_parameters(self):
-        params = []
-        for name, layer in self._named_param_pairs:
-            for n, p in layer.named_parameters():
-                params.append((f"{name}.{n}", p))
-        return params
-    
-    def zero_grad(self):
-        for layer in self._zero_grad_layers:
-            layer.zero_grad()
-    
-    def train_mode(self):
-        for layer in self._train_layers:
-            layer.train_mode()
-    
-    def eval_mode(self):
-        for layer in self._eval_layers:
-            layer.eval_mode()
-    
-    # Backward compatibility
-    train = train_mode
-    eval = eval_mode
 
 
 # Alias for backward compatibility

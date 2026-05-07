@@ -253,37 +253,6 @@ def make_optimizer(parameters, name="adam", lr=0.001, **kwargs):
 # ============================================================================
 
 
-def numerical_gradient(op, x, eps=1e-4):
-    """Compute numerical gradient via central differences.
-
-    Args:
-        op: Function to compute gradient of.
-        x: Input tensor.
-        eps: Finite difference epsilon.
-
-    Returns:
-        Numerical gradient as numpy array.
-    """
-    x_np = x.numpy()
-    grad = np.zeros_like(x_np)
-    flat = grad.flat
-
-    for i in range(x.numel()):
-        x_plus = x_np.copy()
-        x_minus = x_np.copy()
-        x_plus.flat[i] += eps
-        x_minus.flat[i] -= eps
-
-        x_plus_t = fastnn.tensor(x_plus.flatten().tolist(), list(x_np.shape))
-        x_minus_t = fastnn.tensor(x_minus.flatten().tolist(), list(x_np.shape))
-
-        f_plus = op(x_plus_t).numpy().flat[0]
-        f_minus = op(x_minus_t).numpy().flat[0]
-        flat[i] = (f_plus - f_minus) / (2 * eps)
-
-    return grad
-
-
 def numerical_gradient_elementwise(op, x, eps=1e-4):
     """Compute numerical gradient for elementwise operations.
 
@@ -466,6 +435,7 @@ def check_binary_gradient(op_name, a_data, b_data, atol=1e-3, rtol=1e-3):
         "sub": lambda a, b: a - b,
         "mul": lambda a, b: a * b,
         "div": lambda a, b: a / b,
+        "matmul": lambda a, b: a @ b,
     }
 
     if op_name not in ops:
@@ -973,6 +943,54 @@ def training_step(model, x, y, optimizer, loss_fn=fastnn.mse_loss):
     return loss.item()
 
 
+def train_model(model, loader, optimizer, loss_fn=fastnn.mse_loss,
+               epochs=1, max_batches=None, return_losses=False):
+    """Train a model for multiple epochs.
+
+    Args:
+        model: Model to train.
+        loader: DataLoader providing (x, y) batches.
+        optimizer: Optimizer.
+        loss_fn: Loss function (default: mse_loss).
+        epochs: Number of epochs to train.
+        max_batches: Maximum batches per epoch (None for all).
+        return_losses: If True, return list of (epoch, avg_loss) tuples.
+
+    Returns:
+        Dict with 'initial_loss' and 'final_loss' keys, or dict with 'losses' if return_losses=True.
+    """
+    model.train()
+    initial_loss = None
+    final_loss = None
+    losses = []
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        batch_count = 0
+        for x_batch, y_batch in loader:
+            if max_batches is not None and batch_count >= max_batches:
+                break
+            pred = model(x_batch)
+            loss = loss_fn(pred, y_batch)
+            epoch_loss += loss.item()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            batch_count += 1
+
+        avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
+        if epoch == 0:
+            initial_loss = avg_loss
+        if epoch == epochs - 1:
+            final_loss = avg_loss
+        if return_losses:
+            losses.append((epoch, avg_loss))
+
+    if return_losses:
+        return {"losses": losses}
+    return {"initial_loss": initial_loss, "final_loss": final_loss}
+
+
 def evaluate(model, loader, loss_fn=fastnn.mse_loss):
     """Evaluate model on a data loader.
 
@@ -1283,71 +1301,3 @@ def set_learning_rate(optimizer, lr):
         optimizer.lr = lr
     elif hasattr(optimizer, 'learning_rate'):
         optimizer.learning_rate = lr
-
-
-# ============================================================================
-# Gradient Clipping Utilities
-# ============================================================================
-
-
-def clip_grad_norm_(parameters, max_norm, norm_type=2.0):
-    """Clip gradient norm of parameters.
-
-    Note: This is a simplified version. fastnn may have its own implementation.
-
-    Args:
-        parameters: Iterable of Tensors or a single Tensor.
-        max_norm: Max norm of gradients.
-        norm_type: Type of norm (default: 2.0).
-
-    Returns:
-        Total norm of parameters.
-    """
-    if isinstance(parameters, fastnn.Tensor):
-        parameters = [parameters]
-    parameters = [p for p in parameters if p.grad is not None]
-    if len(parameters) == 0:
-        return 0.0
-
-    # Compute total norm
-    total_norm = 0.0
-    for p in parameters:
-        if p.grad is not None:
-            param_norm = np.linalg.norm(p.grad.numpy().flatten(), ord=norm_type)
-            total_norm += param_norm ** norm_type
-    total_norm = total_norm ** (1.0 / norm_type)
-
-    # Clip if necessary
-    clip_coef = max_norm / (total_norm + 1e-6)
-    if clip_coef < 1:
-        for p in parameters:
-            if p.grad is not None:
-                grad_np = p.grad.numpy()
-                p.grad = fastnn.tensor(
-                    (grad_np * clip_coef).flatten().tolist(),
-                    list(grad_np.shape)
-                )
-
-    return total_norm
-
-
-def clip_grad_value_(parameters, clip_value):
-    """Clip gradient values of parameters.
-
-    Note: This is a simplified version. fastnn may have its own implementation.
-
-    Args:
-        parameters: Iterable of Tensors or a single Tensor.
-        clip_value: Maximum absolute value of gradients.
-    """
-    if isinstance(parameters, fastnn.Tensor):
-        parameters = [parameters]
-
-    for p in parameters:
-        if p.grad is not None:
-            grad_np = p.grad.numpy()
-            grad_clipped = np.clip(grad_np, -clip_value, clip_value)
-            p.grad = fastnn.tensor(
-                grad_clipped.flatten().tolist(),
-                list(grad_np.shape)
-            )

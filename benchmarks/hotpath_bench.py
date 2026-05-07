@@ -1,6 +1,7 @@
 """Benchmark Python hot-path: Sequential and BasicBlock."""
-import time
+from tests.benchmark_utils import BenchmarkTimer
 import fastnn as fnn
+
 
 def benchmark_sequential(num_iters=100):
     """Benchmark PySequential vs Rust Sequential."""
@@ -18,19 +19,19 @@ def benchmark_sequential(num_iters=100):
     for _ in range(5):
         py_seq(x)
     
-    start = time.perf_counter()
-    for _ in range(num_iters):
+    timer = BenchmarkTimer(warmup=0, iterations=num_iters, unit="ms")
+    def run_py():
         py_seq(x)
-    py_time = (time.perf_counter() - start) / num_iters * 1000
+    py_time = timer.value(run_py)
     
     # Rust Sequential
     rust_seq = fnn.Sequential(layers)
-    start = time.perf_counter()
-    for _ in range(num_iters):
+    def run_rust():
         rust_seq(x)
-    rust_time = (time.perf_counter() - start) / num_iters * 1000
+    rust_time = timer.value(run_rust)
     
     return py_time, rust_time
+
 
 def benchmark_basicblock(num_iters=50):
     """Benchmark Python BasicBlock vs Rust ResidualBlock."""
@@ -46,10 +47,10 @@ def benchmark_basicblock(num_iters=50):
     for _ in range(3):
         py_block(x)
     
-    start = time.perf_counter()
-    for _ in range(num_iters):
+    timer = BenchmarkTimer(warmup=0, iterations=num_iters, unit="ms")
+    def run_py_block():
         py_block(x)
-    py_time = (time.perf_counter() - start) / num_iters * 1000
+    py_time = timer.value(run_py_block)
     
     # Rust ResidualBlock
     try:
@@ -58,15 +59,15 @@ def benchmark_basicblock(num_iters=50):
             64, 64, 3, 1, 1,  # conv2 params
             None
         )
-        start = time.perf_counter()
-        for _ in range(num_iters):
+        def run_rust_block():
             rust_block(x)
-        rust_time = (time.perf_counter() - start) / num_iters * 1000
+        rust_time = timer.value(run_rust_block)
     except Exception as e:
-        print(f"  Rust ResidualBlock error: {e}")
+        print(f"  Rust ResiduablBlock error: {e}")
         rust_time = None
     
     return py_time, rust_time
+
 
 if __name__ == "__main__":
     print("Benchmarking Sequential (100 iters, batch=32, 128->256->128):")

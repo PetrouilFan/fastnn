@@ -123,6 +123,7 @@ macro_rules! impl_fused_conv_bn {
 }
 
 macro_rules! impl_activation {
+    // Parameterless activation
     ($name:ident, $method:ident) => {
         #[pyclass]
         struct $name;
@@ -136,6 +137,44 @@ macro_rules! impl_activation {
 
             fn __call__(&self, x: &PyTensor) -> PyTensor {
                 PyTensor::from_tensor(x.inner.$method())
+            }
+
+            fn parameters(&self) -> Vec<PyTensor> {
+                vec![]
+            }
+
+            fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+                vec![]
+            }
+
+            fn zero_grad(&self) {}
+
+            fn train(&self) {}
+
+            fn eval(&self) {}
+
+            fn is_training(&self) -> bool {
+                false
+            }
+        }
+    };
+    // Activation with parameters (f64 converted to f32)
+    ($name:ident, $method:ident, $($param_name:ident : $param_type:ty = $default:expr),*) => {
+        #[pyclass]
+        struct $name {
+            $( $param_name: $param_type, )*
+        }
+
+        #[pymethods]
+        impl $name {
+            #[new]
+            #[pyo3(signature = ( $($param_name = $default),* ))]
+            fn new($( $param_name: $param_type, )*) -> Self {
+                $name { $( $param_name, )* }
+            }
+
+            fn __call__(&self, x: &PyTensor) -> PyTensor {
+                PyTensor::from_tensor(x.inner.$method($(self.$param_name as f32),*))
             }
 
             fn parameters(&self) -> Vec<PyTensor> {
@@ -697,114 +736,9 @@ impl_activation!(Tanh, tanh);
 impl_activation!(SiLU, silu);
 impl_activation!(Hardswish, hardswish);
 
-#[pyclass]
-struct LeakyReLU {
-    negative_slope: f64,
-}
-
-#[pymethods]
-impl LeakyReLU {
-    #[new]
-    #[pyo3(signature = (negative_slope = 0.01))]
-    fn new(negative_slope: f64) -> Self {
-        LeakyReLU { negative_slope }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.leaky_relu(self.negative_slope as f32))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train(&self) {}
-
-    fn eval(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
-
-#[pyclass]
-struct Softplus {
-    beta: f64,
-    threshold: f64,
-}
-
-#[pymethods]
-impl Softplus {
-    #[new]
-    #[pyo3(signature = (beta = 1.0, threshold = 20.0))]
-    fn new(beta: f64, threshold: f64) -> Self {
-        Softplus { beta, threshold }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.softplus(self.beta as f32, self.threshold as f32))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train(&self) {}
-
-    fn eval(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
-
-#[pyclass]
-struct Elu {
-    alpha: f64,
-}
-
-#[pymethods]
-impl Elu {
-    #[new]
-    #[pyo3(signature = (alpha = 1.0))]
-    fn new(alpha: f64) -> Self {
-        Elu { alpha }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.elu(self.alpha as f32))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train(&self) {}
-
-    fn eval(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
+impl_activation!(LeakyReLU, leaky_relu, negative_slope: f64 = 0.01);
+impl_activation!(Softplus, softplus, beta: f64 = 1.0, threshold: f64 = 20.0);
+impl_activation!(Elu, elu, alpha: f64 = 1.0);
 
 #[pyclass]
 struct Mish;
