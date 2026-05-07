@@ -1,37 +1,10 @@
 from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d
 from fastnn.layers import PySequential as Seq
 import fastnn as fnn
+from fastnn._model_wrapper import ModuleWrapperMixin
 
 
-def create_mlp(
-    input_dim: int,
-    hidden_dims: list,
-    output_dim: int,
-    activation: str = "relu",
-    dropout: float = 0.0,
-    batch_norm: bool = False,
-):
-    act_map = {"relu": ReLU, "gelu": GELU, "silu": SiLU}
-    if activation not in act_map:
-        raise ValueError(
-            f"activation must be one of {list(act_map.keys())}, got {activation!r}"
-        )
-
-    layers = []
-    dims = [input_dim] + hidden_dims
-    for i in range(len(dims) - 1):
-        layers.append(Linear(dims[i], dims[i + 1], bias=True))
-        if batch_norm:
-            layers.append(BatchNorm1d(dims[i + 1]))
-        layers.append(act_map[activation]())
-        if dropout > 0.0:
-            layers.append(Dropout(dropout))
-    layers.append(Linear(dims[-1], output_dim, bias=True))
-
-    return Seq(layers)
-
-
-class MLP:
+class MLP(ModuleWrapperMixin):
     def __init__(
         self,
         input_dim: int,
@@ -89,18 +62,3 @@ class MLP:
             bias_tensors.append(b)
 
         return fnn.batched_mlp_forward(x, weight_tensors, bias_tensors, activations)
-
-    def __call__(self, x):
-        return self.model(x)
-
-    def forward(self, x):
-        return self.model(x)
-
-    def parameters(self):
-        return self.model.parameters()
-
-    def train(self):
-        return self.model.train()
-
-    def eval(self):
-        return self.model.eval()

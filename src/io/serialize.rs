@@ -168,14 +168,16 @@ pub fn load_model(
             ));
         }
 
-        let mut data_bytes = vec![0u8; data_len * size_of::<f32>()];
+        let mut data = vec![0.0f32; data_len];
+        let data_bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                data.as_mut_ptr() as *mut u8,
+                data_len * size_of::<f32>(),
+            )
+        };
         reader
-            .read_exact(&mut data_bytes)
+            .read_exact(data_bytes)
             .map_err(|e| format!("Failed to read data: {}", e))?;
-
-        let data =
-            unsafe { std::slice::from_raw_parts(data_bytes.as_ptr() as *const f32, data_len) }
-                .to_vec();
 
         let tensor = Tensor::from_vec(data, shape);
         result.insert(name, tensor);

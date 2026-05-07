@@ -14,6 +14,7 @@ Examples:
 
 from typing import Optional, Tuple, List, Any, Union
 
+import numpy as np
 import fastnn._core as _core
 from fastnn.module import Module
 
@@ -97,20 +98,23 @@ class MaxPool2dPy:
         )
         self.return_indices = return_indices
         self.ceil_mode = ceil_mode
+        
+        # Convert to scalar values once
+        self._kernel_size_scalar = self._as_single_value(self.kernel_size, "kernel_size")
+        self._stride_scalar = self._as_single_value(self.stride, "stride")
+        self._padding_scalar = self._as_single_value(self.padding, "padding")
+        self._dilation_scalar = self._as_single_value(self.dilation, "dilation")
+        
+        # Pre-create Rust object
+        self._rust_maxpool = _core.MaxPool2d(
+            self._kernel_size_scalar,
+            self._stride_scalar,
+            self._padding_scalar,
+            self._dilation_scalar
+        )
     
     def __call__(self, x):
-        # x shape: (batch, channels, height, width)
-        # Use Rust implementation for performance
-        # For now, only support symmetric kernel_size, stride, padding, dilation
-        # Check if they are tuples and convert to single value if possible
-        kernel_size = self._as_single_value(self.kernel_size, "kernel_size")
-        stride = self._as_single_value(self.stride, "stride")
-        padding = self._as_single_value(self.padding, "padding")
-        dilation = self._as_single_value(self.dilation, "dilation")
-        
-        # Call the Rust implementation
-        rust_maxpool = _core.MaxPool2d(kernel_size, stride, padding, dilation)
-        return rust_maxpool(x)
+        return self._rust_maxpool(x)
     
     @staticmethod
     def _as_single_value(value, name):
@@ -154,9 +158,7 @@ class Flatten:
         end = self.end_dim if self.end_dim >= 0 else ndim + self.end_dim
         end = end + 1
         new_shape = list(shape[:start])
-        flattened_size = 1
-        for dim in shape[start:end]:
-            flattened_size *= dim
+        flattened_size = int(np.prod(shape[start:end]))
         new_shape.append(flattened_size)
         new_shape.extend(shape[end:])
         return x.view(new_shape)
