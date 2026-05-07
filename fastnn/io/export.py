@@ -5,6 +5,8 @@ import logging
 import struct
 from typing import Any, Tuple, Optional
 
+from fastnn._common import first_or_self
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -92,24 +94,10 @@ def export_pytorch_model(
         elif isinstance(module, torch.nn.Conv2d):
             layer_info["in_channels"] = module.in_channels
             layer_info["out_channels"] = module.out_channels
-            layer_info["kernel_size"] = (
-                module.kernel_size[0]
-                if isinstance(module.kernel_size, tuple)
-                else module.kernel_size
-            )
-            layer_info["stride"] = (
-                module.stride[0] if isinstance(module.stride, tuple) else module.stride
-            )
-            layer_info["padding"] = (
-                module.padding[0]
-                if isinstance(module.padding, tuple)
-                else module.padding
-            )
-            layer_info["dilation"] = (
-                module.dilation[0]
-                if isinstance(module.dilation, tuple)
-                else module.dilation
-            )
+            layer_info["kernel_size"] = first_or_self(module.kernel_size)
+            layer_info["stride"] = first_or_self(module.stride)
+            layer_info["padding"] = first_or_self(module.padding)
+            layer_info["dilation"] = first_or_self(module.dilation)
             layer_info["groups"] = module.groups
             layer_info["bias"] = module.bias is not None
             if module.weight is not None:
@@ -195,24 +183,10 @@ def export_pytorch_model(
 
         elif isinstance(module, torch.nn.MaxPool2d):
             layer_info["type"] = "MaxPool2d"
-            layer_info["kernel_size"] = (
-                module.kernel_size[0]
-                if isinstance(module.kernel_size, tuple)
-                else module.kernel_size
-            )
-            layer_info["stride"] = (
-                module.stride[0] if isinstance(module.stride, tuple) else module.stride
-            )
-            layer_info["padding"] = (
-                module.padding[0]
-                if isinstance(module.padding, tuple)
-                else module.padding
-            )
-            layer_info["dilation"] = (
-                module.dilation[0]
-                if isinstance(module.dilation, tuple)
-                else module.dilation
-            )
+            layer_info["kernel_size"] = first_or_self(module.kernel_size)
+            layer_info["stride"] = first_or_self(module.stride)
+            layer_info["padding"] = first_or_self(module.padding)
+            layer_info["dilation"] = first_or_self(module.dilation)
             layer_info["ceil_mode"] = module.ceil_mode
 
         elif isinstance(module, torch.nn.Dropout):
@@ -346,22 +320,10 @@ def export_pytorch_model(
             # Store conv1 config
             layer_info["conv1_in_channels"] = conv1.in_channels
             layer_info["conv1_out_channels"] = conv1.out_channels
-            layer_info["conv1_kernel_size"] = (
-                conv1.kernel_size[0]
-                if isinstance(conv1.kernel_size, tuple)
-                else conv1.kernel_size
-            )
-            layer_info["conv1_stride"] = (
-                conv1.stride[0] if isinstance(conv1.stride, tuple) else conv1.stride
-            )
-            layer_info["conv1_padding"] = (
-                conv1.padding[0] if isinstance(conv1.padding, tuple) else conv1.padding
-            )
-            layer_info["conv1_dilation"] = (
-                conv1.dilation[0]
-                if isinstance(conv1.dilation, tuple)
-                else conv1.dilation
-            )
+            layer_info["conv1_kernel_size"] = first_or_self(conv1.kernel_size)
+            layer_info["conv1_stride"] = first_or_self(conv1.stride)
+            layer_info["conv1_padding"] = first_or_self(conv1.padding)
+            layer_info["conv1_dilation"] = first_or_self(conv1.dilation)
             layer_info["conv1_groups"] = conv1.groups
             layer_info["conv1_bias"] = conv1.bias is not None
 
@@ -373,22 +335,10 @@ def export_pytorch_model(
             # Store conv2 config
             layer_info["conv2_in_channels"] = conv2.in_channels
             layer_info["conv2_out_channels"] = conv2.out_channels
-            layer_info["conv2_kernel_size"] = (
-                conv2.kernel_size[0]
-                if isinstance(conv2.kernel_size, tuple)
-                else conv2.kernel_size
-            )
-            layer_info["conv2_stride"] = (
-                conv2.stride[0] if isinstance(conv2.stride, tuple) else conv2.stride
-            )
-            layer_info["conv2_padding"] = (
-                conv2.padding[0] if isinstance(conv2.padding, tuple) else conv2.padding
-            )
-            layer_info["conv2_dilation"] = (
-                conv2.dilation[0]
-                if isinstance(conv2.dilation, tuple)
-                else conv2.dilation
-            )
+            layer_info["conv2_kernel_size"] = first_or_self(conv2.kernel_size)
+            layer_info["conv2_stride"] = first_or_self(conv2.stride)
+            layer_info["conv2_padding"] = first_or_self(conv2.padding)
+            layer_info["conv2_dilation"] = first_or_self(conv2.dilation)
             layer_info["conv2_groups"] = conv2.groups
             layer_info["conv2_bias"] = conv2.bias is not None
 

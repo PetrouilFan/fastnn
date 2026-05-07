@@ -1,7 +1,8 @@
 import fastnn.core as core
+from fastnn._model_wrapper import ModuleWrapperMixin
 
 
-class Transformer:
+class Transformer(ModuleWrapperMixin):
     def __init__(
         self,
         vocab_size: int,
@@ -24,20 +25,4 @@ class Transformer:
             dropout_p,
         )
 
-    def __call__(self, x):
-        return self._model.forward(x)
 
-    def forward(self, x):
-        return self._model.forward(x)
-
-    def parameters(self):
-        return self._model.parameters()
-
-    def zero_grad(self):
-        self._model.zero_grad()
-
-    def train(self):
-        self._model.train()
-
-    def eval(self):
-        self._model.eval()
