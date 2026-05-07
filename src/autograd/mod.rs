@@ -198,6 +198,16 @@ pub fn extract_first_grad(grad_outputs: Vec<Option<Tensor>>) -> Tensor {
     grad_outputs.into_iter().next().flatten().unwrap()
 }
 
+/// Helper to ensure a tensor is on CPU, returning a CPU tensor.
+/// If the tensor is already on CPU, returns a clone. Otherwise, converts to CPU.
+pub fn ensure_cpu(tensor: &Tensor) -> Tensor {
+    if tensor.inner.is_cpu() {
+        tensor.clone()
+    } else {
+        tensor.to_cpu()
+    }
+}
+
 include!("elementwise.rs");
 include!("matmul.rs");
 include!("reductions.rs");

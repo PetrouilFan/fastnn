@@ -28,7 +28,7 @@ def tensor(data, shape, device=None, dtype=None):
             data = np.ascontiguousarray(data)
         if data.dtype != np.float32:
             data = data.astype(np.float32)
-        return _core.tensor_from_buffer(data)
+        return _core.tensor_from_buffer(data, device)
     flat_data = _flatten(data)
     return _core.tensor_from_data(flat_data, shape, device)
 
@@ -81,14 +81,14 @@ def full_like(tensor, value: float, device=None):
     return _core.full_like(tensor, value, device=device)
 
 
-def from_numpy(ndarray):
+def from_numpy(ndarray, device=None):
     """Create a tensor from a numpy array using zero-copy buffer protocol."""
     # Ensure the array is contiguous and of dtype float32
     if not ndarray.flags['C_CONTIGUOUS']:
         ndarray = np.ascontiguousarray(ndarray)
     if ndarray.dtype != np.float32:
         ndarray = ndarray.astype(np.float32)
-    return _core.tensor_from_buffer(ndarray)
+    return _core.tensor_from_buffer(ndarray, device)
 
 
 __all__ = [

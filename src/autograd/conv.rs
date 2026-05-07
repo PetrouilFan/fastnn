@@ -116,16 +116,8 @@ impl Node for Conv2dBackward {
             } else {
                 // For stride > 1, dilate grad_output first
                 // Get CPU copy of grad_output (avoid unnecessary copy if already CPU)
-                let grad_cpu = if grad.inner.is_cpu() {
-                    None
-                } else {
-                    Some(grad.to_cpu())
-                };
-                let grad_data = if let Some(ref t) = grad_cpu {
-                    t.data_ptr_f32()
-                } else {
-                    grad.data_ptr_f32()
-                };
+                let grad_cpu = crate::autograd::ensure_cpu(&grad);
+                let grad_data = grad_cpu.data_ptr_f32();
                 let grad_h = out_h;
                 let grad_w = out_w;
                 let dilated_h = grad_h + (grad_h - 1) * (stride - 1);
@@ -227,11 +219,7 @@ impl Node for Conv2dBackward {
                             * dilated_h as usize
                             * dilated_w as usize
                     ];
-                    let grad_g_cpu = if grad_g.inner.is_cpu() {
-                        grad_g
-                    } else {
-                        grad_g.to_cpu()
-                    };
+                    let grad_g_cpu = crate::autograd::ensure_cpu(&grad_g);
                     let grad_g_data = grad_g_cpu.as_f32_slice();
 
                     for b in 0..batch_size as usize {
@@ -302,16 +290,8 @@ impl Node for Conv2dBackward {
             let mut grad_weight_data =
                 vec![0.0f32; (out_channels * in_channels * kernel_h * kernel_w) as usize];
 
-            let input_cpu = if input.inner.is_cpu() {
-                input.clone()
-            } else {
-                input.to_cpu()
-            };
-            let grad_cpu = if grad.inner.is_cpu() {
-                grad.clone()
-            } else {
-                grad.to_cpu()
-            };
+            let input_cpu = crate::autograd::ensure_cpu(&input);
+            let grad_cpu = crate::autograd::ensure_cpu(&grad);
             let input_data = input_cpu.as_f32_slice();
             let grad_data = grad_cpu.as_f32_slice();
 
@@ -366,16 +346,8 @@ impl Node for Conv2dBackward {
                     as usize
             ];
 
-            let input_cpu = if input.inner.is_cpu() {
-                input.clone()
-            } else {
-                input.to_cpu()
-            };
-            let grad_cpu = if grad.inner.is_cpu() {
-                grad.clone()
-            } else {
-                grad.to_cpu()
-            };
+            let input_cpu = crate::autograd::ensure_cpu(&input);
+            let grad_cpu = crate::autograd::ensure_cpu(&grad);
             let input_data = input_cpu.as_f32_slice();
             let grad_data = grad_cpu.as_f32_slice();
 
@@ -441,11 +413,7 @@ impl Node for Conv2dBackward {
         // Compute grad_bias: sum grad_output over batch and spatial dimensions
         let grad_bias = if self.has_bias {
             let mut grad_bias_data = vec![0.0f32; out_channels as usize];
-            let grad_cpu = if grad.inner.is_cpu() {
-                grad.clone()
-            } else {
-                grad.to_cpu()
-            };
+            let grad_cpu = crate::autograd::ensure_cpu(&grad);
             let grad_data = grad_cpu.as_f32_slice();
 
             for b in 0..batch_size as usize {

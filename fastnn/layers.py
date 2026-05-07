@@ -1,13 +1,12 @@
 """Layer definitions for fastnn.
 
-This module provides neural network layers, including both Python implementations
-and re-exports of high-performance Rust layers. All layers are callable and
-implement the `train()` and `eval()` methods for switching between training
-and inference modes.
+This module provides Python-implemented neural network layers.
+For high-performance Rust layers, import directly from `fastnn` (e.g., `fastnn.Linear`).
 
 Examples:
     >>> import fastnn as fnn
-    >>> layer = fnn.layers.Linear(128, 64)
+    >>> from fastnn.layers import Flatten, PySequential
+    >>> layer = fnn.Linear(128, 64)  # Rust implementation
     >>> x = fnn.randn([32, 128])
     >>> y = layer(x)
 """
@@ -19,6 +18,7 @@ import numpy as np
 import fastnn._core as _core
 from fastnn.module import Module
 
+
 class _BaseModule(Module):
     """Base class for modules with common layer iteration logic."""
     def parameters(self):
@@ -27,47 +27,14 @@ class _BaseModule(Module):
             params.extend(layer.parameters())
         return params
 
-    def train(self):
+    def train_mode(self):
         for layer in self._train_layers:
-            layer.train()
+            layer.train_mode()
 
-    def eval(self):
+    def eval_mode(self):
         for layer in self._eval_layers:
-            layer.eval()
+            layer.eval_mode()
 
-# Re-export Rust layer classes with improved naming (remove 'Py' prefix)
-# We'll keep the original names but also provide aliases without 'Py' for consistency.
-# However we cannot modify the original class names, so we re-export them as is.
-# Users can import from fastnn.layers directly.
-
-Linear = _core.Linear
-Conv2d = _core.Conv2d
-LayerNorm = _core.LayerNorm
-BatchNorm1d = _core.BatchNorm1d
-Dropout = _core.Dropout
-Embedding = _core.Embedding
-ReLU = _core.ReLU
-GELU = _core.Gelu
-Sigmoid = _core.Sigmoid
-Tanh = _core.Tanh
-SiLU = _core.SiLU
-Sequential = _core.Sequential_
-ModuleList = _core.ModuleList
-MaxPool2d = _core.MaxPool2d
-ConvTranspose2d = _core.ConvTranspose2d
-Conv1d = _core.Conv1d
-Conv3d = _core.Conv3d
-RMSNorm = _core.RMSNorm
-GroupNorm = _core.GroupNorm
-BatchNorm2d = _core.BatchNorm2d
-LeakyReLU = _core.LeakyReLU
-Softplus = _core.Softplus
-Hardswish = _core.Hardswish
-Dropout2d = _core.Dropout2d
-Upsample = _core.Upsample
-AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
-FusedConvBnSilu = getattr(_core, "PyFusedConvBnSilu", None)
-ResidualBlock = _core.ResidualBlock
 
 # Python-implemented layers (for compatibility and educational purposes)
 
@@ -76,7 +43,7 @@ class MaxPool2dPy(Module):
     
     This is a pure-Python implementation of 2D max pooling, provided for
     compatibility and educational purposes. For performance, use the Rust
-    implementation `fastnn.layers.MaxPool2d`.
+    implementation `fastnn.MaxPool2d`.
     
     Args:
         kernel_size: Size of the pooling window. If int, square kernel.
@@ -151,6 +118,9 @@ class MaxPool2dPy(Module):
             self._dilation_scalar
         )
     
+    def parameters(self):
+        return []
+    
     def __call__(self, x):
         return self._rust_maxpool(x)
 
@@ -171,8 +141,12 @@ class Flatten(Module):
     """
     
     def __init__(self, start_dim: int = 1, end_dim: int = -1):
+        super().__init__()
         self.start_dim = start_dim
         self.end_dim = end_dim
+    
+    def parameters(self):
+        return []
     
     def __call__(self, x):
         shape = x.shape
@@ -187,13 +161,11 @@ class Flatten(Module):
         return x.view(new_shape)
 
 
-
-
 class PySequential(_BaseModule):
     """Sequential container (Python implementation).
     
     A simple sequential container that applies layers in order.
-    This is provided for compatibility; prefer `fastnn.layers.Sequential`
+    This is provided for compatibility; prefer `fastnn.Sequential`
     (the Rust implementation) for better performance.
     
     Args:
@@ -201,9 +173,9 @@ class PySequential(_BaseModule):
     
     Examples:
         >>> model = PySequential([
-        ...     fnn.layers.Linear(784, 256),
-        ...     fnn.layers.ReLU(),
-        ...     fnn.layers.Linear(256, 10),
+        ...     fnn.Linear(784, 256),
+        ...     fnn.ReLU(),
+        ...     fnn.Linear(256, 10),
         ... ])
         >>> x = fnn.randn([32, 784])
         >>> y = model(x)
@@ -233,6 +205,7 @@ class PySequential(_BaseModule):
     def to_gpu(self, device_id: int):
         for layer in self._gpu_layers:
             layer.to_gpu(device_id)
+
 
 class BasicBlock(_BaseModule):
     """ResNet BasicBlock with skip connection.
@@ -279,7 +252,7 @@ class BasicBlock(_BaseModule):
             if hasattr(l, "eval"):
                 self._eval_layers.append(l)
         
-        # Named parameters setup (unchanged)
+        # Named parameters setup
         self._named_param_pairs = []
         for name, layer in [("conv1", conv1), ("bn1", bn1), ("conv2", conv2), ("bn2", bn2)]:
             if hasattr(layer, "named_parameters"):
@@ -316,13 +289,17 @@ class BasicBlock(_BaseModule):
         for layer in self._zero_grad_layers:
             layer.zero_grad()
     
-    def train(self):
+    def train_mode(self):
         for layer in self._train_layers:
-            layer.train()
+            layer.train_mode()
     
-    def eval(self):
+    def eval_mode(self):
         for layer in self._eval_layers:
-            layer.eval()
+            layer.eval_mode()
+    
+    # Backward compatibility
+    train = train_mode
+    eval = eval_mode
 
 
 # Alias for backward compatibility

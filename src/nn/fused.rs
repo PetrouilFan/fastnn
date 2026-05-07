@@ -180,7 +180,7 @@ impl Node for FusedConvBnBackward {
     fn inputs(&self) -> &[Tensor] { &[] }
 }
 
-impl<A: Activation> Module for FusedConvBn<A> {
+impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
     fn forward(&self, x: &Tensor) -> Tensor {
         let default_bias = Tensor::from_scalar(0.0);
         let bias_ref = self.conv_bias.as_ref().unwrap_or(&default_bias);

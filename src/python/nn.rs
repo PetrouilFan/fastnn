@@ -43,25 +43,134 @@ macro_rules! impl_nn_module {
     };
 }
 
+macro_rules! impl_nn_module_with_gpu {
+    ($struct_name:ident { $($methods:tt)* }) => {
+        impl_nn_module!($struct_name {
+            #[pyo3(signature = (device_id))]
+            #[allow(clippy::wrong_self_convention)]
+            fn to_gpu(&mut self, device_id: usize) {
+                self.inner.weight = self.inner.weight.to_gpu(device_id);
+                self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
+            }
+
+            $($methods)*
+        });
+    };
+}
+
+macro_rules! impl_fused_conv_bn {
+    ($name:ident, $inner_type:ty) => {
+        impl_fused_conv_bn!($name, $inner_type, {});
+    };
+    ($name:ident, $inner_type:ty, { $($extra_methods:tt)* }) => {
+        #[pyclass]
+        struct $name {
+            inner: $inner_type,
+        }
+
+        impl_nn_module!($name {
+            #[new]
+            #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
+            fn new(
+                in_channels: i64,
+                out_channels: i64,
+                kernel_size: i64,
+                stride: i64,
+                padding: i64,
+                dilation: i64,
+                groups: i64,
+                eps: f64,
+                bias: bool,
+            ) -> Self {
+                $name {
+                    inner: <$inner_type>::new(
+                        in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
+                    ),
+                }
+            }
+
+            fn forward(&self, x: &PyTensor) -> PyTensor {
+                PyTensor::from_tensor(self.inner.forward(&x.inner))
+            }
+
+            fn set_conv_weight(&mut self, weight: PyTensor) {
+                self.inner.set_conv_weight(weight.inner);
+            }
+
+            fn set_conv_bias(&mut self, bias: PyTensor) {
+                self.inner.set_conv_bias(bias.inner);
+            }
+
+            fn set_bn_weight(&mut self, weight: PyTensor) {
+                self.inner.set_bn_weight(weight.inner);
+            }
+
+            fn set_bn_bias(&mut self, bias: PyTensor) {
+                self.inner.set_bn_bias(bias.inner);
+            }
+
+            fn set_bn_running_mean(&mut self, mean: PyTensor) {
+                self.inner.set_bn_running_mean(mean.inner);
+            }
+
+            fn set_bn_running_var(&mut self, var: PyTensor) {
+                self.inner.set_bn_running_var(var.inner);
+            }
+
+            $($extra_methods)*
+        });
+    };
+}
+
+macro_rules! impl_activation {
+    ($name:ident, $method:ident) => {
+        #[pyclass]
+        struct $name;
+
+        #[pymethods]
+        impl $name {
+            #[new]
+            fn new() -> Self {
+                $name
+            }
+
+            fn __call__(&self, x: &PyTensor) -> PyTensor {
+                PyTensor::from_tensor(x.inner.$method())
+            }
+
+            fn parameters(&self) -> Vec<PyTensor> {
+                vec![]
+            }
+
+            fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+                vec![]
+            }
+
+            fn zero_grad(&self) {}
+
+            fn train(&self) {}
+
+            fn eval(&self) {}
+
+            fn is_training(&self) -> bool {
+                false
+            }
+        }
+    };
+}
+
 #[pyclass]
 struct Linear {
     inner: core_nn::linear::Linear,
 }
 
-impl_nn_module!(Linear {
+impl_nn_module_with_gpu!(Linear {
     #[new]
     #[pyo3(signature = (in_features, out_features, bias = true))]
     fn new(in_features: i64, out_features: i64, bias: bool) -> Self {
         Linear {
             inner: core_nn::linear::Linear::new(in_features, out_features, bias),
         }
-    }
-
-    #[pyo3(signature = (device_id))]
-    #[allow(clippy::wrong_self_convention)]
-    fn to_gpu(&mut self, device_id: usize) {
-        self.inner.weight = self.inner.weight.to_gpu(device_id);
-        self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -92,7 +201,7 @@ struct Conv2d {
     inner: core_nn::conv::Conv2d,
 }
 
-impl_nn_module!(Conv2d {
+impl_nn_module_with_gpu!(Conv2d {
     #[new]
     #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=true))]
     #[allow(clippy::too_many_arguments)]
@@ -118,13 +227,6 @@ impl_nn_module!(Conv2d {
                 bias,
             ),
         }
-    }
-
-    #[pyo3(signature = (device_id))]
-    #[allow(clippy::wrong_self_convention)]
-    fn to_gpu(&mut self, device_id: usize) {
-        self.inner.weight = self.inner.weight.to_gpu(device_id);
-        self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -339,60 +441,7 @@ impl_nn_module!(ResidualBlock {
     }
 });
 
-#[pyclass]
-struct FusedConvBn {
-    inner: core_nn::fused::FusedConvBn,
-}
-
-impl_nn_module!(FusedConvBn {
-    #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
-    fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        groups: i64,
-        eps: f64,
-        bias: bool,
-    ) -> Self {
-        FusedConvBn {
-            inner: core_nn::fused::FusedConvBn::new(
-                in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
-            ),
-        }
-    }
-
-    fn forward(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn set_conv_weight(&mut self, weight: PyTensor) {
-        self.inner.set_conv_weight(weight.inner);
-    }
-
-    fn set_conv_bias(&mut self, bias: PyTensor) {
-        self.inner.set_conv_bias(bias.inner);
-    }
-
-    fn set_bn_weight(&mut self, weight: PyTensor) {
-        self.inner.set_bn_weight(weight.inner);
-    }
-
-    fn set_bn_bias(&mut self, bias: PyTensor) {
-        self.inner.set_bn_bias(bias.inner);
-    }
-
-    fn set_bn_running_mean(&mut self, mean: PyTensor) {
-        self.inner.set_bn_running_mean(mean.inner);
-    }
-
-    fn set_bn_running_var(&mut self, var: PyTensor) {
-        self.inner.set_bn_running_var(var.inner);
-    }
-
+impl_fused_conv_bn!(FusedConvBn, core_nn::fused::FusedConvBn, {
     #[staticmethod]
     fn from_conv_bn(conv: &Conv2d, bn: &BatchNorm2d) -> Self {
         FusedConvBn {
@@ -401,115 +450,8 @@ impl_nn_module!(FusedConvBn {
     }
 });
 
-#[pyclass]
-struct FusedConvBnRelu {
-    inner: core_nn::fused::FusedConvBnRelu,
-}
-
-impl_nn_module!(FusedConvBnRelu {
-    #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
-    fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        groups: i64,
-        eps: f64,
-        bias: bool,
-    ) -> Self {
-        FusedConvBnRelu {
-            inner: core_nn::fused::FusedConvBnRelu::new(
-                in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
-            ),
-        }
-    }
-
-    fn forward(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn set_conv_weight(&mut self, weight: PyTensor) {
-        self.inner.set_conv_weight(weight.inner);
-    }
-
-    fn set_conv_bias(&mut self, bias: PyTensor) {
-        self.inner.set_conv_bias(bias.inner);
-    }
-
-    fn set_bn_weight(&mut self, weight: PyTensor) {
-        self.inner.set_bn_weight(weight.inner);
-    }
-
-    fn set_bn_bias(&mut self, bias: PyTensor) {
-        self.inner.set_bn_bias(bias.inner);
-    }
-
-    fn set_bn_running_mean(&mut self, mean: PyTensor) {
-        self.inner.set_bn_running_mean(mean.inner);
-    }
-
-    fn set_bn_running_var(&mut self, var: PyTensor) {
-        self.inner.set_bn_running_var(var.inner);
-    }
-});
-
-#[pyclass]
-struct FusedConvBnGelu {
-    inner: core_nn::fused::FusedConvBnGelu,
-}
-
-impl_nn_module!(FusedConvBnGelu {
-    #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
-    fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        groups: i64,
-        eps: f64,
-        bias: bool,
-    ) -> Self {
-        FusedConvBnGelu {
-            inner: core_nn::fused::FusedConvBnGelu::new(
-                in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
-            ),
-        }
-    }
-
-    fn forward(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn set_conv_weight(&mut self, weight: PyTensor) {
-        self.inner.set_conv_weight(weight.inner);
-    }
-
-    fn set_conv_bias(&mut self, bias: PyTensor) {
-        self.inner.set_conv_bias(bias.inner);
-    }
-
-    fn set_bn_weight(&mut self, weight: PyTensor) {
-        self.inner.set_bn_weight(weight.inner);
-    }
-
-    fn set_bn_bias(&mut self, bias: PyTensor) {
-        self.inner.set_bn_bias(bias.inner);
-    }
-
-    fn set_bn_running_mean(&mut self, mean: PyTensor) {
-        self.inner.set_bn_running_mean(mean.inner);
-    }
-
-    fn set_bn_running_var(&mut self, var: PyTensor) {
-        self.inner.set_bn_running_var(var.inner);
-    }
-});
+impl_fused_conv_bn!(FusedConvBnRelu, core_nn::fused::FusedConvBnRelu);
+impl_fused_conv_bn!(FusedConvBnGelu, core_nn::fused::FusedConvBnGelu);
 
 #[pyclass]
 struct LayerNorm {
@@ -604,81 +546,49 @@ struct Dropout {
     inner: core_nn::dropout::Dropout,
 }
 
-#[pymethods]
-impl Dropout {
+impl_nn_module!(Dropout {
     #[new]
     fn new(p: f64) -> Self {
         Dropout {
             inner: core_nn::dropout::Dropout::new(p),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn train(&self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct Dropout2d {
     inner: core_nn::dropout::Dropout2d,
 }
 
-#[pymethods]
-impl Dropout2d {
+impl_nn_module!(Dropout2d {
     #[new]
     fn new(p: f64) -> Self {
         Dropout2d {
             inner: core_nn::dropout::Dropout2d::new(p),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn train(&self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct Upsample {
     inner: core_nn::upsample::Upsample,
 }
 
-#[pymethods]
-impl Upsample {
+impl_nn_module!(Upsample {
     #[new]
     fn new(scale_factor: f64, mode: String) -> Self {
         Upsample {
             inner: core_nn::upsample::Upsample::new(scale_factor, mode),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-}
+});
 
 #[pyclass]
 struct Embedding {
     inner: core_nn::embedding::Embedding,
 }
 
-#[pymethods]
-impl Embedding {
+impl_nn_module!(Embedding {
     #[new]
     fn new(num_embeddings: i64, embedding_dim: i64) -> Self {
         Embedding {
@@ -686,16 +596,8 @@ impl Embedding {
         }
     }
 
-    fn __call__(&self, indices: &PyTensor) -> PyTensor {
+    fn forward(&self, indices: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&indices.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -713,7 +615,7 @@ impl Embedding {
         inner.weight = weight.inner;
         Embedding { inner }
     }
-}
+});
 
 #[pyclass]
 struct RMSNorm {
@@ -788,80 +690,12 @@ impl_nn_module!(BatchNorm2d {
     }
 });
 
-#[pyclass]
-struct ReLU;
-
-#[pymethods]
-impl ReLU {
-    #[new]
-    fn new() -> Self {
-        ReLU
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.relu())
-    }
-}
-
-#[pyclass]
-struct Gelu;
-
-#[pymethods]
-impl Gelu {
-    #[new]
-    fn new() -> Self {
-        Gelu
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.gelu())
-    }
-}
-
-#[pyclass]
-struct Sigmoid;
-
-#[pymethods]
-impl Sigmoid {
-    #[new]
-    fn new() -> Self {
-        Sigmoid
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.sigmoid())
-    }
-}
-
-#[pyclass]
-struct Tanh;
-
-#[pymethods]
-impl Tanh {
-    #[new]
-    fn new() -> Self {
-        Tanh
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.tanh())
-    }
-}
-
-#[pyclass]
-struct SiLU;
-
-#[pymethods]
-impl SiLU {
-    #[new]
-    fn new() -> Self {
-        SiLU
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.silu())
-    }
-}
+impl_activation!(ReLU, relu);
+impl_activation!(Gelu, gelu);
+impl_activation!(Sigmoid, sigmoid);
+impl_activation!(Tanh, tanh);
+impl_activation!(SiLU, silu);
+impl_activation!(Hardswish, hardswish);
 
 #[pyclass]
 struct LeakyReLU {
@@ -878,6 +712,24 @@ impl LeakyReLU {
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(x.inner.leaky_relu(self.negative_slope as f32))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        vec![]
+    }
+
+    fn zero_grad(&self) {}
+
+    fn train(&self) {}
+
+    fn eval(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
     }
 }
 
@@ -898,20 +750,23 @@ impl Softplus {
     fn __call__(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(x.inner.softplus(self.beta as f32, self.threshold as f32))
     }
-}
 
-#[pyclass]
-struct Hardswish;
-
-#[pymethods]
-impl Hardswish {
-    #[new]
-    fn new() -> Self {
-        Hardswish
+    fn parameters(&self) -> Vec<PyTensor> {
+        vec![]
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.hardswish())
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        vec![]
+    }
+
+    fn zero_grad(&self) {}
+
+    fn train(&self) {}
+
+    fn eval(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
     }
 }
 
@@ -930,6 +785,24 @@ impl Elu {
 
     fn __call__(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(x.inner.elu(self.alpha as f32))
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        vec![]
+    }
+
+    fn zero_grad(&self) {}
+
+    fn train(&self) {}
+
+    fn eval(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
     }
 }
 
@@ -950,6 +823,24 @@ impl Mish {
         let tanh_sp = sp.tanh();
         PyTensor::from_tensor(x.inner.mul(&tanh_sp))
     }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        vec![]
+    }
+
+    fn zero_grad(&self) {}
+
+    fn train(&self) {}
+
+    fn eval(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
+    }
 }
 
 #[pyclass]
@@ -957,19 +848,14 @@ struct AdaptiveAvgPool2d {
     inner: core_nn::activations::AdaptiveAvgPool2d,
 }
 
-#[pymethods]
-impl AdaptiveAvgPool2d {
+impl_nn_module!(AdaptiveAvgPool2d {
     #[new]
     fn new(output_h: i64, output_w: i64) -> Self {
         AdaptiveAvgPool2d {
             inner: core_nn::activations::AdaptiveAvgPool2d::new((output_h, output_w)),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-}
+});
 
 #[pyclass(name = "Sequential_")]
 struct Sequential {
