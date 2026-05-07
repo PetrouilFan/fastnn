@@ -72,26 +72,16 @@ def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
             f.write(_pack_u32(version))
             
             if version == 1:
-                # Original format: no version field per tensor, no grad storage
+                # Version 1 format: uses write_tensor for consistency
                 f.write(_pack_u64(len(param_list)))
                 for name, tensor in param_list:
-                    name_bytes = name.encode("utf-8")
-                    f.write(_pack_u64(len(name_bytes)))
-                    f.write(name_bytes)
-                    shape = tensor.shape
-                    f.write(_pack_u64(len(shape)))
-                    for d in shape:
-                        f.write(_pack_i64(d))
-                    data = to_numpy(tensor).astype(np.float32, copy=False).ravel()
-                    f.write(_pack_u64(len(data)))
-                    f.write(data.tobytes())
+                    write_tensor(f, name, to_numpy(tensor))
             
             elif version == 2:
                 # Version 2 adds per-tensor version and optional gradient storage
                 f.write(_pack_u64(len(param_list)))
                 for name, tensor in param_list:
-                    # Write tensor header with version
-                    f.write(_pack_u32(2))  # tensor format version
+                    # Write tensor using unified format
                     write_tensor(f, name, to_numpy(tensor))
                     # Write gradient if present
                     grad = tensor.grad
@@ -142,22 +132,14 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
                 num_params = _unpack_u64(f.read(8))
                 result = {}
                 for _ in range(num_params):
-                    name_len = _unpack_u64(f.read(8))
-                    name = f.read(name_len).decode("utf-8")
-                    shape_len = _unpack_u64(f.read(8))
-                    shape = [_unpack_i64(f.read(8)) for _ in range(shape_len)]
-                    data_len = _unpack_u64(f.read(8))
-                    data = np.frombuffer(f.read(data_len * 4), dtype=np.float32)
-                    result[name] = tensor(data, list(shape))
+                    name, data = read_tensor(f)
+                    result[name] = tensor(data, list(data.shape))
                 return result
             
             elif file_version == 2:
                 num_params = _unpack_u64(f.read(8))
                 result = {}
                 for _ in range(num_params):
-                    tensor_version = _unpack_u32(f.read(4))
-                    if tensor_version != 2:
-                        raise SerializationError(f"Unsupported tensor version: {tensor_version}")
                     name, data = read_tensor(f)
                     result[name] = tensor(data, list(data.shape))
                     # Read gradient flag

@@ -1,3 +1,18 @@
+// Helper to resolve device from optional string parameter
+fn resolve_device(device: Option<String>) -> Device {
+    device
+        .as_ref()
+        .and_then(|s| Device::from_str_label(s))
+        .unwrap_or_else(get_default_device)
+}
+
+// Helper to resolve dtype from optional string parameter
+fn resolve_dtype(dtype: Option<String>) -> DType {
+    dtype
+        .and_then(|s| DType::from_str_label(&s))
+        .unwrap_or(DType::F32)
+}
+
 #[pyfunction]
 #[pyo3(signature = (data, shape, device = None))]
 fn tensor_from_data<'py>(
@@ -7,10 +22,7 @@ fn tensor_from_data<'py>(
 ) -> PyResult<PyTensor> {
     let data: Vec<f32> = data.extract()?;
     let shape: Vec<i64> = shape.extract()?;
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let device = resolve_device(device);
     Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
         data, shape, device,
     )))
@@ -24,52 +36,32 @@ fn tensor_factory(data: Vec<f32>, shape: Vec<i64>) -> PyTensor {
 #[pyfunction]
 #[pyo3(signature = (shape, dtype = None, device = None))]
 fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
-    let dtype = dtype
-        .and_then(|s| DType::from_str_label(&s))
-        .unwrap_or(DType::F32);
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let dtype = resolve_dtype(dtype);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::zeros(shape, dtype, device))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, dtype = None, device = None))]
 fn empty(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
-    let dtype = dtype
-        .and_then(|s| DType::from_str_label(&s))
-        .unwrap_or(DType::F32);
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let dtype = resolve_dtype(dtype);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::empty(shape, dtype, device))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, dtype = None, device = None))]
 fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
-    let dtype = dtype
-        .and_then(|s| DType::from_str_label(&s))
-        .unwrap_or(DType::F32);
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let dtype = resolve_dtype(dtype);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::ones(shape, dtype, device))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, value, dtype = None, device = None))]
 fn full(shape: Vec<i64>, value: f32, dtype: Option<String>, device: Option<String>) -> PyTensor {
-    let dtype = dtype
-        .and_then(|s| DType::from_str_label(&s))
-        .unwrap_or(DType::F32);
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let dtype = resolve_dtype(dtype);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::full(shape, value, dtype, device))
 }
 
@@ -84,10 +76,7 @@ fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> Py
     let values: Vec<f32> = (0..numel)
         .map(|i| (start_f64 + i as f64 * step_f64) as f32)
         .collect();
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(
         values,
         vec![numel as i64],
@@ -110,10 +99,7 @@ fn linspace(start: f32, end: f32, steps: usize, device: Option<String>) -> PyTen
             start * (1.0 - t) + end * t
         })
         .collect();
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(
         values,
         vec![steps as i64],
@@ -129,10 +115,7 @@ fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyTensor {
     for i in 0..n.min(m) {
         values[(i * m + i) as usize] = 1.0;
     }
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, vec![n, m], device))
 }
 
@@ -148,10 +131,7 @@ fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
             (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
         })
         .collect();
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
 
@@ -160,10 +140,7 @@ fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
 fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     let numel: i64 = shape.iter().product();
     let values: Vec<f32> = (0..numel as usize).map(|_| rand::random()).collect();
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
 
@@ -182,10 +159,7 @@ fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyTe
             .map(|_| (uniform.sample(&mut rng) as i32 + low) as f32)
             .collect()
     };
-    let device = device
-        .as_ref()
-        .and_then(|s| Device::from_str_label(s))
-        .unwrap_or_else(get_default_device);
+    let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
 

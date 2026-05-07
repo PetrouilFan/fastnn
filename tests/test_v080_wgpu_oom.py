@@ -49,10 +49,3 @@ def test_gpu_detection():
         print(f"  GPU available: {is_gpu}")
     except AttributeError:
         print("  SKIPPED: is_wgpu not available")
-
-
-if __name__ == "__main__":
-    test_cpu_fallback()
-    test_device_attr()
-    test_gpu_detection()
-    print("\n=== WGPU Device-Loss / OOM Tests PASSED ===")

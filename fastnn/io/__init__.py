@@ -4,6 +4,8 @@ This package provides a unified interface for saving/loading models,
 converting from other formats (PyTorch, ONNX), and managing model I/O.
 """
 
+import struct
+
 # Canonical constants for fastnn serialization formats
 MODEL_MAGIC = b"FNN\x00"
 OPTIMIZER_MAGIC = b"FNO\x00"
@@ -13,61 +15,51 @@ OPTIMIZER_VERSION = 1
 
 def _pack_u64(value: int) -> bytes:
     """Pack a 64-bit unsigned integer (little-endian)."""
-    import struct
     return struct.pack("<Q", value)
 
 
 def _pack_i64(value: int) -> bytes:
     """Pack a 64-bit signed integer (little-endian)."""
-    import struct
     return struct.pack("<q", value)
 
 
 def _pack_u32(value: int) -> bytes:
     """Pack a 32-bit unsigned integer (little-endian)."""
-    import struct
     return struct.pack("<I", value)
 
 
 def _pack_u8(value: int) -> bytes:
     """Pack an 8-bit unsigned integer."""
-    import struct
     return struct.pack("<B", value)
 
 
 def _pack_f64(value: float) -> bytes:
     """Pack a 64-bit float (double, little-endian)."""
-    import struct
     return struct.pack("<d", value)
 
 
 def _unpack_u64(data: bytes) -> int:
     """Unpack a 64-bit unsigned integer (little-endian)."""
-    import struct
     return struct.unpack("<Q", data)[0]
 
 
 def _unpack_i64(data: bytes) -> int:
     """Unpack a 64-bit signed integer (little-endian)."""
-    import struct
     return struct.unpack("<q", data)[0]
 
 
 def _unpack_u32(data: bytes) -> int:
     """Unpack a 32-bit unsigned integer (little-endian)."""
-    import struct
     return struct.unpack("<I", data)[0]
 
 
 def _unpack_u8(data: bytes) -> int:
     """Unpack an 8-bit unsigned integer."""
-    import struct
     return struct.unpack("<B", data)[0]
 
 
 def _unpack_f64(data: bytes) -> float:
     """Unpack a 64-bit float (double, little-endian)."""
-    import struct
     return struct.unpack("<d", data)[0]
 
 
@@ -112,14 +104,6 @@ from fastnn.io.serialization import *  # noqa: F401, F403
 from fastnn.io.export import *  # noqa: F401, F403
 from fastnn.io.onnx import *  # noqa: F401, F403
 
-# Re-export key functions with simplified names
-from fastnn.io.serialization import save_model
-from fastnn.io.serialization import load_model
-from fastnn.io.serialization import save_optimizer
-from fastnn.io.serialization import load_optimizer
-from fastnn.io.export import save_fnn_model as _save_pytorch
-from fastnn.io.onnx import import_onnx as _import_onnx
-
 
 def save(model, path: str, format: str = "fnn-v2") -> None:
     """Save a model to file.
@@ -130,7 +114,7 @@ def save(model, path: str, format: str = "fnn-v2") -> None:
         format: Format to save as ("fnn-v2", "pytorch", etc.)
     """
     if format == "fnn-v2":
-        _save_model(model, path)
+        save_model(model, path)
     else:
         raise ValueError(f"Unsupported format: {format}")
 
@@ -144,7 +128,7 @@ def load(path: str) -> object:
     Returns:
         The loaded model.
     """
-    return _load_model(path)
+    return load_model(path)
 
 
 def convert_from_pytorch(torch_model, path: str) -> None:
@@ -154,7 +138,7 @@ def convert_from_pytorch(torch_model, path: str) -> None:
         torch_model: The PyTorch model to convert.
         path: Path to save the converted model.
     """
-    _save_pytorch(torch_model, path)
+    save_fnn_model(torch_model, path)
 
 
 def convert_from_onnx(onnx_path: str, fnn_path: str) -> dict:
@@ -167,7 +151,7 @@ def convert_from_onnx(onnx_path: str, fnn_path: str) -> dict:
     Returns:
         Dictionary with model info.
     """
-    return _import_onnx(onnx_path, fnn_path)
+    return import_onnx(onnx_path, fnn_path)
 
 
 __all__ = [

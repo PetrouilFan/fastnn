@@ -20,7 +20,7 @@ from typing import Any
 class LRScheduler:
     """Base class for learning rate schedulers.
     
-    Modifies the optimizer's learning rate in-place via state_dict.
+    Modifies the optimizer's learning rate in-place.
     
     Args:
         optimizer: Optimizer to schedule.
@@ -36,18 +36,28 @@ class LRScheduler:
         self.last_epoch = -1
     
     def _get_lr(self) -> float:
+        # Access param_groups directly (PyTorch-style) for efficiency
+        if hasattr(self.optimizer, 'param_groups') and self.optimizer.param_groups:
+            return self.optimizer.param_groups[0].get("lr", 0.01)
+        # Fall back to state_dict
         sd = self.optimizer.state_dict()
         return sd.get("lr", 0.01)
     
     def _set_lr(self, lr: float) -> None:
-        sd = self.optimizer.state_dict()
-        sd["lr"] = lr
-        self.optimizer.load_state_dict(sd)
+        # Access param_groups directly (PyTorch-style) for efficiency
+        if hasattr(self.optimizer, 'param_groups'):
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = lr
+        else:
+            # Fall back to state_dict
+            sd = self.optimizer.state_dict()
+            sd["lr"] = lr
+            self.optimizer.load_state_dict(sd)
     
     def get_lr(self) -> float:
         raise NotImplementedError
     
-    def step(self) -> float:
+    def step(self, **kwargs) -> float:
         """Update learning rate and return the new learning rate."""
         self.last_epoch += 1
         lr = self.get_lr()
@@ -55,7 +65,30 @@ class LRScheduler:
         return lr
 
 
-class StepLR(LRScheduler):
+class DecayLR(LRScheduler):
+    """Base class for decay-based LR schedulers that use multiplicative decay.
+    
+    Args:
+        optimizer: Optimizer to schedule.
+        gamma: Multiplicative factor for LR decay.
+    
+    Examples:
+        >>> scheduler = DecayLR(optimizer, gamma=0.1)
+    """
+    
+    def __init__(self, optimizer: Any, gamma: float = 0.1):
+        super().__init__(optimizer)
+        self.gamma = gamma
+    
+    def get_decay_factor(self) -> float:
+        """Calculate the decay factor. Subclasses should override this."""
+        raise NotImplementedError
+    
+    def get_lr(self) -> float:
+        return self.base_lr * self.get_decay_factor()
+
+
+class StepLR(DecayLR):
     """Decays LR by gamma every step_size epochs.
     
     Args:
@@ -68,12 +101,11 @@ class StepLR(LRScheduler):
     """
     
     def __init__(self, optimizer: Any, step_size: int, gamma: float = 0.1):
-        super().__init__(optimizer)
+        super().__init__(optimizer, gamma)
         self.step_size = step_size
-        self.gamma = gamma
     
-    def get_lr(self) -> float:
-        return self.base_lr * self.gamma ** (self.last_epoch // self.step_size)
+    def get_decay_factor(self) -> float:
+        return self.gamma ** (self.last_epoch // self.step_size)
 
 
 class CosineAnnealingLR(LRScheduler):
@@ -102,7 +134,7 @@ class CosineAnnealingLR(LRScheduler):
         )
 
 
-class ExponentialLR(LRScheduler):
+class ExponentialLR(DecayLR):
     """Decays LR by gamma every epoch.
     
     Args:
@@ -114,11 +146,10 @@ class ExponentialLR(LRScheduler):
     """
     
     def __init__(self, optimizer: Any, gamma: float):
-        super().__init__(optimizer)
-        self.gamma = gamma
+        super().__init__(optimizer, gamma)
     
-    def get_lr(self) -> float:
-        return self.base_lr * self.gamma ** self.last_epoch
+    def get_decay_factor(self) -> float:
+        return self.gamma ** self.last_epoch
 
 
 class ReduceLROnPlateau(LRScheduler):
@@ -146,13 +177,8 @@ class ReduceLROnPlateau(LRScheduler):
         self.min_lr = min_lr
         self.best = float("inf") if mode == "min" else float("-inf")
         self.wait = 0
-        self.current_lr = self.base_lr
 
-    def get_lr(self) -> float:
-        """Not used for ReduceLROnPlateau. Required by base class."""
-        return self.current_lr
-
-    def step(self, metric: float) -> float:
+    def step(self, metric: float, **kwargs) -> float:
         """Update learning rate based on metric value."""
         improved = (metric < self.best) if self.mode == "min" else (metric > self.best)
         if improved:
@@ -162,10 +188,10 @@ class ReduceLROnPlateau(LRScheduler):
             self.wait += 1
             if self.wait >= self.patience:
                 self.wait = 0
-                new_lr = self.current_lr * self.factor
+                current_lr = self._get_lr()
+                new_lr = current_lr * self.factor
                 if new_lr < self.min_lr:
                     new_lr = self.min_lr
                 self._set_lr(new_lr)
-                self.current_lr = new_lr
                 return new_lr
-        return self.current_lr
+        return self._get_lr()

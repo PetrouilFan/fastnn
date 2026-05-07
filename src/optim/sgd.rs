@@ -1,7 +1,11 @@
-use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState, zeros_like};
+use crate::optim::{
+    apply_weight_decay, get_grad, Optimizer, OptimizerState, ParamGroup,
+    ParamState, WeightDecayType, zeros_like,
+};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
-use std::sync::Arc;
+
+use crate::impl_params_mut;
 
 #[allow(clippy::upper_case_acronyms)]
 pub struct SGD {
@@ -13,11 +17,6 @@ pub struct SGD {
     pub weight_decay: f64,
     pub nesterov: bool,
     pub velocity: Vec<Tensor>,
-    // Pre-allocated buffers
-    pub temp_wd: Vec<Tensor>,
-    pub temp_nesterov_grad: Vec<Tensor>,
-    pub temp_mom_v: Vec<Tensor>,
-    pub temp_vel: Vec<Tensor>,
 }
 
 impl SGD {
@@ -30,10 +29,6 @@ impl SGD {
         nesterov: bool,
     ) -> Self {
         let velocity = zeros_like(&params);
-        let temp_wd = zeros_like(&params);
-        let temp_nesterov_grad = zeros_like(&params);
-        let temp_mom_v = zeros_like(&params);
-        let temp_vel = zeros_like(&params);
 
         SGD {
             params,
@@ -43,18 +38,12 @@ impl SGD {
             weight_decay,
             nesterov,
             velocity,
-            temp_wd,
-            temp_nesterov_grad,
-            temp_mom_v,
-            temp_vel,
         }
     }
 }
 
 impl Optimizer for SGD {
-    fn params_mut(&mut self) -> &mut Vec<Tensor> {
-        &mut self.params
-    }
+    impl_params_mut!();
 
     #[allow(clippy::needless_range_loop)]
     fn step(&mut self) {
@@ -63,66 +52,42 @@ impl Optimizer for SGD {
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let mut grad = if let Some(g) = param.grad() {
+            let grad = if let Some(g) = get_grad(param) {
                 g
             } else {
                 continue;
             };
 
-            if weight_decay != 0.0 {
-                // grad = grad + weight_decay * param
-                self.temp_wd[i] = param.clone();
-                self.temp_wd[i].mul_scalar_(weight_decay);
-                grad.add_(&self.temp_wd[i]);
-            }
+            // Apply L2 weight decay (consistent with WeightDecayType::L2)
+            let grad = if weight_decay != 0.0 {
+                apply_weight_decay(param, &grad, weight_decay, lr, WeightDecayType::L2)
+            } else {
+                grad
+            };
 
             if momentum != 0.0 {
                 let velocity = &mut self.velocity[i];
 
                 if self.nesterov {
                     // Nesterov: param -= lr * (grad + momentum * velocity)
-                    self.temp_nesterov_grad[i] = grad.clone();
-                    self.temp_mom_v[i] = velocity.clone();
-                    self.temp_mom_v[i].mul_scalar_(momentum);
-                    self.temp_nesterov_grad[i].add_(&self.temp_mom_v[i]);
-
-                    // Now update velocity: velocity = momentum * velocity + grad
-                    velocity.mul_scalar_(momentum);
-                    velocity.add_(&grad);
-
-                    // param = param - lr * nesterov_grad
-                    self.temp_nesterov_grad[i].mul_scalar_(lr);
-                    param.sub_(&self.temp_nesterov_grad[i]);
+                    let nesterov_grad = grad.clone().add(&velocity.mul_scalar(momentum));
+                    velocity.mul_scalar_(momentum).add_(&grad);
+                    param.sub_(&nesterov_grad.mul_scalar(lr));
                 } else {
                     // Standard SGD: velocity = momentum * velocity + grad
-                    velocity.mul_scalar_(momentum);
-                    velocity.add_(&grad);
-
-                    // param = param - lr * velocity
-                    self.temp_vel[i] = velocity.clone();
-                    self.temp_vel[i].mul_scalar_(lr);
-                    param.sub_(&self.temp_vel[i]);
+                    velocity.mul_scalar_(momentum).add_(&grad);
+                    param.sub_(&velocity.clone().mul_scalar(lr));
                 }
             } else {
                 // No momentum: simple update
-                grad.mul_scalar_(lr);
-                param.sub_(&grad);
+                param.sub_(&grad.mul_scalar(lr));
             }
         }
     }
 
     fn add_param_group(&mut self, params: Vec<Tensor>) {
         let velocity = zeros_like(&params);
-        let temp_wd = zeros_like(&params);
-        let temp_nesterov_grad = zeros_like(&params);
-        let temp_mom_v = zeros_like(&params);
-        let temp_vel = zeros_like(&params);
-
         self.velocity.extend(velocity);
-        self.temp_wd.extend(temp_wd);
-        self.temp_nesterov_grad.extend(temp_nesterov_grad);
-        self.temp_mom_v.extend(temp_mom_v);
-        self.temp_vel.extend(temp_vel);
         self.params.extend(params);
     }
 
