@@ -22,7 +22,7 @@ fn dispatch_op(op: &str, args: &[&Tensor]) -> Tensor {
 /// Helper to wrap loss function output with autograd support
 fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
     if autograd::is_grad_enabled() && input.requires_grad() {
-        let edges = autograd::make_edge(input);
+        let _edges = autograd::make_edge(input);
         let backward = backward_fn();
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
@@ -35,6 +35,73 @@ fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnO
     }
 }
 
+/// Helper to convert dim to tensor (avoids repeated Tensor::from_scalar(dim as f32))
+fn dim_to_tensor(dim: i32) -> Tensor {
+    Tensor::from_scalar(dim as f32)
+}
+
+/// Macro for unary operations: fn op(py, a) -> PyTensor { PyTensor::from_tensor(a.inner.op()) }
+macro_rules! unary_op {
+    ($name:ident, $method:ident) => {
+        #[pyfunction]
+        fn $name(py: Python<'_>, a: &PyTensor) -> PyTensor {
+            let a_inner = a.inner.clone();
+            py.detach(move || PyTensor::from_tensor(a_inner.$method()))
+        }
+    };
+}
+
+/// Macro for binary operations: fn op(a, b) -> PyTensor { PyTensor::from_tensor(a.inner.op(&b.inner)) }
+macro_rules! binary_op {
+    ($name:ident, $method:ident) => {
+        #[pyfunction]
+        fn $name(a: &PyTensor, b: &PyTensor) -> PyTensor {
+            PyTensor::from_tensor(a.inner.$method(&b.inner))
+        }
+    };
+}
+
+/// Macro for argmax/argmin operations
+macro_rules! arg_op {
+    ($name:ident, $dispatch_name:ident) => {
+        #[pyfunction]
+        #[pyo3(signature = (a, dim = None))]
+        fn $name(a: &PyTensor, dim: Option<i32>) -> PyTensor {
+            let dim = dim.unwrap_or(0);
+            let args = [&a.inner, &dim_to_tensor(dim), &Tensor::from_scalar(1.0)];
+            PyTensor::from_tensor(dispatch_op(stringify!($dispatch_name), &args))
+        }
+    };
+}
+
+/// Macro for loss functions with common pattern
+macro_rules! loss_fn {
+    ($name:ident, $backward_type:ident) => {
+        #[pyfunction]
+        #[pyo3(signature = (pred, target, reduction = None))]
+        fn $name(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
+            let reduction = reduction.unwrap_or_else(|| "mean".to_string());
+            let reduction_code = match reduction.as_str() {
+                "none" => 0.0,
+                "mean" => 1.0,
+                "sum" => 2.0,
+                _ => 1.0,
+            };
+            let args = [&pred.inner, &target.inner, &Tensor::from_scalar(reduction_code)];
+            let output = dispatch_op(stringify!($name), &args);
+
+            wrap_loss_with_autograd(output, &pred.inner, || {
+                std::sync::Arc::new(autograd::$backward_type::new(
+                    pred.inner.clone(),
+                    target.inner.clone(),
+                    reduction,
+                    autograd::make_edge(&pred.inner),
+                ))
+            })
+        }
+    };
+}
+
 #[pyfunction]
 fn full_like(tensor: &PyTensor, value: f32) -> PyTensor {
     PyTensor::from_tensor(Tensor::full(
@@ -45,105 +112,11 @@ fn full_like(tensor: &PyTensor, value: f32) -> PyTensor {
     ))
 }
 
-#[pyfunction]
-fn add(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.add(&b.inner))
-}
-
-#[pyfunction]
-fn sub(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.sub(&b.inner))
-}
-
-#[pyfunction]
-fn mul(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.mul(&b.inner))
-}
-
-#[pyfunction]
-fn div(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.div(&b.inner))
-}
-
-#[pyfunction]
-fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.matmul(&b.inner))
-}
-
-#[pyfunction]
-fn batched_mlp_forward(
-    input: &PyTensor,
-    weights: Vec<PyTensor>,
-    biases: Vec<PyTensor>,
-    activations: Vec<String>,
-) -> PyTensor {
-    let mut x = input.inner.clone();
-
-    for i in 0..weights.len() {
-        let w = &weights[i].inner;
-        let b = biases.get(i).map(|b| &b.inner);
-
-        // PyTorch convention: weight is [out_features, in_features], so x @ w.T
-        x = x.matmul(&w.transpose(0, 1));
-        if let Some(bias) = b {
-            x = x.add(bias);
-        }
-
-        if i < activations.len() {
-            let act = &activations[i];
-            match act.as_str() {
-                "relu" => {
-                    x = dispatch_unary("relu", &x);
-                }
-                "sigmoid" => {
-                    x = dispatch_unary("sigmoid", &x);
-                }
-                "tanh" => {
-                    x = dispatch_unary("tanh", &x);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    PyTensor::from_tensor(x)
-}
-
-#[pyfunction]
-fn neg(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.neg()))
-}
-
-#[pyfunction]
-fn abs(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.abs()))
-}
-
-#[pyfunction]
-fn exp(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.exp()))
-}
-
-#[pyfunction]
-fn log(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.ln()))
-}
-
-#[pyfunction]
-fn sqrt(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.sqrt()))
-}
-
-#[pyfunction]
-fn relu(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.relu()))
-}
+// Binary operations using macro
+binary_op!(add, add);
+binary_op!(sub, sub);
+binary_op!(mul, mul);
+binary_op!(div, div);
 
 #[pyfunction]
 fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
@@ -203,28 +176,60 @@ fn fused_conv_bn_silu(
 }
 
 #[pyfunction]
-fn gelu(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.gelu()))
+fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(a.inner.matmul(&b.inner))
 }
 
 #[pyfunction]
-fn sigmoid(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.sigmoid()))
+fn batched_mlp_forward(
+    input: &PyTensor,
+    weights: Vec<PyTensor>,
+    biases: Vec<PyTensor>,
+    activations: Vec<String>,
+) -> PyTensor {
+    let mut x = input.inner.clone();
+
+    for i in 0..weights.len() {
+        let w = &weights[i].inner;
+        let b = biases.get(i).map(|b| &b.inner);
+
+        // PyTorch convention: weight is [out_features, in_features], so x @ w.T
+        x = x.matmul(&w.transpose(0, 1));
+        if let Some(bias) = b {
+            x = x.add(bias);
+        }
+
+        if i < activations.len() {
+            let act = &activations[i];
+            match act.as_str() {
+                "relu" => {
+                    x = dispatch_unary("relu", &x);
+                }
+                "sigmoid" => {
+                    x = dispatch_unary("sigmoid", &x);
+                }
+                "tanh" => {
+                    x = dispatch_unary("tanh", &x);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    PyTensor::from_tensor(x)
 }
 
-#[pyfunction]
-fn tanh(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.tanh()))
-}
-
-#[pyfunction]
-fn silu(py: Python<'_>, a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    py.detach(move || PyTensor::from_tensor(a_inner.silu()))
-}
+// Unary operations using macro
+unary_op!(neg, neg);
+unary_op!(abs, abs);
+unary_op!(exp, exp);
+unary_op!(log, ln);
+unary_op!(sqrt, sqrt);
+unary_op!(relu, relu);
+unary_op!(gelu, gelu);
+unary_op!(sigmoid, sigmoid);
+unary_op!(tanh, tanh);
+unary_op!(silu, silu);
 
 #[pyfunction]
 fn softmax(py: Python<'_>, a: &PyTensor, dim: i32) -> PyTensor {
@@ -234,7 +239,7 @@ fn softmax(py: Python<'_>, a: &PyTensor, dim: i32) -> PyTensor {
 
 #[pyfunction]
 fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    let args = [&a.inner, &Tensor::from_scalar(dim as f32)];
+    let args = [&a.inner, &dim_to_tensor(dim)];
     PyTensor::from_tensor(dispatch_op("log_softmax", &args))
 }
 
@@ -277,81 +282,19 @@ fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let dim = dim.unwrap_or(0);
     let args = [
         &a.inner,
-        &Tensor::from_scalar(dim as f32),
+        &dim_to_tensor(dim),
         &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
     ];
     PyTensor::from_tensor(dispatch_op("min", &args))
 }
 
-#[pyfunction]
-#[pyo3(signature = (a, dim = None))]
-fn argmax(a: &PyTensor, dim: Option<i32>) -> PyTensor {
-    let dim = dim.unwrap_or(0);
-    let args = [
-        &a.inner,
-        &Tensor::from_scalar(dim as f32),
-        &Tensor::from_scalar(1.0),
-    ];
-    PyTensor::from_tensor(dispatch_op("max", &args))
-}
+// Argmax and argmin using macro
+arg_op!(argmax, max);
+arg_op!(argmin, min);
 
-#[pyfunction]
-#[pyo3(signature = (a, dim = None))]
-fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
-    let dim = dim.unwrap_or(0);
-    let args = [
-        &a.inner,
-        &Tensor::from_scalar(dim as f32),
-        &Tensor::from_scalar(1.0),
-    ];
-    PyTensor::from_tensor(dispatch_op("min", &args))
-}
-
-#[pyfunction]
-#[pyo3(signature = (pred, target, reduction = None))]
-fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
-    let reduction = reduction.unwrap_or_else(|| "mean".to_string());
-    let reduction_code = match reduction.as_str() {
-        "none" => 0.0,
-        "mean" => 1.0,
-        "sum" => 2.0,
-        _ => 1.0,
-    };
-    let args = [&pred.inner, &target.inner, &Tensor::from_scalar(reduction_code)];
-    let output = dispatch_op("mse_loss", &args);
-
-    wrap_loss_with_autograd(output, &pred.inner, || {
-        std::sync::Arc::new(autograd::MSELossBackward::new(
-            pred.inner.clone(),
-            target.inner.clone(),
-            reduction,
-            autograd::make_edge(&pred.inner),
-        ))
-    })
-}
-
-#[pyfunction]
-#[pyo3(signature = (pred, target, reduction = None))]
-fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
-    let reduction = reduction.unwrap_or_else(|| "mean".to_string());
-    let reduction_code = match reduction.as_str() {
-        "none" => 0.0,
-        "mean" => 1.0,
-        "sum" => 2.0,
-        _ => 1.0,
-    };
-    let args = [&pred.inner, &target.inner, &Tensor::from_scalar(reduction_code)];
-    let output = dispatch_op("cross_entropy_loss", &args);
-
-    wrap_loss_with_autograd(output, &pred.inner, || {
-        std::sync::Arc::new(autograd::CrossEntropyBackward::new(
-            pred.inner.clone(),
-            target.inner.clone(),
-            reduction,
-            autograd::make_edge(&pred.inner),
-        ))
-    })
-}
+// Loss functions using macro
+loss_fn!(mse_loss, MSELossBackward);
+loss_fn!(cross_entropy_loss, CrossEntropyBackward);
 
 #[pyfunction]
 fn _no_grad_enter() {
@@ -454,9 +397,6 @@ fn pow(a: &PyTensor, exponent: f32) -> PyTensor {
 #[pyfunction]
 #[allow(clippy::needless_range_loop)]
 fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
-    // Optimized implementation: average gradients across replicas
-    // param_groups is a list of parameter lists, one per replica
-
     if param_groups.is_empty() {
         return Ok(());
     }
@@ -473,52 +413,37 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
         }
     }
 
-    // Pre-allocate gradients vector to avoid repeated allocations
-    let mut gradients = Vec::with_capacity(num_replicas);
-
     // For each parameter index, average gradients across replicas
     for param_idx in 0..num_params {
-        // Clear gradients vector for reuse (keeps capacity)
-        gradients.clear();
-
         // Collect gradients from all replicas
+        let mut gradients: Vec<core_tensor::Tensor> = Vec::with_capacity(num_replicas);
         let mut all_have_grad = true;
         for replica_idx in 0..num_replicas {
             let param = &param_groups[replica_idx][param_idx];
             if let Some(grad) = param.grad() {
                 gradients.push(grad.inner.clone());
             } else {
-                // If any replica has no gradient, skip this parameter
                 all_have_grad = false;
                 break;
             }
         }
 
-        if !all_have_grad {
+        if !all_have_grad || gradients.len() != num_replicas {
             continue;
         }
 
-        // If we collected gradients from all replicas, average them
-        if gradients.len() == num_replicas {
-            // Compute average gradient: sum all gradients and divide by num_replicas
-            // Start with first gradient as base, accumulate in-place
-            let mut avg_grad = gradients[0].clone();
+        // Compute average gradient in-place
+        let mut avg_grad = gradients[0].clone();
+        for i in 1..gradients.len() {
+            avg_grad.add_(&gradients[i]);
+        }
+        avg_grad.mul_scalar_(1.0 / num_replicas as f32);
 
-            // Add remaining gradients in-place (skip first since it's already in avg_grad)
-            for i in 1..gradients.len() {
-                avg_grad.add_(&gradients[i]);
-            }
-
-            // Divide by number of replicas in-place
-            avg_grad.mul_scalar_(1.0 / num_replicas as f32);
-
-            // Set the averaged gradient back to all parameters
-            // Create the PyTensor once and reuse for all replicas
-            let avg_grad_py = PyTensor::from_tensor(avg_grad.clone());
-            for replica_idx in 0..num_replicas {
-                let param = &mut param_groups[replica_idx][param_idx];
-                param.set_grad(Some(avg_grad_py.clone()));
-            }
+        // Set the averaged gradient to all parameters (share the same tensor via Arc)
+        let avg_grad_arc = avg_grad;
+        for replica_idx in 0..num_replicas {
+            let param = &mut param_groups[replica_idx][param_idx];
+            param.set_grad(Some(PyTensor::from_tensor(avg_grad_arc.clone())));
         }
     }
 

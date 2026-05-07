@@ -1,7 +1,7 @@
 """Module protocol for fastnn layers and models."""
 
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 
 class Module(ABC):

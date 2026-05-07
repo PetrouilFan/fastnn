@@ -2,18 +2,34 @@ import os
 import numpy as np
 import fastnn as fnn
 
+# Default CSV fields for CSVLogger
+DEFAULT_CSV_FIELDS = [
+    "epoch",
+    "loss",
+    "val_loss",
+    "accuracy",
+    "val_accuracy",
+    "lr",
+]
+
 
 class Callback:
-    def on_epoch_begin(self, epoch, logs):
+    def on_train_begin(self, logs=None):
         pass
 
-    def on_epoch_end(self, epoch, logs):
+    def on_train_end(self, logs=None):
         pass
 
-    def on_batch_begin(self, batch, logs):
+    def on_epoch_begin(self, epoch, logs=None):
         pass
 
-    def on_batch_end(self, batch, logs):
+    def on_epoch_end(self, epoch, logs=None):
+        pass
+
+    def on_batch_begin(self, batch, logs=None):
+        pass
+
+    def on_batch_end(self, batch, logs=None):
         pass
 
 
@@ -26,7 +42,20 @@ class MonitorCallback(Callback):
 
     def get_monitor_value(self, logs):
         """Get the monitor value from logs."""
+        if logs is None:
+            return None
         return logs.get(self.monitor)
+
+    def _check_monitor(self, logs):
+        """Check monitor value and return (value, should_continue).
+        
+        Returns:
+            tuple: (value, should_continue) where should_continue is False if value is None
+        """
+        value = self.get_monitor_value(logs)
+        if value is None:
+            return None, False
+        return value, True
 
 
 class ModelCheckpoint(MonitorCallback):
@@ -46,9 +75,9 @@ class ModelCheckpoint(MonitorCallback):
         self.best_value = None
         self.should_save = False
 
-    def on_epoch_end(self, epoch, logs):
-        value = self.get_monitor_value(logs)
-        if value is None:
+    def on_epoch_end(self, epoch, logs=None):
+        value, should_continue = self._check_monitor(logs)
+        if not should_continue:
             return
 
         is_best = False
@@ -95,9 +124,9 @@ class EarlyStopping(MonitorCallback):
         self.best_weights = None
         self.should_stop = False
 
-    def on_epoch_end(self, epoch, logs):
-        value = self.get_monitor_value(logs)
-        if value is None:
+    def on_epoch_end(self, epoch, logs=None):
+        value, should_continue = self._check_monitor(logs)
+        if not should_continue:
             return
 
         if self.best_value is None:
@@ -117,10 +146,9 @@ class EarlyStopping(MonitorCallback):
                 print(f"Early stopping triggered at epoch {epoch}!")
                 self.should_stop = True
 
-    def on_train_end(self, model):
+    def on_train_end(self, logs=None):
         if self.restore_best_weights and self.best_weights is not None:
             print("Restoring best model weights...")
-            # Model should handle restoring weights
 
 
 class LearningRateScheduler(Callback):
@@ -162,41 +190,32 @@ class LearningRateScheduler(Callback):
             # Assume scheduler is a scheduler object
             self.scheduler = scheduler
 
-    def on_epoch_end(self, epoch, logs):
+    def on_epoch_end(self, epoch, logs=None):
         """Update learning rate and log the new value."""
         new_lr = self.scheduler.step()
-        logs["lr"] = new_lr
+        if logs is not None:
+            logs["lr"] = new_lr
 
 
 class CSVLogger(Callback):
     def __init__(self, filepath, fields=None):
         self.filepath = filepath
-        self.fields = fields
+        self.fields = fields if fields is not None else DEFAULT_CSV_FIELDS
         self._file = None
         self._initialized = False
 
-    def on_train_begin(self, logs):
+    def on_train_begin(self, logs=None):
         if self._initialized:
             return
         mode = "a" if os.path.exists(self.filepath) else "w"
         self._file = open(self.filepath, mode)
-
-        if self.fields is None:
-            self.fields = [
-                "epoch",
-                "loss",
-                "val_loss",
-                "accuracy",
-                "val_accuracy",
-                "lr",
-            ]
 
         if mode == "w":
             self._file.write(",".join(self.fields) + "\n")
 
         self._initialized = True
 
-    def on_epoch_end(self, epoch, logs):
+    def on_epoch_end(self, epoch, logs=None):
         if not self._initialized:
             return
 
@@ -204,10 +223,10 @@ class CSVLogger(Callback):
         self._file.write(",".join(values) + "\n")
         self._file.flush()
 
-    def on_train_end(self, logs):
+    def on_train_end(self, logs=None):
         if self._file:
             self._file.close()
             self._file = None
 
     def __del__(self):
-        self.on_train_end(None)
+        self.on_train_end()

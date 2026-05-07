@@ -1,6 +1,11 @@
-use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState, WeightDecayOptimizer, zeros_like};
+use crate::optim::{
+    apply_weight_decay, get_grad, Optimizer, OptimizerState, ParamGroup,
+    ParamState, WeightDecayOptimizer, WeightDecayType, zeros_like,
+};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
+
+use crate::impl_params_mut;
 
 pub struct AdamW {
     pub params: Vec<Tensor>,
@@ -67,9 +72,7 @@ impl WeightDecayOptimizer for AdamW {
 }
 
 impl Optimizer for AdamW {
-    fn params_mut(&mut self) -> &mut Vec<Tensor> {
-        &mut self.params
-    }
+    impl_params_mut!();
 
     fn step(&mut self) {
         let beta1 = self.betas.0 as f32;
@@ -79,7 +82,7 @@ impl Optimizer for AdamW {
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = param.grad() {
+            let grad = if let Some(g) = get_grad(param) {
                 g
             } else {
                 continue;
@@ -96,12 +99,13 @@ impl Optimizer for AdamW {
             let m = &mut self.m[i];
             let v = &mut self.v[i];
 
-            let g = grad.mul_scalar(beta1_c);
-            let m_update = m.mul_scalar(beta1).add(&g);
+            // m = beta1 * m + (1 - beta1) * grad
+            let m_update = m.mul_scalar(beta1).add(&grad.mul_scalar(beta1_c));
             *m = m_update;
 
-            let g_sq = grad.pow(2.0);
-            let v_update = v.mul_scalar(beta2).add(&g_sq.mul_scalar(beta2_c));
+            // v = beta2 * v + (1 - beta2) * grad^2
+            let grad_sq = grad.pow(2.0);
+            let v_update = v.mul_scalar(beta2).add(&grad_sq.mul_scalar(beta2_c));
             *v = v_update;
 
             let bias_correction1 = self.bias_correction1[i] as f32;
@@ -114,10 +118,11 @@ impl Optimizer for AdamW {
 
             let no_decay = self.no_decay.get(i).copied().unwrap_or(false);
             if weight_decay != 0.0 && !no_decay {
-                let p_update = param.mul_scalar(1.0 - lr * weight_decay);
-                param.clone_from(&p_update.sub(&update.mul_scalar(lr)));
+                // Decoupled weight decay
+                param.mul_scalar_(1.0 - lr * weight_decay);
+                param.sub_(&update.mul_scalar(lr));
             } else {
-                param.clone_from(&param.sub(&update.mul_scalar(lr)));
+                param.sub_(&update.mul_scalar(lr));
             }
 
             param.set_grad(None);
