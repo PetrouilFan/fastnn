@@ -331,7 +331,7 @@ Load pretrained PyTorch models and run inference through fastnn.
 ```python
 import torch
 import torchvision.models as models
-from fastnn.export import export_pytorch_model, load_fnn_model
+from fastnn.io import export_pytorch_model, load_fnn_model
 
 # Export
 model = models.resnet18(pretrained=True)

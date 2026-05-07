@@ -130,6 +130,32 @@ thread_local! {
     };
 }
 
+/// Generic GPU fallback wrapper: moves inputs to CPU, computes, moves result back to GPU.
+/// Extracts device_id from the first GPU tensor in args.
+pub fn gpu_fallback<F>(args: &[&Tensor], compute: F) -> Vec<Tensor>
+where
+    F: FnOnce(&[&Tensor]) -> Vec<Tensor>,
+{
+    // Convert all inputs to CPU
+    let cpu_args: Vec<Tensor> = args.iter().map(|t| t.to_cpu()).collect();
+    let cpu_refs: Vec<&Tensor> = cpu_args.iter().collect();
+
+    // Compute on CPU
+    let results = compute(&cpu_refs);
+
+    // Find the device_id from the first GPU tensor in original args
+    let device_id = args
+        .iter()
+        .find_map(|t| match t.inner.storage.as_ref() {
+            Storage::Wgpu(gpu) => Some(gpu.device_id),
+            _ => None,
+        })
+        .unwrap_or(0); // Default to device 0 if no GPU tensor found
+
+    // Move results back to GPU
+    results.into_iter().map(|r| r.to_gpu(device_id)).collect()
+}
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
 
@@ -974,21 +1000,7 @@ fn register_kernels() {
 
     // GPU fallback for cross_entropy_loss (moves to CPU for computation)
     fn cross_entropy_loss_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
-        // Move inputs to CPU, compute, then move result back to GPU
-        let pred_cpu = args[0].to_cpu();
-        let target_cpu = args[1].to_cpu();
-        let reduction_code = args[2].item();
-
-        // Create CPU tensors for dispatch
-        let cpu_args = [&pred_cpu, &target_cpu, &Tensor::from_scalar(reduction_code)];
-        let result = unsafe { cross_entropy_loss_kernel(&cpu_args) };
-
-        // Move result back to original GPU
-        let device_id = match args[0].inner.storage.as_ref() {
-            Storage::Wgpu(gpu) => gpu.device_id,
-            _ => 0,
-        };
-        vec![result[0].to_gpu(device_id)]
+        gpu_fallback(args, |cpu_args| unsafe { cross_entropy_loss_kernel(cpu_args) })
     }
 
     register(
@@ -1053,15 +1065,7 @@ fn register_kernels() {
 
     // GPU fallback for gt_scalar (moves to CPU for computation)
     fn gt_scalar_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
-        let input_cpu = args[0].to_cpu();
-        let threshold = args[1].item();
-        let result_cpu = unsafe { gt_scalar_kernel(&[&input_cpu, &Tensor::from_scalar(threshold)]) };
-
-        let device_id = match args[0].inner.storage.as_ref() {
-            Storage::Wgpu(gpu) => gpu.device_id,
-            _ => 0,
-        };
-        vec![result_cpu[0].to_gpu(device_id)]
+        gpu_fallback(args, |cpu_args| unsafe { gt_scalar_kernel(cpu_args) })
     }
 
     register(

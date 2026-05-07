@@ -6,7 +6,7 @@ import struct
 from typing import Any, Tuple, Optional
 
 from fastnn._common import first_or_self
-from fastnn.serialization_utils import write_tensor, read_tensor
+from fastnn.io import write_tensor, read_tensor
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,39 @@ def load_tensor_to_layer(tensors, name, layer, setter_method):
         setter_method(fnn.tensor(arr, arr.shape))
         return True
     return False
+
+
+def extract_module_parameters(module, name, param_names):
+    """Extract multiple parameters from a module."""
+    result = []
+    for param_name in param_names:
+        arr = extract_tensor(module, param_name)
+        if arr is not None:
+            result.append((f"{name}.{param_name}", arr))
+    return result
+
+
+def get_conv2d_config(module):
+    """Get Conv2d configuration as a dictionary."""
+    return {
+        "in_channels": module.in_channels,
+        "out_channels": module.out_channels,
+        "kernel_size": first_or_self(module.kernel_size),
+        "stride": first_or_self(module.stride),
+        "padding": first_or_self(module.padding),
+        "dilation": first_or_self(module.dilation),
+        "groups": module.groups,
+        "bias": module.bias is not None,
+    }
+
+
+def get_batchnorm_config(module):
+    """Get BatchNorm configuration as a dictionary."""
+    return {
+        "num_features": module.num_features,
+        "eps": module.eps,
+        "momentum": module.momentum,
+    }
 
 
 def export_pytorch_model(
@@ -105,49 +138,18 @@ def export_pytorch_model(
             layer_info["in_features"] = module.in_features
             layer_info["out_features"] = module.out_features
             layer_info["bias"] = module.bias is not None
-            weight = extract_tensor(module, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.weight", weight))
-            bias = extract_tensor(module, 'bias')
-            if bias is not None:
-                parameters.append((f"{name}.bias", bias))
+            parameters.extend(extract_module_parameters(module, name, ["weight", "bias"]))
 
         elif isinstance(module, torch.nn.Conv2d):
-            layer_info["in_channels"] = module.in_channels
-            layer_info["out_channels"] = module.out_channels
-            layer_info["kernel_size"] = first_or_self(module.kernel_size)
-            layer_info["stride"] = first_or_self(module.stride)
-            layer_info["padding"] = first_or_self(module.padding)
-            layer_info["dilation"] = first_or_self(module.dilation)
-            layer_info["groups"] = module.groups
-            layer_info["bias"] = module.bias is not None
-            weight = extract_tensor(module, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.weight", weight))
-            bias = extract_tensor(module, 'bias')
-            if bias is not None:
-                parameters.append((f"{name}.bias", bias))
+            layer_info.update(get_conv2d_config(module))
+            parameters.extend(extract_module_parameters(module, name, ["weight", "bias"]))
 
         elif isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
             # Map BatchNorm2d to BatchNorm1d (fastnn only has BatchNorm1d)
             layer_info["type"] = "BatchNorm1d"
-            layer_info["num_features"] = module.num_features
-            layer_info["eps"] = module.eps
-            layer_info["momentum"] = module.momentum
+            layer_info.update(get_batchnorm_config(module))
             layer_info["affine"] = module.affine
-            weight = extract_tensor(module, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.weight", weight))
-            bias = extract_tensor(module, 'bias')
-            if bias is not None:
-                parameters.append((f"{name}.bias", bias))
-            # running_mean and running_var are also needed for inference
-            running_mean = extract_tensor(module, 'running_mean')
-            if running_mean is not None:
-                parameters.append((f"{name}.running_mean", running_mean))
-            running_var = extract_tensor(module, 'running_var')
-            if running_var is not None:
-                parameters.append((f"{name}.running_var", running_var))
+            parameters.extend(extract_module_parameters(module, name, ["weight", "bias", "running_mean", "running_var"]))
 
         elif isinstance(module, torch.nn.LayerNorm):
             layer_info["type"] = "LayerNorm"
@@ -159,20 +161,13 @@ def export_pytorch_model(
                 layer_info["normalized_shape"] = module.normalized_shape[0]
             layer_info["eps"] = module.eps
             layer_info["elementwise_affine"] = module.elementwise_affine
-            weight = extract_tensor(module, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.weight", weight))
-            bias = extract_tensor(module, 'bias')
-            if bias is not None:
-                parameters.append((f"{name}.bias", bias))
+            parameters.extend(extract_module_parameters(module, name, ["weight", "bias"]))
 
         elif isinstance(module, torch.nn.Embedding):
             layer_info["type"] = "Embedding"
             layer_info["num_embeddings"] = module.num_embeddings
             layer_info["embedding_dim"] = module.embedding_dim
-            weight = extract_tensor(module, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.weight", weight))
+            parameters.extend(extract_module_parameters(module, name, ["weight"]))
 
         elif isinstance(module, torch.nn.ReLU):
             layer_info["type"] = "ReLU"
@@ -223,170 +218,51 @@ def export_pytorch_model(
             conv2 = module.conv2
             bn2 = module.bn2
 
-            # Collect parameters for sub-layers using extract_tensor helper
-            # conv1
-            weight = extract_tensor(conv1, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.conv1.weight", weight))
-            bias = extract_tensor(conv1, 'bias')
-            if bias is not None:
-                parameters.append((f"{name}.conv1.bias", bias))
+            # Collect parameters for sub-layers using helper
+            parameters.extend(extract_module_parameters(conv1, f"{name}.conv1", ["weight", "bias"]))
+            parameters.extend(extract_module_parameters(bn1, f"{name}.bn1", ["weight", "bias", "running_mean", "running_var"]))
+            parameters.extend(extract_module_parameters(conv2, f"{name}.conv2", ["weight", "bias"]))
+            parameters.extend(extract_module_parameters(bn2, f"{name}.bn2", ["weight", "bias", "running_mean", "running_var"]))
 
-            # bn1
-            weight = extract_tensor(bn1, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.bn1.weight", weight))
-            bias = extract_tensor(bn1, 'bias')
-            if bias is not None:
-                parameters.append((f"{name}.bn1.bias", bias))
-            running_mean = extract_tensor(bn1, 'running_mean')
-            if running_mean is not None:
-                parameters.append((f"{name}.bn1.running_mean", running_mean))
-            running_var = extract_tensor(bn1, 'running_var')
-            if running_var is not None:
-                parameters.append((f"{name}.bn1.running_var", running_var))
+            # Store conv1 config using helper
+            conv1_config = get_conv2d_config(conv1)
+            for key, val in conv1_config.items():
+                layer_info[f"conv1_{key}"] = val
 
-            # conv2
-            weight = extract_tensor(conv2, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.conv2.weight", weight))
-            bias = extract_tensor(conv2, 'bias')
-            if bias is not None:
-                parameters.append((f"{name}.conv2.bias", bias))
+            # Store bn1 config using helper
+            bn1_config = get_batchnorm_config(bn1)
+            for key, val in bn1_config.items():
+                layer_info[f"bn1_{key}"] = val
 
-            # bn2
-            weight = extract_tensor(bn2, 'weight')
-            if weight is not None:
-                parameters.append((f"{name}.bn2.weight", weight))
-            bias = extract_tensor(bn2, 'bias')
-            if bias is not None:
-                parameters.append((f"{name}.bn2.bias", bias))
-            running_mean = extract_tensor(bn2, 'running_mean')
-            if running_mean is not None:
-                parameters.append((f"{name}.bn2.running_mean", running_mean))
-            running_var = extract_tensor(bn2, 'running_var')
-            if running_var is not None:
-                parameters.append((f"{name}.bn2.running_var", running_var))
+            # Store conv2 config using helper
+            conv2_config = get_conv2d_config(conv2)
+            for key, val in conv2_config.items():
+                layer_info[f"conv2_{key}"] = val
 
-            # downsample
-            if hasattr(module, "downsample") and module.downsample is not None:
-                try:
-                    downsample_layers = list(module.downsample)  # type: ignore
-                    for i, sub_mod in enumerate(downsample_layers):
-                        if isinstance(sub_mod, torch.nn.Conv2d):
-                            weight = extract_tensor(sub_mod, 'weight')
-                            if weight is not None:
-                                parameters.append(
-                                    (f"{name}.downsample.{i}.weight", weight)
-                                )
-                            bias = extract_tensor(sub_mod, 'bias')
-                            if bias is not None:
-                                parameters.append(
-                                    (f"{name}.downsample.{i}.bias", bias)
-                                )
-                        elif isinstance(sub_mod, torch.nn.BatchNorm2d):
-                            weight = extract_tensor(sub_mod, 'weight')
-                            if weight is not None:
-                                parameters.append(
-                                    (f"{name}.downsample.{i}.weight", weight)
-                                )
-                            bias = extract_tensor(sub_mod, 'bias')
-                            if bias is not None:
-                                parameters.append(
-                                    (f"{name}.downsample.{i}.bias", bias)
-                                )
-                            running_mean = extract_tensor(sub_mod, 'running_mean')
-                            if running_mean is not None:
-                                parameters.append(
-                                    (f"{name}.downsample.{i}.running_mean", running_mean)
-                                )
-                            running_var = extract_tensor(sub_mod, 'running_var')
-                            if running_var is not None:
-                                parameters.append(
-                                    (f"{name}.downsample.{i}.running_var", running_var)
-                                )
-                except TypeError:
-                    # Not iterable
-                    pass
+            # Store bn2 config using helper
+            bn2_config = get_batchnorm_config(bn2)
+            for key, val in bn2_config.items():
+                layer_info[f"bn2_{key}"] = val
 
-            # Store conv1 config
-            layer_info["conv1_in_channels"] = conv1.in_channels
-            layer_info["conv1_out_channels"] = conv1.out_channels
-            layer_info["conv1_kernel_size"] = first_or_self(conv1.kernel_size)
-            layer_info["conv1_stride"] = first_or_self(conv1.stride)
-            layer_info["conv1_padding"] = first_or_self(conv1.padding)
-            layer_info["conv1_dilation"] = first_or_self(conv1.dilation)
-            layer_info["conv1_groups"] = conv1.groups
-            layer_info["conv1_bias"] = conv1.bias is not None
-
-            # Store bn1 config
-            layer_info["bn1_num_features"] = bn1.num_features
-            layer_info["bn1_eps"] = bn1.eps
-            layer_info["bn1_momentum"] = bn1.momentum
-
-            # Store conv2 config
-            layer_info["conv2_in_channels"] = conv2.in_channels
-            layer_info["conv2_out_channels"] = conv2.out_channels
-            layer_info["conv2_kernel_size"] = first_or_self(conv2.kernel_size)
-            layer_info["conv2_stride"] = first_or_self(conv2.stride)
-            layer_info["conv2_padding"] = first_or_self(conv2.padding)
-            layer_info["conv2_dilation"] = first_or_self(conv2.dilation)
-            layer_info["conv2_groups"] = conv2.groups
-            layer_info["conv2_bias"] = conv2.bias is not None
-
-            # Store bn2 config
-            layer_info["bn2_num_features"] = bn2.num_features
-            layer_info["bn2_eps"] = bn2.eps
-            layer_info["bn2_momentum"] = bn2.momentum
-
-            # Check for downsample
+            # Handle downsample
             if hasattr(module, "downsample") and module.downsample is not None:
                 layer_info["downsample"] = f"{name}.downsample"
-                # Try to store downsample config (it's typically a Sequential)
                 try:
                     downsample_layers = list(module.downsample)  # type: ignore
                     layer_info["downsample_num_layers"] = len(downsample_layers)
-                    # Store configurations for downsample sub-layers
                     for i, sub_mod in enumerate(downsample_layers):
                         if isinstance(sub_mod, torch.nn.Conv2d):
                             layer_info[f"downsample_{i}_type"] = "Conv2d"
-                            layer_info[f"downsample_{i}_in_channels"] = (
-                                sub_mod.in_channels
-                            )
-                            layer_info[f"downsample_{i}_out_channels"] = (
-                                sub_mod.out_channels
-                            )
-                            layer_info[f"downsample_{i}_kernel_size"] = (
-                                sub_mod.kernel_size[0]
-                                if isinstance(sub_mod.kernel_size, tuple)
-                                else sub_mod.kernel_size
-                            )
-                            layer_info[f"downsample_{i}_stride"] = (
-                                sub_mod.stride[0]
-                                if isinstance(sub_mod.stride, tuple)
-                                else sub_mod.stride
-                            )
-                            layer_info[f"downsample_{i}_padding"] = (
-                                sub_mod.padding[0]
-                                if isinstance(sub_mod.padding, tuple)
-                                else sub_mod.padding
-                            )
-                            layer_info[f"downsample_{i}_dilation"] = (
-                                sub_mod.dilation[0]
-                                if isinstance(sub_mod.dilation, tuple)
-                                else sub_mod.dilation
-                            )
-                            layer_info[f"downsample_{i}_groups"] = sub_mod.groups
-                            layer_info[f"downsample_{i}_bias"] = (
-                                sub_mod.bias is not None
-                            )
+                            config = get_conv2d_config(sub_mod)
+                            for key, val in config.items():
+                                layer_info[f"downsample_{i}_{key}"] = val
+                            parameters.extend(extract_module_parameters(sub_mod, f"{name}.downsample.{i}", ["weight", "bias"]))
                         elif isinstance(sub_mod, torch.nn.BatchNorm2d):
                             layer_info[f"downsample_{i}_type"] = "BatchNorm2d"
-                            layer_info[f"downsample_{i}_num_features"] = (
-                                sub_mod.num_features
-                            )
-                            layer_info[f"downsample_{i}_eps"] = sub_mod.eps
-                            layer_info[f"downsample_{i}_momentum"] = sub_mod.momentum
+                            config = get_batchnorm_config(sub_mod)
+                            for key, val in config.items():
+                                layer_info[f"downsample_{i}_{key}"] = val
+                            parameters.extend(extract_module_parameters(sub_mod, f"{name}.downsample.{i}", ["weight", "bias", "running_mean", "running_var"]))
                 except TypeError:
                     pass
 
@@ -398,8 +274,6 @@ def export_pytorch_model(
             processed_names.add(f"{name}.bn2")
             if hasattr(module, "downsample") and module.downsample is not None:
                 processed_names.add(f"{name}.downsample")
-                # Also mark downsample sub-modules
-                # downsample is typically a Sequential (or iterable)
                 try:
                     downsample_layers = list(module.downsample)  # type: ignore
                     for i in range(len(downsample_layers)):
@@ -468,6 +342,19 @@ def export_pytorch_model(
 def save_fnn_model(model, path: str) -> None:
     """Export a fastnn model to .fnn format (alias for export_pytorch_model)."""
     export_pytorch_model(model, path)
+
+
+def get_param_setter(layer, param_name):
+    """Get the appropriate setter method for a parameter."""
+    if param_name == "weight":
+        return getattr(layer, "set_weight", None)
+    elif param_name == "bias":
+        return getattr(layer, "set_bias", None)
+    elif param_name == "running_mean":
+        return getattr(layer, "set_running_mean", None)
+    elif param_name == "running_var":
+        return getattr(layer, "set_running_var", None)
+    return None
 
 
 def load_fnn_model(path: str) -> Any:
@@ -780,59 +667,32 @@ def load_fnn_model(path: str) -> Any:
                 elif param_name == "bias":
                     load_tensor_to_layer(tensors, f"{layer_prefix}.bias", layer, layer.set_bias)
             elif ltype == "BasicBlock":
-                # Use load_tensor_to_layer helper for BasicBlock sub-layers
-                if param_name == "weight":
-                    if "conv1" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.conv1, layer.conv1.set_weight)
-                    elif "conv2" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.conv2, layer.conv2.set_weight)
-                    elif "bn1" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.bn1, layer.bn1.set_weight)
-                    elif "bn2" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.bn2, layer.bn2.set_weight)
-                    elif "downsample" in layer_prefix:
-                        parts = layer_prefix.split(".")
-                        if len(parts) >= 3 and parts[-1].isdigit():
-                            idx = int(parts[-1])
-                            if layer.downsample and idx < len(layer.downsample.layers):
-                                load_tensor_to_layer(tensors, tensor_name, layer.downsample.layers[idx], layer.downsample.layers[idx].set_weight)
-                elif param_name == "bias":
-                    if "conv1" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.conv1, layer.conv1.set_bias)
-                    elif "conv2" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.conv2, layer.conv2.set_bias)
-                    elif "bn1" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.bn1, layer.bn1.set_bias)
-                    elif "bn2" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.bn2, layer.bn2.set_bias)
-                    elif "downsample" in layer_prefix:
-                        parts = layer_prefix.split(".")
-                        if len(parts) >= 3 and parts[-1].isdigit():
-                            idx = int(parts[-1])
-                            if layer.downsample and idx < len(layer.downsample.layers):
-                                load_tensor_to_layer(tensors, tensor_name, layer.downsample.layers[idx], layer.downsample.layers[idx].set_bias)
-                elif param_name == "running_mean":
-                    if "bn1" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.bn1, layer.bn1.set_running_mean)
-                    elif "bn2" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.bn2, layer.bn2.set_running_mean)
-                    elif "downsample" in layer_prefix:
-                        parts = layer_prefix.split(".")
-                        if len(parts) >= 3 and parts[-1].isdigit():
-                            idx = int(parts[-1])
-                            if layer.downsample and idx < len(layer.downsample.layers):
-                                load_tensor_to_layer(tensors, tensor_name, layer.downsample.layers[idx], layer.downsample.layers[idx].set_running_mean)
-                elif param_name == "running_var":
-                    if "bn1" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.bn1, layer.bn1.set_running_var)
-                    elif "bn2" in layer_prefix:
-                        load_tensor_to_layer(tensors, tensor_name, layer.bn2, layer.bn2.set_running_var)
-                    elif "downsample" in layer_prefix:
-                        parts = layer_prefix.split(".")
-                        if len(parts) >= 3 and parts[-1].isdigit():
-                            idx = int(parts[-1])
-                            if layer.downsample and idx < len(layer.downsample.layers):
-                                load_tensor_to_layer(tensors, tensor_name, layer.downsample.layers[idx], layer.downsample.layers[idx].set_running_var)
+                # Determine which sub-layer this tensor belongs to
+                parts = tensor_name.split(".")
+                if len(parts) >= 2:
+                    sub_layer_name = parts[-2]  # e.g., "conv1", "bn1", "conv2", "bn2"
+                    sub_layer = None
+                    if sub_layer_name == "conv1":
+                        sub_layer = layer.conv1
+                    elif sub_layer_name == "bn1":
+                        sub_layer = layer.bn1
+                    elif sub_layer_name == "conv2":
+                        sub_layer = layer.conv2
+                    elif sub_layer_name == "bn2":
+                        sub_layer = layer.bn2
+                    elif "downsample" in parts:
+                        # Handle downsample sub-layers
+                        try:
+                            idx = int(parts[-2]) if parts[-2].isdigit() else -1
+                            if idx >= 0 and layer.downsample and idx < len(layer.downsample.layers):
+                                sub_layer = layer.downsample.layers[idx]
+                        except (ValueError, IndexError):
+                            pass
+
+                    if sub_layer is not None:
+                        setter = get_param_setter(sub_layer, param_name)
+                        if setter:
+                            setter(fnn.tensor(tensors[tensor_name], tensors[tensor_name].shape))
             elif ltype == "Conv2d":
                 if param_name == "weight":
                     load_tensor_to_layer(tensors, f"{layer_prefix}.weight", layer, layer.set_weight)

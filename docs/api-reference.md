@@ -1,12 +1,26 @@
 # API Reference
 
-The stable public API remains available from `import fastnn as fnn`. New code may also import narrower facade modules:
+The stable public API is available from `import fastnn as fnn`. All tensor operations, layers, and losses are accessible directly from the `fastnn` module:
 
 ```python
-from fastnn.tensor import tensor, zeros, randn
-from fastnn.ops import matmul, relu, softmax
-from fastnn.nn import Linear, Conv2d, Sequential
-from fastnn.losses import mse_loss, cross_entropy_loss
+import fastnn as fnn
+
+# Tensor creation
+x = fnn.tensor([1, 2, 3])
+y = fnn.zeros([10, 20])
+z = fnn.randn([5, 5])
+
+# Operations
+result = fnn.matmul(a, b)
+activated = fnn.relu(x)
+probs = fnn.softmax(logits)
+
+# Layers
+layer = fnn.Linear(10, 20)
+conv = fnn.Conv2d(3, 16, 3)
+
+# Losses
+loss = fnn.mse_loss(pred, target)
 ```
 
 ## Tensor Creation

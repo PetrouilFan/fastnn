@@ -6,7 +6,7 @@ use crate::optim::{self as core_optim, Optimizer};
 use crate::storage::allocator_stats as storage_allocator_stats;
 use crate::storage::{DType, Device};
 use crate::tensor::{self as core_tensor, Tensor};
-use crate::{autograd, dispatcher, io as core_io, residual, set_seeded_rng};
+use crate::{autograd, dispatcher, residual, set_seeded_rng};
 use parking_lot::RwLock;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -68,16 +68,16 @@ pyo3::create_exception!(
 );
 
 // Thread-local default device storage
-static DEFAULT_DEVICE: OnceLock<RwLock<Device>> = OnceLock::new();
+pub(crate) static DEFAULT_DEVICE: OnceLock<RwLock<Device>> = OnceLock::new();
 
-fn get_default_device() -> Device {
+pub(crate) fn get_default_device() -> Device {
     let guard = DEFAULT_DEVICE
         .get_or_init(|| RwLock::new(Device::Cpu))
         .read();
     *guard
 }
 
-fn set_default_device_internal(device: Device) {
+pub(crate) fn set_default_device_internal(device: Device) {
     let mut guard = DEFAULT_DEVICE
         .get_or_init(|| RwLock::new(Device::Cpu))
         .write();
@@ -116,9 +116,8 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
      m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
 
-    m.add_function(wrap_pyfunction!(tensor_factory, py)?)?;
-    m.add_function(wrap_pyfunction!(tensor_from_list, py)?)?;
-    m.add_function(wrap_pyfunction!(zeros, py)?)?;
+     m.add_function(wrap_pyfunction!(tensor_factory, py)?)?;
+     m.add_function(wrap_pyfunction!(zeros, py)?)?;
     m.add_function(wrap_pyfunction!(empty, py)?)?;
     m.add_function(wrap_pyfunction!(ones, py)?)?;
     m.add_function(wrap_pyfunction!(full, py)?)?;

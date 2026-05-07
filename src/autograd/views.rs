@@ -186,27 +186,31 @@ impl CheckpointNode {
 
 impl Node for CheckpointNode {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        // Temporarily enable gradient tracking to recompute forward pass with computation graph
+        // For gradient checkpointing, we need to recompute the forward pass
+        // WITH gradient tracking to build a computation graph for backward.
+        // Save current gradient state and ensure gradients are enabled.
         let prev_grad_enabled = is_grad_enabled();
-        no_grad_enter();
-        
-        // Recompute the forward pass, storing outputs
-        let recomputed_outputs = (self.checkpoint_fn)(&self.inputs);
-        
-        // Restore previous gradient tracking state immediately after recomputation
-        if prev_grad_enabled {
-            // Do nothing - we already entered no_grad state
-        } else {
-            no_grad_exit(); // Exit no_grad to restore previous state
+
+        // Enable gradients for recomputation if they're currently disabled
+        if !prev_grad_enabled {
+            no_grad_exit(); // Decrement no_grad counter to enable gradients
         }
-        
+
+        // Recompute the forward pass, building computation graph
+        let recomputed_outputs = (self.checkpoint_fn)(&self.inputs);
+
+        // Restore previous gradient tracking state after recomputation
+        if !prev_grad_enabled {
+            no_grad_enter(); // Re-disable gradients if they were disabled before
+        }
+
         // Validate that recomputed outputs match grad_outputs count
         assert_eq!(
             recomputed_outputs.len(),
             grad_outputs.len(),
             "Checkpoint recomputed output count doesn't match grad_outputs"
         );
-        
+
         // Backpropagate each gradient through corresponding recomputed output
         for (output, grad_opt) in recomputed_outputs.iter().zip(grad_outputs.iter()) {
             if let Some(grad) = grad_opt {
@@ -214,13 +218,13 @@ impl Node for CheckpointNode {
                 crate::autograd::backward(output, Some(grad.clone()));
             }
         }
-        
+
         // Collect gradients for each input tensor
         let input_grads: Vec<Option<Tensor>> = self.inputs
             .iter()
             .map(|input| input.grad())
             .collect();
-        
+
         input_grads
     }
 
