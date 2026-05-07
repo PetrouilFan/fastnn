@@ -63,6 +63,53 @@ struct DLPackContext {
     strides: Box<[i64]>,
 }
 
+/// Convert a fastnn DType to a DLPack DLDataType.
+#[allow(dead_code)]
+fn dtype_to_dlpack(dtype: DType) -> DLDataType {
+    match dtype {
+        DType::F32 => DLDataType {
+            code: DLDTYPE_FLOAT,
+            bits: 32,
+            lanes: 1,
+        },
+        DType::F64 => DLDataType {
+            code: DLDTYPE_FLOAT,
+            bits: 64,
+            lanes: 1,
+        },
+        DType::I32 => DLDataType {
+            code: DLDTYPE_INT,
+            bits: 32,
+            lanes: 1,
+        },
+        DType::I64 => DLDataType {
+            code: DLDTYPE_INT,
+            bits: 64,
+            lanes: 1,
+        },
+        _ => DLDataType {
+            code: DLDTYPE_FLOAT,
+            bits: 32,
+            lanes: 1,
+        },
+    }
+}
+
+/// Convert a DLPack DLDataType to a fastnn DType.
+#[allow(dead_code)]
+fn dlpack_to_dtype(dl_dtype: DLDataType) -> Result<DType, String> {
+    match (dl_dtype.code, dl_dtype.bits) {
+        (DLDTYPE_FLOAT, 32) => Ok(DType::F32),
+        (DLDTYPE_FLOAT, 64) => Ok(DType::F64),
+        (DLDTYPE_INT, 32) => Ok(DType::I32),
+        (DLDTYPE_INT, 64) => Ok(DType::I64),
+        _ => Err(format!(
+            "Unsupported DLPack dtype: code={}, bits={}",
+            dl_dtype.code, dl_dtype.bits
+        )),
+    }
+}
+
 /// Convert a Tensor to a DLPack managed tensor (zero-copy for CPU tensors).
 /// Returns a raw pointer that can be passed to other frameworks.
 /// The tensor's storage is kept alive via Arc until the deleter is called.
@@ -110,33 +157,7 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
                 device_id: 0,
             },
             ndim,
-            dtype: match tensor.dtype() {
-                DType::F32 => DLDataType {
-                    code: DLDTYPE_FLOAT,
-                    bits: 32,
-                    lanes: 1,
-                },
-                DType::F64 => DLDataType {
-                    code: DLDTYPE_FLOAT,
-                    bits: 64,
-                    lanes: 1,
-                },
-                DType::I32 => DLDataType {
-                    code: DLDTYPE_INT,
-                    bits: 32,
-                    lanes: 1,
-                },
-                DType::I64 => DLDataType {
-                    code: DLDTYPE_INT,
-                    bits: 64,
-                    lanes: 1,
-                },
-                _ => DLDataType {
-                    code: DLDTYPE_FLOAT,
-                    bits: 32,
-                    lanes: 1,
-                },
-            },
+            dtype: dtype_to_dlpack(tensor.dtype()),
             shape: unsafe { (*ctx_ptr).shape.as_mut_ptr() },
             strides: unsafe { (*ctx_ptr).strides.as_mut_ptr() },
             byte_offset: 0,
@@ -165,8 +186,9 @@ extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
     }
 }
 
-/// Create a Tensor from a DLPack managed tensor (zero-copy).
+/// Create a Tensor from a DLPack managed tensor.
 /// Takes ownership of the DLPack capsule.
+/// Note: Currently copies data; zero-copy support is planned for future versions.
 ///
 /// # Safety
 /// The capsule must be valid and properly managed by a DLManagedTensor sentinel.
@@ -193,18 +215,7 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> Result<Tensor, Strin
         };
 
         // Determine dtype
-        let dtype = match (dl_tensor.dtype.code, dl_tensor.dtype.bits) {
-            (2, 32) => DType::F32,
-            (2, 64) => DType::F64,
-            (1, 32) => DType::I32,
-            (1, 64) => DType::I64,
-            _ => {
-                return Err(format!(
-                    "Unsupported DLPack dtype: code={}, bits={}",
-                    dl_tensor.dtype.code, dl_tensor.dtype.bits
-                ))
-            }
-        };
+        let dtype = dlpack_to_dtype(dl_tensor.dtype)?;
 
         // Calculate total elements
         let numel: usize = shape.iter().map(|&x| x as usize).product();

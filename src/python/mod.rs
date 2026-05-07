@@ -115,7 +115,7 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CudaError", py.get_type::<CudaError>())?;
 
      m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
-     m.add_function(wrap_pyfunction!(tensor_from_buffer, py)?)?;
+
     m.add_function(wrap_pyfunction!(tensor_factory, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_from_list, py)?)?;
     m.add_function(wrap_pyfunction!(zeros, py)?)?;

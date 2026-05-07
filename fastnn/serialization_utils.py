@@ -75,7 +75,7 @@ def write_tensor(f, name: str, data: np.ndarray) -> None:
     """
     name_bytes = name.encode("utf-8")
     shape = list(data.shape)
-    data_f32 = data.astype(np.float32).flatten()
+    data_f32 = data.astype(np.float32, copy=False).ravel()
     f.write(_pack_u64(len(name_bytes)))
     f.write(name_bytes)
     f.write(_pack_u64(len(shape)))

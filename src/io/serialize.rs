@@ -54,7 +54,7 @@ pub fn save_model(model: &dyn Module, path: &str) -> Result<(), String> {
             .map_err(|e| format!("Failed to write shape length: {}", e))?;
         for &dim in &shape {
             writer
-                .write_all(&(dim as u64).to_le_bytes())
+                 .write_all(&dim.to_le_bytes())
                 .map_err(|e| format!("Failed to write shape dim: {}", e))?;
         }
 
@@ -149,7 +149,7 @@ pub fn load_model(
             reader
                 .read_exact(&mut dim_bytes)
                 .map_err(|e| format!("Failed to read shape dim: {}", e))?;
-            shape.push(u64::from_le_bytes(dim_bytes) as i64);
+             shape.push(i64::from_le_bytes(dim_bytes));
         }
 
         // Read data

@@ -20,28 +20,7 @@ from fastnn.serialization_utils import MODEL_MAGIC, MODEL_VERSION, write_tensor
 logger = logging.getLogger(__name__)
 
 
-def _get_initializer(model: "onnx.ModelProto", name: str) -> Optional[np.ndarray]:
-    """Get initializer tensor by name."""
-    import onnx
-    for init in model.graph.initializer:
-        if init.name == name:
-            return onnx.numpy_helper.to_array(init)
-    return None
 
-
-def _get_value_info(model: "onnx.ModelProto", name: str) -> Optional["onnx.ValueInfoProto"]:
-    """Get value info by name."""
-    import onnx
-    for vi in model.graph.value_info:
-        if vi.name == name:
-            return vi
-    for inp in model.graph.input:
-        if inp.name == name:
-            return inp
-    for out in model.graph.output:
-        if out.name == name:
-            return out
-    return None
 
 
 def _get_attr(node: "onnx.NodeProto", name: str, default=None):
