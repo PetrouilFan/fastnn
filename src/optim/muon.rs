@@ -1,11 +1,10 @@
 use crate::optim::{
-    apply_weight_decay, get_grad, Optimizer, OptimizerState, ParamGroup,
-    ParamState, WeightDecayType, zeros_like,
+    apply_weight_decay, zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState,
+    WeightDecayType,
 };
 use crate::tensor::Tensor;
+use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;
-
-use crate::impl_params_mut;
 
 pub struct Muon {
     pub params: Vec<Tensor>,
@@ -90,11 +89,7 @@ impl Optimizer for Muon {
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = get_grad(param) {
-                g
-            } else {
-                continue;
-            };
+            let grad = get_grad_or_skip!(param);
 
             let shape = param.shape();
             let is_2d = shape.len() == 2;
@@ -111,7 +106,8 @@ impl Optimizer for Muon {
                 self.m[i].mul_scalar_(momentum).add_(&effective_grad);
 
                 // Orthogonalize the momentum
-                let mut ortho_m = Tensor::zeros(self.m[i].shape(), self.m[i].dtype(), self.m[i].device());
+                let mut ortho_m =
+                    Tensor::zeros(self.m[i].shape(), self.m[i].dtype(), self.m[i].device());
                 Self::newton_schulz_iteration_inplace(&self.m[i], 5, &mut ortho_m);
 
                 // For Nesterov: update_dir = effective_grad + momentum * ortho_momentum

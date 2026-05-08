@@ -1,9 +1,9 @@
 use crate::dtypes::PackedWord;
 use crate::nn::linear::Linear;
 use crate::nn::Module;
-use crate::{impl_training_state, nn::TrainingState};
 use crate::packed_tensor::PackedTensor;
 use crate::tensor::Tensor;
+use crate::{impl_training_state, nn::TrainingState};
 
 /// Quantized Multi-Head Attention with block-wise KV cache.
 /// Uses packed precision for weights and activations to reduce memory bandwidth.
@@ -66,7 +66,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
     /// Forward pass with quantized inputs.
     /// Input should be a 3D tensor [batch, seq_len, d_model].
     pub fn forward_impl(&self, x: &Tensor) -> Tensor {
-        let shape = x.shape();
+        let shape = x.shape_ref();
         assert_eq!(shape.len(), 3, "Input must be 3D [batch, seq_len, d_model]");
         let batch = shape[0] as usize;
         let seq_len = shape[1] as usize;
@@ -359,7 +359,7 @@ impl<T: PackedWord> Module for PackedMultiHeadAttention<T> {
 
     fn zero_grad(&self) {}
 
-impl_training_state!(self, self.training);
+    impl_training_state!(self, self.training);
 }
 
 #[cfg(test)]
@@ -395,7 +395,7 @@ mod tests {
 
         let output = attn.forward(&input);
         assert_eq!(
-            output.shape(),
+            output.shape_ref(),
             vec![batch as i64, seq_len as i64, d_model as i64]
         );
 
@@ -515,18 +515,18 @@ impl MultiHeadAttention {
         if x.ndim() < 3 {
             panic!(
                 "MultiHeadAttention expected input with at least 3 dimensions (batch, seq_len, d_model), got shape {:?}",
-                x.shape()
+                x.shape_ref()
             );
         }
-        let batch = x.shape()[0];
-        let seq_len = x.shape()[1];
+        let batch = x.shape_ref()[0];
+        let seq_len = x.shape_ref()[1];
 
         // Use fused QKV projection if available (better memory locality)
         let (q, k, v) = if let Some(ref qkv_proj) = self.qkv_proj {
             let qkv = qkv_proj.forward(x);
             // Assert proper QKV split dimensions
             let expected_qkv_size = self.d_model * 3;
-            let actual_qkv_size = qkv.shape()[2];
+            let actual_qkv_size = qkv.shape_ref()[2];
             assert_eq!(
                 actual_qkv_size, expected_qkv_size,
                 "Fused QKV projection output size mismatch: expected {} but got {}",

@@ -43,8 +43,8 @@ macro_rules! impl_params_mut {
 /// Weight decay strategy enum to standardize inconsistent implementations
 #[derive(Debug, Clone, Copy)]
 pub enum WeightDecayType {
-    L2,         // Add weight_decay * param to gradient (SGD, Muon)
-    Decoupled,  // Scale param directly: param *= (1 - lr * weight_decay) (Adam, AdamW, etc.)
+    L2,        // Add weight_decay * param to gradient (SGD, Muon)
+    Decoupled, // Scale param directly: param *= (1 - lr * weight_decay) (Adam, AdamW, etc.)
     None,
 }
 
@@ -81,6 +81,17 @@ pub(crate) fn get_grad(param: &Tensor) -> Option<Tensor> {
     None
 }
 
+/// Macro to replace the duplicate gradient retrieval pattern in optimizer step() methods
+#[macro_export]
+macro_rules! get_grad_or_skip {
+    ($param:expr) => {
+        match $crate::optim::get_grad($param) {
+            Some(g) => g,
+            None => continue,
+        }
+    };
+}
+
 pub trait WeightDecayOptimizer {
     fn params(&self) -> &Vec<Tensor>;
     fn no_decay(&self) -> &Vec<bool>;
@@ -95,7 +106,10 @@ pub trait WeightDecayOptimizer {
     }
 
     fn mark_biases_no_decay(&mut self) {
-        let indices: Vec<usize> = self.params().iter().enumerate()
+        let indices: Vec<usize> = self
+            .params()
+            .iter()
+            .enumerate()
             .filter_map(|(i, p)| if p.ndim() == 1 { Some(i) } else { None })
             .collect();
         for i in indices {
@@ -105,7 +119,10 @@ pub trait WeightDecayOptimizer {
 }
 
 pub(crate) fn zeros_like(params: &[Tensor]) -> Vec<Tensor> {
-    params.iter().map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device())).collect()
+    params
+        .iter()
+        .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
+        .collect()
 }
 
 #[derive(Debug, Clone)]

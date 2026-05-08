@@ -3,17 +3,17 @@
 #![allow(unused_imports)]
 #![allow(clippy::missing_safety_doc)]
 
+use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
-    matmul_blas, matmul_blas_into, matmul_blas_with_transpose,
-    matmul_blas_with_transpose_into, MIN_BLAS_SIZE,
+    matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
+    MIN_BLAS_SIZE,
 };
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
-use super::*;
 
 pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
@@ -38,7 +38,7 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         1
     };
 
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let batch_size = x_shape[0];
     let channels = x_shape[1];
     let in_height = x_shape[2];
@@ -143,4 +143,3 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     vec![output]
 }
-

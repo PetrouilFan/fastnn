@@ -2,10 +2,7 @@
 #[path = "bench_util.rs"]
 mod bench_util;
 
-use bench_util::{
-    bench_gemv, bench_relu, speedup,
-    print_comparison_header, print_result_row,
-};
+use bench_util::{bench_gemv, bench_relu, print_comparison_header, print_result_row, speedup};
 use fastnn::dtypes::{F16x2, F32x1, PackedWord, U4x8, U8x4};
 
 fn main() {

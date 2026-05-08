@@ -1,5 +1,8 @@
-use crate::{impl_training_state, nn::{Module, TrainingState}};
 use crate::tensor::Tensor;
+use crate::{
+    impl_training_state,
+    nn::{Module, TrainingState},
+};
 use rand::Rng;
 
 pub struct Dropout {
@@ -35,8 +38,8 @@ impl Module for Dropout {
                 })
                 .collect();
 
-            let shape = x.shape();
-            let mut out = Tensor::from_vec(mask_data, shape);
+            let shape = x.shape_ref();
+            let mut out = Tensor::from_vec(mask_data, shape.to_vec());
             if x.requires_grad() {
                 out = out.requires_grad_(true);
             }
@@ -76,7 +79,7 @@ impl Dropout2d {
 impl Module for Dropout2d {
     fn forward(&self, x: &Tensor) -> Tensor {
         if self.training.is_training() {
-            let x_shape = x.shape();
+            let x_shape = x.shape_ref();
             let batch = x_shape[0] as usize;
             let channels = x_shape[1] as usize;
             let spatial: usize = x_shape[2..].iter().map(|&x| x as usize).product();
@@ -107,7 +110,7 @@ impl Module for Dropout2d {
                 }
             }
 
-            let mut out = Tensor::from_vec(out_data, x_shape);
+            let mut out = Tensor::from_vec(out_data, x_shape.to_vec());
             if x.requires_grad() {
                 out = out.requires_grad_(true);
             }
