@@ -53,7 +53,9 @@ class MLP(BaseModel):
 
         activations = self._activations
 
-        weight_tensors = list(self._weights)
+        # batched_mlp_forward expects weights in [out_features, in_features] format (PyTorch convention)
+        # but Linear stores weights as [in_features, out_features], so we need to transpose
+        weight_tensors = [w.transpose(0, 1) for w in self._weights]
         bias_tensors = list(self._biases)
 
         return fnn.batched_mlp_forward(x, weight_tensors, bias_tensors, activations)
