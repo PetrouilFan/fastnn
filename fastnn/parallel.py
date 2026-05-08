@@ -6,7 +6,6 @@ from typing import List, Optional
 
 __all__ = [
     "DataParallel",
-    "_normalize_weights",
 ]
 
 
