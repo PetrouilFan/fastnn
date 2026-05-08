@@ -207,16 +207,16 @@ for epoch in range(100):
     scheduler.step()  # or scheduler.step(val_loss) for ReduceLROnPlateau
 ```
 
-## Optimizer State Dict
+## Optimizer State
 
-Save and load optimizer state:
+Save and load optimizer state using `fastnn.io`:
 
 ```python
 # Save
-fnn.save_optimizer(optimizer, 'optimizer.fno')
+fnn.io.save(optimizer, 'optimizer.fno')
 
 # Load
-fnn.load_optimizer(optimizer, 'optimizer.fno')
+fnn.io.load('optimizer.fno')
 ```
 
 ## Choosing an Optimizer

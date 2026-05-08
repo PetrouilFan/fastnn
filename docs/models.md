@@ -184,29 +184,37 @@ for epoch in range(50):
 
     # Save checkpoint
     if epoch % 10 == 0:
-        fnn.save_model(model, f'checkpoint_epoch_{epoch}.fnn')
-        fnn.save_optimizer(optimizer, f'optimizer_epoch_{epoch}.fno')
+        fnn.io.save(model, f'checkpoint_epoch_{epoch}.fnn')
+        fnn.io.save(optimizer, f'optimizer_epoch_{epoch}.fno')
 ```
 
 ## Model I/O
 
 ```python
-# Save model
-fnn.save_model(model, 'model.fnn')
+# Save model (custom binary format)
+fnn.io.save(model, 'model.fnn')
 
 # Load model
-state_dict = fnn.load_model('model.fnn')
+loaded_model = fnn.io.load('model.fnn')
+```
 
-# Save optimizer
-fnn.save_optimizer(optimizer, 'optimizer.fno')
+## ONNX Import
 
-# Load optimizer
-fnn.load_optimizer(optimizer, 'optimizer.fno')
+Import models from PyTorch via ONNX:
 
-# Save/load state dict
-fnn.save_state_dict(model, 'weights.fnn')
-state = fnn.load_model('weights.fnn')
-fnn.load_state_dict(model, state)
+```python
+# Export from PyTorch
+import torch
+torch_model = torch.nn.Linear(784, 10)
+torch.onnx.export(torch_model, torch.randn(1, 784), 'model.onnx')
+
+# Import to fastnn (legacy)
+info = fnn.import_onnx('model.onnx', 'model.fnn')
+print(f"Imported {info['parameters']} parameters")
+
+# Or use the unified API
+from fnn.io import convert_from_onnx
+info = convert_from_onnx('model.onnx', 'model.fnn')
 ```
 
 ## ONNX Import

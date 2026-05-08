@@ -29,8 +29,8 @@ def test_checkpoint_roundtrip_linear():
         checkpoint_path = f.name
 
     try:
-        fastnn.save_model(linear, checkpoint_path)
-        state = fastnn.load_model(checkpoint_path)
+        fastnn.io.save(linear, checkpoint_path)
+        state = fastnn.io.load(checkpoint_path)
         assert isinstance(state, dict)
         assert len(state) > 0
         print(f"  PASSED: Checkpoint round-trip ({len(state)} tensors loaded)")
@@ -43,9 +43,9 @@ def test_format_exists():
     """Test that serialization format exists."""
     print("Testing serialization format...")
 
-    # Verify save_model and load_model are accessible
-    assert hasattr(fastnn, "save_model"), "save_model not found"
-    assert hasattr(fastnn, "load_model"), "load_model not found"
+    # Verify io.save and io.load are accessible
+    assert hasattr(fastnn.io, "save"), "io.save not found"
+    assert hasattr(fastnn.io, "load"), "io.load not found"
 
     print("  PASSED: Serialization API accessible")
 

@@ -1,8 +1,24 @@
 # IO & Serialization
 
-FastNN supports saving and loading models using safetensors format.
+FastNN uses a custom binary format (.fnn for models, .fno for optimizers).
 
-## Saving Models
+## Unified API (fastnn.io)
+
+The `fastnn.io` module provides a unified interface for saving/loading models and converting from other formats.
+
+```python
+import fastnn as fnn
+
+# Save/Load models (custom binary format)
+fnn.io.save(model, "model.fnn")        # Save model
+loaded_model = fnn.io.load("model.fnn")       # Load model
+
+# Convert from other formats
+fnn.io.convert_from_pytorch(torch_model, "model.fnn")
+info = fnn.io.convert_from_onnx("model.onnx", "model.fnn")
+```
+
+### Save Model
 
 ```python
 import fastnn as fnn
@@ -11,11 +27,11 @@ import fastnn as fnn
 model = fnn.models.MLP(input_dim=784, hidden_dims=[256, 128], output_dim=10)
 # ... training code ...
 
-# Save model
-fnn.save_model(model, "model.safetensors")
+# Save model (custom binary format)
+fnn.io.save(model, "model.fnn")
 ```
 
-## Loading Models
+### Load Model
 
 ```python
 import fastnn as fnn
@@ -24,56 +40,52 @@ import fastnn as fnn
 model = fnn.models.MLP(input_dim=784, hidden_dims=[256, 128], output_dim=10)
 
 # Load weights
-fnn.load_model(model, "model.safetensors")
+loaded_model = fnn.io.load("model.fnn")
 
 # Use for inference
-model.eval()
-with fnn.no_grad():
-    prediction = model(test_input)
-```
-
-## Complete Save/Load Example
-
-```python
-import fastnn as fnn
-
-# === Training Phase ===
-model = fnn.models.MLP(input_dim=10, hidden_dims=[32, 16], output_dim=2)
-optimizer = fnn.Adam(model.parameters(), lr=1e-3)
-
-# ... training loop ...
-
-# Save trained model
-fnn.save_model(model, "trained_model.safetensors")
-print("Model saved!")
-
-# === Inference Phase ===
-# Load model
-loaded_model = fnn.models.MLP(input_dim=10, hidden_dims=[32, 16], output_dim=2)
-fnn.load_model(loaded_model, "trained_model.safetensors")
-
 loaded_model.eval()
 with fnn.no_grad():
-    test_input = fnn.randn(5, 10)
-    predictions = loaded_model(test_input)
-    print(predictions.numpy())
+    prediction = loaded_model(test_input)
 ```
+
+### Convert from PyTorch
+
+```python
+import torch
+import torch.nn as nn
+from fastnn.io import convert_from_pytorch
+
+# Create PyTorch model
+torch_model = nn.Linear(784, 10)
+
+# Convert to fastnn format
+convert_from_pytorch(torch_model, "model.fnn")
+```
+
+### Convert from ONNX
+
+```python
+from fastnn.io import convert_from_onnx
+
+# Import ONNX model and save as fastnn format
+info = convert_from_onnx("model.onnx", "model.fnn")
+print(f"Imported {info['parameters']} parameters")
+print(f"Input shape: {info['input_shape']}")
+print(f"Output shape: {info['output_shape']}")
+```
+
+
+## Serialization Format
+
+FastNN uses a custom binary format with:
+- Magic bytes header (`b"FNN\x00"` for models, `b"FNO\x00"` for optimizers)
+- Version number (currently version 2 for models)
+- Tensor data stored as float32 with shape information
 
 ## DLPack Interop
 
-FastNN tensors support DLPack for interoperability with other libraries:
-
-```python
-import fastnn as fnn
-
-x = fnn.randn(3, 4)
-
-# Get DLPack capsule (for interoperability with other ML frameworks)
-dlpack_cap = x.to_dlpack()
-
-# Create tensor from DLPack
-y = fnn.from_dlpack(dlpack_cap)
-```
+`to_dlpack()` / `from_dlpack()` exist in the Rust backend but are **NOT exported** to Python.
+The documentation previously referenced these functions, but they are not currently available from Python.
 
 ## Allocator Statistics
 
