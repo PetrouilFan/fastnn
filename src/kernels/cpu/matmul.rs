@@ -38,9 +38,9 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_strides = a.strides();
     let b_strides = b.strides();
     let _a_is_transposed =
-        a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] >= a_shape[a_shape.len() - 2];
+        a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] == a_shape[a_shape.len() - 2];
     let b_is_transposed =
-        b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] >= b_shape[b_shape.len() - 2];
+        b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] == b_shape[b_shape.len() - 2];
 
     // For matmul: A[m, k] @ B[k, n] = C[m, n]
     // When B is transposed (shape [n, k] representing original [k, n]):
@@ -96,7 +96,7 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             flat_batch,
             a_shape[a_shape.len() - 2],
             a_shape[a_shape.len() - 1],
-        ])
+        ]).contiguous()
     } else {
         a.clone()
     };
@@ -106,7 +106,7 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             flat_batch,
             b_shape[b_shape.len() - 2],
             b_shape[b_shape.len() - 1],
-        ])
+        ]).contiguous()
     } else {
         b.clone()
     };
