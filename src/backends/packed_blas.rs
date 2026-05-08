@@ -18,6 +18,21 @@
 use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 
+// Thread-local scratch buffer, reused across calls.
+thread_local! {
+    static BLAS_SCRATCH: std::cell::RefCell<Vec<f32>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+fn with_blas_scratch<R>(f: impl FnOnce(&mut [f32]) -> R) -> R {
+    BLAS_SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.resize(KC * MR, 0.0);
+        f(&mut buf)
+    })
+}
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
 
@@ -56,91 +71,64 @@ pub fn gemv_packed_tiled<T: PackedWord>(
         *o = 0.0;
     }
 
-    // Allocate micro-kernel buffer once (outside K and M loops)
-    let mut row_bufs = MicroKernelBuf {
-        data: Box::new([[0.0f32; KC]; MR]),
-    };
-
     // Process K in cache blocks
-    let mut k_offset = 0;
-    while k_offset < k {
-        let k_end = (k_offset + KC).min(k);
-        let k_block = k_end - k_offset;
+    with_blas_scratch(|row_bufs| {
+        let mut k_offset = 0;
+        while k_offset < k {
+            let k_end = (k_offset + KC).min(k);
+            let k_block = k_end - k_offset;
 
-        // Process M in register blocks of MR rows
-        let mut row = 0;
-        while row + MR <= m {
-            // Full MR×1 micro-kernel
-            micro_kernel::<T>(
-                weights,
-                &activation[k_offset..k_end],
-                &mut output[row..row + MR],
-                row,
-                k_offset,
-                k_end,
-                k_packed,
-                k_block,
-                &mut row_bufs,
-            );
-            row += MR;
-        }
+            let mut row = 0;
+            while row + MR <= m {
+                micro_kernel::<T>(
+                    weights,
+                    &activation[k_offset..k_end],
+                    &mut output[row..row + MR],
+                    row,
+                    k_offset,
+                    k_end,
+                    k_packed,
+                    k_block,
+                    row_bufs,
+                );
+                row += MR;
+            }
 
-        // Tail: process remaining rows (1..MR-1)
-        while row < m {
-            let mut acc = 0.0f32;
-            let row_offset = row * k_packed;
-            let packed_start = k_offset / T::ITEMS;
-            let packed_end = k_end.div_ceil(T::ITEMS);
-
-            // Process packed words
-            for p in packed_start..packed_end {
-                let word = weights.as_packed()[row_offset + p];
-                let unpacked = word.unpack_to_f32();
-                let base = p * T::ITEMS;
-                for j in 0..T::ITEMS {
-                    let idx = base + j;
-                    if idx >= k_offset && idx < k_end {
-                        acc += unpacked.as_ref()[j] * activation[idx];
+            // Tail rows
+            while row < m {
+                let mut acc = 0.0f32;
+                let row_offset = row * k_packed;
+                let packed_start = k_offset / T::ITEMS;
+                let packed_end = k_end.div_ceil(T::ITEMS);
+                for p in packed_start..packed_end {
+                    let word = weights.as_packed()[row_offset + p];
+                    let unpacked = word.unpack_to_f32();
+                    let base = p * T::ITEMS;
+                    for j in 0..T::ITEMS {
+                        let idx = base + j;
+                        if idx >= k_offset && idx < k_end {
+                            acc += unpacked.as_ref()[j] * activation[idx];
+                        }
                     }
                 }
+                output[row] += acc;
+                row += 1;
             }
-            output[row] += acc;
-            row += 1;
+
+            k_offset += KC;
         }
 
-        k_offset += KC;
-    }
-
-    // Apply per-row scale and zero
-    for row in 0..m {
-        output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
-    }
+        for row in 0..m {
+            output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
+        }
+    });
 }
 
 // ============================================================
 // Micro-kernel: MR rows × full K block
 // ============================================================
 
-/// Generic micro-kernel: unpack weights, then call type-specific FMA.
-/// Micro-kernel buffer passed by caller to avoid allocation in inner loop.
-#[repr(align(32))]
-struct MicroKernelBuf {
-    data: Box<[[f32; KC]; MR]>,
-}
-
-impl std::ops::Index<usize> for MicroKernelBuf {
-    type Output = [f32; KC];
-    fn index(&self, idx: usize) -> &Self::Output {
-        &self.data[idx]
-    }
-}
-
-impl std::ops::IndexMut<usize> for MicroKernelBuf {
-    fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
-        &mut self.data[idx]
-    }
-}
-
+/// Thread-local scratch: MR rows × KC columns of unpacked f32.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn micro_kernel<T: PackedWord>(
@@ -152,13 +140,15 @@ fn micro_kernel<T: PackedWord>(
     k_end: usize,
     k_packed: usize,
     k_block: usize,
-    row_bufs: &mut MicroKernelBuf,
+    row_bufs: &mut [f32],
 ) {
     debug_assert_eq!(output.len(), MR);
+    debug_assert!(row_bufs.len() >= KC * MR);
 
     // Unpack MR rows of weights into contiguous buffers
     for r in 0..MR {
-        row_bufs[r].fill(0.0);
+        let row_start = r * KC;
+        row_bufs[row_start..row_start + KC].fill(0.0);
         let row = start_row + r;
         let row_offset = row * k_packed;
         let packed_start = k_start / T::ITEMS;
@@ -172,7 +162,7 @@ fn micro_kernel<T: PackedWord>(
             for j in 0..T::ITEMS {
                 let idx = base + j;
                 if idx >= k_start && idx < k_end {
-                    row_bufs[r][idx - k_start] = unpacked.as_ref()[j];
+                    row_bufs[row_start + (idx - k_start)] = unpacked.as_ref()[j];
                 }
             }
         }
@@ -183,7 +173,7 @@ fn micro_kernel<T: PackedWord>(
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             unsafe {
-                micro_kernel_avx2(&row_bufs.data, activation, output, k_block);
+                micro_kernel_avx2(row_bufs, activation, output, k_block);
             }
             return;
         }
@@ -191,9 +181,10 @@ fn micro_kernel<T: PackedWord>(
 
     // Scalar fallback
     for r in 0..MR {
+        let row_start = r * KC;
         let mut acc = 0.0f32;
         for kk in 0..k_block {
-            acc += row_bufs[r][kk] * activation[kk];
+            acc += row_bufs[row_start + kk] * activation[kk];
         }
         output[r] += acc;
     }
@@ -205,12 +196,7 @@ fn micro_kernel<T: PackedWord>(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-unsafe fn micro_kernel_avx2(
-    row_bufs: &[[f32; KC]; MR],
-    activation: &[f32],
-    output: &mut [f32],
-    k: usize,
-) {
+unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [f32], k: usize) {
     let mut acc0 = _mm256_setzero_ps();
     let mut acc1 = _mm256_setzero_ps();
     let mut acc2 = _mm256_setzero_ps();
@@ -222,33 +208,58 @@ unsafe fn micro_kernel_avx2(
     while kk + 8 <= k {
         let act = _mm256_loadu_ps(activation.as_ptr().add(kk));
 
-        let w0 = _mm256_loadu_ps(row_bufs[0].as_ptr().add(kk));
-        let w1 = _mm256_loadu_ps(row_bufs[1].as_ptr().add(kk));
-        let w2 = _mm256_loadu_ps(row_bufs[2].as_ptr().add(kk));
-        let w3 = _mm256_loadu_ps(row_bufs[3].as_ptr().add(kk));
+        // Row 0
+        let row0 = _mm256_loadu_ps(row_bufs.as_ptr().add(0 * KC + kk));
+        acc0 = _mm256_fmadd_ps(row0, act, acc0);
 
-        acc0 = _mm256_fmadd_ps(w0, act, acc0);
-        acc1 = _mm256_fmadd_ps(w1, act, acc1);
-        acc2 = _mm256_fmadd_ps(w2, act, acc2);
-        acc3 = _mm256_fmadd_ps(w3, act, acc3);
+        // Row 1
+        let row1 = _mm256_loadu_ps(row_bufs.as_ptr().add(1 * KC + kk));
+        acc1 = _mm256_fmadd_ps(row1, act, acc1);
+
+        // Row 2
+        let row2 = _mm256_loadu_ps(row_bufs.as_ptr().add(2 * KC + kk));
+        acc2 = _mm256_fmadd_ps(row2, act, acc2);
+
+        // Row 3
+        let row3 = _mm256_loadu_ps(row_bufs.as_ptr().add(3 * KC + kk));
+        acc3 = _mm256_fmadd_ps(row3, act, acc3);
 
         kk += 8;
     }
 
-    // Horizontal sum each accumulator and add to output
-    output[0] += hsum256_ps(acc0);
-    output[1] += hsum256_ps(acc1);
-    output[2] += hsum256_ps(acc2);
-    output[3] += hsum256_ps(acc3);
-
-    // Scalar tail
+    // Handle remaining elements
     while kk < k {
-        output[0] += row_bufs[0][kk] * activation[kk];
-        output[1] += row_bufs[1][kk] * activation[kk];
-        output[2] += row_bufs[2][kk] * activation[kk];
-        output[3] += row_bufs[3][kk] * activation[kk];
+        let act = _mm256_set1_ps(*activation.as_ptr().add(kk));
+
+        // Row 0
+        let row0 = _mm256_set1_ps(*row_bufs.as_ptr().add(0 * KC + kk));
+        acc0 = _mm256_fmadd_ps(row0, act, acc0);
+
+        // Row 1
+        let row1 = _mm256_set1_ps(*row_bufs.as_ptr().add(1 * KC + kk));
+        acc1 = _mm256_fmadd_ps(row1, act, acc1);
+
+        // Row 2
+        let row2 = _mm256_set1_ps(*row_bufs.as_ptr().add(2 * KC + kk));
+        acc2 = _mm256_fmadd_ps(row2, act, acc2);
+
+        // Row 3
+        let row3 = _mm256_set1_ps(*row_bufs.as_ptr().add(3 * KC + kk));
+        acc3 = _mm256_fmadd_ps(row3, act, acc3);
+
         kk += 1;
     }
+
+    // Horizontal sum of each accumulator
+    let hsum0 = hsum256_ps(acc0);
+    let hsum1 = hsum256_ps(acc1);
+    let hsum2 = hsum256_ps(acc2);
+    let hsum3 = hsum256_ps(acc3);
+
+    *output.as_mut_ptr().add(0) += hsum0;
+    *output.as_mut_ptr().add(1) += hsum1;
+    *output.as_mut_ptr().add(2) += hsum2;
+    *output.as_mut_ptr().add(3) += hsum3;
 }
 
 // ============================================================
@@ -271,94 +282,92 @@ pub fn gemv_u8x4_tiled(
         *o = 0.0;
     }
 
-    // Allocate aligned buffer once (outside loops)
-    let mut row_bufs = MicroKernelBuf {
-        data: Box::new([[0.0f32; KC]; MR]),
-    };
+    with_blas_scratch(|row_bufs| {
+        let mut k_offset = 0;
+        while k_offset < k {
+            let k_end = (k_offset + KC).min(k);
 
-    let mut k_offset = 0;
-    while k_offset < k {
-        let k_end = (k_offset + KC).min(k);
+            // Process MR rows at a time
+            let mut row = 0;
+            while row + MR <= m {
+                // Unpack MR rows of int8→f32 efficiently
+                for r in 0..MR {
+                    let row_start = r * KC;
+                    row_bufs[row_start..row_start + KC].fill(0.0);
+                    let row_idx = row + r;
+                    let row_off = row_idx * k_packed;
+                    let packed_start = k_offset / 4;
+                    let packed_end = k_end.div_ceil(4);
 
-        // Process MR rows at a time
-        let mut row = 0;
-        while row + MR <= m {
-            // Unpack MR rows of int8→f32 efficiently
-            for r in 0..MR {
-                row_bufs[r].fill(0.0);
-                let row_idx = row + r;
-                let row_off = row_idx * k_packed;
-                let packed_start = k_offset / 4;
-                let packed_end = k_end.div_ceil(4);
-
-                for p in packed_start..packed_end {
-                    let w = weights_u32[row_off + p];
-                    let bytes = w.to_le_bytes();
-                    let base = p * 4;
-                    for j in 0..4 {
-                        let idx = base + j;
-                        if idx >= k_offset && idx < k_end {
-                            row_bufs[r][idx - k_offset] = (bytes[j] as i8) as f32;
+                    for p in packed_start..packed_end {
+                        let w = weights_u32[row_off + p];
+                        let bytes = w.to_le_bytes();
+                        let base = p * 4;
+                        for j in 0..4 {
+                            let idx = base + j;
+                            if idx >= k_offset && idx < k_end {
+                                row_bufs[row_start + (idx - k_offset)] = (bytes[j] as i8) as f32;
+                            }
                         }
                     }
                 }
-            }
 
-            // SIMD micro-kernel
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-                    unsafe {
-                        micro_kernel_avx2(
-                            &row_bufs.data,
+                // SIMD micro-kernel
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                        unsafe {
+                            micro_kernel_avx2(
+                                row_bufs,
+                                &activation[k_offset..k_end],
+                                &mut output[row..row + MR],
+                                k_end - k_offset,
+                            );
+                        }
+                    } else {
+                        scalar_micro_kernel(
+                            row_bufs,
                             &activation[k_offset..k_end],
                             &mut output[row..row + MR],
                             k_end - k_offset,
                         );
                     }
-                } else {
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
                     scalar_micro_kernel(
-                        &row_bufs.data,
+                        row_bufs,
                         &activation[k_offset..k_end],
                         &mut output[row..row + MR],
                         k_end - k_offset,
                     );
                 }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
-                scalar_micro_kernel(
-                    &row_bufs.data,
-                    &activation[k_offset..k_end],
-                    &mut output[row..row + MR],
-                    k_end - k_offset,
-                );
+
+                row += MR;
             }
 
-            row += MR;
+            // Tail rows
+            while row < m {
+                let mut acc = 0.0f32;
+                let row_off = row * k_packed;
+                for kk in k_offset..k_end {
+                    let p = kk / 4;
+                    let j = kk % 4;
+                    let w = weights_u32[row_off + p];
+                    let bytes = w.to_le_bytes();
+                    acc += (bytes[j] as i8) as f32 * activation[kk];
+                }
+                output[row] += acc;
+                row += 1;
+            }
+
+            k_offset += KC;
         }
 
-        // Tail rows
-        while row < m {
-            let mut acc = 0.0f32;
-            let row_off = row * k_packed;
-            for kk in k_offset..k_end {
-                let p = kk / 4;
-                let j = kk % 4;
-                let w = weights_u32[row_off + p];
-                let bytes = w.to_le_bytes();
-                acc += (bytes[j] as i8) as f32 * activation[kk];
-            }
-            output[row] += acc;
-            row += 1;
+        for row in 0..m {
+            output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
-
-        k_offset += KC;
-    }
-
-    for row in 0..m {
-        output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
-    }
+    });
 }
 
 /// Tiled GEMV for F16x2 with F16C dispatch.
@@ -379,72 +388,75 @@ pub fn gemv_f16x2_tiled(
     }
 
     if is_x86_feature_detected!("f16c") {
-        let mut row_bufs: Box<[[f32; KC]; MR]> = Box::new([[0.0f32; KC]; MR]);
-        let mut k_offset = 0;
-        while k_offset < k {
-            let k_end = (k_offset + KC).min(k);
+        with_blas_scratch(|row_bufs| {
+            let mut k_offset = 0;
+            while k_offset < k {
+                let k_end = (k_offset + KC).min(k);
 
-            let mut row = 0;
-            while row + MR <= m {
-                for r in 0..MR {
-                    row_bufs[r].fill(0.0);
-                    let row_idx = row + r;
-                    let row_off = row_idx * k_packed;
+                let mut row = 0;
+                while row + MR <= m {
+                    for r in 0..MR {
+                        let row_start = r * KC;
+                        row_bufs[row_start..row_start + KC].fill(0.0);
+                        let row_idx = row + r;
+                        let row_off = row_idx * k_packed;
+                        let packed_start = k_offset / 2;
+                        let packed_end = k_end.div_ceil(2);
+
+                        for p in packed_start..packed_end {
+                            let w = weights_u32[row_off + p];
+                            let half_bits = if p * 2 >= k_offset && p * 2 < k_end {
+                                w as u16
+                            } else {
+                                (w >> 16) as u16
+                            };
+                            let idx = p * 2;
+                            if idx >= k_offset && idx < k_end {
+                                row_bufs[row_start + (idx - k_offset)] =
+                                    half::f16::from_bits(half_bits).to_f32();
+                            }
+                            if idx + 1 >= k_offset && idx + 1 < k_end {
+                                row_bufs[row_start + (idx + 1 - k_offset)] =
+                                    half::f16::from_bits((w >> 16) as u16).to_f32();
+                            }
+                        }
+                    }
+
+                    unsafe {
+                        micro_kernel_avx2(
+                            row_bufs,
+                            &activation[k_offset..k_end],
+                            &mut output[row..row + MR],
+                            k_end - k_offset,
+                        );
+                    }
+                    row += MR;
+                }
+
+                while row < m {
+                    let mut acc = 0.0f32;
+                    let row_off = row * k_packed;
                     let packed_start = k_offset / 2;
                     let packed_end = k_end.div_ceil(2);
 
                     for p in packed_start..packed_end {
                         let w = weights_u32[row_off + p];
-                        let half_bits = if p * 2 >= k_offset && p * 2 < k_end {
-                            w as u16
-                        } else {
-                            (w >> 16) as u16
-                        };
                         let idx = p * 2;
                         if idx >= k_offset && idx < k_end {
-                            row_bufs[r][idx - k_offset] = half::f16::from_bits(half_bits).to_f32();
+                            acc += half::f16::from_bits(w as u16).to_f32() * activation[idx];
                         }
                         if idx + 1 >= k_offset && idx + 1 < k_end {
-                            row_bufs[r][idx + 1 - k_offset] =
-                                half::f16::from_bits((w >> 16) as u16).to_f32();
+                            acc += half::f16::from_bits((w >> 16) as u16).to_f32()
+                                * activation[idx + 1];
                         }
                     }
+                    output[row] += acc;
+                    row += 1;
                 }
 
-                unsafe {
-                    micro_kernel_avx2(
-                        &row_bufs,
-                        &activation[k_offset..k_end],
-                        &mut output[row..row + MR],
-                        k_end - k_offset,
-                    );
-                }
-                row += MR;
+                k_offset += KC;
             }
-
-            while row < m {
-                let mut acc = 0.0f32;
-                let row_off = row * k_packed;
-                let packed_start = k_offset / 2;
-                let packed_end = k_end.div_ceil(2);
-
-                for p in packed_start..packed_end {
-                    let w = weights_u32[row_off + p];
-                    let idx = p * 2;
-                    if idx >= k_offset && idx < k_end {
-                        acc += half::f16::from_bits(w as u16).to_f32() * activation[idx];
-                    }
-                    if idx + 1 >= k_offset && idx + 1 < k_end {
-                        acc +=
-                            half::f16::from_bits((w >> 16) as u16).to_f32() * activation[idx + 1];
-                    }
-                }
-                output[row] += acc;
-                row += 1;
-            }
-
-            k_offset += KC;
-        }
+        });
     } else {
         // Fallback to generic
         gemv_packed_tiled(weights, activation, output);
@@ -474,17 +486,53 @@ pub fn gemv_u4x8_tiled(
     }
 
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        let mut row_bufs: Box<[[f32; KC]; MR]> = Box::new([[0.0f32; KC]; MR]);
-        let mut k_offset = 0;
-        while k_offset < k {
-            let k_end = (k_offset + KC).min(k);
+        with_blas_scratch(|row_bufs| {
+            let mut k_offset = 0;
+            while k_offset < k {
+                let k_end = (k_offset + KC).min(k);
 
-            let mut row = 0;
-            while row + MR <= m {
-                for r in 0..MR {
-                    row_bufs[r].fill(0.0);
-                    let row_idx = row + r;
-                    let row_off = row_idx * k_packed;
+                let mut row = 0;
+                while row + MR <= m {
+                    for r in 0..MR {
+                        let row_start = r * KC;
+                        row_bufs[row_start..row_start + KC].fill(0.0);
+                        let row_idx = row + r;
+                        let row_off = row_idx * k_packed;
+                        let packed_start = k_offset / 8;
+                        let packed_end = k_end.div_ceil(8);
+
+                        for p in packed_start..packed_end {
+                            let w = weights_u32[row_off + p];
+                            let base = p * 8;
+                            for j in 0..8 {
+                                let idx = base + j;
+                                if idx >= k_offset && idx < k_end {
+                                    let nibble = (w >> (j * 4)) & 0xF;
+                                    let signed = if nibble & 0x8 != 0 {
+                                        (nibble | 0xFFFFFFF0) as i32
+                                    } else {
+                                        nibble as i32
+                                    };
+                                    row_bufs[row_start + (idx - k_offset)] = signed as f32;
+                                }
+                            }
+                        }
+                    }
+
+                    unsafe {
+                        micro_kernel_avx2(
+                            row_bufs,
+                            &activation[k_offset..k_end],
+                            &mut output[row..row + MR],
+                            k_end - k_offset,
+                        );
+                    }
+                    row += MR;
+                }
+
+                while row < m {
+                    let mut acc = 0.0f32;
+                    let row_off = row * k_packed;
                     let packed_start = k_offset / 8;
                     let packed_end = k_end.div_ceil(8);
 
@@ -500,51 +548,17 @@ pub fn gemv_u4x8_tiled(
                                 } else {
                                     nibble as i32
                                 };
-                                row_bufs[r][idx - k_offset] = signed as f32;
+                                acc += signed as f32 * activation[idx];
                             }
                         }
                     }
+                    output[row] += acc;
+                    row += 1;
                 }
 
-                unsafe {
-                    micro_kernel_avx2(
-                        &row_bufs,
-                        &activation[k_offset..k_end],
-                        &mut output[row..row + MR],
-                        k_end - k_offset,
-                    );
-                }
-                row += MR;
+                k_offset += KC;
             }
-
-            while row < m {
-                let mut acc = 0.0f32;
-                let row_off = row * k_packed;
-                let packed_start = k_offset / 8;
-                let packed_end = k_end.div_ceil(8);
-
-                for p in packed_start..packed_end {
-                    let w = weights_u32[row_off + p];
-                    let base = p * 8;
-                    for j in 0..8 {
-                        let idx = base + j;
-                        if idx >= k_offset && idx < k_end {
-                            let nibble = (w >> (j * 4)) & 0xF;
-                            let signed = if nibble & 0x8 != 0 {
-                                (nibble | 0xFFFFFFF0) as i32
-                            } else {
-                                nibble as i32
-                            };
-                            acc += signed as f32 * activation[idx];
-                        }
-                    }
-                }
-                output[row] += acc;
-                row += 1;
-            }
-
-            k_offset += KC;
-        }
+        });
     } else {
         gemv_packed_tiled(weights, activation, output);
         return;
@@ -696,16 +710,12 @@ unsafe fn micro_kernel_neon(
 // ============================================================
 
 /// Scalar micro-kernel fallback.
-fn scalar_micro_kernel(
-    row_bufs: &[[f32; KC]; MR],
-    activation: &[f32],
-    output: &mut [f32],
-    k: usize,
-) {
+fn scalar_micro_kernel(row_bufs: &[f32], activation: &[f32], output: &mut [f32], k: usize) {
     for r in 0..MR {
         let mut acc = 0.0f32;
+        let row_start = r * KC;
         for kk in 0..k {
-            acc += row_bufs[r][kk] * activation[kk];
+            acc += row_bufs[row_start + kk] * activation[kk];
         }
         output[r] += acc;
     }

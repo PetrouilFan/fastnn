@@ -59,19 +59,19 @@ impl Node for Conv2dBackward {
         let input = &self.input;
         let weight = &self.weight;
 
-        let weight_shape = weight.shape();
+        let weight_shape = weight.shape_ref();
         let out_channels = weight_shape[0];
         let in_channels_per_group = weight_shape[1];
         let kernel_h = weight_shape[2];
         let kernel_w = weight_shape[3];
 
-        let input_shape = input.shape();
+        let input_shape = input.shape_ref();
         let batch_size = input_shape[0];
         let in_channels = input_shape[1];
         let in_h = input_shape[2];
         let in_w = input_shape[3];
 
-        let grad_shape = grad.shape();
+        let grad_shape = grad.shape_ref();
         let out_h = grad_shape[2];
         let out_w = grad_shape[3];
 
@@ -189,9 +189,9 @@ impl Node for Conv2dBackward {
                 // Slice input for this group
                 let input_g = input.slice(1, in_c_start as i64, in_c_end as i64, 1);
 
-                let _input_g_shape = input_g.shape();
-                let _in_h_g = input_g.shape()[2];
-                let _in_w_g = input_g.shape()[3];
+                let _input_g_shape = input_g.shape_ref();
+                let _in_h_g = input_g.shape_ref()[2];
+                let _in_w_g = input_g.shape_ref()[3];
 
                 let grad_input_g = if stride == 1 {
                     dispatch(
@@ -209,8 +209,8 @@ impl Node for Conv2dBackward {
                     )[0]
                     .clone()
                 } else {
-                    let out_h_g = grad_g.shape()[2];
-                    let out_w_g = grad_g.shape()[3];
+                    let out_h_g = grad_g.shape_ref()[2];
+                    let out_w_g = grad_g.shape_ref()[3];
                     let dilated_h = out_h_g + (out_h_g - 1) * (stride - 1);
                     let dilated_w = out_w_g + (out_w_g - 1) * (stride - 1);
 
@@ -509,14 +509,14 @@ impl Node for ConvTranspose2dBackward {
             return grads;
         };
 
-        let in_shape = self.input.shape();
+        let in_shape = self.input.shape_ref();
         let _batch = in_shape[0];
         let _in_channels = in_shape[1];
         let h_in = in_shape[2];
         let w_in = in_shape[3];
-        let _out_channels = self.weight.shape()[0];
-        let kernel_h = self.weight.shape()[2];
-        let kernel_w = self.weight.shape()[3];
+        let _out_channels = self.weight.shape_ref()[0];
+        let kernel_h = self.weight.shape_ref()[2];
+        let kernel_w = self.weight.shape_ref()[3];
 
         let _h_out = (h_in - 1) * self.stride - 2 * self.padding + kernel_h;
         let _w_out = (w_in - 1) * self.stride - 2 * self.padding + kernel_w;

@@ -1,1 +1,1241 @@
-// Elementwise and matmul tensor methods will be extracted from `tensor::mod` here.
+// Tensor operation methods - arithmetic, matmul, activations, and operator overloads
+
+use crate::autograd;
+use crate::dispatcher::{device_to_dispatch_key, dispatch};
+use crate::storage::{CpuStorage, DType, Device, Storage};
+use parking_lot::RwLock;
+use smallvec::smallvec;
+use smallvec::SmallVec;
+use std::collections::HashMap;
+use std::ops::{Add, Div, Mul, Neg, Sub};
+use std::sync::Arc;
+
+use super::factories::dim_scalar;
+use super::{Tensor, TensorImpl};
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use std::arch::x86_64::{
+    _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_storeu_ps, _mm256_sub_ps,
+};
+
+impl Tensor {
+    pub fn add(&self, other: &Tensor) -> Tensor {
+        let _ = Self::broadcast_shapes(&self.shape(), &other.shape())
+            .unwrap_or_else(|e| panic!("{}", e));
+        // Fast path: CPU contiguous same-shape add, skip dispatch overhead
+        if self.device() == Device::Cpu
+            && other.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && other.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && other.is_contiguous()
+            && self.inner.sizes == other.inner.sizes
+        {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    unreachable!("add fast path only runs when both tensors are on CPU")
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let b_ptr = other.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+                // Single-threaded AVX2 SIMD - faster than rayon for memory-bound ops
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let av = _mm256_loadu_ps(a_ptr.add(i));
+                                let bv = _mm256_loadu_ps(b_ptr.add(i));
+                                _mm256_storeu_ps(out_ptr.add(i), _mm256_add_ps(av, bv));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *out_ptr.add(j) = *a_ptr.add(j) + *b_ptr.add(j);
+                            }
+                        }
+                    } else {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for i in 0..numel {
+                        unsafe {
+                            *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
+                        }
+                    }
+                }
+            }
+            // Attach autograd if needed
+            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+                let edges = {
+                    let mut edges = autograd::make_edge(self);
+                    edges.extend(autograd::make_edge(other));
+                    edges
+                };
+                let backward = autograd::AddBackward::new(vec![self.clone(), other.clone()], edges);
+                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                Arc::make_mut(&mut output.inner).autograd_meta =
+                    Some(Arc::new(std::sync::Mutex::new(meta)));
+            }
+            return output;
+        }
+
+        // General path: dispatch
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
+        let result = dispatch("add", dispatch_key, &[self, other]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = Arc::new(autograd::AddBackward::new(
+                vec![self.clone(), other.clone()],
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    /// In-place addition for gradient accumulation
+    /// This is used internally by the autograd engine to accumulate gradients
+    pub fn add_(&mut self, other: &Tensor) -> &mut Self {
+        // For GPU tensors or non-contiguous tensors, use dispatch-based addition
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).add(other);
+            *self = result;
+            return self;
+        }
+
+        // CPU path: direct memory manipulation (requires contiguous self)
+        let dtype = self.inner.dtype;
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+
+        // If other is broadcast (e.g., expanded scalar), use general path
+        if other_numel != numel || !other.is_contiguous() {
+            let result = (self as &Tensor).add(other);
+            *self = result;
+            return self;
+        }
+
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+
+        match dtype {
+            DType::F32 => {
+                // SIMD + parallel path for F32 gradient accumulation (hot path)
+                // Using sequential chunks with SIMD to avoid data races from parallel in-place modification
+                #[cfg(feature = "parallel")]
+                {
+                    if numel > 64 * 1024 {
+                        const CHUNK: usize = 4096;
+                        let num_chunks = numel.div_ceil(CHUNK);
+                        // Process each chunk sequentially to avoid race conditions
+                        for chunk in 0..num_chunks {
+                            let start = chunk * CHUNK;
+                            let end = (start + CHUNK).min(numel);
+
+                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                            {
+                                if is_x86_feature_detected!("avx2") {
+                                    unsafe {
+                                        let mut i = start;
+                                        while i + 8 <= end {
+                                            let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                            let ov = _mm256_loadu_ps(other_ptr.add(i));
+                                            let r = _mm256_add_ps(sv, ov);
+                                            _mm256_storeu_ps(self_ptr.add(i), r);
+                                            i += 8;
+                                        }
+                                        for j in i..end {
+                                            *self_ptr.add(j) += *other_ptr.add(j);
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            // Scalar fallback for this chunk
+                            for i in start..end {
+                                unsafe {
+                                    *self_ptr.add(i) += *other_ptr.add(i);
+                                }
+                            }
+                        }
+                        return self;
+                    }
+                }
+                // Small tensor or non-parallel: SIMD inline or scalar
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                let ov = _mm256_loadu_ps(other_ptr.add(i));
+                                let r = _mm256_add_ps(sv, ov);
+                                _mm256_storeu_ps(self_ptr.add(i), r);
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *self_ptr.add(j) += *other_ptr.add(j);
+                            }
+                            return self;
+                        }
+                    }
+                }
+                // Scalar fallback
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) += *other_ptr.add(i);
+                    }
+                }
+            }
+            DType::F64 => {
+                let self_ptr = self_ptr as *mut f64;
+                let other_ptr = other_ptr as *const f64;
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) += *other_ptr.add(i);
+                    }
+                }
+            }
+            DType::I32 => {
+                let self_ptr = self_ptr as *mut i32;
+                let other_ptr = other_ptr as *const i32;
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) += *other_ptr.add(i);
+                    }
+                }
+            }
+            DType::BF16 => {
+                let self_ptr = self.data_ptr_mut() as *mut half::bf16;
+                let other_ptr = other.data_ptr() as *const half::bf16;
+                for i in 0..numel {
+                    unsafe {
+                        let self_val = f32::from(*self_ptr.add(i));
+                        let other_val = f32::from(*other_ptr.add(i));
+                        *self_ptr.add(i) = half::bf16::from_f32(self_val + other_val);
+                    }
+                }
+            }
+            DType::F16 => {
+                let self_ptr = self.data_ptr_mut() as *mut half::f16;
+                let other_ptr = other.data_ptr() as *const half::f16;
+                for i in 0..numel {
+                    unsafe {
+                        let self_val = f32::from(*self_ptr.add(i));
+                        let other_val = f32::from(*other_ptr.add(i));
+                        *self_ptr.add(i) = half::f16::from_f32(self_val + other_val);
+                    }
+                }
+            }
+            _ => unimplemented!("add_ for dtype {:?}", dtype),
+        }
+        self
+    }
+
+    /// In-place multiplication
+    pub fn mul_(&mut self, other: &Tensor) -> &mut Self {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).mul(other);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
+            let result = (self as &Tensor).mul(other);
+            *self = result;
+            return self;
+        }
+
+        let dtype = self.inner.dtype;
+        let numel = self.inner.numel() as usize;
+
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+
+        match dtype {
+            DType::F32 => {
+                #[cfg(feature = "parallel")]
+                {
+                    if numel > 64 * 1024 {
+                        use rayon::prelude::*;
+                        const CHUNK: usize = 4096;
+                        let num_chunks = numel.div_ceil(CHUNK);
+                        let self_usize = self_ptr as usize;
+                        let other_usize = other_ptr as usize;
+                        (0..num_chunks).into_par_iter().for_each(|chunk| {
+                            let start = chunk * CHUNK;
+                            let end = (start + CHUNK).min(numel);
+                            let s_p = self_usize as *mut f32;
+                            let o_p = other_usize as *const f32;
+                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                            {
+                                if is_x86_feature_detected!("avx2") {
+                                    unsafe {
+                                        let mut i = start;
+                                        while i + 8 <= end {
+                                            let sv = _mm256_loadu_ps(s_p.add(i));
+                                            let ov = _mm256_loadu_ps(o_p.add(i));
+                                            _mm256_storeu_ps(s_p.add(i), _mm256_mul_ps(sv, ov));
+                                            i += 8;
+                                        }
+                                        for j in i..end {
+                                            *s_p.add(j) *= *o_p.add(j);
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            for j in start..end {
+                                unsafe {
+                                    *s_p.add(j) *= *o_p.add(j);
+                                }
+                            }
+                        });
+                        return self;
+                    }
+                }
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                let ov = _mm256_loadu_ps(other_ptr.add(i));
+                                _mm256_storeu_ps(self_ptr.add(i), _mm256_mul_ps(sv, ov));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *self_ptr.add(j) *= *other_ptr.add(j);
+                            }
+                            return self;
+                        }
+                    }
+                }
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) *= *other_ptr.add(i);
+                    }
+                }
+            }
+            DType::F64 => {
+                let self_ptr = self_ptr as *mut f64;
+                let other_ptr = other_ptr as *const f64;
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) *= *other_ptr.add(i);
+                    }
+                }
+            }
+            DType::I32 => {
+                let self_ptr = self_ptr as *mut i32;
+                let other_ptr = other_ptr as *const i32;
+                for i in 0..numel {
+                    unsafe {
+                        *self_ptr.add(i) *= *other_ptr.add(i);
+                    }
+                }
+            }
+            DType::BF16 => {
+                let self_ptr = self.data_ptr_mut() as *mut half::bf16;
+                let other_ptr = other.data_ptr() as *const half::bf16;
+                for i in 0..numel {
+                    unsafe {
+                        let self_val = f32::from(*self_ptr.add(i));
+                        let other_val = f32::from(*other_ptr.add(i));
+                        *self_ptr.add(i) = half::bf16::from_f32(self_val * other_val);
+                    }
+                }
+            }
+            DType::F16 => {
+                let self_ptr = self.data_ptr_mut() as *mut half::f16;
+                let other_ptr = other.data_ptr() as *const half::f16;
+                for i in 0..numel {
+                    unsafe {
+                        let self_val = f32::from(*self_ptr.add(i));
+                        let other_val = f32::from(*other_ptr.add(i));
+                        *self_ptr.add(i) = half::f16::from_f32(self_val * other_val);
+                    }
+                }
+            }
+            _ => unimplemented!("mul_ for dtype {:?}", dtype),
+        }
+        self
+    }
+
+    /// In-place scalar multiplication: self *= scalar
+    /// Avoids allocating a scalar tensor for optimizer hot paths.
+    pub fn mul_scalar_(&mut self, scalar: f32) -> &mut Self {
+        if self.inner.is_gpu() {
+            let scalar_t = Tensor::from_scalar(scalar);
+            let result = (self as &Tensor).mul(&scalar_t);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let self_ptr = self.data_ptr_f32_mut();
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) *= scalar;
+            }
+        }
+        self
+    }
+
+    /// Non-in-place scalar multiplication without creating a scalar tensor.
+    /// Avoids the 5-heap-alloc overhead of Tensor::from_scalar().
+    pub fn mul_scalar(&self, scalar: f32) -> Tensor {
+        let mut result = self.clone();
+        result.mul_scalar_(scalar);
+        result
+    }
+
+    /// In-place scalar addition: self += scalar
+    pub fn add_scalar_(&mut self, scalar: f32) -> &mut Self {
+        if self.inner.is_gpu() {
+            let scalar_t = Tensor::from_scalar(scalar);
+            let result = (self as &Tensor).add(&scalar_t);
+            *self = result;
+            return self;
+        }
+
+        let numel = self.inner.numel() as usize;
+        let self_ptr = self.data_ptr_f32_mut();
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) += scalar;
+            }
+        }
+        self
+    }
+
+    /// In-place subtraction: self -= other
+    pub fn sub_(&mut self, other: &Tensor) -> &mut Self {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).sub(other);
+            *self = result;
+            return self;
+        }
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
+            let result = (self as &Tensor).sub(other);
+            *self = result;
+            return self;
+        }
+
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let sv = _mm256_loadu_ps(self_ptr.add(i));
+                        let ov = _mm256_loadu_ps(other_ptr.add(i));
+                        _mm256_storeu_ps(self_ptr.add(i), _mm256_sub_ps(sv, ov));
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *self_ptr.add(j) -= *other_ptr.add(j);
+                    }
+                    return self;
+                }
+            }
+        }
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) -= *other_ptr.add(i);
+            }
+        }
+        self
+    }
+
+    /// In-place division: self /= other
+    pub fn div_(&mut self, other: &Tensor) -> &mut Self {
+        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            let result = (self as &Tensor).div(other);
+            *self = result;
+            return self;
+        }
+        let numel = self.inner.numel() as usize;
+        let other_numel = other.inner.numel() as usize;
+        if other_numel != numel || !other.is_contiguous() {
+            let result = (self as &Tensor).div(other);
+            *self = result;
+            return self;
+        }
+
+        let self_ptr = self.data_ptr_f32_mut();
+        let other_ptr = other.data_ptr_f32();
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let sv = _mm256_loadu_ps(self_ptr.add(i));
+                        let ov = _mm256_loadu_ps(other_ptr.add(i));
+                        _mm256_storeu_ps(self_ptr.add(i), _mm256_div_ps(sv, ov));
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *self_ptr.add(j) /= *other_ptr.add(j);
+                    }
+                    return self;
+                }
+            }
+        }
+        for i in 0..numel {
+            unsafe {
+                *self_ptr.add(i) /= *other_ptr.add(i);
+            }
+        }
+        self
+    }
+
+    /// In-place addcmul: self += tensor1 * tensor2
+    /// Fused operation to reduce allocations in backward passes
+    pub fn addcmul_(&mut self, tensor1: &Tensor, tensor2: &Tensor) -> &mut Self {
+        // Fast path: CPU contiguous same-shape tensors, skip dispatch overhead
+        if self.device() == Device::Cpu
+            && tensor1.device() == Device::Cpu
+            && tensor2.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && tensor1.inner.dtype == DType::F32
+            && tensor2.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && tensor1.is_contiguous()
+            && tensor2.is_contiguous()
+            && self.inner.sizes == tensor1.inner.sizes
+            && self.inner.sizes == tensor2.inner.sizes
+        {
+            let numel = self.inner.numel() as usize;
+            let self_ptr = self.data_ptr_f32_mut();
+            let t1_ptr = tensor1.data_ptr_f32();
+            let t2_ptr = tensor2.data_ptr_f32();
+
+            #[cfg(feature = "parallel")]
+            {
+                if numel > 64 * 1024 {
+                    use rayon::prelude::*;
+                    const CHUNK: usize = 4096;
+                    let num_chunks = numel.div_ceil(CHUNK);
+                    let self_usize = self_ptr as usize;
+                    let t1_usize = t1_ptr as usize;
+                    let t2_usize = t2_ptr as usize;
+                    (0..num_chunks).into_par_iter().for_each(|chunk| {
+                        let start = chunk * CHUNK;
+                        let end = (start + CHUNK).min(numel);
+                        let s_p = self_usize as *mut f32;
+                        let t1_p = t1_usize as *const f32;
+                        let t2_p = t2_usize as *const f32;
+                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                        {
+                            if is_x86_feature_detected!("avx2") {
+                                unsafe {
+                                    let mut i = start;
+                                    while i + 8 <= end {
+                                        let sv = _mm256_loadu_ps(s_p.add(i));
+                                        let t1v = _mm256_loadu_ps(t1_p.add(i));
+                                        let t2v = _mm256_loadu_ps(t2_p.add(i));
+                                        let prod = _mm256_mul_ps(t1v, t2v);
+                                        let r = _mm256_add_ps(sv, prod);
+                                        _mm256_storeu_ps(s_p.add(i), r);
+                                        i += 8;
+                                    }
+                                    for j in i..end {
+                                        *s_p.add(j) += *t1_p.add(j) * *t2_p.add(j);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        // Scalar fallback
+                        for i in start..end {
+                            unsafe {
+                                *s_p.add(i) += *t1_p.add(i) * *t2_p.add(i);
+                            }
+                        }
+                    });
+                    return self;
+                }
+            }
+
+            // Small tensor or non-parallel: SIMD inline
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && numel >= 8 {
+                    unsafe {
+                        let mut i = 0;
+                        while i + 8 <= numel {
+                            let sv = _mm256_loadu_ps(self_ptr.add(i));
+                            let t1v = _mm256_loadu_ps(t1_ptr.add(i));
+                            let t2v = _mm256_loadu_ps(t2_ptr.add(i));
+                            let prod = _mm256_mul_ps(t1v, t2v);
+                            let r = _mm256_add_ps(sv, prod);
+                            _mm256_storeu_ps(self_ptr.add(i), r);
+                            i += 8;
+                        }
+                        for j in i..numel {
+                            *self_ptr.add(j) += *t1_ptr.add(j) * *t2_ptr.add(j);
+                        }
+                        return self;
+                    }
+                }
+            }
+
+            // Scalar fallback
+            for i in 0..numel {
+                unsafe {
+                    *self_ptr.add(i) += *t1_ptr.add(i) * *t2_ptr.add(i);
+                }
+            }
+            self
+        } else {
+            // Fallback: use dispatched operations
+            let product = tensor1.mul(tensor2);
+            self.add_(&product);
+            self
+        }
+    }
+
+    pub fn sub(&self, other: &Tensor) -> Tensor {
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
+        let result = dispatch("sub", dispatch_key, &[self, other]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = Arc::new(autograd::SubBackward::new(
+                vec![self.clone(), other.clone()],
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn mul(&self, other: &Tensor) -> Tensor {
+        // Fast path: CPU contiguous same-shape mul, skip dispatch overhead
+        if self.device() == Device::Cpu
+            && other.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && other.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && other.is_contiguous()
+            && self.inner.sizes == other.inner.sizes
+        {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    unreachable!("mul fast path only runs when both tensors are on CPU")
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let b_ptr = other.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+                // Single-threaded AVX2 SIMD - faster than rayon for memory-bound ops
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let av = _mm256_loadu_ps(a_ptr.add(i));
+                                let bv = _mm256_loadu_ps(b_ptr.add(i));
+                                _mm256_storeu_ps(out_ptr.add(i), _mm256_mul_ps(av, bv));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *out_ptr.add(j) = *a_ptr.add(j) * *b_ptr.add(j);
+                            }
+                        }
+                    } else {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for i in 0..numel {
+                        unsafe {
+                            *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
+                        }
+                    }
+                }
+            }
+            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+                let edges = {
+                    let mut edges = autograd::make_edge(self);
+                    edges.extend(autograd::make_edge(other));
+                    edges
+                };
+                let backward = autograd::MulBackward::new(vec![self.clone(), other.clone()], edges);
+                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                Arc::make_mut(&mut output.inner).autograd_meta =
+                    Some(Arc::new(std::sync::Mutex::new(meta)));
+            }
+            return output;
+        }
+
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
+        let result = dispatch("mul", dispatch_key, &[self, other]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = Arc::new(autograd::MulBackward::new(
+                vec![self.clone(), other.clone()],
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn div(&self, other: &Tensor) -> Tensor {
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
+        let result = dispatch("div", dispatch_key, &[self, other]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = Arc::new(autograd::DivBackward::new(
+                vec![self.clone(), other.clone()],
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn matmul(&self, other: &Tensor) -> Tensor {
+        // Fast path: 2D CPU matmul, skip dispatch overhead
+        if self.inner.ndim() == 2
+            && other.inner.ndim() == 2
+            && self.device() == Device::Cpu
+            && other.device() == Device::Cpu
+            && self.inner.dtype == DType::F32
+            && other.inner.dtype == DType::F32
+            && self.is_contiguous()
+            && other.is_contiguous()
+        {
+            return self.matmul_fast_2d(other);
+        }
+
+        let dispatch_key = match (self.device(), other.device()) {
+            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+            _ => device_to_dispatch_key(Device::Cpu),
+        };
+        let result = dispatch("matmul", dispatch_key, &[self, other]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = Arc::new(autograd::MatmulBackward::new(
+                self.clone(),
+                other.clone(),
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    /// Fast 2D contiguous F32 matmul bypassing dispatch
+    fn matmul_fast_2d(&self, other: &Tensor) -> Tensor {
+        let a_shape = &self.inner.sizes;
+        let b_shape = &other.inner.sizes;
+        let m = a_shape[0] as usize;
+        let k = a_shape[1] as usize;
+        let n = b_shape[1] as usize;
+
+        // Allocate output directly
+        let sizes: SmallVec<[i64; 8]> = smallvec![m as i64, n as i64];
+        let nbytes = m * n * DType::F32.size();
+        let data = vec![0u8; nbytes];
+        let storage = Arc::new(Storage::Cpu(CpuStorage {
+            data: Arc::new(data),
+            nbytes,
+            gpu_buffer_cache: RwLock::new(HashMap::new()),
+        }));
+        let mut output = Tensor::new(TensorImpl::new(storage, sizes, DType::F32));
+        {
+            let output_inner = Arc::make_mut(&mut output.inner);
+            let output_storage = Arc::make_mut(&mut output_inner.storage);
+            let Storage::Cpu(cpu_storage) = output_storage else {
+                unreachable!("matmul_fast_2d always allocates CPU output")
+            };
+            let out_data = Arc::make_mut(&mut cpu_storage.data);
+
+            let a_ptr = self.data_ptr_f32();
+            let b_ptr = other.data_ptr_f32();
+            let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, m * k) };
+            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k * n) };
+            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, m * n) };
+
+            crate::kernels::blas::matmul_blas_into(a_slice, b_slice, out_slice, m, k, n);
+        }
+
+        // Attach autograd if needed
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = {
+                let mut edges = autograd::make_edge(self);
+                edges.extend(autograd::make_edge(other));
+                edges
+            };
+            let backward = autograd::MatmulBackward::new(self.clone(), other.clone(), edges);
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+        output
+    }
+
+    pub fn neg(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("neg", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::NegBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn relu(&self) -> Tensor {
+        // Fast path: contiguous CPU F32, skip dispatch
+        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    panic!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = (*a_ptr.add(i)).max(0.0);
+                    }
+                }
+            }
+            if autograd::is_grad_enabled() && self.requires_grad() {
+                let edges = autograd::make_edge(self);
+                let backward = autograd::ReluBackward::new(self.clone(), edges);
+                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                Arc::make_mut(&mut output.inner).autograd_meta =
+                    Some(Arc::new(std::sync::Mutex::new(meta)));
+            }
+            return output;
+        }
+
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("relu", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::ReluBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn exp(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("exp", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::ExpBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn ln(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("log", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::LogBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn sigmoid(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("sigmoid", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::SigmoidBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn tanh(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("tanh", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::TanhBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn silu(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("silu", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::SiLUBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn gelu(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("gelu", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::GeluBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn leaky_relu(&self, negative_slope: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let slope_tensor = Tensor::from_scalar(negative_slope);
+        let result = dispatch("leaky_relu", dispatch_key, &[self, &slope_tensor]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::LeakyReLUBackward::new(
+                self.clone(),
+                negative_slope,
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn softplus(&self, beta: f32, threshold: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let beta_t = Tensor::from_scalar(beta);
+        let threshold_t = Tensor::from_scalar(threshold);
+        let result = dispatch("softplus", dispatch_key, &[self, &beta_t, &threshold_t]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::SoftplusBackward::new(
+                self.clone(),
+                beta,
+                threshold,
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn hardswish(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("hardswish", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::HardswishBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn elu(&self, alpha: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let alpha_tensor = Tensor::from_scalar(alpha);
+        let result = dispatch("elu", dispatch_key, &[self, &alpha_tensor]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::EluBackward::new(self.clone(), alpha, edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn softmax(&self, dim: i32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("softmax", dispatch_key, &[self, &dim_scalar(dim)]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::SoftmaxBackward::new(
+                self.clone(),
+                output.clone(),
+                dim as usize,
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn sqrt(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("sqrt", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::SqrtBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn fused_linear_gelu(&self, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
+        let device = match (self.device(), weight.device()) {
+            (Device::Wgpu(id), _) => Device::Wgpu(id),
+            (_, Device::Wgpu(id)) => Device::Wgpu(id),
+            _ => {
+                if let Some(b) = bias {
+                    b.device()
+                } else {
+                    Device::Cpu
+                }
+            }
+        };
+        let dispatch_key = device_to_dispatch_key(device);
+        let args: Vec<&Tensor> = match bias {
+            Some(b) => vec![self, weight, b],
+            None => vec![self, weight],
+        };
+        let result = dispatch("fused_linear_gelu", dispatch_key, &args);
+        result[0].clone()
+    }
+
+    pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch(
+            "clamp",
+            dispatch_key,
+            &[
+                self,
+                &Tensor::from_scalar(min_val),
+                &Tensor::from_scalar(max_val),
+            ],
+        );
+        result[0].clone()
+    }
+
+    pub fn pow(&self, exponent: f32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("pow", dispatch_key, &[self, &Tensor::from_scalar(exponent)]);
+        result[0].clone()
+    }
+
+    pub fn abs(&self) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch("abs", dispatch_key, &[self]);
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::AbsBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn log_softmax(&self, dim: i32) -> Tensor {
+        let dispatch_key = device_to_dispatch_key(self.device());
+        let result = dispatch(
+            "log_softmax",
+            dispatch_key,
+            &[self, &Tensor::from_scalar(dim as f32)],
+        );
+        result[0].clone()
+    }
+
+    pub fn as_i64_slice(&self) -> Vec<i64> {
+        let src = self.to_cpu();
+        let data = src.as_f32_slice();
+        data.iter().map(|&v| v as i64).collect()
+    }
+}
+
+impl Add for &Tensor {
+    type Output = Tensor;
+    fn add(self, other: &Tensor) -> Tensor {
+        self.add(other)
+    }
+}
+
+impl Add for Tensor {
+    type Output = Tensor;
+    #[allow(clippy::needless_borrow)]
+    fn add(self, other: Tensor) -> Tensor {
+        (&self).add(&other)
+    }
+}
+
+impl Sub for &Tensor {
+    type Output = Tensor;
+    fn sub(self, other: &Tensor) -> Tensor {
+        self.sub(other)
+    }
+}
+
+impl Sub for Tensor {
+    type Output = Tensor;
+    #[allow(clippy::needless_borrow)]
+    fn sub(self, other: Tensor) -> Tensor {
+        (&self).sub(&other)
+    }
+}
+
+impl Mul for &Tensor {
+    type Output = Tensor;
+    fn mul(self, other: &Tensor) -> Tensor {
+        self.mul(other)
+    }
+}
+
+impl Mul for Tensor {
+    type Output = Tensor;
+    #[allow(clippy::needless_borrow)]
+    fn mul(self, other: Tensor) -> Tensor {
+        (&self).mul(&other)
+    }
+}
+
+impl Div for &Tensor {
+    type Output = Tensor;
+    fn div(self, other: &Tensor) -> Tensor {
+        self.div(other)
+    }
+}
+
+impl Div for Tensor {
+    type Output = Tensor;
+    #[allow(clippy::needless_borrow)]
+    fn div(self, other: Tensor) -> Tensor {
+        (&self).div(&other)
+    }
+}
+
+impl Neg for Tensor {
+    type Output = Tensor;
+    #[allow(clippy::needless_borrow, unconditional_recursion)]
+    fn neg(self) -> Tensor {
+        (&self).neg()
+    }
+}
+
+impl Neg for &Tensor {
+    type Output = Tensor;
+    fn neg(self) -> Tensor {
+        self.neg()
+    }
+}

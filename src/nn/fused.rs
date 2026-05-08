@@ -84,9 +84,10 @@ impl<A: Activation> FusedConvBn<A> {
         let k = kernel_size * kernel_size * in_channels / groups;
         let scale = (2.0 / k as f32).sqrt();
 
-        let conv_weight_data: Vec<f32> = (0..out_channels * in_channels / groups * kernel_size * kernel_size)
-            .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
-            .collect();
+        let conv_weight_data: Vec<f32> =
+            (0..out_channels * in_channels / groups * kernel_size * kernel_size)
+                .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
+                .collect();
         let conv_weight = Tensor::from_vec(
             conv_weight_data,
             vec![out_channels, in_channels / groups, kernel_size, kernel_size],
@@ -174,10 +175,18 @@ impl Node for FusedConvBnBackward {
             self.msg
         );
     }
-    fn next_edges(&self) -> &[Edge] { &[] }
-    fn num_inputs(&self) -> usize { 0 }
-    fn name(&self) -> &str { self.backward_name }
-    fn inputs(&self) -> &[Tensor] { &[] }
+    fn next_edges(&self) -> &[Edge] {
+        &[]
+    }
+    fn num_inputs(&self) -> usize {
+        0
+    }
+    fn name(&self) -> &str {
+        self.backward_name
+    }
+    fn inputs(&self) -> &[Tensor] {
+        &[]
+    }
 }
 
 impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
@@ -217,14 +226,19 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
             });
             let mut meta = AutogradMeta::new_non_leaf(false);
             meta.grad_fn = Some(backward);
-            Arc::make_mut(&mut output.inner).autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
         }
 
         output
     }
 
     fn parameters(&self) -> Vec<Tensor> {
-        let mut params = vec![self.conv_weight.clone(), self.bn_weight.clone(), self.bn_bias.clone()];
+        let mut params = vec![
+            self.conv_weight.clone(),
+            self.bn_weight.clone(),
+            self.bn_bias.clone(),
+        ];
         if let Some(b) = &self.conv_bias {
             params.push(b.clone());
         }
@@ -262,7 +276,9 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
 
     fn train_mode(&self) {}
     fn eval_mode(&self) {}
-    fn is_training(&self) -> bool { false }
+    fn is_training(&self) -> bool {
+        false
+    }
 }
 
 /// Fused Conv2d + BatchNorm2d + SiLU layer (inference only).
@@ -277,10 +293,7 @@ pub type FusedConvBnGelu = FusedConvBn<GeluAct>;
 /// FusedConvBn (no activation) specific methods
 impl FusedConvBn<NoAct> {
     /// Fuse parameters from separate Conv2d and BatchNorm2d layers
-    pub fn from_conv_bn(
-        conv: &crate::nn::conv::Conv2d,
-        bn: &crate::nn::norm::BatchNorm2d,
-    ) -> Self {
+    pub fn from_conv_bn(conv: &crate::nn::conv::Conv2d, bn: &crate::nn::norm::BatchNorm2d) -> Self {
         let stride = conv.stride;
         let padding = conv.padding;
         let dilation = conv.dilation;

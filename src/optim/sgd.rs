@@ -1,11 +1,10 @@
 use crate::optim::{
-    apply_weight_decay, get_grad, Optimizer, OptimizerState, ParamGroup,
-    ParamState, WeightDecayType, zeros_like,
+    apply_weight_decay, zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState,
+    WeightDecayType,
 };
 use crate::tensor::Tensor;
+use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;
-
-use crate::impl_params_mut;
 
 #[allow(clippy::upper_case_acronyms)]
 pub struct SGD {
@@ -52,11 +51,7 @@ impl Optimizer for SGD {
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = get_grad(param) {
-                g
-            } else {
-                continue;
-            };
+            let grad = get_grad_or_skip!(param);
 
             // Apply L2 weight decay (consistent with WeightDecayType::L2)
             let grad = if weight_decay != 0.0 {

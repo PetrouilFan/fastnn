@@ -78,23 +78,22 @@ pub enum FastnnError {
     Other(String),
 }
 
-
 impl FastnnError {
     /// Create a shape error with context
     pub fn shape(msg: impl Into<String>) -> Self {
         FastnnError::Shape(msg.into())
     }
-    
+
     /// Create a dtype error with context
     pub fn dtype(msg: impl Into<String>) -> Self {
         FastnnError::Dtype(msg.into())
     }
-    
+
     /// Create a device error with context
     pub fn device(msg: impl Into<String>) -> Self {
         FastnnError::Device(msg.into())
     }
-    
+
     /// Create a tensor operation error with context
     pub fn tensor_op(msg: impl Into<String>) -> Self {
         FastnnError::TensorOp(msg.into())
@@ -146,7 +145,7 @@ pub trait Context<T> {
     fn with_context<F>(self, f: F) -> Result<T, FastnnError>
     where
         F: FnOnce() -> String;
-    
+
     fn with_context_str(self, context: &str) -> Result<T, FastnnError>;
 }
 
@@ -164,7 +163,9 @@ impl<T> Context<T> for Result<T, FastnnError> {
             FastnnError::Optim(msg) => FastnnError::Optim(format!("{}: {}", f(), msg)),
             FastnnError::Io(err) => FastnnError::Serialization(format!("{}: {}", f(), err)),
             FastnnError::Utf8(err) => FastnnError::Serialization(format!("{}: {}", f(), err)),
-            FastnnError::Serialization(msg) => FastnnError::Serialization(format!("{}: {}", f(), msg)),
+            FastnnError::Serialization(msg) => {
+                FastnnError::Serialization(format!("{}: {}", f(), msg))
+            }
             FastnnError::Cuda(msg) => FastnnError::Cuda(format!("{}: {}", f(), msg)),
             FastnnError::DataLoader(msg) => FastnnError::DataLoader(format!("{}: {}", f(), msg)),
             FastnnError::Computation(msg) => FastnnError::Computation(format!("{}: {}", f(), msg)),

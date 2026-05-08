@@ -3,23 +3,23 @@
 #![allow(unused_imports)]
 #![allow(clippy::missing_safety_doc)]
 
+use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
-    matmul_blas, matmul_blas_into, matmul_blas_with_transpose,
-    matmul_blas_with_transpose_into, MIN_BLAS_SIZE,
+    matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
+    MIN_BLAS_SIZE,
 };
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
-use super::*;
 
 pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
         let dim_i32 = args[1].item() as i32;
-        let a_shape = a.shape();
+        let a_shape = a.shape_ref();
         let ndim = a_shape.len() as i32;
         // Handle negative dimensions
         let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
@@ -33,12 +33,12 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         false
     };
 
-    let a_shape = a.shape();
+    let a_shape = a.shape_ref();
     let ndim = a_shape.len();
 
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
-    let mut output_shape: Vec<i64> = a_shape.clone();
+    let mut output_shape: Vec<i64> = a_shape.to_vec();
     if keepdim {
         output_shape[dim] = 1;
     } else {
@@ -140,7 +140,7 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
         let dim_i32 = args[1].item() as i32;
-        let a_shape = a.shape();
+        let a_shape = a.shape_ref();
         let ndim = a_shape.len() as i32;
         // Handle negative dimensions
         let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
@@ -154,11 +154,11 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         false
     };
 
-    let a_shape = a.shape();
+    let a_shape = a.shape_ref();
     let ndim = a_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
-    let mut output_shape: Vec<i64> = a_shape.clone();
+    let mut output_shape: Vec<i64> = a_shape.to_vec();
     if keepdim {
         output_shape[dim] = 1;
     } else {
@@ -255,7 +255,7 @@ pub unsafe fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
         let dim_i32 = args[1].item() as i32;
-        let a_shape = a.shape();
+        let a_shape = a.shape_ref();
         let ndim = a_shape.len() as i32;
         // Handle negative dimensions
         let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
@@ -269,7 +269,7 @@ pub unsafe fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         false
     };
 
-    let a_shape = a.shape();
+    let a_shape = a.shape_ref();
     let ndim = a_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
@@ -304,7 +304,7 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
         let dim_i32 = args[1].item() as i32;
-        let a_shape = a.shape();
+        let a_shape = a.shape_ref();
         let ndim = a_shape.len() as i32;
         // Handle negative dimensions
         let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
@@ -318,11 +318,11 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         false
     };
 
-    let a_shape = a.shape();
+    let a_shape = a.shape_ref();
     let ndim = a_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
-    let mut output_shape: Vec<i64> = a_shape.clone();
+    let mut output_shape: Vec<i64> = a_shape.to_vec();
     if keepdim {
         output_shape[dim] = 1;
     } else {
@@ -413,7 +413,7 @@ pub unsafe fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let dim = if args.len() > 1 {
         let dim_i32 = args[1].item() as i32;
-        let x_shape = x.shape();
+        let x_shape = x.shape_ref();
         let ndim = x_shape.len() as i32;
         // Handle negative dimensions
         let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
@@ -422,7 +422,7 @@ pub unsafe fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         0
     };
 
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let ndim = x_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
@@ -447,7 +447,7 @@ pub unsafe fn softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 #[inline]
 pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let _batch_size: i64 = x_shape[..x_shape.len() - 1].iter().product();
 
     let x_ptr = x.data_ptr() as *const f32;
@@ -724,7 +724,7 @@ pub unsafe fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let dim = if args.len() > 1 {
         let dim_i32 = args[1].item() as i32;
-        let x_shape = x.shape();
+        let x_shape = x.shape_ref();
         let ndim = x_shape.len() as i32;
         // Handle negative dimensions
         let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
@@ -733,7 +733,7 @@ pub unsafe fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         0
     };
 
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let ndim = x_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
 
@@ -758,7 +758,7 @@ pub unsafe fn log_softmax_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 #[inline]
 pub fn log_softmax_last_dim_fused(x: &Tensor, dim_size: usize) -> Tensor {
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let x_ptr = x.data_ptr() as *const f32;
     let numel = x.numel() as usize;
 
@@ -847,7 +847,7 @@ pub unsafe fn softmax_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         0
     };
 
-    let s_shape = s.shape();
+    let s_shape = s.shape_ref();
     let ndim = s_shape.len();
     let dim = if dim >= ndim { ndim - 1 } else { dim };
     let dim_size = s_shape[dim] as usize;
@@ -909,8 +909,11 @@ pub unsafe fn softmax_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 /// Optimized softmax backward for last dimension using SIMD
 #[inline]
 fn softmax_backward_last_dim(s: &Tensor, grad: &Tensor, dim_size: usize) -> Tensor {
-    let s_shape = s.shape();
-    let outer_size: usize = s_shape[..s_shape.len() - 1].iter().map(|&d| d as usize).product();
+    let s_shape = s.shape_ref();
+    let outer_size: usize = s_shape[..s_shape.len() - 1]
+        .iter()
+        .map(|&d| d as usize)
+        .product();
     let _numel = s.numel() as usize;
 
     let mut output = Tensor::empty(s_shape.to_vec(), s.dtype(), s.device());
@@ -952,4 +955,3 @@ fn softmax_backward_last_dim(s: &Tensor, grad: &Tensor, dim_size: usize) -> Tens
 
     output
 }
-

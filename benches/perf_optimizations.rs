@@ -1,15 +1,15 @@
-use fastnn::{Tensor, Device, DType};
-use fastnn::optim::{Optimizer, adamw::AdamW};
-use fastnn::storage_pool::get_storage_pool;
 use fastnn::autograd::backward;
-use std::time::{Instant, Duration};
+use fastnn::optim::{adamw::AdamW, Optimizer};
+use fastnn::storage_pool::get_storage_pool;
+use fastnn::{DType, Device, Tensor};
 use std::hint::black_box;
+use std::time::{Duration, Instant};
 
 const ITERS: usize = 1000;
 
 fn bench_elementwise_broadcast() -> Duration {
     let a_data: Vec<f32> = (0..64).map(|i| (i as f32 * 0.001).sin()).collect();
-    let b_data: Vec<f32> = (0..32*64).map(|i| (i as f32 * 0.001).cos()).collect();
+    let b_data: Vec<f32> = (0..32 * 64).map(|i| (i as f32 * 0.001).cos()).collect();
     let a = Tensor::from_vec(a_data, vec![1, 64]);
     let b = Tensor::from_vec(b_data, vec![32, 64]);
     let mut total = Duration::ZERO;

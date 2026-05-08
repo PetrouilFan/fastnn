@@ -85,8 +85,8 @@ impl Node for AddBackward {
 
         // Handle broadcasting: if input shape doesn't match output shape,
         // sum over the extra dimensions.
-        let grad_a = crate::autograd::sum_to_shape(grad.clone(), &a.shape());
-        let grad_b = crate::autograd::sum_to_shape(grad, &b.shape());
+        let grad_a = crate::autograd::sum_to_shape(grad.clone(), &a.shape_ref());
+        let grad_b = crate::autograd::sum_to_shape(grad, &b.shape_ref());
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -174,8 +174,8 @@ impl Node for SubBackward {
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
-        let grad_a = crate::autograd::sum_to_shape(grad.clone(), &a.shape());
-        let grad_b = crate::autograd::sum_to_shape(grad.neg(), &b.shape());
+        let grad_a = crate::autograd::sum_to_shape(grad.clone(), &a.shape_ref());
+        let grad_b = crate::autograd::sum_to_shape(grad.neg(), &b.shape_ref());
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -218,10 +218,10 @@ impl Node for MulBackward {
         let b = &self.inputs[1];
 
         // Compute gradient for a: grad * b
-        let grad_a = crate::autograd::sum_to_shape(grad.mul(b), &a.shape());
+        let grad_a = crate::autograd::sum_to_shape(grad.mul(b), &a.shape_ref());
 
         // Compute gradient for b: grad * a
-        let grad_b = crate::autograd::sum_to_shape(grad.mul(a), &b.shape());
+        let grad_b = crate::autograd::sum_to_shape(grad.mul(a), &b.shape_ref());
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -272,8 +272,8 @@ impl Node for DivBackward {
         let grad_b = grad.mul(a).div(&b_sq).neg();
 
         // Handle broadcasting for both gradients
-        let final_grad_a = crate::autograd::sum_to_shape(grad_a, &a.shape());
-        let final_grad_b = crate::autograd::sum_to_shape(grad_b, &b.shape());
+        let final_grad_a = crate::autograd::sum_to_shape(grad_a, &a.shape_ref());
+        let final_grad_b = crate::autograd::sum_to_shape(grad_b, &b.shape_ref());
 
         vec![Some(final_grad_a), Some(final_grad_b)]
     }
@@ -590,8 +590,8 @@ impl Node for MinimumBackward {
         let mask = a.le_tensor(b);
         let mask_not = mask.logical_not();
 
-        let grad_a = crate::autograd::sum_to_shape(grad.mul(&mask), &a.shape());
-        let grad_b = crate::autograd::sum_to_shape(grad.mul(&mask_not), &b.shape());
+        let grad_a = crate::autograd::sum_to_shape(grad.mul(&mask), &a.shape_ref());
+        let grad_b = crate::autograd::sum_to_shape(grad.mul(&mask_not), &b.shape_ref());
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -638,8 +638,8 @@ impl Node for MaximumBackward {
         let mask = a.ge_tensor(b);
         let mask_not = mask.logical_not();
 
-        let grad_a = crate::autograd::sum_to_shape(grad.mul(&mask), &a.shape());
-        let grad_b = crate::autograd::sum_to_shape(grad.mul(&mask_not), &b.shape());
+        let grad_a = crate::autograd::sum_to_shape(grad.mul(&mask), &a.shape_ref());
+        let grad_b = crate::autograd::sum_to_shape(grad.mul(&mask_not), &b.shape_ref());
 
         vec![Some(grad_a), Some(grad_b)]
     }

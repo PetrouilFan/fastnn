@@ -26,9 +26,7 @@ struct AlignedBuffer {
 
 impl AlignedBuffer {
     const fn new(_capacity: usize) -> Self {
-        Self {
-            data: Vec::new(),
-        }
+        Self { data: Vec::new() }
     }
 
     fn resize(&mut self, new_len: usize) {
@@ -165,9 +163,9 @@ use rayon::prelude::*;
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 use std::arch::aarch64::*;
 
+use wide::f32x4;
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 use wide::f32x8;
-use wide::f32x4;
 
 // Memory-bound elementwise ops: 128KB working set (L2 cache friendly)
 const CHUNK_MEMBOUND: usize = 1024 * 32; // 32K f32 = 128KB
@@ -185,7 +183,6 @@ const PARALLEL_THRESHOLD: usize = 1024 * 32; // 32K elements
 // This constant is used to determine when to use SIMD operations
 #[allow(dead_code)]
 const SIMD_THRESHOLD: usize = 256;
-
 
 // Runtime SIMD level detection
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -220,7 +217,6 @@ fn detect_simd_level() -> SimdLevel {
 // Fast log approximation using integer exponent extraction
 
 // Fast log approximation for AVX512
-
 
 // Parallel SIMD kernels - AVX2 version with vectorized tails
 
@@ -310,7 +306,6 @@ fn detect_simd_level() -> SimdLevel {
 
 // Parallel tanh NEON kernel using wide::f32x4
 
-
 // Exp kernel using wide library for SIMD
 
 // Log kernel using wide library for SIMD
@@ -326,10 +321,6 @@ fn detect_simd_level() -> SimdLevel {
 // Log kernel using wide library for SIMD on ARM
 
 // Sqrt kernel using wide library for SIMD on ARM
-
-
-
-
 
 // Sigmoid SIMD for x86_64 using exp approximation
 
@@ -397,12 +388,6 @@ fn broadcast_index_decomposition(
     input_idx + storage_offset
 }
 
-
-
-
-
-
-
 // Parallel exp AVX2 kernel using fast_exp_avx2
 
 // Parallel exp AVX512 kernel using fast_exp_avx512
@@ -415,36 +400,17 @@ fn broadcast_index_decomposition(
 
 // Parallel log NEON kernel using wide::f32x4
 
-
-
 // Parallel sqrt AVX2 kernel
 
 // Parallel sqrt AVX512 kernel
 
 // Parallel sqrt NEON kernel using wide::f32x4
 
-
-
-
-
 // Parallel GELU AVX2 kernel using fast_exp_avx2 for tanh
 
 // Parallel GELU AVX512 kernel using fast_exp_avx512 for tanh
 
 // Parallel GELU NEON kernel using wide::f32x4
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// Fast contiguous last-dim sum with SIMD
 pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> Tensor {
@@ -541,15 +507,6 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
     }
     Tensor::from_vec(result_data, vec![num_rows as i64])
 }
-
-
-
-
-
-
-
-
-
 
 /// Cross-entropy backward: computes grad_logits = softmax(logits) - one_hot(target),
 /// scaled by grad_output / batch_size for mean reduction.
@@ -655,19 +612,8 @@ pub fn cross_entropy_backward_f32(
     }
 }
 
-
-
-
-
-
-
-
-
 // Winograd F(2x2, 3x3) is disabled for now due to overhead from transform operations
 // The im2col + BLAS approach is faster for current use cases
-
-
-
 
 /// Fused layer norm backward: computes dX, dW, dB without intermediate tensors.
 /// Parallelized over outer dimensions (rows) for dX computation.
@@ -793,9 +739,6 @@ pub fn layer_norm_backward_f32(
     }
 }
 
-
-
-
 pub struct EmbeddingBackward {
     pub inputs: Vec<Tensor>,
     pub edges: Vec<Edge>,
@@ -811,10 +754,14 @@ impl EmbeddingBackward {
 }
 
 impl Node for EmbeddingBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+    fn apply(
+        &self,
+        grad_outputs: Vec<Option<Tensor>>,
+        _output_tensor_id: usize,
+    ) -> Vec<Option<Tensor>> {
         let Some(grad_output) = grad_outputs.into_iter().next().flatten() else {
             return vec![Some(Tensor::zeros(
-                self.inputs[0].shape().clone(),
+                self.inputs[0].shape_ref().to_vec(),
                 self.inputs[0].dtype(),
                 self.inputs[0].device(),
             ))];
@@ -822,12 +769,12 @@ impl Node for EmbeddingBackward {
         let weight = &self.inputs[0];
         let indices = &self.inputs[1];
 
-        let weight_shape = weight.shape().clone();
+        let weight_shape = weight.shape_ref();
         let embedding_dim = weight_shape[1];
-        let batch_size = grad_output.shape()[0];
+        let batch_size = grad_output.shape_ref()[0];
 
         // Create gradient for weight (same shape as weight)
-        let mut weight_grad = Tensor::zeros(weight_shape.clone(), weight.dtype(), weight.device());
+        let mut weight_grad = Tensor::zeros(weight_shape.to_vec(), weight.dtype(), weight.device());
 
         // Accumulate gradients from output
         let grad_output_ptr = grad_output.data_ptr() as *const f32;
@@ -872,23 +819,6 @@ impl Node for EmbeddingBackward {
         &self.inputs
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[ctor::ctor]
 fn register_kernels() {
@@ -1000,7 +930,9 @@ fn register_kernels() {
 
     // GPU fallback for cross_entropy_loss (moves to CPU for computation)
     fn cross_entropy_loss_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
-        gpu_fallback(args, |cpu_args| unsafe { cross_entropy_loss_kernel(cpu_args) })
+        gpu_fallback(args, |cpu_args| unsafe {
+            cross_entropy_loss_kernel(cpu_args)
+        })
     }
 
     register(
@@ -1032,11 +964,7 @@ fn register_kernels() {
         DispatchKey::Cpu,
         batch_norm_kernel as KernelFn,
     );
-    register(
-        "rms_norm",
-        DispatchKey::Cpu,
-        rms_norm_kernel as KernelFn,
-    );
+    register("rms_norm", DispatchKey::Cpu, rms_norm_kernel as KernelFn);
     register(
         "fused_rms_norm_gelu",
         DispatchKey::Cpu,
@@ -1122,8 +1050,6 @@ mod tests {
         }
         c
     }
-
-
 
     #[test]
     fn test_embedding_bulk_copy() {
@@ -2188,18 +2114,3 @@ mod tests {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
