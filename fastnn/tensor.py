@@ -41,15 +41,15 @@ def tensor(data, shape, device=None, dtype=None):
     return _core.tensor_from_data(flat_data, shape, device)
 
 
-def zeros(shape, device=None):
+def zeros(shape, dtype=None, device=None):
     return _core.zeros(shape, device=device)
 
 
-def ones(shape, device=None):
+def ones(shape, dtype=None, device=None):
     return _core.ones(shape, device=device)
 
 
-def full(shape, value: float, device=None):
+def full(shape, value: float, dtype=None, device=None):
     return _core.full(shape, value, device=device)
 
 

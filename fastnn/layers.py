@@ -104,6 +104,23 @@ class _BaseModule(Module):
     def to_gpu(self, device_id: int) -> None:
         for layer in self._gpu_layers:
             layer.to_gpu(device_id)
+    
+    def state_dict(self) -> Dict[str, Any]:
+        result = {}
+        for name, param in self.named_parameters():
+            result[name] = param
+        return result
+    
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        current_state = self.state_dict()
+        for name, value in state_dict.items():
+            if name in current_state:
+                # Get the current tensor and copy data from value
+                current_tensor = current_state[name]
+                # Use numpy to copy data
+                current_tensor_numpy = current_tensor.numpy()
+                value_numpy = value.numpy() if hasattr(value, 'numpy') else value
+                current_tensor_numpy[:] = value_numpy
 
 
 # Python-implemented layers (for compatibility and educational purposes)
@@ -233,8 +250,12 @@ class PySequential(_BaseModule):
     def __init__(self, layers: List[Any]):
         super().__init__()
         self.layers = layers
-        for l in layers:
-            self._register_layer(l)
+        for i, l in enumerate(layers):
+            # Only register with name if layer has named_parameters
+            if hasattr(l, "named_parameters"):
+                self._register_layer(l, str(i))
+            else:
+                self._register_layer(l)
     
     def __call__(self, x):
         for layer in self.layers:
