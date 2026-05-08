@@ -71,11 +71,10 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
     import onnx.numpy_helper
 
     model = onnx.load(onnx_path)
-
+    
     layers = []
     layer_index = 0
-    param_count = 0
-
+    
     # Build initializer dict for O(1) lookup
     initializer_map = {init.name: onnx.numpy_helper.to_array(init)
                        for init in model.graph.initializer}

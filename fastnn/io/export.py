@@ -406,8 +406,7 @@ def load_fnn_model(path: str) -> Any:
         layers = []
         for layer_info in header["layers"]:
             ltype = layer_info["type"]
-            name = layer_info["name"]
-
+            
             if ltype == "Linear":
                 layer = fnn.Linear(
                     layer_info["in_features"],
