@@ -16,8 +16,14 @@ impl LinearBackward {
 }
 
 impl Node for LinearBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
+            let mut grads = vec![None, None];
+            if self.inputs.len() == 3 {
+                grads.push(None);
+            }
+            return grads;
+        };
 
         let input = &self.inputs[0];
         let weight = &self.inputs[1];
@@ -70,84 +76,17 @@ impl AddBackward {
 }
 
 impl Node for AddBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
         // Handle broadcasting: if input shape doesn't match output shape,
-        // sum over the extra dimensions. Minimize clones by reusing grad when possible.
-        let a_matches = a.shape() == grad.shape();
-        let b_matches = b.shape() == grad.shape();
-
-        let (grad_a, grad_b) = match (a_matches, b_matches) {
-            (true, true) => {
-                // Both match: clone once, reuse for the other
-                (grad.clone(), grad)
-            }
-            (true, false) => {
-                // a matches, b doesn't: reuse grad for a, clone and modify for b
-                let mut grad_b = grad.clone();
-                let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
-                for i in (0..grad_b.shape().len()).rev() {
-                    let b_dim = if i as i32 >= diff {
-                        b.shape()[(i as i32 - diff) as usize]
-                    } else {
-                        1
-                    };
-                    if b_dim != grad_b.shape()[i] {
-                        grad_b = grad_b.sum(i as i32, false);
-                    }
-                }
-                (grad, grad_b)
-            }
-            (false, true) => {
-                // b matches, a doesn't: clone and modify for a, reuse grad for b
-                let mut grad_a = grad.clone();
-                let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
-                for i in (0..grad_a.shape().len()).rev() {
-                    let a_dim = if i as i32 >= diff {
-                        a.shape()[(i as i32 - diff) as usize]
-                    } else {
-                        1
-                    };
-                    if a_dim != grad_a.shape()[i] {
-                        grad_a = grad_a.sum(i as i32, false);
-                    }
-                }
-                (grad_a, grad)
-            }
-            (false, false) => {
-                // Neither matches: clone for both and modify each
-                let mut grad_a = grad.clone();
-                let mut grad_b = grad.clone();
-
-                let diff_a = grad_a.shape().len() as i32 - a.shape().len() as i32;
-                for i in (0..grad_a.shape().len()).rev() {
-                    let a_dim = if i as i32 >= diff_a {
-                        a.shape()[(i as i32 - diff_a) as usize]
-                    } else {
-                        1
-                    };
-                    if a_dim != grad_a.shape()[i] {
-                        grad_a = grad_a.sum(i as i32, false);
-                    }
-                }
-
-                let diff_b = grad_b.shape().len() as i32 - b.shape().len() as i32;
-                for i in (0..grad_b.shape().len()).rev() {
-                    let b_dim = if i as i32 >= diff_b {
-                        b.shape()[(i as i32 - diff_b) as usize]
-                    } else {
-                        1
-                    };
-                    if b_dim != grad_b.shape()[i] {
-                        grad_b = grad_b.sum(i as i32, false);
-                    }
-                }
-                (grad_a, grad_b)
-            }
-        };
+        // sum over the extra dimensions.
+        let grad_a = crate::autograd::sum_to_shape(grad.clone(), &a.shape());
+        let grad_b = crate::autograd::sum_to_shape(grad, &b.shape());
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -190,8 +129,10 @@ impl UnsqueezeBackward {
 }
 
 impl Node for UnsqueezeBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let grad_squeezed = grad.squeeze(Some(self.dim));
         vec![Some(grad_squeezed)]
     }
@@ -226,49 +167,15 @@ impl SubBackward {
 }
 
 impl Node for SubBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
-        let a_matches = a.shape() == grad.shape();
-        let b_matches = b.shape() == grad.shape();
-
-        let grad_a = if a_matches {
-            grad.clone()
-        } else {
-            let mut grad_a = grad.clone();
-            let diff = grad.shape().len() as i32 - a.shape().len() as i32;
-            for i in (0..grad.shape().len()).rev() {
-                let a_dim = if i as i32 >= diff {
-                    a.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if a_dim != grad.shape()[i] {
-                    grad_a = grad_a.sum(i as i32, false);
-                }
-            }
-            grad_a
-        };
-
-        let grad_b = if b_matches {
-            grad.neg()
-        } else {
-            let mut grad_b = grad.neg();
-            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
-            for i in (0..grad_b.shape().len()).rev() {
-                let b_dim = if i as i32 >= diff {
-                    b.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if b_dim != grad_b.shape()[i] {
-                    grad_b = grad_b.sum(i as i32, false);
-                }
-            }
-            grad_b
-        };
+        let grad_a = crate::autograd::sum_to_shape(grad.clone(), &a.shape());
+        let grad_b = crate::autograd::sum_to_shape(grad.neg(), &b.shape());
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -303,44 +210,18 @@ impl MulBackward {
 }
 
 impl Node for MulBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
         // Compute gradient for a: grad * b
-        let mut grad_a = grad.mul(b);
-        // Sum over dimensions that were broadcasted in a
-        if a.shape() != grad_a.shape() {
-            let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
-            for i in (0..grad_a.shape().len()).rev() {
-                let a_dim = if i as i32 >= diff {
-                    a.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if a_dim != grad_a.shape()[i] {
-                    grad_a = grad_a.sum(i as i32, false);
-                }
-            }
-        }
+        let grad_a = crate::autograd::sum_to_shape(grad.mul(b), &a.shape());
 
         // Compute gradient for b: grad * a
-        let mut grad_b = grad.mul(a);
-        // Sum over dimensions that were broadcasted in b
-        if b.shape() != grad_b.shape() {
-            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
-            for i in (0..grad_b.shape().len()).rev() {
-                let b_dim = if i as i32 >= diff {
-                    b.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if b_dim != grad_b.shape()[i] {
-                    grad_b = grad_b.sum(i as i32, false);
-                }
-            }
-        }
+        let grad_b = crate::autograd::sum_to_shape(grad.mul(a), &b.shape());
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -375,8 +256,10 @@ impl DivBackward {
 }
 
 impl Node for DivBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
@@ -389,44 +272,8 @@ impl Node for DivBackward {
         let grad_b = grad.mul(a).div(&b_sq).neg();
 
         // Handle broadcasting for both gradients
-        let a_matches = a.shape() == grad_a.shape();
-        let b_matches = b.shape() == grad_b.shape();
-
-        let final_grad_a = if a_matches {
-            grad_a.clone()
-        } else {
-            let mut g = grad_a;
-            let diff = g.shape().len() as i32 - a.shape().len() as i32;
-            for i in (0..g.shape().len()).rev() {
-                let a_dim = if i as i32 >= diff {
-                    a.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if a_dim != g.shape()[i] {
-                    g = g.sum(i as i32, false);
-                }
-            }
-            g
-        };
-
-        let final_grad_b = if b_matches {
-            grad_b.clone()
-        } else {
-            let mut g = grad_b;
-            let diff = g.shape().len() as i32 - b.shape().len() as i32;
-            for i in (0..g.shape().len()).rev() {
-                let b_dim = if i as i32 >= diff {
-                    b.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if b_dim != g.shape()[i] {
-                    g = g.sum(i as i32, false);
-                }
-            }
-            g
-        };
+        let final_grad_a = crate::autograd::sum_to_shape(grad_a, &a.shape());
+        let final_grad_b = crate::autograd::sum_to_shape(grad_b, &b.shape());
 
         vec![Some(final_grad_a), Some(final_grad_b)]
     }
@@ -461,10 +308,11 @@ impl NegBackward {
 }
 
 impl Node for NegBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        vec![Some(
-            grad_outputs.into_iter().next().flatten().unwrap().neg(),
-        )]
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
+        vec![Some(grad.neg())]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -496,8 +344,10 @@ impl ReluBackward {
 }
 
 impl Node for ReluBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let mask = self.input.gt_scalar(0.0);
         let result = grad.mul(&mask);
         vec![Some(result)]
@@ -537,8 +387,10 @@ impl LeakyReLUBackward {
 }
 
 impl Node for LeakyReLUBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let mask = self.input.gt_scalar(0.0);
         let _neg_slope_t = Tensor::from_scalar(self.negative_slope);
         let grad_input = mask.mul(&grad_output).add(
@@ -586,8 +438,10 @@ impl SoftplusBackward {
 }
 
 impl Node for SoftplusBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let bx = self.input.mul_scalar(self.beta);
         let mask = bx.gt_scalar(self.threshold);
         let exp_bx = bx.exp();
@@ -627,8 +481,10 @@ impl HardswishBackward {
 }
 
 impl Node for HardswishBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let x_plus_3 = self.input.add_scalar(3.0);
         let relu6 = x_plus_3.clamp(0.0, 6.0);
         let lt_minus3 = self.input.lt_scalar(-3.0);
@@ -674,8 +530,10 @@ impl EluBackward {
 }
 
 impl Node for EluBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         // d/dx elu(x) = 1 if x > 0 else alpha * exp(x)
         let mask = self.input.gt_scalar(0.0);
         let exp_x = self.input.exp();
@@ -720,8 +578,10 @@ impl MinimumBackward {
 }
 
 impl Node for MinimumBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
@@ -730,37 +590,8 @@ impl Node for MinimumBackward {
         let mask = a.le_tensor(b);
         let mask_not = mask.logical_not();
 
-        let mut grad_a = grad.mul(&mask);
-        let mut grad_b = grad.mul(&mask_not);
-
-        // Handle broadcasting
-        if a.shape() != grad_a.shape() {
-            let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
-            for i in (0..grad_a.shape().len()).rev() {
-                let a_dim = if i as i32 >= diff {
-                    a.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if a_dim != grad_a.shape()[i] {
-                    grad_a = grad_a.sum(i as i32, false);
-                }
-            }
-        }
-
-        if b.shape() != grad_b.shape() {
-            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
-            for i in (0..grad_b.shape().len()).rev() {
-                let b_dim = if i as i32 >= diff {
-                    b.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if b_dim != grad_b.shape()[i] {
-                    grad_b = grad_b.sum(i as i32, false);
-                }
-            }
-        }
+        let grad_a = crate::autograd::sum_to_shape(grad.mul(&mask), &a.shape());
+        let grad_b = crate::autograd::sum_to_shape(grad.mul(&mask_not), &b.shape());
 
         vec![Some(grad_a), Some(grad_b)]
     }
@@ -795,8 +626,10 @@ impl MaximumBackward {
 }
 
 impl Node for MaximumBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 
@@ -805,37 +638,8 @@ impl Node for MaximumBackward {
         let mask = a.ge_tensor(b);
         let mask_not = mask.logical_not();
 
-        let mut grad_a = grad.mul(&mask);
-        let mut grad_b = grad.mul(&mask_not);
-
-        // Handle broadcasting
-        if a.shape() != grad_a.shape() {
-            let diff = grad_a.shape().len() as i32 - a.shape().len() as i32;
-            for i in (0..grad_a.shape().len()).rev() {
-                let a_dim = if i as i32 >= diff {
-                    a.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if a_dim != grad_a.shape()[i] {
-                    grad_a = grad_a.sum(i as i32, false);
-                }
-            }
-        }
-
-        if b.shape() != grad_b.shape() {
-            let diff = grad_b.shape().len() as i32 - b.shape().len() as i32;
-            for i in (0..grad_b.shape().len()).rev() {
-                let b_dim = if i as i32 >= diff {
-                    b.shape()[(i as i32 - diff) as usize]
-                } else {
-                    1
-                };
-                if b_dim != grad_b.shape()[i] {
-                    grad_b = grad_b.sum(i as i32, false);
-                }
-            }
-        }
+        let grad_a = crate::autograd::sum_to_shape(grad.mul(&mask), &a.shape());
+        let grad_b = crate::autograd::sum_to_shape(grad.mul(&mask_not), &b.shape());
 
         vec![Some(grad_a), Some(grad_b)]
     }

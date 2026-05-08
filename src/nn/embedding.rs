@@ -1,5 +1,5 @@
 use crate::dispatcher::{dispatch, DispatchKey};
-use crate::nn::Module;
+use crate::{impl_training_state, nn::{clear_grad, Module, TrainingState}};
 use crate::tensor::Tensor;
 
 pub struct Embedding {
@@ -8,7 +8,7 @@ pub struct Embedding {
     pub num_embeddings: i64,
     #[allow(dead_code)]
     pub embedding_dim: i64,
-    training: std::sync::atomic::AtomicBool,
+    training: TrainingState,
 }
 
 impl Embedding {
@@ -24,16 +24,8 @@ impl Embedding {
             weight,
             num_embeddings,
             embedding_dim,
-            training: std::sync::atomic::AtomicBool::new(true),
+            training: TrainingState::new(),
         }
-    }
-
-    pub fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone()]
-    }
-
-    pub fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![("weight".to_string(), self.weight.clone())]
     }
 }
 
@@ -53,24 +45,8 @@ impl Module for Embedding {
     }
 
     fn zero_grad(&self) {
-        if let Some(meta) = &self.weight.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = None;
-            }
-        }
+        clear_grad(&self.weight);
     }
 
-    fn train_mode(&self) {
-        self.training
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn eval_mode(&self) {
-        self.training
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::Relaxed)
-    }
+    impl_training_state!(self, self.training);
 }

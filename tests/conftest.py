@@ -14,3 +14,23 @@ def isolate_memory_pool():
     """
     yield
     fastnn._core.clear_storage_pool()
+
+
+@pytest.fixture
+def small_mlp():
+    """Create a small MLP for testing."""
+    return fastnn.models.MLP(input_dim=2, hidden_dims=[16, 16], output_dim=1)
+
+
+@pytest.fixture
+def adam_optimizer(small_mlp):
+    """Create Adam optimizer for the small MLP."""
+    return fastnn.Adam(small_mlp.parameters(), lr=0.01)
+
+
+@pytest.fixture
+def sample_data():
+    """Create XOR sample data for training tests."""
+    X = fastnn.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], [4, 2])
+    y = fastnn.tensor([[0.0], [1.0], [1.0], [0.0]], [4, 1])
+    return X, y

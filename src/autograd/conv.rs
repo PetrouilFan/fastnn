@@ -8,6 +8,13 @@ pub struct Conv2dBackward {
     pub groups: i64,
     pub edges: Vec<Edge>,
     pub inputs: Vec<Tensor>,
+    // Pre-allocated scalar constants to avoid per-call allocation
+    stride_scalar: Tensor,
+    padding_scalar: Tensor,
+    dilation_scalar: Tensor,
+    groups_scalar: Tensor,
+    zero_scalar: Tensor,
+    one_scalar: Tensor,
 }
 
 impl Conv2dBackward {
@@ -33,13 +40,21 @@ impl Conv2dBackward {
             groups,
             edges,
             inputs,
+            stride_scalar: Tensor::from_scalar(stride as f32),
+            padding_scalar: Tensor::from_scalar(padding as f32),
+            dilation_scalar: Tensor::from_scalar(dilation as f32),
+            groups_scalar: Tensor::from_scalar(groups as f32),
+            zero_scalar: Tensor::from_scalar(0.0),
+            one_scalar: Tensor::from_scalar(1.0),
         }
     }
 }
 
 impl Node for Conv2dBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None, None];
+        };
 
         let input = &self.input;
         let weight = &self.weight;
@@ -73,47 +88,38 @@ impl Node for Conv2dBackward {
         // - Output padding is determined by stride and kernel size
         // - Padding for grad_input = dilation * (kernel - 1) - padding
         let grad_input_padding_h = dilation * (kernel_h - 1) - padding;
-        let grad_input_padding_w = dilation * (kernel_w - 1) - padding;
+        let _grad_input_padding_w = dilation * (kernel_w - 1) - padding;
+
+        // Use pre-allocated scalars
+        let padding_scalar = &self.padding_scalar;
+        let dilation_scalar = &self.dilation_scalar;
+        let zero_scalar = &self.zero_scalar;
+        let one_scalar = &self.one_scalar;
 
         // OPTIMIZATION: grad_input computation
-        // Avoid .to_cpu() when already CPU, use raw pointers
         let grad_input = if groups == 1 {
             // Standard convolution backward
             if stride == 1 {
                 // Use conv2d with adjusted parameters
-                let stride_scalar = Tensor::from_scalar(1.0);
-                let padding_h_scalar = Tensor::from_scalar(grad_input_padding_h as f32);
-                let _padding_w_scalar = Tensor::from_scalar(grad_input_padding_w as f32);
-                let dilation_scalar = Tensor::from_scalar(dilation as f32);
-                let groups_scalar = Tensor::from_scalar(1.0);
-
                 dispatch(
                     "conv2d",
                     crate::dispatcher::DispatchKey::Cpu,
                     &[
                         &grad,
                         &weight_rotated,
-                        &Tensor::from_scalar(0.0),
-                        &stride_scalar,
-                        &padding_h_scalar,
-                        &dilation_scalar,
-                        &groups_scalar,
+                        zero_scalar,
+                        one_scalar,
+                        padding_scalar,
+                        dilation_scalar,
+                        one_scalar,
                     ],
                 )[0]
                 .clone()
             } else {
                 // For stride > 1, dilate grad_output first
                 // Get CPU copy of grad_output (avoid unnecessary copy if already CPU)
-                let grad_cpu = if grad.inner.is_cpu() {
-                    None
-                } else {
-                    Some(grad.to_cpu())
-                };
-                let grad_data = if let Some(ref t) = grad_cpu {
-                    t.data_ptr_f32()
-                } else {
-                    grad.data_ptr_f32()
-                };
+                let grad_cpu = crate::autograd::ensure_cpu(&grad);
+                let grad_data = grad_cpu.data_ptr_f32();
                 let grad_h = out_h;
                 let grad_w = out_w;
                 let dilated_h = grad_h + (grad_h - 1) * (stride - 1);
@@ -147,21 +153,17 @@ impl Node for Conv2dBackward {
                 }
                 // grad_cpu (if any) gets dropped here when it goes out of scope
 
-                let padding_h_scalar = Tensor::from_scalar(grad_input_padding_h as f32);
-                let dilation_scalar = Tensor::from_scalar(dilation as f32);
-                let groups_scalar = Tensor::from_scalar(1.0);
-
                 dispatch(
                     "conv2d",
                     crate::dispatcher::DispatchKey::Cpu,
                     &[
                         &dilated_grad,
                         &weight_rotated,
-                        &Tensor::from_scalar(0.0),
-                        &Tensor::from_scalar(1.0),
-                        &padding_h_scalar,
-                        &dilation_scalar,
-                        &groups_scalar,
+                        zero_scalar,
+                        one_scalar,
+                        padding_scalar,
+                        dilation_scalar,
+                        one_scalar,
                     ],
                 )[0]
                 .clone()
@@ -198,11 +200,11 @@ impl Node for Conv2dBackward {
                         &[
                             &grad_g,
                             &weight_g_rotated,
-                            &Tensor::from_scalar(0.0),
-                            &Tensor::from_scalar(1.0),
+                            zero_scalar,
+                            one_scalar,
                             &Tensor::from_scalar(grad_input_padding_h as f32),
-                            &Tensor::from_scalar(dilation as f32),
-                            &Tensor::from_scalar(1.0),
+                            dilation_scalar,
+                            one_scalar,
                         ],
                     )[0]
                     .clone()
@@ -219,7 +221,7 @@ impl Node for Conv2dBackward {
                             * dilated_h as usize
                             * dilated_w as usize
                     ];
-                    let grad_g_cpu = grad_g.to_cpu();
+                    let grad_g_cpu = crate::autograd::ensure_cpu(&grad_g);
                     let grad_g_data = grad_g_cpu.as_f32_slice();
 
                     for b in 0..batch_size as usize {
@@ -257,11 +259,11 @@ impl Node for Conv2dBackward {
                         &[
                             &dilated_grad,
                             &weight_g_rotated,
-                            &Tensor::from_scalar(0.0),
-                            &Tensor::from_scalar(1.0),
+                            zero_scalar,
+                            one_scalar,
                             &Tensor::from_scalar(grad_input_padding_h as f32),
-                            &Tensor::from_scalar(dilation as f32),
-                            &Tensor::from_scalar(1.0),
+                            dilation_scalar,
+                            one_scalar,
                         ],
                     )[0]
                     .clone()
@@ -290,8 +292,8 @@ impl Node for Conv2dBackward {
             let mut grad_weight_data =
                 vec![0.0f32; (out_channels * in_channels * kernel_h * kernel_w) as usize];
 
-            let input_cpu = input.to_cpu();
-            let grad_cpu = grad.to_cpu();
+            let input_cpu = crate::autograd::ensure_cpu(input);
+            let grad_cpu = crate::autograd::ensure_cpu(&grad);
             let input_data = input_cpu.as_f32_slice();
             let grad_data = grad_cpu.as_f32_slice();
 
@@ -346,8 +348,8 @@ impl Node for Conv2dBackward {
                     as usize
             ];
 
-            let input_cpu = input.to_cpu();
-            let grad_cpu = grad.to_cpu();
+            let input_cpu = crate::autograd::ensure_cpu(input);
+            let grad_cpu = crate::autograd::ensure_cpu(&grad);
             let input_data = input_cpu.as_f32_slice();
             let grad_data = grad_cpu.as_f32_slice();
 
@@ -413,7 +415,7 @@ impl Node for Conv2dBackward {
         // Compute grad_bias: sum grad_output over batch and spatial dimensions
         let grad_bias = if self.has_bias {
             let mut grad_bias_data = vec![0.0f32; out_channels as usize];
-            let grad_cpu = grad.to_cpu();
+            let grad_cpu = crate::autograd::ensure_cpu(&grad);
             let grad_data = grad_cpu.as_f32_slice();
 
             for b in 0..batch_size as usize {
@@ -464,6 +466,11 @@ pub struct ConvTranspose2dBackward {
     pub padding: i64,
     pub kernel_size: i64,
     pub edges: Vec<Edge>,
+    // Pre-allocated scalar constants
+    stride_scalar: Tensor,
+    padding_scalar: Tensor,
+    zero_scalar: Tensor,
+    one_scalar: Tensor,
 }
 
 impl ConvTranspose2dBackward {
@@ -484,13 +491,23 @@ impl ConvTranspose2dBackward {
             padding,
             kernel_size,
             edges,
+            stride_scalar: Tensor::from_scalar(stride as f32),
+            padding_scalar: Tensor::from_scalar(padding as f32),
+            zero_scalar: Tensor::from_scalar(0.0),
+            one_scalar: Tensor::from_scalar(1.0),
         }
     }
 }
 
 impl Node for ConvTranspose2dBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
+            let mut grads = vec![None, None];
+            if self.bias.is_some() {
+                grads.push(None);
+            }
+            return grads;
+        };
 
         let in_shape = self.input.shape();
         let _batch = in_shape[0];
@@ -512,10 +529,10 @@ impl Node for ConvTranspose2dBackward {
             &[
                 &grad_output,
                 &self.weight,
-                &Tensor::from_scalar(1.0),
+                &self.one_scalar,
                 &Tensor::from_scalar(pad_input as f32),
-                &Tensor::from_scalar(0.0),
-                &Tensor::from_scalar(1.0),
+                &self.zero_scalar,
+                &self.one_scalar,
             ],
         )[0]
         .clone();
@@ -529,10 +546,10 @@ impl Node for ConvTranspose2dBackward {
             &[
                 &self.input,
                 &grad_output,
-                &Tensor::from_scalar(1.0),
-                &Tensor::from_scalar(self.padding as f32),
-                &Tensor::from_scalar(0.0),
-                &Tensor::from_scalar(1.0),
+                &self.one_scalar,
+                &self.padding_scalar,
+                &self.zero_scalar,
+                &self.one_scalar,
             ],
         )[0]
         .clone();

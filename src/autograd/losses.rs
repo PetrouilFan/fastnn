@@ -31,8 +31,10 @@ impl LayerNormBackward {
 }
 
 impl Node for LayerNormBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None, None];
+        };
         let input = &self.inputs[0];
         let weight = &self.inputs[1];
         let _bias = &self.inputs[2];
@@ -45,7 +47,7 @@ impl Node for LayerNormBackward {
         let norm_dim: usize = shape[shape.len() - 1] as usize;
         let total = outer_size * norm_dim;
 
-        let grad_cpu = grad.to_cpu();
+        let grad_cpu = crate::autograd::ensure_cpu(&grad);
         let x_hat_cpu = self.normalized.to_cpu();
         let var_cpu = self.variance.to_cpu();
 
@@ -112,8 +114,8 @@ impl EmbeddingBackward {
 }
 
 impl Node for EmbeddingBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        vec![grad_outputs.into_iter().next().flatten()]
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        vec![crate::autograd::extract_first_grad(grad_outputs)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -152,8 +154,10 @@ impl CrossEntropyBackward {
 }
 
 impl Node for CrossEntropyBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output_tensor = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output_tensor) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let grad_out = grad_output_tensor.item();
 
         let logits = &self.logits;
@@ -161,12 +165,11 @@ impl Node for CrossEntropyBackward {
         let batch_size = logits.shape()[0] as usize;
         let num_classes = logits.shape()[1] as usize;
 
-        let logits_cpu = logits.to_cpu();
-
+        let logits_cpu = crate::autograd::ensure_cpu(logits);
         let logits_data = logits_cpu.as_f32_slice();
 
         // Convert targets to integer indices
-        let targets_cpu = targets.to_cpu();
+        let targets_cpu = crate::autograd::ensure_cpu(targets);
         let targets_i64 = targets_cpu.as_i64_slice();
 
         // Convert to f32 representation for kernel (kernel expects f32 bit patterns of indices)
@@ -234,8 +237,10 @@ impl MSELossBackward {
 }
 
 impl Node for MSELossBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let diff = self.pred.sub(&self.target);
 
         let grad_loss = match self.reduction.as_str() {

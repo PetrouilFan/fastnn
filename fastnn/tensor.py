@@ -7,6 +7,17 @@ import fastnn._core as _core
 Tensor = _core.PyTensor
 
 
+def _ensure_tensor_ready(arr):
+    """Ensure numpy array is C-contiguous and float32 dtype."""
+    if arr.flags['C_CONTIGUOUS'] and arr.dtype == np.float32:
+        return arr
+    if not arr.flags['C_CONTIGUOUS']:
+        arr = np.ascontiguousarray(arr)
+    if arr.dtype != np.float32:
+        arr = arr.astype(np.float32)
+    return arr
+
+
 def _flatten(nested):
     """Flatten a nested list iteratively."""
     result = []
@@ -24,25 +35,22 @@ def _flatten(nested):
 
 def tensor(data, shape, device=None, dtype=None):
     if isinstance(data, np.ndarray):
-        if not data.flags['C_CONTIGUOUS']:
-            data = np.ascontiguousarray(data)
-        if data.dtype != np.float32:
-            data = data.astype(np.float32)
+        data = _ensure_tensor_ready(data)
         return _core.tensor_from_buffer(data)
     flat_data = _flatten(data)
     return _core.tensor_from_data(flat_data, shape, device)
 
 
-def zeros(shape, device=None):
-    return _core.zeros(shape, device=device)
+def zeros(shape, dtype=None, device=None):
+    return _core.zeros(shape, dtype=dtype, device=device)
 
 
-def ones(shape, device=None):
-    return _core.ones(shape, device=device)
+def ones(shape, dtype=None, device=None):
+    return _core.ones(shape, dtype=dtype, device=device)
 
 
-def full(shape, value: float, device=None):
-    return _core.full(shape, value, device=device)
+def full(shape, value: float, dtype=None, device=None):
+    return _core.full(shape, value, dtype=dtype, device=device)
 
 
 def eye(n: int, device=None):
@@ -66,7 +74,7 @@ def randn(shape, device=None):
 
 
 def randint(low: int, high: int, shape, device=None):
-    return _core.randint(low, high, shape, device=device)
+    return _core.randint(shape, low, high, device=device)
 
 
 def zeros_like(tensor, device=None):
@@ -81,14 +89,9 @@ def full_like(tensor, value: float, device=None):
     return _core.full_like(tensor, value, device=device)
 
 
-def from_numpy(ndarray):
+def from_numpy(ndarray, device=None):
     """Create a tensor from a numpy array using zero-copy buffer protocol."""
-    # Ensure the array is contiguous and of dtype float32
-    if not ndarray.flags['C_CONTIGUOUS']:
-        ndarray = np.ascontiguousarray(ndarray)
-    if ndarray.dtype != np.float32:
-        ndarray = ndarray.astype(np.float32)
-    return _core.tensor_from_buffer(ndarray)
+    return tensor(ndarray, None, device)
 
 
 __all__ = [
