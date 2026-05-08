@@ -811,7 +811,7 @@ impl EmbeddingBackward {
 }
 
 impl Node for EmbeddingBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
         let Some(grad_output) = grad_outputs.into_iter().next().flatten() else {
             return vec![Some(Tensor::zeros(
                 self.inputs[0].shape().clone(),

@@ -1562,11 +1562,12 @@ impl Tensor {
                 let numel = self.inner.numel() as usize;
                 let elem_size = self.inner.dtype.size();
                 let byte_len = numel * elem_size;
+                let start = self.inner.storage_offset as usize * elem_size;
                 // Ensure we don't read past the storage
-                if byte_len > data.len() {
+                if start + byte_len > data.len() {
                     return None;
                 }
-                Some(&data[self.inner.storage_offset as usize * elem_size..][..byte_len])
+                Some(&data[start..][..byte_len])
             }
             Storage::Wgpu(_) => None,
         }

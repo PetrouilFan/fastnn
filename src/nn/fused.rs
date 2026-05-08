@@ -168,7 +168,7 @@ struct FusedConvBnBackward {
 }
 
 impl Node for FusedConvBnBackward {
-    fn apply(&self, _: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+    fn apply(&self, _: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
         panic!(
             "FusedConvBn with {} does not support autograd; use separate layers for training",
             self.msg
