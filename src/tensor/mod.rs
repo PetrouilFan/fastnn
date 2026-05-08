@@ -3333,7 +3333,7 @@ impl Tensor {
             let mut indices = vec![0i64; ndim];
             let dim_size = t.inner.sizes[dim];
             for _ in 0..t.numel() as usize {
-                let mut t_lin = t.inner.storage_offset;
+                let mut t_lin = 0i64;
                 let mut o_lin = out_offset;
                 for d in 0..ndim {
                     t_lin += indices[d] * t_strides[d];
