@@ -3,17 +3,17 @@
 #![allow(unused_imports)]
 #![allow(clippy::missing_safety_doc)]
 
+use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
-    matmul_blas, matmul_blas_into, matmul_blas_with_transpose,
-    matmul_blas_with_transpose_into, MIN_BLAS_SIZE,
+    matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
+    MIN_BLAS_SIZE,
 };
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
-use super::*;
 
 /// Fused layer norm forward: single-pass mean/variance, normalize, apply weight/bias.
 /// Returns [output, mean, variance, x_hat].
@@ -21,7 +21,7 @@ use super::*;
 /// Zero intermediate tensor allocations — writes directly into output buffers.
 pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
-    let _normalized_shape_arg = args[1].shape();
+    let _normalized_shape_arg = args[1].shape_ref();
     let weight = if args.len() > 2 && args[2].numel() > 0 {
         Some(args[2])
     } else {
@@ -34,7 +34,7 @@ pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let eps = if args.len() > 4 { args[4].item() } else { 1e-5 };
 
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let ndim = x_shape.len();
     let norm_dim = x_shape[ndim - 1] as usize;
 
@@ -149,10 +149,10 @@ pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     mean_shape.push(1);
     let var_shape = mean_shape.clone();
 
-    let output = Tensor::from_vec(output_data, x_shape.clone());
+    let output = Tensor::from_vec(output_data, x_shape.to_vec());
     let mean = Tensor::from_vec(mean_data, mean_shape);
     let var = Tensor::from_vec(var_data, var_shape);
-    let x_hat = Tensor::from_vec(x_hat_data, x_shape.clone());
+    let x_hat = Tensor::from_vec(x_hat_data, x_shape.to_vec());
 
     vec![output, mean, var, x_hat]
 }
@@ -167,13 +167,9 @@ pub unsafe fn rms_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     } else {
         None
     };
-    let eps = if args.len() > 2 {
-        args[2].item()
-    } else {
-        1e-5
-    };
+    let eps = if args.len() > 2 { args[2].item() } else { 1e-5 };
 
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let ndim = x_shape.len();
     let norm_dim = x_shape[ndim - 1] as usize;
 
@@ -247,7 +243,7 @@ pub unsafe fn rms_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
 
-    let output = Tensor::from_vec(output_data, x_shape.clone());
+    let output = Tensor::from_vec(output_data, x_shape.to_vec());
     vec![output]
 }
 
@@ -284,7 +280,7 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         1e-5
     };
 
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let ndim = x_shape.len();
 
     // BatchNorm normalizes across the channel dimension (dim=1)
@@ -302,7 +298,7 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_data = bias.map(|b| b.as_f32_slice());
 
     // Create output tensor with same shape as input
-    let mut output = Tensor::empty(x_shape.clone(), x.dtype(), x.device());
+    let mut output = Tensor::empty(x_shape.to_vec(), x.dtype(), x.device());
 
     // Get raw pointers for fast access
     let x_ptr = x.data_ptr() as *const f32;
@@ -567,7 +563,6 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
-
 /// Fused layer norm + GELU: single-pass with GELU activation.
 /// Returns [output].
 pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -584,7 +579,7 @@ pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
     let eps = if args.len() > 3 { args[3].item() } else { 1e-5 };
 
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let ndim = x_shape.len();
     let norm_dim = x_shape[ndim - 1] as usize;
 
@@ -702,13 +697,9 @@ pub unsafe fn fused_rms_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     } else {
         None
     };
-    let eps = if args.len() > 2 {
-        args[2].item()
-    } else {
-        1e-5
-    };
+    let eps = if args.len() > 2 { args[2].item() } else { 1e-5 };
 
-    let x_shape = x.shape();
+    let x_shape = x.shape_ref();
     let ndim = x_shape.len();
     let norm_dim = x_shape[ndim - 1] as usize;
 
@@ -788,5 +779,5 @@ pub unsafe fn fused_rms_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
 
-    vec![Tensor::from_vec(output_data, x_shape)]
+    vec![Tensor::from_vec(output_data, x_shape.to_vec())]
 }

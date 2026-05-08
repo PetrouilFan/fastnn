@@ -1,11 +1,7 @@
-use crate::optim::{
-    get_grad, Optimizer, OptimizerState, ParamGroup,
-    ParamState, zeros_like,
-};
+use crate::optim::{zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState};
 use crate::tensor::Tensor;
+use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;
-
-use crate::impl_params_mut;
 
 pub struct Lion {
     pub params: Vec<Tensor>,
@@ -42,11 +38,7 @@ impl Optimizer for Lion {
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = get_grad(param) {
-                g
-            } else {
-                continue;
-            };
+            let grad = get_grad_or_skip!(param);
 
             self.step[i] += 1;
 
@@ -57,12 +49,18 @@ impl Optimizer for Lion {
 
             // Update momentum: m = beta1 * m + (1 - beta1) * grad
             let beta1_c = 1.0 - beta1;
-            let m_update = self.m[i].clone().mul_scalar(beta1).add(&grad.mul_scalar(beta1_c));
+            let m_update = self.m[i]
+                .clone()
+                .mul_scalar(beta1)
+                .add(&grad.mul_scalar(beta1_c));
             self.m[i] = m_update;
 
             // Compute sign of (beta2 * m + (1 - beta2) * grad)
             let beta2_c = 1.0 - beta2;
-            let update_term = self.m[i].clone().mul_scalar(beta2).add(&grad.mul_scalar(beta2_c));
+            let update_term = self.m[i]
+                .clone()
+                .mul_scalar(beta2)
+                .add(&grad.mul_scalar(beta2_c));
             let signed = update_term.sign();
 
             // param = param - lr * sign(update)

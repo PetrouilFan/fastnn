@@ -167,7 +167,7 @@ pub trait Node: Send + Sync {
 /// Helper to sum a gradient tensor to match a target shape (handle broadcasting).
 /// This efficiently computes which dimensions need to be summed and does it in one pass.
 pub fn sum_to_shape(mut grad: Tensor, target_shape: &[i64]) -> Tensor {
-    let grad_shape = grad.shape();
+    let grad_shape = grad.shape_ref();
     if grad_shape == target_shape {
         return grad;
     }
