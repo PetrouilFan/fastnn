@@ -1,11 +1,12 @@
 import torch
+from torch.nn import Sequential, ModuleList, ModuleDict, ParameterList, ParameterDict
 import json
 import logging
 import struct
 from typing import Any, Tuple, Optional
 
 from fastnn._common import first_or_self
-from fastnn.io import write_tensor, read_tensor, MODEL_MAGIC, MODEL_VERSION
+from fastnn.io import write_tensor, read_tensor, MODEL_MAGIC, MODEL_VERSION, read_fnn_header, read_fnn_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,8 @@ except ImportError:
 
 # Import fastnn for tensor creation
 import fastnn as fnn
+
+__all__ = ["export_pytorch_model", "save_fnn_model", "load_fnn_model"]
 
 
 def extract_tensor(module, attr_name):
@@ -123,7 +126,6 @@ def export_pytorch_model(
 
     # Iterate over all named modules (including containers)
     # Build a mapping of module names to modules for parent lookup
-    module_dict = dict(model.named_modules())
 
     # Build set of BasicBlock names for O(1) lookup
     basicblock_names = set()
@@ -305,14 +307,6 @@ def export_pytorch_model(
         else:
             # Skip container types (like BasicBlock, Sequential) - their children are already exported
             # Only warn for actual layer types that are unsupported
-            from torch.nn import (
-                Sequential,
-                ModuleList,
-                ModuleDict,
-                ParameterList,
-                ParameterDict,
-            )
-
             container_types = (
                 Sequential,
                 ModuleList,
@@ -389,24 +383,13 @@ def load_fnn_model(path: str) -> Any:
     Load a .fnn model file and return a fastnn model ready for inference.
     """
     with open(path, "rb") as f:
-        # Read and validate magic bytes
-        magic = f.read(4)
+        # Read file header
+        magic, file_version, header, num_params = read_fnn_header(f)
         if magic != MODEL_MAGIC:
-            raise ValueError("Invalid .fnn file: missing magic bytes")
+            raise SerializationError("Invalid .fnn file: missing magic bytes")
 
-        # Read format version
-        version_bytes = f.read(4)
-        if len(version_bytes) < 4:
-            raise ValueError("Invalid .fnn file: missing version")
-        file_version = _unpack_u32(version_bytes)
-
-        # Read header length and header JSON
-        header_len = _unpack_u64(f.read(8))
-        header_bytes = f.read(header_len)
-        header = json.loads(header_bytes.decode("utf-8"))
-
-        # Read number of parameters
-        num_params = _unpack_u64(f.read(8))
+        # Read parameters
+        tensors = read_fnn_parameters(f, num_params)
 
         # Pre-compute BasicBlock prefixes for O(1) sub-layer detection
         basicblock_prefixes = set()
@@ -530,12 +513,6 @@ def load_fnn_model(path: str) -> Any:
             filtered_layers.append(layer)
 
         model = fnn.Sequential(filtered_layers)
-
-        # Load tensors using shared utility
-        tensors = {}
-        for _ in range(num_params):
-            name, arr = read_tensor(f)
-            tensors[name] = arr
 
         # Create a mapping from layer name to layer object in filtered_layers
         layer_name_to_layer = {}

@@ -5,12 +5,28 @@ converting from other formats (PyTorch, ONNX), and managing model I/O.
 """
 
 import struct
+import json
+from contextlib import contextmanager
+from pathlib import Path
 
 # Canonical constants for fastnn serialization formats
 MODEL_MAGIC = b"FNN\x00"
 OPTIMIZER_MAGIC = b"FNO\x00"
 MODEL_VERSION = 2
 OPTIMIZER_VERSION = 1
+
+
+class SerializationError(Exception):
+    """Raised when serialization or deserialization fails."""
+    pass
+
+
+@contextmanager
+def serialization_error(action):
+    try:
+        yield
+    except (OSError, ValueError) as e:
+        raise SerializationError(f"Failed to {action}: {e}") from e
 
 
 def _pack_u64(value: int) -> bytes:
@@ -100,9 +116,59 @@ def read_tensor(f) -> tuple:
     return name, data.reshape(shape)
 
 
-from fastnn.io.serialization import *  # noqa: F401, F403
-from fastnn.io.export import *  # noqa: F401, F403
-from fastnn.io.onnx import *  # noqa: F401, F403
+def write_fnn_file(f, header, params, magic=MODEL_MAGIC, version=MODEL_VERSION):
+    """Write standard .fnn file format (magic + version + JSON header + parameters)."""
+    f.write(magic)
+    f.write(_pack_u32(version))
+    header_json = json.dumps(header, indent=2)
+    header_bytes = header_json.encode("utf-8")
+    f.write(_pack_u64(len(header_bytes)))
+    f.write(header_bytes)
+    f.write(_pack_u64(len(params)))
+    for name, data in params:
+        write_tensor(f, name, data)
+
+
+def read_fnn_header(f):
+    """Read and return (magic, version, header_dict, num_params) from .fnn file."""
+    magic = f.read(4)
+    if len(magic) != 4:
+        raise ValueError("Incomplete file: failed to read magic bytes")
+    version = _unpack_u32(f.read(4))
+    header_len = _unpack_u64(f.read(8))
+    header_bytes = f.read(header_len)
+    if len(header_bytes) != header_len:
+        raise ValueError("Incomplete file: failed to read header")
+    header_dict = json.loads(header_bytes.decode("utf-8"))
+    num_params = _unpack_u64(f.read(8))
+    return magic, version, header_dict, num_params
+
+
+def read_fnn_parameters(f, num_params):
+    """Read and return dict of {name: data} for num_params tensors."""
+    params = {}
+    for _ in range(num_params):
+        name, data = read_tensor(f)
+        params[name] = data
+    return params
+
+
+from fastnn.io.serialization import (
+    save_model,
+    load_model,
+    save_optimizer,
+    load_optimizer,
+    save_state_dict,
+    load_state_dict,
+)
+from fastnn.io.export import (
+    export_pytorch_model,
+    save_fnn_model,
+    load_fnn_model,
+)
+from fastnn.io.onnx import (
+    import_onnx,
+)
 
 
 def save(model, path: str, format: str = "fnn-v2") -> None:
@@ -113,8 +179,9 @@ def save(model, path: str, format: str = "fnn-v2") -> None:
         path: Path to save to.
         format: Format to save as ("fnn-v2", "pytorch", etc.)
     """
+    path = Path(path)
     if format == "fnn-v2":
-        save_model(model, path)
+        save_model(model, str(path))
     else:
         raise ValueError(f"Unsupported format: {format}")
 
@@ -128,7 +195,7 @@ def load(path: str) -> object:
     Returns:
         The loaded model.
     """
-    return load_model(path)
+    return load_model(str(Path(path)))
 
 
 def convert_from_pytorch(torch_model, path: str) -> None:
@@ -138,7 +205,7 @@ def convert_from_pytorch(torch_model, path: str) -> None:
         torch_model: The PyTorch model to convert.
         path: Path to save the converted model.
     """
-    save_fnn_model(torch_model, path)
+    save_fnn_model(torch_model, str(Path(path)))
 
 
 def convert_from_onnx(onnx_path: str, fnn_path: str) -> dict:
@@ -151,7 +218,7 @@ def convert_from_onnx(onnx_path: str, fnn_path: str) -> dict:
     Returns:
         Dictionary with model info.
     """
-    return import_onnx(onnx_path, fnn_path)
+    return import_onnx(str(Path(onnx_path)), str(Path(fnn_path)))
 
 
 __all__ = [
@@ -181,4 +248,8 @@ __all__ = [
     "_unpack_u32",
     "_unpack_u8",
     "_unpack_f64",
+    "write_fnn_file",
+    "read_fnn_header",
+    "read_fnn_parameters",
+    "serialization_error",
 ]
