@@ -288,36 +288,20 @@ logger = fnn.CSVLogger(filepath='training_log.csv')
 
 ## Model I/O
 
-### Save/Load Model
+### Unified API (fastnn.io)
 
 ```python
-# Save
-fnn.save_model(model, 'model.fnn')
+import fastnn as fnn
 
-# Load
-state_dict = fnn.load_model('model.fnn')
+# Save/Load models (custom binary format .fnn)
+fnn.io.save(model, "model.fnn")
+loaded_model = fnn.io.load("model.fnn")
+
+# Convert from other formats
+fnn.io.convert_from_pytorch(torch_model, "model.fnn")
+info = fnn.io.convert_from_onnx("model.onnx", "model.fnn")
 ```
 
-### Save/Load Optimizer
-
-```python
-# Save
-fnn.save_optimizer(optimizer, 'optimizer.fno')
-
-# Load
-fnn.load_optimizer(optimizer, 'optimizer.fno')
-```
-
-### State Dict
-
-```python
-# Save model parameters
-fnn.save_state_dict(model, 'weights.fnn')
-
-# Load model parameters
-state = fnn.load_model('weights.fnn')
-fnn.load_state_dict(model, state)
-```
 
 ## Complete Training Example
 
@@ -360,9 +344,43 @@ for epoch in range(50):
 
     # Save checkpoint
     if epoch % 10 == 0:
-        fnn.save_model(model, f'checkpoint_epoch_{epoch}.fnn')
-        fnn.save_optimizer(optimizer, f'optimizer_epoch_{epoch}.fno')
+        fnn.io.save(model, f'checkpoint_epoch_{epoch}.fnn')
+        fnn.io.save(optimizer, f'optimizer_epoch_{epoch}.fno')
 ```
+
+## Distributed Data Parallel
+
+FastNN provides `DataParallel` for multi-GPU training using data parallelism.
+
+```python
+from fastnn.parallel import DataParallel
+
+# Create model replicas for each GPU
+model_gpu0 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
+model_gpu1 = fnn.models.MLP(input_dim=784, hidden_dims=[256], output_dim=10)
+
+# Initialize DataParallel
+dp_model = DataParallel(
+    [model_gpu0, model_gpu1],
+    device_ids=[0, 1],
+    weights=[0.6, 0.4]  # Optional: data distribution weights
+)
+
+# Training loop
+for x_batch, y_batch in loader:
+    loss = dp_model.forward_backward(x_batch, y_batch, fnn.cross_entropy_loss)
+    dp_model.sync_gradients()
+    
+    # Step optimizers for each replica
+    for opt in optimizers:
+        opt.step()
+        opt.zero_grad()
+```
+
+Parameters:
+- `models`: List of model replicas (one per GPU)
+- `device_ids`: List of GPU device IDs (e.g., [0, 1])
+- `weights`: Optional list of data weights per GPU (e.g., [0.6, 0.4] for uneven GPUs)
 
 ## Inference
 

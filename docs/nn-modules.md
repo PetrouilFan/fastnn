@@ -220,7 +220,7 @@ silu = fnn.SiLU()
 leaky_relu = fnn.LeakyReLU(negative_slope=0.01)
 softplus = fnn.Softplus(beta=1.0, threshold=20.0)
 hardswish = fnn.Hardswish()
-elu = fnn.ELU(alpha=1.0)
+elu = fnn.Elu(alpha=1.0)
 mish = fnn.Mish()
 
 output = relu(input_tensor)
@@ -235,7 +235,10 @@ output = input_tensor.sigmoid()
 output = input_tensor.tanh()
 output = input_tensor.silu()
 output = input_tensor.leaky_relu(0.01)
-output = input_tensor.elu(1.0)
+output = input_tensor.softplus(beta, threshold)
+output = input_tensor.hardswish()
+output = input_tensor.elu(alpha)
+output = input_tensor.mish()
 output = input_tensor.softmax(dim=-1)
 output = input_tensor.log_softmax(dim=-1)
 ```
@@ -259,6 +262,21 @@ input_tensor = fnn.randn([8, 64, 32, 32])
 output = pool(input_tensor)
 print(output.shape)  # (8, 64, 1, 1)
 ```
+
+## Flatten
+
+Flattens the input tensor starting from a given dimension.
+
+```python
+flatten = fnn.Flatten(start_dim=1, end_dim=-1)
+
+input_tensor = fnn.randn([32, 3, 32, 32])
+output = flatten(input_tensor)  # shape [32, 3072]
+```
+
+Parameters:
+- `start_dim`: First dimension to flatten (default: 1)
+- `end_dim`: Last dimension to flatten (default: -1)
 
 ## ResidualBlock
 
