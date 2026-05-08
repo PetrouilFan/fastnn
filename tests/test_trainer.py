@@ -1,5 +1,7 @@
 import fastnn as fnn
 from fastnn.data import DataLoader, TensorDataset
+from tests.test_utils import train_model, evaluate, assert_not_none
+from fastnn import EarlyStopping
 
 
 def test_trainer_fit():
@@ -13,21 +15,14 @@ def test_trainer_fit():
 
     optimizer = fnn.Adam(model.parameters(), lr=0.01)
 
-    initial_loss = None
-    for epoch in range(10):
-        epoch_loss = 0
-        for batch_x, batch_y in loader:
-            pred = model(batch_x)
-            loss = fnn.mse_loss(pred, batch_y)
-            epoch_loss += loss.item()
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-
-        if epoch == 0:
-            initial_loss = epoch_loss
-
-    assert initial_loss is not None
+    result = train_model(
+        model,
+        loader,
+        optimizer,
+        loss_fn=fnn.mse_loss,
+        epochs=10,
+    )
+    assert_not_none(result["initial_loss"])
 
 
 def test_trainer_evaluate():
@@ -39,23 +34,11 @@ def test_trainer_evaluate():
     ds = TensorDataset(X, y)
     loader = DataLoader(ds, batch_size=2, shuffle=False)
 
-    metrics = {}
-
-    model.eval()
-    total_loss = 0
-    for batch_x, batch_y in loader:
-        pred = model(batch_x)
-        loss = fnn.mse_loss(pred, batch_y)
-        total_loss += loss.item()
-
-    metrics["loss"] = total_loss / len(loader)
-
+    metrics = evaluate(model, loader, loss_fn=fnn.mse_loss)
     assert "loss" in metrics
 
 
 def test_early_stopping():
-    from fastnn import EarlyStopping
-
     es = EarlyStopping(patience=3, min_delta=0.01)
 
     for i in range(10):

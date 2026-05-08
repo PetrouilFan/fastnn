@@ -1,3 +1,4 @@
+use crate::error::{FastnnError, FastnnResult};
 use crate::storage::DType;
 use crate::tensor::Tensor;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ pub struct DLTensor {
 
 #[repr(C)]
 #[allow(dead_code)]
+#[derive(Copy, Clone)]
 pub struct DLDataType {
     pub code: u8,
     pub bits: u8,
@@ -63,6 +65,66 @@ struct DLPackContext {
     strides: Box<[i64]>,
 }
 
+/// Convert a fastnn DType to a DLPack DLDataType.
+/// Returns an error for unsupported dtypes instead of silently falling back.
+#[allow(dead_code)]
+fn dtype_to_dlpack(dtype: DType) -> FastnnResult<DLDataType> {
+    match dtype {
+        DType::F32 => Ok(DLDataType {
+            code: DLDTYPE_FLOAT,
+            bits: 32,
+            lanes: 1,
+        }),
+        DType::F64 => Ok(DLDataType {
+            code: DLDTYPE_FLOAT,
+            bits: 64,
+            lanes: 1,
+        }),
+        DType::I32 => Ok(DLDataType {
+            code: DLDTYPE_INT,
+            bits: 32,
+            lanes: 1,
+        }),
+        DType::I64 => Ok(DLDataType {
+            code: DLDTYPE_INT,
+            bits: 64,
+            lanes: 1,
+        }),
+        _ => Err(FastnnError::Dtype(format!(
+            "Unsupported dtype for DLPack export: {:?}",
+            dtype
+        ))),
+    }
+}
+
+/// Convert a DLPack DLDataType to a fastnn DType.
+#[allow(dead_code)]
+fn dlpack_to_dtype(dl_dtype: DLDataType) -> FastnnResult<DType> {
+    match (dl_dtype.code, dl_dtype.bits) {
+        (DLDTYPE_FLOAT, 32) => Ok(DType::F32),
+        (DLDTYPE_FLOAT, 64) => Ok(DType::F64),
+        (DLDTYPE_INT, 32) => Ok(DType::I32),
+        (DLDTYPE_INT, 64) => Ok(DType::I64),
+        _ => Err(FastnnError::Serialization(format!(
+            "Unsupported DLPack dtype: code={}, bits={}",
+            dl_dtype.code, dl_dtype.bits
+        ))),
+    }
+}
+
+/// Compute contiguous row-major strides for a given shape.
+fn compute_strides(shape: &[i64]) -> Vec<i64> {
+    let ndim = shape.len();
+    if ndim == 0 {
+        return vec![];
+    }
+    let mut strides = vec![1i64; ndim];
+    for i in (0..ndim - 1).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    strides
+}
+
 /// Convert a Tensor to a DLPack managed tensor (zero-copy for CPU tensors).
 /// Returns a raw pointer that can be passed to other frameworks.
 /// The tensor's storage is kept alive via Arc until the deleter is called.
@@ -81,17 +143,14 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
     // Allocate shape array
     let shape_box = shape.clone().into_boxed_slice();
 
-    // Create strides (row-major/contiguous)
-    let strides: Vec<i64> = if ndim > 0 {
-        let mut s = vec![1i64; ndim as usize];
-        for i in (0..ndim as usize - 1).rev() {
-            s[i] = s[i + 1] * shape[i + 1];
-        }
-        s
-    } else {
-        vec![]
+    // Create strides using helper function
+    let strides_box = compute_strides(&shape).into_boxed_slice();
+
+    // Get dtype, returning null on error
+    let dtype = match dtype_to_dlpack(tensor.dtype()) {
+        Ok(d) => d,
+        Err(_) => return std::ptr::null_mut(),
     };
-    let strides_box = strides.into_boxed_slice();
 
     // Create context that holds a strong reference to the tensor's storage
     // This prevents the data pointer from becoming dangling
@@ -110,33 +169,7 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
                 device_id: 0,
             },
             ndim,
-            dtype: match tensor.dtype() {
-                DType::F32 => DLDataType {
-                    code: DLDTYPE_FLOAT,
-                    bits: 32,
-                    lanes: 1,
-                },
-                DType::F64 => DLDataType {
-                    code: DLDTYPE_FLOAT,
-                    bits: 64,
-                    lanes: 1,
-                },
-                DType::I32 => DLDataType {
-                    code: DLDTYPE_INT,
-                    bits: 32,
-                    lanes: 1,
-                },
-                DType::I64 => DLDataType {
-                    code: DLDTYPE_INT,
-                    bits: 64,
-                    lanes: 1,
-                },
-                _ => DLDataType {
-                    code: DLDTYPE_FLOAT,
-                    bits: 32,
-                    lanes: 1,
-                },
-            },
+            dtype,
             shape: unsafe { (*ctx_ptr).shape.as_mut_ptr() },
             strides: unsafe { (*ctx_ptr).strides.as_mut_ptr() },
             byte_offset: 0,
@@ -165,15 +198,16 @@ extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
     }
 }
 
-/// Create a Tensor from a DLPack managed tensor (zero-copy).
+/// Create a Tensor from a DLPack managed tensor.
 /// Takes ownership of the DLPack capsule.
+/// Note: Currently copies data; zero-copy support is planned for future versions.
 ///
 /// # Safety
 /// The capsule must be valid and properly managed by a DLManagedTensor sentinel.
 #[allow(dead_code)]
-pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> Result<Tensor, String> {
+pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor> {
     if capsule.is_null() {
-        return Err("DLPack capsule is null".to_string());
+        return Err(FastnnError::Serialization("DLPack capsule is null".to_string()));
     }
 
     unsafe {
@@ -181,7 +215,7 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> Result<Tensor, Strin
         let dl_tensor = &managed.dl_tensor;
 
         if dl_tensor.data.is_null() {
-            return Err("DLPack tensor data is null".to_string());
+            return Err(FastnnError::Serialization("DLPack tensor data is null".to_string()));
         }
 
         // Extract shape
@@ -193,18 +227,14 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> Result<Tensor, Strin
         };
 
         // Determine dtype
-        let dtype = match (dl_tensor.dtype.code, dl_tensor.dtype.bits) {
-            (2, 32) => DType::F32,
-            (2, 64) => DType::F64,
-            (1, 32) => DType::I32,
-            (1, 64) => DType::I64,
-            _ => {
-                return Err(format!(
-                    "Unsupported DLPack dtype: code={}, bits={}",
-                    dl_tensor.dtype.code, dl_tensor.dtype.bits
-                ))
-            }
-        };
+        let dtype = dlpack_to_dtype(dl_tensor.dtype)?;
+
+        // F64 is not supported - return an error instead of silent conversion
+        if dtype == DType::F64 {
+            return Err(FastnnError::Dtype(
+                "F64 tensors are not supported. Use F32 instead.".to_string()
+            ));
+        }
 
         // Calculate total elements
         let numel: usize = shape.iter().map(|&x| x as usize).product();
@@ -220,14 +250,10 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> Result<Tensor, Strin
                 );
                 src.to_vec()
             }
-            DType::F64 => {
-                let src = std::slice::from_raw_parts(
-                    (dl_tensor.data as *const f64).add(dl_tensor.byte_offset as usize),
-                    numel,
-                );
-                src.iter().map(|&x| x as f32).collect()
-            }
-            _ => return Err("Unsupported dtype for from_dlpack".to_string()),
+            _ => return Err(FastnnError::Dtype(format!(
+                "Unsupported dtype for from_dlpack: {:?}",
+                dtype
+            ))),
         };
 
         // Call the deleter if provided

@@ -3,205 +3,65 @@ use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
 
-#[allow(dead_code)]
-pub struct ReLU;
+macro_rules! impl_stateless_activation {
+    ($name:ident, $dispatch_name:expr) => {
+        #[allow(dead_code)]
+        pub struct $name;
 
-impl ReLU {
-    pub fn new() -> Self {
-        ReLU
-    }
+        impl $name {
+            pub fn new() -> Self {
+                $name
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl Module for $name {
+            fn forward(&self, x: &Tensor) -> Tensor {
+                let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x]);
+                result[0].clone()
+            }
+
+            impl_stateless_activation_methods!();
+        }
+    };
 }
 
-impl Module for ReLU {
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("relu", DispatchKey::Cpu, &[x]);
-        result[0].clone()
-    }
+/// Macro to implement the standard empty methods for stateless modules.
+macro_rules! impl_stateless_activation_methods {
+    () => {
+        fn parameters(&self) -> Vec<Tensor> {
+            vec![]
+        }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
+        fn named_parameters(&self) -> Vec<(String, Tensor)> {
+            vec![]
+        }
 
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
+        fn zero_grad(&self) {}
 
-    fn zero_grad(&self) {}
+        fn train_mode(&self) {}
 
-    fn train_mode(&self) {}
+        fn eval_mode(&self) {}
 
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+        fn is_training(&self) -> bool {
+            false
+        }
+    };
 }
 
-impl Default for ReLU {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+impl_stateless_activation!(ReLU, "relu");
+impl_stateless_activation!(Gelu, "gelu");
+impl_stateless_activation!(Sigmoid, "sigmoid");
+impl_stateless_activation!(Tanh, "tanh");
+impl_stateless_activation!(SiLU, "silu");
+impl_stateless_activation!(Hardswish, "hardswish");
 
-#[allow(dead_code)]
-pub struct Gelu;
-
-impl Gelu {
-    pub fn new() -> Self {
-        Gelu
-    }
-}
-
-impl Default for Gelu {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Module for Gelu {
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("gelu", DispatchKey::Cpu, &[x]);
-        result[0].clone()
-    }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
-
-impl Default for Sigmoid {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(dead_code)]
-pub struct Sigmoid;
-
-impl Sigmoid {
-    pub fn new() -> Self {
-        Sigmoid
-    }
-}
-
-impl Module for Sigmoid {
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("sigmoid", DispatchKey::Cpu, &[x]);
-        result[0].clone()
-    }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
-
-#[allow(dead_code)]
-pub struct Tanh;
-
-impl Tanh {
-    pub fn new() -> Self {
-        Tanh
-    }
-}
-
-impl Default for Tanh {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Module for Tanh {
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("tanh", DispatchKey::Cpu, &[x]);
-        result[0].clone()
-    }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
-
-#[allow(dead_code)]
-pub struct SiLU;
-
-impl SiLU {
-    pub fn new() -> Self {
-        SiLU
-    }
-}
-
-impl Default for SiLU {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Module for SiLU {
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("silu", DispatchKey::Cpu, &[x]);
-        result[0].clone()
-    }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
+impl_stateless_activation!(Mish, "mish");
 
 pub struct LeakyReLU {
     negative_slope: f64,
@@ -220,23 +80,7 @@ impl Module for LeakyReLU {
         result[0].clone()
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_stateless_activation_methods!();
 }
 
 pub struct PReLU {
@@ -301,62 +145,7 @@ impl Module for Softplus {
         result[0].clone()
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
-
-pub struct Hardswish;
-
-impl Hardswish {
-    pub fn new() -> Self {
-        Hardswish
-    }
-}
-
-impl Default for Hardswish {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Module for Hardswish {
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("hardswish", DispatchKey::Cpu, &[x]);
-        result[0].clone()
-    }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_stateless_activation_methods!();
 }
 
 pub struct Elu {
@@ -376,65 +165,7 @@ impl Module for Elu {
         result[0].clone()
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
-}
-
-pub struct Mish;
-
-impl Mish {
-    pub fn new() -> Self {
-        Mish
-    }
-}
-
-impl Default for Mish {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Module for Mish {
-    fn forward(&self, x: &Tensor) -> Tensor {
-        // mish(x) = x * tanh(softplus(x))
-        // softplus(x) = ln(1 + exp(x))
-        let sp = x.add_scalar(1.0).exp().ln();
-        let tanh_sp = sp.tanh();
-        x.mul(&tanh_sp)
-    }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_stateless_activation_methods!();
 }
 
 pub struct AdaptiveAvgPool2d {

@@ -13,8 +13,10 @@ impl MatmulBackward {
 }
 
 impl Node for MatmulBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
         let a = &self.inputs[0];
         let b = &self.inputs[1];
 

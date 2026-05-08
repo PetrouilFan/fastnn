@@ -1,5 +1,5 @@
 use crate::dispatcher::{dispatch, DispatchKey};
-use crate::nn::Module;
+use crate::{impl_training_state, nn::{clear_grad, Module, TrainingState}};
 use crate::tensor::Tensor;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ pub struct LayerNorm {
     pub weight: Option<Tensor>,
     pub bias: Option<Tensor>,
     pub eps: f64,
-    training: std::sync::atomic::AtomicBool,
+    training: TrainingState,
     eps_scalar: Tensor,
 }
 
@@ -27,7 +27,7 @@ impl LayerNorm {
             bias: Some(bias),
             normalized_shape,
             eps,
-            training: std::sync::atomic::AtomicBool::new(true),
+            training: TrainingState::new(),
             eps_scalar: Tensor::from_scalar(eps as f32),
         }
     }
@@ -112,34 +112,14 @@ impl Module for LayerNorm {
 
     fn zero_grad(&self) {
         if let Some(w) = &self.weight {
-            if let Some(meta) = &w.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
+            clear_grad(w);
         }
         if let Some(b) = &self.bias {
-            if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
+            clear_grad(b);
         }
     }
 
-    fn train_mode(&self) {
-        self.training
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn eval_mode(&self) {
-        self.training
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::Relaxed)
-    }
+    impl_training_state!(self, self.training);
 }
 
 pub struct BatchNorm1d {
@@ -153,7 +133,7 @@ pub struct BatchNorm1d {
     pub bias: Option<Tensor>,
     pub running_mean: Arc<RwLock<Tensor>>,
     pub running_var: Arc<RwLock<Tensor>>,
-    pub training: std::sync::atomic::AtomicBool,
+    training: TrainingState,
     #[allow(dead_code)]
     pub track_running_stats: bool,
     // Pre-allocated scalar tensors
@@ -184,7 +164,7 @@ impl BatchNorm1d {
             momentum,
             running_mean: Arc::new(RwLock::new(running_mean)),
             running_var: Arc::new(RwLock::new(running_var)),
-            training: std::sync::atomic::AtomicBool::new(true),
+            training: TrainingState::new(),
             track_running_stats: true,
             eps_scalar: Tensor::from_scalar(eps as f32),
             training_true_scalar: Tensor::from_scalar(1.0),
@@ -213,7 +193,7 @@ impl Module for BatchNorm1d {
             }
         };
 
-        let is_training = self.training.load(std::sync::atomic::Ordering::Relaxed);
+        let is_training = self.training.is_training();
 
         let training_flag = if is_training {
             &self.training_true_scalar
@@ -306,34 +286,14 @@ impl Module for BatchNorm1d {
 
     fn zero_grad(&self) {
         if let Some(w) = &self.weight {
-            if let Some(meta) = &w.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
+            clear_grad(w);
         }
         if let Some(b) = &self.bias {
-            if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
+            clear_grad(b);
         }
     }
 
-    fn train_mode(&self) {
-        self.training
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn eval_mode(&self) {
-        self.training
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::Relaxed)
-    }
+    impl_training_state!(self, self.training);
 }
 
 pub struct RMSNorm {
@@ -498,7 +458,7 @@ pub struct BatchNorm2d {
     pub eps: f32,
     pub momentum: f32,
     pub num_features: i64,
-    training: std::sync::atomic::AtomicBool,
+    training: TrainingState,
     eps_scalar: Tensor,
     training_true_scalar: Tensor,
     training_false_scalar: Tensor,
@@ -538,7 +498,7 @@ impl BatchNorm2d {
             eps,
             momentum,
             num_features,
-            training: std::sync::atomic::AtomicBool::new(true),
+            training: TrainingState::new(),
             eps_scalar: Tensor::from_scalar(eps),
             training_true_scalar: Tensor::from_scalar(1.0),
             training_false_scalar: Tensor::from_scalar(0.0),
@@ -548,7 +508,7 @@ impl BatchNorm2d {
 
 impl Module for BatchNorm2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let is_training = self.training.load(std::sync::atomic::Ordering::Relaxed);
+        let is_training = self.training.is_training();
 
         let training_flag = if is_training {
             &self.training_true_scalar
@@ -630,26 +590,9 @@ impl Module for BatchNorm2d {
     }
 
     fn zero_grad(&self) {
-        for t in [&self.weight, &self.bias] {
-            if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
+        clear_grad(&self.weight);
+        clear_grad(&self.bias);
     }
 
-    fn train_mode(&self) {
-        self.training
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn eval_mode(&self) {
-        self.training
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::Relaxed)
-    }
+    impl_training_state!(self, self.training);
 }

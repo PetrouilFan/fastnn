@@ -13,14 +13,22 @@ Examples:
 """
 
 import math
-from typing import Any
+from typing import Any, Optional
 
+__all__ = [
+    'LRScheduler',
+    'DecayLR',
+    'StepLR',
+    'ExponentialLR',
+    'CosineAnnealingLR',
+    'ReduceLROnPlateau',
+]
 
 
 class LRScheduler:
     """Base class for learning rate schedulers.
     
-    Modifies the optimizer's learning rate in-place via state_dict.
+    Modifies the optimizer's learning rate in-place.
     
     Args:
         optimizer: Optimizer to schedule.
@@ -30,24 +38,49 @@ class LRScheduler:
         >>> lr = scheduler.get_lr()
     """
     
-    def __init__(self, optimizer: Any):
+    def __init__(self, optimizer: Any) -> None:
         self.optimizer = optimizer
+        self._has_param_groups = hasattr(self.optimizer, 'param_groups')
         self.base_lr = self._get_lr()
         self.last_epoch = -1
     
     def _get_lr(self) -> float:
+        param_groups = self._get_param_groups()
+        if param_groups:
+            return param_groups[0].get("lr", 0.01)
+        # Fallback to state_dict's top-level lr key (for custom optimizers)
         sd = self.optimizer.state_dict()
         return sd.get("lr", 0.01)
     
     def _set_lr(self, lr: float) -> None:
+        param_groups = self._get_param_groups()
+        if param_groups:
+            for pg in param_groups:
+                pg["lr"] = lr
+        else:
+            sd = self.optimizer.state_dict()
+            if 'param_groups' in sd:
+                # Handle multiple param groups in state_dict
+                for pg in sd['param_groups']:
+                    pg['lr'] = lr
+            else:
+                # Assume single param group, set top-level lr key
+                sd["lr"] = lr
+            self.optimizer.load_state_dict(sd)
+
+    def _get_param_groups(self) -> Optional[list]:
+        if self._has_param_groups and self.optimizer.param_groups:
+            return self.optimizer.param_groups
+        # Fallback to state_dict's param_groups if available (e.g., PyTorch)
         sd = self.optimizer.state_dict()
-        sd["lr"] = lr
-        self.optimizer.load_state_dict(sd)
-    
+        if 'param_groups' in sd:
+            return sd['param_groups']
+        return None
+
     def get_lr(self) -> float:
         raise NotImplementedError
     
-    def step(self) -> float:
+    def step(self, **kwargs) -> float:
         """Update learning rate and return the new learning rate."""
         self.last_epoch += 1
         lr = self.get_lr()
@@ -55,7 +88,30 @@ class LRScheduler:
         return lr
 
 
-class StepLR(LRScheduler):
+class DecayLR(LRScheduler):
+    """Base class for decay-based LR schedulers that use multiplicative decay.
+    
+    Args:
+        optimizer: Optimizer to schedule.
+        gamma: Multiplicative factor for LR decay.
+    
+    Examples:
+        >>> scheduler = DecayLR(optimizer, gamma=0.1)
+    """
+    
+    def __init__(self, optimizer: Any, gamma: float = 0.1) -> None:
+        super().__init__(optimizer)
+        self.gamma = gamma
+    
+    def get_decay_factor(self) -> float:
+        """Calculate the decay factor. Subclasses should override this."""
+        raise NotImplementedError
+    
+    def get_lr(self) -> float:
+        return self.base_lr * self.get_decay_factor()
+
+
+class StepLR(DecayLR):
     """Decays LR by gamma every step_size epochs.
     
     Args:
@@ -67,13 +123,12 @@ class StepLR(LRScheduler):
         >>> scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
     """
     
-    def __init__(self, optimizer: Any, step_size: int, gamma: float = 0.1):
-        super().__init__(optimizer)
+    def __init__(self, optimizer: Any, step_size: int, gamma: float = 0.1) -> None:
+        super().__init__(optimizer, gamma)
         self.step_size = step_size
-        self.gamma = gamma
     
-    def get_lr(self) -> float:
-        return self.base_lr * self.gamma ** (self.last_epoch // self.step_size)
+    def get_decay_factor(self) -> float:
+        return self.gamma ** (self.last_epoch // self.step_size)
 
 
 class CosineAnnealingLR(LRScheduler):
@@ -88,7 +143,7 @@ class CosineAnnealingLR(LRScheduler):
         >>> scheduler = CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
     """
     
-    def __init__(self, optimizer: Any, T_max: int, eta_min: float = 0):
+    def __init__(self, optimizer: Any, T_max: int, eta_min: float = 0) -> None:
         super().__init__(optimizer)
         self.T_max = T_max
         self.eta_min = eta_min
@@ -102,7 +157,7 @@ class CosineAnnealingLR(LRScheduler):
         )
 
 
-class ExponentialLR(LRScheduler):
+class ExponentialLR(DecayLR):
     """Decays LR by gamma every epoch.
     
     Args:
@@ -113,53 +168,56 @@ class ExponentialLR(LRScheduler):
         >>> scheduler = ExponentialLR(optimizer, gamma=0.95)
     """
     
-    def __init__(self, optimizer: Any, gamma: float):
-        super().__init__(optimizer)
-        self.gamma = gamma
+    def __init__(self, optimizer: Any, gamma: float) -> None:
+        super().__init__(optimizer, gamma)
     
-    def get_lr(self) -> float:
-        return self.base_lr * self.gamma ** self.last_epoch
+    def get_decay_factor(self) -> float:
+        return self.gamma ** self.last_epoch
 
 
-class ReduceLROnPlateau:
+class ReduceLROnPlateau(LRScheduler):
     """Reduce LR when metric has stopped improving.
-    
+
     Args:
         optimizer: Optimizer to schedule.
         mode: 'min' or 'max'.
         factor: Factor to multiply LR by.
         patience: Number of epochs with no improvement.
         min_lr: Minimum learning rate.
-    
+
     Examples:
         >>> scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
         >>> for epoch in range(100):
         ...     val_loss = validate(...)
         ...     scheduler.step(val_loss)
     """
-    
-    def __init__(self, optimizer: Any, mode: str = "min", factor: float = 0.1, patience: int = 10, min_lr: float = 1e-6):
-        self.optimizer = optimizer
+
+    def __init__(self, optimizer: Any, mode: str = "min", factor: float = 0.1, patience: int = 10, min_lr: float = 1e-6) -> None:
+        super().__init__(optimizer)
         self.mode = mode
         self.factor = factor
         self.patience = patience
         self.min_lr = min_lr
         self.best = float("inf") if mode == "min" else float("-inf")
         self.wait = 0
-        self.current_lr = self._get_lr()
-    
-    def _get_lr(self) -> float:
-        sd = self.optimizer.state_dict()
-        return sd.get("lr", 0.01)
-    
-    def _set_lr(self, lr: float) -> None:
-        sd = self.optimizer.state_dict()
-        sd["lr"] = lr
-        self.optimizer.load_state_dict(sd)
-        self.current_lr = lr
-    
-    def step(self, metric: float) -> float:
+        self._should_reduce = False
+
+    def get_lr(self) -> float:
+        if self._should_reduce:
+            current_lr = self._get_lr()
+            new_lr = current_lr * self.factor
+            # Clamp to min_lr
+            if self.mode == "min":
+                new_lr = max(new_lr, self.min_lr)
+            else:
+                new_lr = min(new_lr, self.min_lr)
+            self._should_reduce = False
+            return new_lr
+        return self._get_lr()
+
+    def step(self, metric: float, **kwargs) -> float:
         """Update learning rate based on metric value."""
+        self.last_epoch += 1
         improved = (metric < self.best) if self.mode == "min" else (metric > self.best)
         if improved:
             self.best = metric
@@ -168,9 +226,7 @@ class ReduceLROnPlateau:
             self.wait += 1
             if self.wait >= self.patience:
                 self.wait = 0
-                new_lr = self.current_lr * self.factor
-                if new_lr < self.min_lr:
-                    new_lr = self.min_lr
-                self._set_lr(new_lr)
-                return new_lr
-        return self.current_lr
+                self._should_reduce = True
+        lr = self.get_lr()
+        self._set_lr(lr)
+        return lr

@@ -1,7 +1,8 @@
-import fastnn.core as core
+import fastnn._core as _core
+from fastnn.models.base import BaseModel
 
 
-class Transformer:
+class Transformer(BaseModel):
     def __init__(
         self,
         vocab_size: int,
@@ -13,7 +14,7 @@ class Transformer:
         num_classes: int,
         dropout_p: float = 0.1,
     ):
-        self._model = core.PyTransformerEncoder(
+        self._model = _core.PyTransformerEncoder(
             vocab_size,
             max_seq_len,
             d_model,
@@ -24,20 +25,7 @@ class Transformer:
             dropout_p,
         )
 
-    def __call__(self, x):
-        return self._model.forward(x)
-
     def forward(self, x):
-        return self._model.forward(x)
+        return self._model(x)
 
-    def parameters(self):
-        return self._model.parameters()
 
-    def zero_grad(self):
-        self._model.zero_grad()
-
-    def train(self):
-        self._model.train()
-
-    def eval(self):
-        self._model.eval()

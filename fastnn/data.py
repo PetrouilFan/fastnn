@@ -12,6 +12,21 @@ import queue
 from collections import deque
 from typing import Any, Callable, Iterator, List, Optional, Sequence
 import numpy as np
+import fastnn as fnn
+from fastnn.utils.tensor_utils import to_numpy
+
+__all__ = [
+    "Dataset",
+    "TensorDataset",
+    "CachedDataset",
+    "Sampler",
+    "SequentialSampler",
+    "RandomSampler",
+    "SubsetRandomSampler",
+    "BatchSampler",
+    "default_collate",
+    "DataLoader",
+]
 
 
 class Dataset:
@@ -22,6 +37,20 @@ class Dataset:
 
     def __getitem__(self, idx: int) -> Any:
         raise NotImplementedError
+
+    def batch_get(self, indices: List[int]) -> List[Any]:
+        """Get a batch of items by indices.
+
+        Default implementation calls __getitem__ for each index.
+        Subclasses can override this for more efficient batch fetching.
+
+        Args:
+            indices: List of indices to fetch.
+
+        Returns:
+            List of items.
+        """
+        return [self[i] for i in indices]
 
 
 class TensorDataset(Dataset):
@@ -64,17 +93,19 @@ class TensorDataset(Dataset):
         return tuple(t[idx] for t in self.tensors)
 
     def __getstate__(self):
-        """Return state for pickling - use numpy arrays (convert lazily)."""
-        if self._numpy_tensors is None:
-            self._numpy_tensors = tuple(
-                t.numpy() if hasattr(t, "numpy") else t for t in self.tensors
-            )
-        return {"numpy_tensors": self._numpy_tensors}
-
+        """Return state for pickling - convert to numpy for compatibility.
+        
+        Note: This does not modify self._numpy_tensors to avoid side effects.
+        After unpickling, tensors will be numpy arrays.
+        """
+        numpy_tensors = tuple(to_numpy(t) for t in self.tensors)
+        return {"numpy_tensors": numpy_tensors}
+    
     def __setstate__(self, state):
-        """Restore state from pickling - use numpy arrays."""
+        """Restore state from pickling."""
         self._numpy_tensors = state["numpy_tensors"]
-        # Reconstruct tensors from numpy (this is a limitation - we'll use numpy in workers)
+        # Note: tensors are restored as numpy arrays
+        # Caller may need to convert back to fastnn tensors if needed
         self.tensors = self._numpy_tensors
 
 
@@ -104,13 +135,6 @@ class CachedDataset(Dataset):
         if len(self.cache) < self.cache_size:
             self.cache[idx] = item
         return item
-
-
-def _convert_to_numpy(tensor):
-    """Convert fastnn tensor to numpy array for pickling."""
-    if hasattr(tensor, "numpy"):
-        return tensor.numpy()
-    return tensor
 
 
 class Sampler:
@@ -166,7 +190,7 @@ class RandomSampler(Sampler):
         if self._indices_buffer is None or len(self._indices_buffer) != n:
             self._indices_buffer = np.arange(n, dtype=np.int64)
         else:
-            self._indices_buffer[:] = np.arange(n)
+            np.arange(n, dtype=np.int64, out=self._indices_buffer)
         self.generator.shuffle(self._indices_buffer)
         return iter(self._indices_buffer[: self.num_samples].tolist())
 
@@ -188,9 +212,8 @@ class SubsetRandomSampler(Sampler):
         self.generator = generator or random.Random()
 
     def __iter__(self) -> Iterator[int]:
-        indices = self.indices[:]
-        self.generator.shuffle(indices)
-        return iter(indices)
+        # Use generator.sample to get shuffled list without intermediate copy
+        return iter(self.generator.sample(self.indices, len(self.indices)))
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -244,9 +267,6 @@ def default_collate(batch: list) -> tuple:
     Returns:
         Tuple of batched tensors/arrays/lists.
     """
-    import fastnn as fnn
-    import numpy as np
-
     if not batch:
         return ()
 
@@ -256,13 +276,16 @@ def default_collate(batch: list) -> tuple:
         return tuple(map(default_collate, zip(*batch)))
 
     if hasattr(elem, "numpy"):
-        arrays = [b.numpy() for b in batch]
-        result_np = np.stack(arrays, axis=0)
-        return fnn.tensor(np.ascontiguousarray(result_np).ravel().tolist(), list(result_np.shape))
+        if all(hasattr(b, "numpy") for b in batch):
+            return fnn.stack(batch, dim=0)
+        batch_np = [to_numpy(b) for b in batch]
+        result_np = np.stack(batch_np, axis=0)
+        return fnn.tensor(result_np, result_np.shape)
 
     if isinstance(elem, np.ndarray):
-        result_np = np.stack(batch, axis=0)
-        return fnn.tensor(np.ascontiguousarray(result_np).ravel().tolist(), list(result_np.shape))
+        batch_np = [to_numpy(b) for b in batch]
+        result_np = np.stack(batch_np, axis=0)
+        return fnn.tensor(result_np, result_np.shape)
 
     if isinstance(elem, (int, float)):
         return fnn.tensor(batch, [len(batch)])
@@ -367,7 +390,100 @@ class _AutoTuner:
         return self.current_workers, self.current_prefetch
 
 
-class _PrefetchIterator:
+class _BaseIterator:
+    """Base class for data iterators with shared cleanup, context manager, and metrics logic."""
+
+    def __init__(self, metrics: Optional[_Metrics] = None):
+        self.metrics = metrics
+        self._started = False
+        self._queue = None
+        self._done_event = None
+        self._error_ref = None
+
+    def __iter__(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+
+    def __del__(self):
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        """Clean up resources. Subclasses must implement this."""
+        raise NotImplementedError
+
+    def _record_metrics(self, wait_ms: float, batch_ms: float) -> None:
+        """Record wait and batch times if metrics are enabled."""
+        if self.metrics is not None:
+            self.metrics.record(wait_ms=wait_ms, batch_ms=batch_ms)
+
+    def _check_done_and_raise(self, done_event: threading.Event, error_ref: Any, q: queue.Queue) -> None:
+        """Check if iteration is done and raise appropriate exception.
+
+        Args:
+            done_event: Event that signals completion.
+            error_ref: Reference to an error variable.
+            q: The queue to check.
+
+        Raises:
+            Exception: Any stored error from the worker.
+            StopIteration: When the iteration is complete.
+        """
+        if done_event.is_set() and q.empty():
+            if isinstance(error_ref, list) and error_ref[0] is not None:
+                raise error_ref[0]
+            elif hasattr(error_ref, "__getitem__") and error_ref[0] is not None:
+                raise error_ref[0]
+            raise StopIteration
+
+    def __next__(self) -> tuple:
+        if not self._started:
+            self._start()
+        return self._get_next_from_queue(self._queue, self._done_event, self._error_ref)
+
+    def _get_next_from_queue(
+        self, q: queue.Queue, done_event: threading.Event, error_ref: Any
+    ) -> tuple:
+        """Common logic for getting next batch from a queue.
+
+        Args:
+            q: The queue to get the batch from.
+            done_event: Event that signals completion.
+            error_ref: Reference to an error variable (can be a list or object with error attribute).
+
+        Returns:
+            The next batch.
+
+        Raises:
+            StopIteration: When the iteration is complete.
+            Exception: Any stored error from the worker.
+        """
+        batch_start = time.monotonic()
+
+        if done_event.is_set() and q.empty():
+            self._check_done_and_raise(done_event, error_ref, q)
+
+        try:
+            item = q.get(timeout=60)
+            wait_ms = (time.monotonic() - batch_start) * 1000
+            if isinstance(item, tuple) and len(item) == 2:
+                batch, batch_ms = item
+            else:
+                batch = item
+                batch_ms = 0.0
+            self._record_metrics(wait_ms, batch_ms)
+            return batch
+        except queue.Empty:
+            if done_event.is_set() and q.empty():
+                self._check_done_and_raise(done_event, error_ref, q)
+            raise
+
+
+class _PrefetchIterator(_BaseIterator):
     """Background prefetch iterator that prepares the next batch in a thread.
 
     Uses a bounded queue to limit memory usage. The prefetch thread prepares
@@ -389,75 +505,46 @@ class _PrefetchIterator:
         prefetch_size: int = 2,
         metrics: Optional[_Metrics] = None,
     ):
+        super().__init__(metrics=metrics)
         self.indices_iter = indices_iter
         self.dataset = dataset
         self.collate_fn = collate_fn
         self.prefetch_size = max(1, prefetch_size)
-        self.metrics = metrics
-        self.queue: queue.Queue = queue.Queue(maxsize=prefetch_size)
-        self.done = threading.Event()
-        self.error: Optional[Exception] = None
+        self._queue: queue.Queue = queue.Queue(maxsize=prefetch_size)
+        self._done_event = threading.Event()
+        self._error_ref: list[Optional[Exception]] = [None]
+        self.thread = None
+        self._started = False
+
+    def _start(self) -> None:
+        """Lazy-start the prefetch thread."""
+        if self._started:
+            return
+        self._started = True
         self.thread = threading.Thread(target=self._prefetch_worker, daemon=True)
-        self._batch_start_time = time.monotonic()
         self.thread.start()
 
     def _prefetch_worker(self) -> None:
         """Background thread that prepares batches and puts them in the queue."""
-        self._batch_start_time = time.monotonic()
         try:
             for batch_idx in self.indices_iter:
-                samples = [self.dataset[i] for i in batch_idx]
-                batch = self.collate_fn(samples)
-                self.queue.put(batch, timeout=60)
-                self._batch_start_time = time.monotonic()
+                batch_start = time.monotonic()
+                samples = _fetch_batch(self.dataset, batch_idx, self.collate_fn)
+                batch_ms = (time.monotonic() - batch_start) * 1000
+                self._queue.put((samples, batch_ms), timeout=60)
         except Exception as e:
-            self.error = e
+            self._error_ref[0] = e
         finally:
-            self.done.set()
-
-    def __iter__(self) -> "_PrefetchIterator":
-        return self
-
-    def __next__(self) -> tuple:
-        batch_start = time.monotonic()
-
-        if self.done.is_set() and self.queue.empty():
-            if self.error is not None:
-                raise self.error
-            raise StopIteration
-
-        try:
-            batch = self.queue.get(timeout=60)
-            wait_ms = (time.monotonic() - batch_start) * 1000
-
-            if self.metrics is not None:
-                self.metrics.record(wait_ms=wait_ms, batch_ms=wait_ms)
-
-            return batch
-        except queue.Empty:
-            if self.done.is_set() and self.queue.empty():
-                if self.error is not None:
-                    raise self.error
-                raise StopIteration
-            raise
+            self._done_event.set()
 
     def cleanup(self) -> None:
         """Signal the prefetch thread to stop and wait for it."""
-        self.done.set()
-        if self.thread.is_alive():
-            self.thread.join(timeout=5)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
-
-    def __del__(self):
-        self.cleanup()
+        self._done_event.set()
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=30)
 
 
-class _MultiProcessIterator:
+class _MultiProcessIterator(_BaseIterator):
     """Multi-threaded iterator for parallel data loading.
 
     Uses a thread pool to fetch batches in parallel, overlapping I/O with
@@ -482,6 +569,7 @@ class _MultiProcessIterator:
         prefetch_size: int = 2,
         metrics: Optional[_Metrics] = None,
     ):
+        super().__init__(metrics=metrics)
         from concurrent.futures import ThreadPoolExecutor
 
         self.indices_iter = indices_iter
@@ -489,102 +577,83 @@ class _MultiProcessIterator:
         self.collate_fn = collate_fn
         self.num_workers = num_workers
         self.prefetch_size = max(1, prefetch_size)
-        self.metrics = metrics
 
         self._executor = ThreadPoolExecutor(max_workers=num_workers)
-        self._result_queue: queue.Queue = queue.Queue(maxsize=prefetch_size)
-        self._done = threading.Event()
-        self._error: Optional[Exception] = None
+        self._queue: queue.Queue = queue.Queue(maxsize=prefetch_size)
+        self._done_event = threading.Event()
+        self._error_ref: list[Optional[Exception]] = [None]
         self._started = False
         self._batch_iter = None
+        self._batch_iter_lock = threading.Lock()
+        self._pending_futures = []
 
-    def _start_workers(self) -> None:
-        """Start worker thread."""
-        if self._executor is None:
+    def _start(self) -> None:
+        """Start worker threads."""
+        if self._started:
             return
 
         self._batch_iter = iter(self.indices_iter)
 
         def worker_fn():
             try:
-                for batch_indices in self._batch_iter:
-                    result = _worker_fetch_batch(
+                while True:
+                    with self._batch_iter_lock:
+                        try:
+                            batch_indices = next(self._batch_iter)
+                        except StopIteration:
+                            return
+
+                    batch_start = time.monotonic()
+                    result = _fetch_batch(
                         self.dataset, batch_indices, self.collate_fn
                     )
-                    self._result_queue.put(result, timeout=60)
-                self._done.set()
+                    batch_ms = (time.monotonic() - batch_start) * 1000
+                    self._queue.put((result, batch_ms), timeout=60)
             except Exception as e:
-                self._error = e
-                self._done.set()
+                self._error_ref[0] = e
+                self._done_event.set()
 
-        self._thread = threading.Thread(target=worker_fn, daemon=True)
-        self._thread.start()
+        # Submit num_workers tasks
+        for _ in range(self.num_workers):
+            future = self._executor.submit(worker_fn)
+            self._pending_futures.append(future)
+
+        # Submit a task to wait for all workers and signal completion
+        def wait_for_workers():
+            from concurrent.futures import as_completed
+            try:
+                for future in as_completed(self._pending_futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        if self._error_ref[0] is None:
+                            self._error_ref[0] = e
+            finally:
+                self._done_event.set()
+
+        self._executor.submit(wait_for_workers)
         self._started = True
-
-    def __iter__(self) -> "_MultiProcessIterator":
-        return self
-
-    def __next__(self) -> tuple:
-        if not self._started:
-            self._start_workers()
-
-        batch_start = time.monotonic()
-
-        try:
-            result = self._result_queue.get(timeout=60)
-            wait_ms = (time.monotonic() - batch_start) * 1000
-
-            if self.metrics is not None:
-                self.metrics.record(wait_ms=wait_ms, batch_ms=wait_ms)
-
-            return result
-        except queue.Empty:
-            if self._done.is_set() and self._result_queue.empty():
-                if self._error is not None:
-                    raise self._error
-                raise StopIteration
-            raise
 
     def cleanup(self) -> None:
         """Shutdown the executor."""
-        self._done.set()
+        self._done_event.set()
         if self._executor is not None:
             self._executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
 
-    def __enter__(self):
-        return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
-
-    def __del__(self):
-        self.cleanup()
-
-
-def _worker_fetch_batch(
+def _fetch_batch(
     dataset: Dataset, batch_indices: List[int], collate_fn: Callable
 ) -> tuple:
-    """Fetch and collate a batch from the dataset."""
-    samples = []
-    for i in batch_indices:
-        sample = dataset[i]
-        # Convert fastnn tensors to numpy for consistency with collate
-        if isinstance(sample, tuple):
-            converted = tuple(s.numpy() if hasattr(s, "numpy") else s for s in sample)
-            samples.append(converted)
-        elif hasattr(sample, "numpy"):
-            samples.append(sample.numpy())
-        else:
-            samples.append(sample)
+    """Fetch and collate a batch from the dataset.
+
+    Shared helper used by both _PrefetchIterator and _MultiProcessIterator.
+    """
+    if hasattr(dataset, 'batch_get'):
+        samples = dataset.batch_get(batch_indices)
+    else:
+        samples = [dataset[i] for i in batch_indices]
     return collate_fn(samples)
-
-
-def _worker_process_batch_simple(
-    batch_indices: List[int], dataset: Dataset, collate_fn: Callable
-) -> tuple:
-    """Process a batch in a worker process (placeholder for future multiprocessing)."""
-    return _worker_fetch_batch(dataset, batch_indices, collate_fn)
 
 
 class DataLoader:
@@ -679,8 +748,6 @@ class DataLoader:
             self.num_workers = num_workers
             self.prefetch_size = max(1, prefetch_size)
 
-        self.indices = list(range(len(dataset)))
-
         if batch_sampler is not None:
             self.batch_sampler = batch_sampler
         else:
@@ -728,15 +795,14 @@ class DataLoader:
         if self.shuffle:
             if isinstance(self.sampler, RandomSampler):
                 self.sampler.generator = self.generator
-            self.batch_sampler = BatchSampler(
-                self.sampler, self.batch_size, self.drop_last
-            )
+            # Only recreate BatchSampler if the sampler has changed
+            if self.batch_sampler.sampler is not self.sampler:
+                self.batch_sampler = BatchSampler(
+                    self.sampler, self.batch_size, self.drop_last
+                )
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-    def __del__(self):
         pass

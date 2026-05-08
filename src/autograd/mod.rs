@@ -148,7 +148,12 @@ pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
 pub trait Node: Send + Sync {
     /// Apply backward pass. Takes ownership of grad_outputs to avoid cloning.
     /// Implementations should consume gradients instead of cloning them.
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>>;
+    /// `output_tensor_id` is the ID of the output tensor that triggered backward.
+    fn apply(
+        &self,
+        grad_outputs: Vec<Option<Tensor>>,
+        output_tensor_id: usize,
+    ) -> Vec<Option<Tensor>>;
     fn next_edges(&self) -> &[Edge];
     fn num_inputs(&self) -> usize;
     fn name(&self) -> &str;
@@ -156,6 +161,56 @@ pub trait Node: Send + Sync {
     fn id(&self) -> usize {
         let ptr = self as *const _ as *const ();
         ptr as usize
+    }
+}
+
+/// Helper to sum a gradient tensor to match a target shape (handle broadcasting).
+/// This efficiently computes which dimensions need to be summed and does it in one pass.
+pub fn sum_to_shape(mut grad: Tensor, target_shape: &[i64]) -> Tensor {
+    let grad_shape = grad.shape();
+    if grad_shape == target_shape {
+        return grad;
+    }
+
+    let grad_ndim = grad_shape.len();
+    let target_ndim = target_shape.len();
+    let diff = grad_ndim as i32 - target_ndim as i32;
+
+    // Collect dims to sum
+    let mut dims_to_sum: Vec<i32> = Vec::new();
+    for i in 0..grad_ndim {
+        let target_dim = if i as i32 >= diff {
+            target_shape[(i as i32 - diff) as usize]
+        } else {
+            1
+        };
+        if target_dim != grad_shape[i] {
+            dims_to_sum.push(i as i32);
+        }
+    }
+
+    // Sum all dims at once from outermost to innermost
+    for &dim in dims_to_sum.iter().rev() {
+        grad = grad.sum(dim, false);
+    }
+
+    grad
+}
+
+/// Helper to extract the first gradient from grad_outputs.
+/// Returns None if the gradient is not present.
+/// This is a common pattern used in many backward implementations.
+pub fn extract_first_grad(grad_outputs: Vec<Option<Tensor>>) -> Option<Tensor> {
+    grad_outputs.into_iter().next().flatten()
+}
+
+/// Helper to ensure a tensor is on CPU, returning a CPU tensor.
+/// If the tensor is already on CPU, returns a clone. Otherwise, converts to CPU.
+pub fn ensure_cpu(tensor: &Tensor) -> Tensor {
+    if tensor.inner.is_cpu() {
+        tensor.clone()
+    } else {
+        tensor.to_cpu()
     }
 }
 

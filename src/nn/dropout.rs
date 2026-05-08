@@ -1,25 +1,24 @@
-use crate::nn::Module;
+use crate::{impl_training_state, nn::{Module, TrainingState}};
 use crate::tensor::Tensor;
 use rand::Rng;
-use std::sync::atomic::AtomicBool;
 
 pub struct Dropout {
     pub p: f64,
-    pub training: AtomicBool,
+    training: TrainingState,
 }
 
 impl Dropout {
     pub fn new(p: f64) -> Self {
         Dropout {
             p,
-            training: AtomicBool::new(true),
+            training: TrainingState::new(),
         }
     }
 }
 
 impl Module for Dropout {
     fn forward(&self, x: &Tensor) -> Tensor {
-        if self.training.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.training.is_training() {
             let x_data = x.as_f32_slice();
             let scale = 1.0 / (1.0 - self.p) as f32;
             let keep_prob = 1.0 - self.p;
@@ -57,38 +56,26 @@ impl Module for Dropout {
 
     fn zero_grad(&self) {}
 
-    fn train_mode(&self) {
-        self.training
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn eval_mode(&self) {
-        self.training
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::Relaxed)
-    }
+    impl_training_state!(self, self.training);
 }
 
 pub struct Dropout2d {
     pub p: f64,
-    pub training: std::sync::atomic::AtomicBool,
+    training: TrainingState,
 }
 
 impl Dropout2d {
     pub fn new(p: f64) -> Self {
         Dropout2d {
             p,
-            training: std::sync::atomic::AtomicBool::new(true),
+            training: TrainingState::new(),
         }
     }
 }
 
 impl Module for Dropout2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        if self.training.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.training.is_training() {
             let x_shape = x.shape();
             let batch = x_shape[0] as usize;
             let channels = x_shape[1] as usize;
@@ -140,17 +127,5 @@ impl Module for Dropout2d {
 
     fn zero_grad(&self) {}
 
-    fn train_mode(&self) {
-        self.training
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn eval_mode(&self) {
-        self.training
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(std::sync::atomic::Ordering::Relaxed)
-    }
+    impl_training_state!(self, self.training);
 }

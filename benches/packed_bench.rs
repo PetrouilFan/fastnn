@@ -1,47 +1,12 @@
-use fastnn::backends::cpu;
+// Use bench_util module for shared benchmark functions
+#[path = "bench_util.rs"]
+mod bench_util;
+
+use bench_util::{
+    bench_gemv, bench_relu, speedup,
+    print_comparison_header, print_result_row,
+};
 use fastnn::dtypes::{F16x2, F32x1, PackedWord, U4x8, U8x4};
-use fastnn::packed_tensor::PackedTensor;
-use std::time::Instant;
-
-fn bench_gemv<T: PackedWord>(m: usize, k: usize, iters: usize) -> (f64, usize) {
-    let weight_data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.01).sin() * 2.0).collect();
-    let activation: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01).cos()).collect();
-    let mut output = vec![0.0f32; m];
-
-    let weights = PackedTensor::<T>::from_f32_auto(&weight_data, &[m, k]);
-
-    for _ in 0..5 {
-        cpu::gemv_cpu(&weights, &activation, &mut output);
-    }
-
-    let start = Instant::now();
-    for _ in 0..iters {
-        cpu::gemv_cpu(&weights, &activation, &mut output);
-    }
-    let elapsed = start.elapsed();
-
-    let ms = elapsed.as_secs_f64() * 1000.0 / iters as f64;
-    let packed_bytes = weights.packed_len() * 4;
-    (ms, packed_bytes)
-}
-
-fn bench_relu<T: PackedWord>(data: &[f32], shape: &[usize], iters: usize) -> f64 {
-    // Create tensor OUTSIDE the timing loop
-    let mut tensor = PackedTensor::<T>::from_f32_auto(data, shape);
-
-    // Warmup
-    for _ in 0..5 {
-        fastnn::backends::cpu::relu_cpu(&mut tensor);
-        tensor = PackedTensor::<T>::from_f32_auto(data, shape); // reset
-    }
-
-    let start = Instant::now();
-    for _ in 0..iters {
-        fastnn::backends::cpu::relu_cpu(&mut tensor);
-    }
-    let elapsed = start.elapsed();
-    elapsed.as_secs_f64() * 1000.0 / iters as f64
-}
 
 fn main() {
     println!("=== fastnn Native Packed Precision Benchmark ===\n");
@@ -72,8 +37,8 @@ fn main() {
             f16_ms,
             gflops,
             f16_bytes,
-            f32_ms / f16_ms,
-            f32_bytes as f64 / f16_bytes as f64
+            speedup(f32_ms, f16_ms),
+            speedup(f32_bytes as f64, f16_bytes as f64)
         );
 
         let (u8_ms, u8_bytes) = bench_gemv::<U8x4>(m, k, iters);
@@ -84,8 +49,8 @@ fn main() {
             u8_ms,
             gflops,
             u8_bytes,
-            f32_ms / u8_ms,
-            f32_bytes as f64 / u8_bytes as f64
+            speedup(f32_ms, u8_ms),
+            speedup(f32_bytes as f64, u8_bytes as f64)
         );
 
         let (u4_ms, u4_bytes) = bench_gemv::<U4x8>(m, k, iters);
@@ -96,8 +61,8 @@ fn main() {
             u4_ms,
             gflops,
             u4_bytes,
-            f32_ms / u4_ms,
-            f32_bytes as f64 / u4_bytes as f64
+            speedup(f32_ms, u4_ms),
+            speedup(f32_bytes as f64, u4_bytes as f64)
         );
 
         println!();
@@ -135,7 +100,7 @@ fn main() {
             f16_ms,
             numel as f64 / f16_ms,
             f16_bytes,
-            f32_ms / f16_ms
+            speedup(f32_ms, f16_ms)
         );
 
         let u8_ms = bench_relu::<U8x4>(&data, &shape, iters);
@@ -146,7 +111,7 @@ fn main() {
             u8_ms,
             numel as f64 / u8_ms,
             u8_bytes,
-            f32_ms / u8_ms
+            speedup(f32_ms, u8_ms)
         );
 
         let u4_ms = bench_relu::<U4x8>(&data, &shape, iters);
@@ -157,7 +122,7 @@ fn main() {
             u4_ms,
             numel as f64 / u4_ms,
             u4_bytes,
-            f32_ms / u4_ms
+            speedup(f32_ms, u4_ms)
         );
     }
 
