@@ -17,8 +17,10 @@ impl SumBackward {
 }
 
 impl Node for SumBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let shape = self.input.shape();
         let grad_shape = grad.shape();
 
@@ -74,8 +76,10 @@ impl MeanBackward {
 }
 
 impl Node for MeanBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let scale = 1.0 / self.numel as f32;
 
         let shape = self.input.shape();
@@ -136,8 +140,10 @@ impl ExpBackward {
 }
 
 impl Node for ExpBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let exp_x = self.input.exp();
         vec![Some(grad.mul(&exp_x))]
     }
@@ -175,8 +181,10 @@ impl LogBackward {
 }
 
 impl Node for LogBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         // Clamp input to prevent ±inf gradients on dead ReLU -> log chains
         // Use a small epsilon to avoid division by zero
         let eps = Tensor::from_scalar(1e-8);
@@ -220,8 +228,10 @@ impl SqrtBackward {
 }
 
 impl Node for SqrtBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let inv_sqrt_x = self.half.div(&self.input.sqrt());
         vec![Some(grad.mul(&inv_sqrt_x))]
     }
@@ -256,8 +266,10 @@ impl AbsBackward {
 }
 
 impl Node for AbsBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let sign = self.input.sign();
         vec![Some(grad.mul(&sign))]
     }
@@ -305,8 +317,10 @@ impl GeluBackward {
 }
 
 impl Node for GeluBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let x = &self.input;
 
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
@@ -352,8 +366,10 @@ impl SigmoidBackward {
 }
 
 impl Node for SigmoidBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let sigmoid_x = self.input.sigmoid();
         let derivative = sigmoid_x.mul(&sigmoid_x.neg().add(&self.one));
         vec![Some(grad.mul(&derivative))]
@@ -395,8 +411,10 @@ impl TanhBackward {
 }
 
 impl Node for TanhBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let tanh_x = self.input.tanh();
         let tanh_sq = tanh_x.pow(2.0);
         let one_minus_tanh_sq = tanh_sq.mul(&self.neg_one).add(&self.one);
@@ -432,8 +450,10 @@ impl SiLUBackward {
 }
 
 impl Node for SiLUBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let s = self.input.sigmoid();
 
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(self.input.device());
@@ -477,8 +497,10 @@ impl SoftmaxBackward {
 }
 
 impl Node for SoftmaxBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let s = &self.output;
         let dim_tensor = Tensor::from_scalar(self.dim as f32);
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(s.device());
@@ -521,8 +543,10 @@ impl LogSoftmaxBackward {
 }
 
 impl Node for LogSoftmaxBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let softmax = self.output.exp();
         let dim_i32 = self.dim as i32;
         let grad_sum = grad.sum(dim_i32, true);

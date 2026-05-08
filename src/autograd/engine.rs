@@ -141,7 +141,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             check_gradient_validity(grad, &format!("backward pass for node {}", node.name()));
         }
 
-        let grad_inputs = node.apply(vec![grad_output_for_node]);
+        let grad_inputs = node.apply(vec![grad_output_for_node], tensor_id);
         let input_tensors = node.inputs();
 
         for (input_tensor, grad_input_opt) in input_tensors.iter().zip(grad_inputs) {

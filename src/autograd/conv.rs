@@ -51,8 +51,10 @@ impl Conv2dBackward {
 }
 
 impl Node for Conv2dBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None, None];
+        };
 
         let input = &self.input;
         let weight = &self.weight;
@@ -498,8 +500,14 @@ impl ConvTranspose2dBackward {
 }
 
 impl Node for ConvTranspose2dBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
+            let mut grads = vec![None, None];
+            if self.bias.is_some() {
+                grads.push(None);
+            }
+            return grads;
+        };
 
         let in_shape = self.input.shape();
         let _batch = in_shape[0];

@@ -959,7 +959,10 @@ def train_model(model, loader, optimizer, loss_fn=fastnn.mse_loss,
     Returns:
         Dict with 'initial_loss' and 'final_loss' keys, or dict with 'losses' if return_losses=True.
     """
-    model.train()
+    if hasattr(model, 'train_mode'):
+        model.train_mode()
+    elif hasattr(model, 'train'):
+        model.train()
     initial_loss = None
     final_loss = None
     losses = []
@@ -1002,14 +1005,20 @@ def evaluate(model, loader, loss_fn=fastnn.mse_loss):
     Returns:
         Dict with loss value.
     """
-    model.eval()
+    if hasattr(model, 'eval_mode'):
+        model.eval_mode()
+    elif hasattr(model, 'eval'):
+        model.eval()
     total_loss = 0
     with fastnn.no_grad():
         for x_batch, y_batch in loader:
             pred = model(x_batch)
             loss = loss_fn(pred, y_batch)
             total_loss += loss.item()
-    model.train()
+    if hasattr(model, 'train_mode'):
+        model.train_mode()
+    elif hasattr(model, 'train'):
+        model.train()
     return {"loss": total_loss / len(loader)}
 
 

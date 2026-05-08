@@ -65,7 +65,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
 
     /// Forward pass with quantized inputs.
     /// Input should be a 3D tensor [batch, seq_len, d_model].
-    pub fn forward(&self, x: &Tensor) -> Tensor {
+    pub fn forward_impl(&self, x: &Tensor) -> Tensor {
         let shape = x.shape();
         assert_eq!(shape.len(), 3, "Input must be 3D [batch, seq_len, d_model]");
         let batch = shape[0] as usize;
@@ -346,7 +346,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
 
 impl<T: PackedWord> Module for PackedMultiHeadAttention<T> {
     fn forward(&self, x: &Tensor) -> Tensor {
-        self.forward(x)
+        self.forward_impl(x)
     }
 
     fn parameters(&self) -> Vec<Tensor> {
