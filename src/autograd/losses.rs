@@ -161,11 +161,11 @@ impl Node for CrossEntropyBackward {
         let batch_size = logits.shape()[0] as usize;
         let num_classes = logits.shape()[1] as usize;
 
-        let logits_cpu = crate::autograd::ensure_cpu(&logits);
+        let logits_cpu = crate::autograd::ensure_cpu(logits);
         let logits_data = logits_cpu.as_f32_slice();
 
         // Convert targets to integer indices
-        let targets_cpu = crate::autograd::ensure_cpu(&targets);
+        let targets_cpu = crate::autograd::ensure_cpu(targets);
         let targets_i64 = targets_cpu.as_i64_slice();
 
         // Convert to f32 representation for kernel (kernel expects f32 bit patterns of indices)

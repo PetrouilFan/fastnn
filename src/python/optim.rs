@@ -369,7 +369,7 @@ impl PyRMSprop {
     }
 
     fn state_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-use pyo3::types::{PyList, PyDict};
+use pyo3::types::PyDict;
         let dict = PyDict::new(py);
         dict.set_item("lr", self.inner.lr)?;
         dict.set_item("alpha", self.inner.alpha)?;

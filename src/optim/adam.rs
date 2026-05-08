@@ -1,6 +1,6 @@
 use crate::optim::{
-    apply_weight_decay, get_grad, Optimizer, OptimizerState, ParamGroup,
-    ParamState, WeightDecayOptimizer, WeightDecayType, zeros_like,
+    get_grad, Optimizer, OptimizerState, ParamGroup,
+    ParamState, WeightDecayOptimizer, zeros_like,
 };
 use crate::tensor::Tensor;
 use std::collections::HashMap;

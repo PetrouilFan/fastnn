@@ -37,7 +37,7 @@ impl StoragePool {
                 if nbytes < SMALL_TENSOR_THRESHOLD {
                     let cached = SMALL_CACHE.with(|cache| {
                         let mut cache = cache.borrow_mut();
-                        let mut storages = cache.get_mut(&nbytes)?;
+                        let storages = cache.get_mut(&nbytes)?;
                         let storage = storages.pop()?;
                         if storages.is_empty() {
                             cache.remove(&nbytes);
