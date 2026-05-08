@@ -36,7 +36,8 @@ def _flatten(nested):
 def tensor(data, shape, device=None, dtype=None):
     if isinstance(data, np.ndarray):
         data = _ensure_tensor_ready(data)
-        return _core.tensor_from_buffer(data)
+        shape = shape if shape is not None else list(data.shape)
+        return _core.tensor_from_data(data.flatten().tolist(), shape, device)
     flat_data = _flatten(data)
     return _core.tensor_from_data(flat_data, shape, device)
 
