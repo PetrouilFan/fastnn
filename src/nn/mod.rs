@@ -55,6 +55,12 @@ impl TrainingState {
     }
 }
 
+impl Default for TrainingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Macro to implement zero_grad for modules with weight/bias parameters.
 #[macro_export]
 macro_rules! impl_zero_grad {
