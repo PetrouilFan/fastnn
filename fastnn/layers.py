@@ -18,8 +18,30 @@ import fastnn._core as _core
 from fastnn.module import Module
 
 
+def _to_scalar(value: Union[int, Tuple[int, int]], name: str) -> int:
+    """Convert a tuple or int to a scalar value.
+    
+    Args:
+        value: Either an int or a tuple of ints.
+        name: Name of the parameter (for error messages).
+    
+    Returns:
+        The scalar value.
+    
+    Raises:
+        NotImplementedError: If tuple values are not equal (non-square).
+    """
+    if isinstance(value, tuple):
+        if value[0] != value[1]:
+            raise NotImplementedError(f"Non-square {name} not supported yet")
+        return value[0]
+    return value
+
+
 class _BaseModule(Module):
     """Base class for modules with common layer iteration logic."""
+    __slots__ = ('_param_layers', '_zero_grad_layers', '_train_layers', 
+                 '_eval_layers', '_gpu_layers', '_named_param_pairs')
     
     def __init__(self):
         super().__init__()
@@ -30,28 +52,35 @@ class _BaseModule(Module):
         self._gpu_layers = []
         self._named_param_pairs = []
     
-    def _register_layer(self, layer, name=None):
+    def _register_layer(self, layer: Any, name: Optional[str] = None) -> None:
         """Register a layer for parameter iteration, training mode, etc."""
-        if hasattr(layer, "parameters"):
+        has_params = hasattr(layer, "parameters")
+        has_zero_grad = hasattr(layer, "zero_grad")
+        has_train = hasattr(layer, "train_mode")
+        has_eval = hasattr(layer, "eval_mode")
+        has_gpu = hasattr(layer, "to_gpu")
+        has_named_params = name and hasattr(layer, "named_parameters")
+        
+        if has_params:
             self._param_layers.append(layer)
-        if hasattr(layer, "zero_grad"):
+        if has_zero_grad:
             self._zero_grad_layers.append(layer)
-        if hasattr(layer, "train_mode"):
+        if has_train:
             self._train_layers.append(layer)
-        if hasattr(layer, "eval_mode"):
+        if has_eval:
             self._eval_layers.append(layer)
-        if hasattr(layer, "to_gpu"):
+        if has_gpu:
             self._gpu_layers.append(layer)
-        if name and hasattr(layer, "named_parameters"):
+        if has_named_params:
             self._named_param_pairs.append((name, layer))
     
-    def parameters(self):
+    def parameters(self) -> List[Any]:
         params = []
         for layer in self._param_layers:
             params.extend(layer.parameters())
         return params
     
-    def named_parameters(self):
+    def named_parameters(self) -> List[Tuple[str, Any]]:
         params = []
         for name, layer in self._named_param_pairs:
             for n, p in layer.named_parameters():
@@ -62,19 +91,17 @@ class _BaseModule(Module):
         for layer in self._zero_grad_layers:
             layer.zero_grad()
     
-    def train_mode(self):
+    def train_mode(self) -> None:
         super().train_mode()
         for layer in self._train_layers:
-            if hasattr(layer, 'train_mode'):
-                layer.train_mode()
+            layer.train_mode()
     
-    def eval_mode(self):
+    def eval_mode(self) -> None:
         super().eval_mode()
         for layer in self._eval_layers:
-            if hasattr(layer, 'eval_mode'):
-                layer.eval_mode()
+            layer.eval_mode()
     
-    def to_gpu(self, device_id):
+    def to_gpu(self, device_id: int) -> None:
         for layer in self._gpu_layers:
             layer.to_gpu(device_id)
 
@@ -101,6 +128,8 @@ class MaxPool2dPy(Module):
         >>> x = fnn.randn([1, 3, 32, 32])
         >>> y = pool(x)
     """
+    __slots__ = ('return_indices', 'ceil_mode', '_kernel_size_scalar', 
+                 '_stride_scalar', '_padding_scalar', '_dilation_scalar', '_rust_maxpool')
     
     def __init__(
         self,
@@ -111,39 +140,14 @@ class MaxPool2dPy(Module):
         return_indices: bool = False,
         ceil_mode: bool = False,
     ):
-        # Process kernel_size to scalar
-        if isinstance(kernel_size, tuple):
-            if kernel_size[0] != kernel_size[1]:
-                raise NotImplementedError(f"Non-square kernel_size not supported yet")
-            kernel_size_scalar = kernel_size[0]
-        else:
-            kernel_size_scalar = kernel_size
+        # Process parameters to scalars using helper
+        kernel_size_scalar = _to_scalar(kernel_size, "kernel_size")
         
-        # Process stride to scalar
-        if stride is None:
-            stride = kernel_size
-        if isinstance(stride, tuple):
-            if stride[0] != stride[1]:
-                raise NotImplementedError(f"Non-square stride not supported yet")
-            stride_scalar = stride[0]
-        else:
-            stride_scalar = stride
+        stride = kernel_size if stride is None else stride
+        stride_scalar = _to_scalar(stride, "stride")
         
-        # Process padding to scalar
-        if isinstance(padding, tuple):
-            if padding[0] != padding[1]:
-                raise NotImplementedError(f"Non-square padding not supported yet")
-            padding_scalar = padding[0]
-        else:
-            padding_scalar = padding
-        
-        # Process dilation to scalar
-        if isinstance(dilation, tuple):
-            if dilation[0] != dilation[1]:
-                raise NotImplementedError(f"Non-square dilation not supported yet")
-            dilation_scalar = dilation[0]
-        else:
-            dilation_scalar = dilation
+        padding_scalar = _to_scalar(padding, "padding")
+        dilation_scalar = _to_scalar(dilation, "dilation")
         
         self.return_indices = return_indices
         self.ceil_mode = ceil_mode
@@ -182,6 +186,7 @@ class Flatten(Module):
         >>> x = fnn.randn([32, 3, 32, 32])
         >>> y = flatten(x)  # shape [32, 3072]
     """
+    __slots__ = ('start_dim', 'end_dim')
     
     def __init__(self, start_dim: int = 1, end_dim: int = -1):
         super().__init__()
@@ -223,6 +228,7 @@ class PySequential(_BaseModule):
         >>> x = fnn.randn([32, 784])
         >>> y = model(x)
     """
+    __slots__ = ('layers',)
     
     def __init__(self, layers: List[Any]):
         super().__init__()
@@ -254,6 +260,7 @@ class BasicBlock(_BaseModule):
         >>> x = fnn.randn([1, 64, 32, 32])
         >>> y = block(x)
     """
+    __slots__ = ('conv1', 'bn1', 'relu', 'conv2', 'bn2', 'downsample')
     
     def __init__(self, conv1, bn1, relu, conv2, bn2, downsample=None):
         super().__init__()
@@ -264,13 +271,18 @@ class BasicBlock(_BaseModule):
         self.bn2 = bn2
         self.downsample = downsample
         
-        # Register layers with names for named_parameters
-        self._register_layer(conv1, "conv1")
-        self._register_layer(bn1, "bn1")
-        self._register_layer(conv2, "conv2")
-        self._register_layer(bn2, "bn2")
+        # Register layers with names for named_parameters using a loop
+        layers_to_register = [
+            (conv1, "conv1"),
+            (bn1, "bn1"),
+            (conv2, "conv2"),
+            (bn2, "bn2"),
+        ]
         if downsample is not None:
-            self._register_layer(downsample, "downsample")
+            layers_to_register.append((downsample, "downsample"))
+        
+        for layer, name in layers_to_register:
+            self._register_layer(layer, name)
     
     def __call__(self, x):
         identity = x

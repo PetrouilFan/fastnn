@@ -375,3 +375,42 @@ def bench_fn_simple(
     timer = BenchmarkTimer(warmup=warmup, iterations=iters, unit="ms")
     result = timer.measure(fn)
     return result.median
+
+
+# =============================================================================
+# Benchmark Factory Functions
+# =============================================================================
+
+def create_benchmark_tensor(shape, dtype="f32", low=-1.0, high=1.0):
+    """Create a random tensor for benchmarking.
+
+    Args:
+        shape: Shape of the tensor.
+        dtype: Tensor dtype (f32, f64, bf16, f16).
+        low: Lower bound for uniform distribution.
+        high: Upper bound for uniform distribution.
+
+    Returns:
+        fastnn tensor with random values.
+    """
+    import numpy as np
+    np_data = np.random.uniform(low, high, shape).astype(np.float32)
+    return fastnn.tensor(np_data.flatten().tolist(), list(shape))
+
+
+def create_dataloader_benchmark(batch_size=4, num_samples=32, input_shape=(3, 32, 32)):
+    """Create a DataLoader for benchmarking.
+
+    Args:
+        batch_size: Batch size.
+        num_samples: Number of samples in dataset.
+        input_shape: Shape of each input sample (without batch dimension).
+
+    Returns:
+        fastnn DataLoader instance.
+    """
+    # Create random data
+    x = create_benchmark_tensor([num_samples] + list(input_shape))
+    y = fastnn.randint(0, 10, [num_samples])
+    ds = fastnn.data.TensorDataset(x, y)
+    return fastnn.data.DataLoader(ds, batch_size=batch_size, num_workers=0)

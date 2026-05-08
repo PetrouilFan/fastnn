@@ -3,6 +3,7 @@
 Provides delegation methods for common model operations.
 """
 
+__all__ = ["ModuleWrapperMixin"]
 
 class ModuleWrapperMixin:
     """Mixin for classes that wrap a fastnn model.
@@ -39,9 +40,8 @@ class ModuleWrapperMixin:
         # Backward compatibility
         return model.eval()
     
-    # Backward compatibility
-    train = train_mode
-    eval = eval_mode
+    # Note: train and eval aliases removed to avoid shadowing built-in names
+    # Use train_mode() and eval_mode() directly
     
     def zero_grad(self):
         """Zero gradients of the wrapped model."""
@@ -49,8 +49,11 @@ class ModuleWrapperMixin:
     
     def __call__(self, x):
         """Forward pass through the wrapped model."""
-        return self._get_wrapped_model()(x)
-    
+        return self.forward(x)
+
     def forward(self, x):
-        """Forward pass through the wrapped model."""
+        """Forward pass through the wrapped model.
+        
+        Subclasses should override this method to provide custom forward logic.
+        """
         return self._get_wrapped_model()(x)

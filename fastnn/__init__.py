@@ -28,6 +28,16 @@ from fastnn.callbacks import (  # noqa: E402
     CSVLogger,
 )
 from fastnn.parallel import DataParallel  # noqa: E402
+from fastnn.optimizers import (  # noqa: E402
+    SGD,
+    Adam,
+    AdamW,
+    Muon,
+    Lion,
+    RMSprop,
+    clip_grad_norm_,
+    clip_grad_value_,
+)
 from fastnn.tensor import (  # noqa: E402
     Tensor,
     zeros,
@@ -209,8 +219,9 @@ __all__ = [
     "CosineAnnealingLR",
     "ExponentialLR",
     "ReduceLROnPlateau",
-    # Serialization functions
-    "save_model",
+    # Activations module
+    "activations",
+    # IO functions
     "load_model",
     "save_optimizer",
     "load_optimizer",
@@ -230,8 +241,10 @@ __all__ = [
 def __getattr__(name):
     if name == "models":
         import fastnn.models
-
         return fastnn.models
+    if name == "activations":
+        import fastnn.activations
+        return fastnn.activations
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -332,11 +345,6 @@ Tanh = _core.Tanh
 SiLU = _core.SiLU
 Sequential = _core.Sequential_
 
-ModuleList = _core.ModuleList
-SGD = _core.PySGD
-Adam = _core.PyAdam
-AdamW = _core.PyAdamW
-Muon = _core.PyMuon
 LeakyReLU = _core.LeakyReLU
 Softplus = _core.Softplus
 Hardswish = _core.Hardswish
@@ -345,20 +353,16 @@ GroupNorm = _core.GroupNorm
 BatchNorm2d = _core.BatchNorm2d
 Lion = _core.PyLion
 bce_with_logits = _core.bce_with_logits
-huber_loss = _core.huber_loss
 ConvTranspose2d = _core.ConvTranspose2d
 Conv1d = _core.Conv1d
 Conv3d = _core.Conv3d
 einsum = _core.einsum
 flash_attention = _core.flash_attention
 ResidualBlock = _core.ResidualBlock
-clip_grad_norm_ = _core.clip_grad_norm_
-clip_grad_value_ = _core.clip_grad_value_
 Dropout2d = _core.Dropout2d
 Upsample = _core.Upsample
 RMSprop = _core.PyRMSprop
 Elu = _core.Elu
-Mish = _core.Mish
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
 
 

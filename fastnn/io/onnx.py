@@ -15,7 +15,9 @@ import numpy as np
 if TYPE_CHECKING:
     import onnx
 
-from fastnn.io import MODEL_MAGIC, MODEL_VERSION, _pack_u32, _pack_u64, write_tensor
+from fastnn.io import MODEL_MAGIC, MODEL_VERSION, _pack_u32, _pack_u64, write_tensor, write_fnn_file
+
+__all__ = ["import_onnx"]
 
 logger = logging.getLogger(__name__)
 
@@ -249,29 +251,12 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
         layers.append(layer_info)
 
     # Write to file with unified format
+    header = {
+        "layers": layers,
+        "total_parameters": len(params),
+    }
     with open(fnn_path, "wb") as f:
-        # Write magic bytes and version
-        f.write(MODEL_MAGIC)
-        f.write(_pack_u32(MODEL_VERSION))
-
-        # Prepare header metadata
-        header = {
-            "layers": layers,
-            "total_parameters": len(params),
-        }
-
-        # Write header metadata as length-prefixed JSON
-        header_json = json.dumps(header, indent=2)
-        header_bytes = header_json.encode("utf-8")
-        f.write(_pack_u64(len(header_bytes)))
-        f.write(header_bytes)
-
-        # Write number of parameters
-        f.write(_pack_u64(len(params)))
-
-        # Write parameters
-        for name, data in params:
-            write_tensor(f, name, data)
+        write_fnn_file(f, header, params)
 
     # Get input/output shapes
     input_shape = None

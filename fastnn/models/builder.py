@@ -1,18 +1,10 @@
-from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d
+from fastnn import Linear, Dropout, BatchNorm1d
 from fastnn.layers import PySequential as Seq
+from fastnn.activations import get_activation
 
 
 def create_mlp(input_dim, hidden_dims, output_dim, activation="relu", dropout=0.0, batch_norm=False):
-    activation_map = {
-        "relu": ReLU,
-        "gelu": GELU,
-        "silu": SiLU,
-    }
-    
-    if activation not in activation_map:
-        raise ValueError(f"Unsupported activation: {activation}. Choose from {list(activation_map.keys())}")
-    
-    activation_cls = activation_map[activation]
+    activation_cls = get_activation(activation)
     layers = []
     in_dim = input_dim
     

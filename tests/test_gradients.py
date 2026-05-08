@@ -2,6 +2,7 @@
 
 import numpy as np
 import fastnn as fnn
+import pytest
 
 from tests.test_utils import (
     numerical_gradient_elementwise,
@@ -14,55 +15,23 @@ from tests.test_utils import (
 )
 
 
-def test_relu_grad():
-    """Test ReLU gradient."""
-    x_data = np.array([1.0, -1.0, 0.0, 2.0, -3.0], dtype=np.float32)
-    check_unary_gradient("relu", x_data)
-
-
-def test_sigmoid_grad():
-    """Test sigmoid gradient."""
+@pytest.mark.parametrize("op_name", ["relu", "sigmoid", "tanh", "gelu", "silu"])
+def test_unary_gradient_ops(op_name):
+    """Test gradient for unary operations."""
     x_data = np.array([0.0, 1.0, -1.0, 2.0], dtype=np.float32)
-    check_unary_gradient("sigmoid", x_data)
+    check_unary_gradient(op_name, x_data)
 
 
-def test_tanh_grad():
-    """Test tanh gradient."""
-    x_data = np.array([0.0, 1.0, -1.0, 2.0], dtype=np.float32)
-    check_unary_gradient("tanh", x_data)
-
-
-def test_gelu_grad():
-    """Test GELU gradient."""
-    x_data = np.array([0.0, 1.0, -1.0, 2.0], dtype=np.float32)
-    check_unary_gradient("gelu", x_data)
-
-
-def test_silu_grad():
-    """Test SiLU gradient."""
-    x_data = np.array([0.0, 1.0, -1.0, 2.0], dtype=np.float32)
-    check_unary_gradient("silu", x_data)
-
-
-def test_add_grad():
-    """Test addition gradient."""
-    a_data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-    b_data = np.array([4.0, 5.0, 6.0], dtype=np.float32)
-    check_binary_gradient("add", a_data, b_data)
-
-
-def test_mul_grad():
-    """Test multiplication gradient."""
-    a_data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-    b_data = np.array([4.0, 5.0, 6.0], dtype=np.float32)
-    check_binary_gradient("mul", a_data, b_data)
-
-
-def test_matmul_grad():
-    """Test matrix multiplication gradient."""
-    a_data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
-    b_data = np.array([[5.0, 6.0], [7.0, 8.0]], dtype=np.float32)
-    check_binary_gradient("matmul", a_data, b_data)
+@pytest.mark.parametrize("op_name", ["add", "mul", "matmul"])
+def test_binary_gradient_ops(op_name):
+    """Test gradient for binary operations."""
+    if op_name == "matmul":
+        a_data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        b_data = np.array([[5.0, 6.0], [7.0, 8.0]], dtype=np.float32)
+    else:
+        a_data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        b_data = np.array([4.0, 5.0, 6.0], dtype=np.float32)
+    check_binary_gradient(op_name, a_data, b_data)
 
 
 def test_sum_grad():
