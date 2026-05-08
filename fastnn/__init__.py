@@ -27,6 +27,7 @@ from fastnn.callbacks import (  # noqa: E402
     LearningRateScheduler,
     CSVLogger,
 )
+from fastnn.losses import *  # noqa: F403
 from fastnn.parallel import DataParallel  # noqa: E402
 from fastnn.optimizers import (  # noqa: E402
     SGD,
