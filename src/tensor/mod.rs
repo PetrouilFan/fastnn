@@ -762,17 +762,6 @@ impl std::fmt::Debug for Tensor {
     }
 }
 
-impl Tensor {
-
-
-
-    // Tensor comparison operations for autograd
-
-
-
-
-
-}
 
 pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     let parts: Vec<&str> = equation.split("->").collect();
