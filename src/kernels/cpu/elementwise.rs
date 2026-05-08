@@ -1429,18 +1429,7 @@ pub unsafe fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        log_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * chunk_size;
@@ -1552,18 +1541,7 @@ pub unsafe fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        sqrt_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * chunk_size;
@@ -1788,20 +1766,7 @@ pub unsafe fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        fused_add_relu_parallel_neon(
-                            chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
-                        );
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     fused_add_relu_parallel_scalar(
@@ -2027,20 +1992,7 @@ pub unsafe fn fused_mul_add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        fused_mul_add_parallel_neon(
-                            chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
-                        );
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     fused_mul_add_parallel_scalar(
@@ -2227,18 +2179,7 @@ pub unsafe fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        gelu_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     let start = chunk_idx * chunk_size;
@@ -2352,18 +2293,7 @@ pub unsafe fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        sigmoid_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     sigmoid_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
@@ -2372,33 +2302,16 @@ pub unsafe fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-                sigmoid_simd(a_slice, out_slice);
-            }
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
-                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-
-                // Use runtime detection to choose implementation
-                if is_x86_feature_detected!("avx2") {
-                    sigmoid_simd_x86(a_slice, out_slice);
-                } else {
-                    for idx in 0..numel {
-                        unsafe {
-                            let x = *a_ptr.add(idx);
-                            *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
-                        }
+                for idx in 0..numel {
+                    unsafe {
+                        let x = *a_ptr.add(idx);
+                        *out_ptr.add(idx) = 1.0 / (1.0 + (-x).exp());
                     }
                 }
             }
-            #[cfg(not(all(
-                feature = "simd",
-                any(target_arch = "aarch64", target_arch = "x86_64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for idx in 0..numel {
                     unsafe {
@@ -2472,18 +2385,7 @@ pub unsafe fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     });
                 }
             }
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                (0..num_chunks)
-                    .into_par_iter()
-                    .for_each(|chunk_idx| unsafe {
-                        tanh_parallel_neon(chunk_idx, chunk_size, numel, a_usize, out_usize);
-                    });
-            }
-            #[cfg(not(any(
-                all(feature = "simd", target_arch = "x86_64"),
-                all(feature = "simd", target_arch = "aarch64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                     tanh_parallel_scalar(chunk_idx, chunk_size, numel, a_usize, out_usize);
@@ -2492,32 +2394,15 @@ pub unsafe fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
         #[cfg(not(feature = "parallel"))]
         {
-            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-            {
-                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-                tanh_simd(a_slice, out_slice);
-            }
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
-                let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, numel) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
-
-                // Use runtime detection to choose implementation
-                if is_x86_feature_detected!("avx2") {
-                    tanh_simd(a_slice, out_slice);
-                } else {
-                    for idx in 0..numel {
-                        unsafe {
-                            *out_ptr.add(idx) = (*a_ptr.add(idx)).tanh();
-                        }
+                for idx in 0..numel {
+                    unsafe {
+                        *out_ptr.add(idx) = (*a_ptr.add(idx)).tanh();
                     }
                 }
             }
-            #[cfg(not(all(
-                feature = "simd",
-                any(target_arch = "aarch64", target_arch = "x86_64")
-            )))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 for idx in 0..numel {
                     unsafe {

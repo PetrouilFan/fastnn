@@ -11,7 +11,7 @@ Examples:
     >>> y = layer(x)
 """
 
-from typing import Optional, Tuple, List, Any, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import math
 import fastnn._core as _core
