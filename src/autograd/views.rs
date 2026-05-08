@@ -12,8 +12,10 @@ impl ViewBackward {
 }
 
 impl Node for ViewBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let shape = self.input.shape();
         vec![Some(grad.reshape(shape))]
     }
@@ -35,7 +37,6 @@ impl Node for ViewBackward {
     }
 }
 
-#[allow(dead_code)]
 pub struct SliceBackward {
     pub input: Tensor,
     pub dim: usize,
@@ -66,8 +67,10 @@ impl SliceBackward {
 }
 
 impl Node for SliceBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
 
         let input_shape = self.input.shape();
         let mut grad_input = Tensor::zeros(
@@ -185,7 +188,7 @@ impl CheckpointNode {
 }
 
 impl Node for CheckpointNode {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, output_tensor_id: usize) -> Vec<Option<Tensor>> {
         // For gradient checkpointing, we need to recompute the forward pass
         // WITH gradient tracking to build a computation graph for backward.
         // Save current gradient state and ensure gradients are enabled.
@@ -204,19 +207,16 @@ impl Node for CheckpointNode {
             no_grad_enter(); // Re-disable gradients if they were disabled before
         }
 
-        // Validate that recomputed outputs match grad_outputs count
-        assert_eq!(
-            recomputed_outputs.len(),
-            grad_outputs.len(),
-            "Checkpoint recomputed output count doesn't match grad_outputs"
-        );
+        // Find which output the gradient is for using output_ids
+        let output_idx = self
+            .output_ids
+            .iter()
+            .position(|&id| id == output_tensor_id)
+            .expect("output_tensor_id not found in checkpoint output_ids");
 
-        // Backpropagate each gradient through corresponding recomputed output
-        for (output, grad_opt) in recomputed_outputs.iter().zip(grad_outputs.iter()) {
-            if let Some(grad) = grad_opt {
-                // Use the backward function to propagate gradients
-                crate::autograd::backward(output, Some(grad.clone()));
-            }
+        // Backpropagate through the specific output that triggered backward
+        if let Some(grad) = grad_outputs.into_iter().next().flatten() {
+            crate::autograd::backward(&recomputed_outputs[output_idx], Some(grad));
         }
 
         // Collect gradients for each input tensor
@@ -300,4 +300,3 @@ where
 
     outputs
 }
-

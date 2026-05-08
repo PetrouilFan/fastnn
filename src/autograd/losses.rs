@@ -31,8 +31,10 @@ impl LayerNormBackward {
 }
 
 impl Node for LayerNormBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None, None];
+        };
         let input = &self.inputs[0];
         let weight = &self.inputs[1];
         let _bias = &self.inputs[2];
@@ -112,8 +114,8 @@ impl EmbeddingBackward {
 }
 
 impl Node for EmbeddingBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        vec![Some(crate::autograd::extract_first_grad(grad_outputs))]
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        vec![crate::autograd::extract_first_grad(grad_outputs)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -152,8 +154,10 @@ impl CrossEntropyBackward {
 }
 
 impl Node for CrossEntropyBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad_output_tensor = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad_output_tensor) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let grad_out = grad_output_tensor.item();
 
         let logits = &self.logits;
@@ -233,8 +237,10 @@ impl MSELossBackward {
 }
 
 impl Node for MSELossBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = crate::autograd::extract_first_grad(grad_outputs);
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let diff = self.pred.sub(&self.target);
 
         let grad_loss = match self.reduction.as_str() {

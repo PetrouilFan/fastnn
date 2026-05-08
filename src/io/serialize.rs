@@ -49,6 +49,44 @@ fn read_slice_i64(reader: &mut impl Read) -> FastnnResult<Vec<i64>> {
     Ok(result)
 }
 
+/// Read a tensor using the v1 format (used by Python's write_tensor/read_tensor).
+/// Returns (name, numpy_data) where numpy_data is a Vec<f32> with shape information.
+fn read_tensor_v1(reader: &mut impl Read) -> FastnnResult<(String, Vec<u32>, Vec<f32>)> {
+    // Read name length and name
+    let mut name_len_bytes = [0u8; 8];
+    reader.read_exact(&mut name_len_bytes).map_err(FastnnError::Io)?;
+    let name_len = u64::from_le_bytes(name_len_bytes) as usize;
+    let mut name_bytes = vec![0u8; name_len];
+    reader.read_exact(&mut name_bytes).map_err(FastnnError::Io)?;
+    let name = String::from_utf8(name_bytes).map_err(FastnnError::Utf8)?;
+
+    // Read shape length and shape
+    let mut shape_len_bytes = [0u8; 8];
+    reader.read_exact(&mut shape_len_bytes).map_err(FastnnError::Io)?;
+    let shape_len = u64::from_le_bytes(shape_len_bytes) as usize;
+    let mut shape = Vec::with_capacity(shape_len);
+    for _ in 0..shape_len {
+        let mut dim_bytes = [0u8; 8];
+        reader.read_exact(&mut dim_bytes).map_err(FastnnError::Io)?;
+        shape.push(i64::from_le_bytes(dim_bytes) as u32);
+    }
+
+    // Read data length and data
+    let mut data_len_bytes = [0u8; 8];
+    reader.read_exact(&mut data_len_bytes).map_err(FastnnError::Io)?;
+    let data_len = u64::from_le_bytes(data_len_bytes) as usize;
+    let mut data_bytes = vec![0u8; data_len * 4]; // f32 is 4 bytes
+    reader.read_exact(&mut data_bytes).map_err(FastnnError::Io)?;
+    
+    // Convert bytes to f32 values
+    let data: Vec<f32> = data_bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+
+    Ok((name, shape, data))
+}
+
 #[allow(dead_code)]
 pub fn save_model(model: &dyn Module, path: &str) -> FastnnResult<()> {
     let params = model.named_parameters();
@@ -134,34 +172,44 @@ pub fn load_model(
         .read_exact(&mut num_params_bytes)?;
     let num_params = u64::from_le_bytes(num_params_bytes);
 
-    for _ in 0..num_params {
-        // Read name using helper
-        let name_bytes = read_length_prefixed(&mut reader)?;
-        let name = String::from_utf8(name_bytes)
-            .map_err(FastnnError::Utf8)?;
-
-        // Read shape using helper
-        let shape = read_slice_i64(&mut reader)?;
-
-        // Read data
-        let data_bytes = read_length_prefixed(&mut reader)?;
-
-        // Validate shape matches data length
-        let expected_numel: usize = shape.iter().map(|&d| d as usize).product();
-        let data_len = data_bytes.len() / 4; // f32 is 4 bytes
-        if expected_numel != data_len {
-            return Err(FastnnError::Serialization(format!(
-                "Shape mismatch for parameter '{}': shape {:?} expects {} elements, but data has {} elements",
-                name, shape, expected_numel, data_len
-            )));
+    if version == 1 {
+        // Version 1 format: uses read_tensor (old format with name + data)
+        for _ in 0..num_params {
+            let (name, shape, data) = read_tensor_v1(&mut reader)?;
+            let tensor = Tensor::from_vec(data, shape.into_iter().map(|d| d as i64).collect());
+            result.insert(name, tensor);
         }
+    } else {
+        // Version 2+ format: uses length-prefixed encoding
+        for _ in 0..num_params {
+            // Read name using helper
+            let name_bytes = read_length_prefixed(&mut reader)?;
+            let name = String::from_utf8(name_bytes)
+                .map_err(FastnnError::Utf8)?;
 
-        let data = unsafe {
-            std::slice::from_raw_parts(data_bytes.as_ptr() as *const f32, data_len).to_vec()
-        };
+            // Read shape using helper
+            let shape = read_slice_i64(&mut reader)?;
 
-        let tensor = Tensor::from_vec(data, shape);
-        result.insert(name, tensor);
+            // Read data
+            let data_bytes = read_length_prefixed(&mut reader)?;
+
+            // Validate shape matches data length
+            let expected_numel: usize = shape.iter().map(|&d| d as usize).product();
+            let data_len = data_bytes.len() / 4; // f32 is 4 bytes
+            if expected_numel != data_len {
+                return Err(FastnnError::Serialization(format!(
+                    "Shape mismatch for parameter '{}': shape {:?} expects {} elements, but data has {} elements",
+                    name, shape, expected_numel, data_len
+                )));
+            }
+
+            let data = unsafe {
+                std::slice::from_raw_parts(data_bytes.as_ptr() as *const f32, data_len).to_vec()
+            };
+
+            let tensor = Tensor::from_vec(data, shape);
+            result.insert(name, tensor);
+        }
     }
 
     Ok(result)

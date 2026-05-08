@@ -1,7 +1,8 @@
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
+import numpy as np
+
 if TYPE_CHECKING:
-    import numpy as np
     from fastnn._core import PyTensor
 
 # Common tensor-like types

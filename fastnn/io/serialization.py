@@ -76,7 +76,7 @@ def save_model(model: Any, path: str, version: int = MODEL_VERSION) -> None:
                     write_tensor(f, name, to_numpy(tensor))
             
             elif version == 2:
-                # Version 2 adds per-tensor version and optional gradient storage
+                # Version 2 adds optional gradient storage
                 f.write(_pack_u64(len(param_list)))
                 for name, tensor in param_list:
                     # Write tensor using unified format
