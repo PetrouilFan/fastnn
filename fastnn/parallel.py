@@ -4,6 +4,11 @@ import fastnn._core as _core
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
+__all__ = [
+    "DataParallel",
+    "_normalize_weights",
+]
+
 
 class DataParallel:
     """Distributed Data Parallel wrapper for fastnn models.

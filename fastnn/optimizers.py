@@ -16,6 +16,17 @@ from typing import Any, List, Union
 
 import fastnn._core as _core
 
+__all__ = [
+    "SGD",
+    "Adam",
+    "AdamW",
+    "Muon",
+    "Lion",
+    "RMSprop",
+    "clip_grad_norm_",
+    "clip_grad_value_",
+]
+
 # Re-export optimizer classes, removing 'Py' prefix for cleaner API.
 # The original Rust classes are named PySGD, PyAdam, etc. We provide aliases
 # without the prefix for user convenience.

@@ -1,8 +1,8 @@
 import fastnn.core as core
-from fastnn._model_wrapper import ModuleWrapperMixin
+from fastnn.models.base import BaseModel
 
 
-class Transformer(ModuleWrapperMixin):
+class Transformer(BaseModel):
     def __init__(
         self,
         vocab_size: int,
@@ -24,5 +24,8 @@ class Transformer(ModuleWrapperMixin):
             num_classes,
             dropout_p,
         )
+
+    def forward(self, x):
+        return self._model(x)
 
 

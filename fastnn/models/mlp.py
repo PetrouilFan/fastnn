@@ -1,11 +1,9 @@
-from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d
-from fastnn.layers import PySequential as Seq
 import fastnn as fnn
-from fastnn._model_wrapper import ModuleWrapperMixin
+from fastnn.models.base import BaseModel
 from fastnn.models.builder import create_mlp
 
 
-class MLP(ModuleWrapperMixin):
+class MLP(BaseModel):
     def __init__(
         self,
         input_dim: int,
@@ -21,11 +19,12 @@ class MLP(ModuleWrapperMixin):
         self.activation = activation
         self.dropout = dropout
         self.batch_norm = batch_norm
-        self.model = create_mlp(
+        self._model = create_mlp(
             input_dim, hidden_dims, output_dim, activation, dropout, batch_norm
         )
         self._weights = None
         self._biases = None
+        self._activations = [self.activation] * len(self.hidden_dims)
 
     def _prepare_weights(self):
         if self._weights is not None:
@@ -34,7 +33,7 @@ class MLP(ModuleWrapperMixin):
         weights = []
         biases = []
 
-        for layer in self.model.layers:
+        for layer in self._model.layers:
             if not hasattr(layer, "parameters"):
                 continue
             params = layer.parameters()
@@ -48,18 +47,16 @@ class MLP(ModuleWrapperMixin):
 
         self._weights = weights
         self._biases = biases
-        print(f"Prepared {len(weights)} weights and {len(biases)} biases")
 
     def fast_forward(self, x):
         self._prepare_weights()
 
-        activations = [self.activation] * len(self.hidden_dims)
+        activations = self._activations
 
-        weight_tensors = []
-        bias_tensors = []
-        for w in self._weights:
-            weight_tensors.append(w)
-        for b in self._biases:
-            bias_tensors.append(b)
+        weight_tensors = list(self._weights)
+        bias_tensors = list(self._biases)
 
         return fnn.batched_mlp_forward(x, weight_tensors, bias_tensors, activations)
+
+    def forward(self, x):
+        return self.fast_forward(x)

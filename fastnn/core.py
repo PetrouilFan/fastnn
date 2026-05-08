@@ -1,26 +1,30 @@
 import contextlib
 import fastnn._core as _core
+from typing import Callable, List, Optional
+from fastnn.tensor import Tensor
+
+__all__ = ["sum", "mean", "maximum", "minimum", "checkpoint"]
 
 # Utility functions that wrap _core with Python-friendly interfaces
 
 
-def sum(a, dim=None, keepdim=False):
+def _apply_reduction(fn: Callable, a: Tensor, dim: Optional[int] = None, keepdim: bool = False) -> Tensor:
     if dim is None:
-        # Flatten then single sum instead of O(dims) dispatches
+        # Flatten then single reduction instead of O(dims) dispatches
         flat = a.reshape([-1])
-        return _core.sum(flat, 0, False)
-    return _core.sum(a, dim, keepdim)
+        return fn(flat, 0, False)
+    return fn(a, dim, keepdim)
 
 
-def mean(a, dim=None, keepdim=False):
-    if dim is None:
-        # Flatten then single mean
-        flat = a.reshape([-1])
-        return _core.mean(flat, 0, False)
-    return _core.mean(a, dim, keepdim)
+def sum(a: Tensor, dim: Optional[int] = None, keepdim: bool = False) -> Tensor:
+    return _apply_reduction(_core.sum, a, dim, keepdim)
 
 
-def maximum(a, b):
+def mean(a: Tensor, dim: Optional[int] = None, keepdim: bool = False) -> Tensor:
+    return _apply_reduction(_core.mean, a, dim, keepdim)
+
+
+def maximum(a: Tensor, b: Tensor) -> Tensor:
     """Element-wise maximum of two tensors.
 
     Args:
@@ -33,7 +37,7 @@ def maximum(a, b):
     return a.maximum(b)
 
 
-def minimum(a, b):
+def minimum(a: Tensor, b: Tensor) -> Tensor:
     """Element-wise minimum of two tensors.
 
     Args:
@@ -72,19 +76,18 @@ def set_default_device(device: str):
     _core._set_default_device(device)
 
 
-def checkpoint(fn, inputs):
+def checkpoint(fn: Callable, inputs: List[Tensor]) -> List[Tensor]:
     """Enable gradient checkpointing to save memory during training.
 
-    This is a placeholder implementation that returns the inputs as-is.
-    In a full implementation, this would store the computation graph
-    for recomputation during the backward pass.
+    Wraps the core checkpoint implementation to recompute intermediate
+    values during the backward pass instead of storing them.
 
     Args:
-        fn: The function to checkpoint (currently not fully implemented)
-        inputs: List of input tensors
+        fn: The function to checkpoint (must have a __name__ attribute)
+        inputs: List of input tensors to the function
 
     Returns:
-        List of output tensors (currently just returns inputs)
+        List of output tensors from the function, computed with checkpointing
     """
     # Note: PyO3 doesn't easily support passing Python callables to Rust.
     # The function is passed as a string name for now.
