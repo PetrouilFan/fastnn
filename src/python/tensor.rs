@@ -47,7 +47,7 @@ impl PyTensor {
         let device = device
             .as_ref()
             .and_then(|s| crate::storage::Device::from_str_label(s))
-            .unwrap_or_else(|| crate::python::get_default_device());
+            .unwrap_or_else(crate::python::get_default_device);
         Ok(PyTensor::from_tensor(crate::tensor::Tensor::from_vec_with_device(data, shape, device)))
     }
 

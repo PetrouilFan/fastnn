@@ -290,7 +290,7 @@ impl Node for Conv2dBackward {
             let mut grad_weight_data =
                 vec![0.0f32; (out_channels * in_channels * kernel_h * kernel_w) as usize];
 
-            let input_cpu = crate::autograd::ensure_cpu(&input);
+            let input_cpu = crate::autograd::ensure_cpu(input);
             let grad_cpu = crate::autograd::ensure_cpu(&grad);
             let input_data = input_cpu.as_f32_slice();
             let grad_data = grad_cpu.as_f32_slice();
@@ -346,7 +346,7 @@ impl Node for Conv2dBackward {
                     as usize
             ];
 
-            let input_cpu = crate::autograd::ensure_cpu(&input);
+            let input_cpu = crate::autograd::ensure_cpu(input);
             let grad_cpu = crate::autograd::ensure_cpu(&grad);
             let input_data = input_cpu.as_f32_slice();
             let grad_data = grad_cpu.as_f32_slice();
