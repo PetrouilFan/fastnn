@@ -1237,7 +1237,7 @@ mod tests {
             for o in 0..out_feat {
                 let mut sum = 0.0f32;
                 for k in 0..in_feat {
-                    sum += x_data[b * in_feat + k] * w_data[o * in_feat + k];
+                    sum += x_data[b * in_feat + k] * w_data[k * out_feat + o];
                 }
                 if let Some(bias) = bias_data {
                     sum += bias[o];
@@ -1281,7 +1281,7 @@ mod tests {
             let bias_data: Vec<f32> = (0..out_feat).map(|i| (i as f32) * 0.01).collect();
 
             let x = Tensor::from_vec(x_data.clone(), vec![batch as i64, in_feat as i64]);
-            let w = Tensor::from_vec(w_data.clone(), vec![out_feat as i64, in_feat as i64]);
+            let w = Tensor::from_vec(w_data.clone(), vec![in_feat as i64, out_feat as i64]);
             let bias = Tensor::from_vec(bias_data.clone(), vec![out_feat as i64]);
 
             // Without bias
@@ -1349,7 +1349,7 @@ mod tests {
             let bias_data: Vec<f32> = (0..out_feat).map(|i| (i as f32) * 0.01).collect();
 
             let x = Tensor::from_vec(x_data.clone(), vec![batch as i64, in_feat as i64]);
-            let w = Tensor::from_vec(w_data.clone(), vec![out_feat as i64, in_feat as i64]);
+            let w = Tensor::from_vec(w_data.clone(), vec![in_feat as i64, out_feat as i64]);
             let bias = Tensor::from_vec(bias_data.clone(), vec![out_feat as i64]);
 
             // With bias
@@ -1399,7 +1399,7 @@ mod tests {
             let bias_data: Vec<f32> = (0..out_feat).map(|i| (i as f32) * 0.01).collect();
 
             let x = Tensor::from_vec(x_data.clone(), vec![batch as i64, in_feat as i64]);
-            let w = Tensor::from_vec(w_data.clone(), vec![out_feat as i64, in_feat as i64]);
+            let w = Tensor::from_vec(w_data.clone(), vec![in_feat as i64, out_feat as i64]);
             let bias = Tensor::from_vec(bias_data.clone(), vec![out_feat as i64]);
 
             let result = dispatch("fused_linear_gelu", DispatchKey::Cpu, &[&x, &w, &bias]);
