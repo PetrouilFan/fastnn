@@ -39,7 +39,7 @@ class SerializationError(IoError):
     pass
 
 
-def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
+def _save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
     """Save a model's parameters to a file.
     
     The serialization format is versioned to allow future extensions while
@@ -57,7 +57,7 @@ def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
     Examples:
         >>> import fastnn as fnn
         >>> model = fnn.models.MLP(input_dim=10, hidden_dims=[20], output_dim=1)
-        >>> fnn.save_model(model, "model.fnn")
+        >>> fnn.io.save(model, "model.fnn")
     """
     try:
         params = model.parameters() if hasattr(model, "parameters") else []
@@ -108,7 +108,7 @@ def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
         raise SerializationError(f"Failed to save model: {e}") from e
 
 
-def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
+def _load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
     """Load model parameters from a file.
     
     Automatically detects the file version and loads accordingly.
@@ -125,8 +125,7 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
         ValueError: If version mismatch.
     
     Examples:
-        >>> params = fnn.load_model("model.fnn")
-        >>> model.load_state_dict(params)
+        >>> params = fnn.io.load("model.fnn")
     """
     try:
         with open(path, "rb") as f:
@@ -183,22 +182,19 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
         raise SerializationError(f"Failed to load model: {e}") from e
 
 
-def save_state_dict(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
+def _save_state_dict(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
     """Save model state dictionary (parameters and gradients) to a file.
     
     Args:
         model: Model object with `named_parameters()` method.
         path: Path to output file.
         version: Serialization format version.
-    
-    Examples:
-        >>> fnn.save_state_dict(model, "state.fnn")
     """
-    # For now, same as save_model but only named parameters
-    save_model(model, path, version)
+    # For now, same as _save_model but only named parameters
+    _save_model(model, path, version)
 
 
-def load_state_dict(path: str) -> Dict[str, Any]:
+def _load_state_dict(path: str) -> Dict[str, Any]:
     """Load state dictionary from file.
     
     Args:
@@ -207,10 +203,10 @@ def load_state_dict(path: str) -> Dict[str, Any]:
     Returns:
         State dictionary.
     """
-    return load_model(path)
+    return _load_model(path)
 
 
-def save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
+def _save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
     """Save optimizer state to a file.
     
     Args:
@@ -223,7 +219,7 @@ def save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
     
     Examples:
         >>> optimizer = fnn.SGD(model.parameters(), lr=0.01)
-        >>> fnn.save_optimizer(optimizer, "opt.fno")
+        >>> fastnn.io.save(optimizer, "opt.fno")  # via io.save
     """
     try:
         with open(path, "wb") as f:
@@ -260,7 +256,7 @@ def save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
         raise SerializationError(f"Failed to save optimizer: {e}") from e
 
 
-def load_optimizer(opt: Any, path: str) -> None:
+def _load_optimizer(opt: Any, path: str) -> None:
     """Load optimizer state from a file.
     
     Args:
@@ -269,10 +265,6 @@ def load_optimizer(opt: Any, path: str) -> None:
     
     Raises:
         SerializationError: If loading fails.
-    
-    Examples:
-        >>> optimizer = fnn.SGD(model.parameters(), lr=0.01)
-        >>> fnn.load_optimizer(optimizer, "opt.fno")
     """
     try:
         with open(path, "rb") as f:

@@ -67,7 +67,7 @@ class ModelCheckpoint(Callback):
         if self.should_save:
             import fastnn as fnn
 
-            fnn.save_model(model, self.filepath)
+            fnn.io.save(model, self.filepath)
             self.should_save = False
 
 

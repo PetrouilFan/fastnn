@@ -452,10 +452,8 @@ output = fnn_model(fnn.tensor(data, shape))
 
 | Function                                 | Description          |
 |------------------------------------------|----------------------|
-| `fnn.save_model(model, path)`            | Save model weights   |
-| `fnn.load_model(path)`                   | Load model weights   |
-| `fnn.save_optimizer(opt, path)`          | Save optimizer state |
-| `fnn.load_optimizer(opt, path)`          | Load optimizer state |
+| `fnn.io.save(model, path)`               | Save model weights   |
+| `fnn.io.load(path)`                      | Load model weights   |
 
 ### Attention
 
