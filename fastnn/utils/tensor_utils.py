@@ -5,6 +5,20 @@ Provides centralized functions for converting between fastnn tensors and numpy a
 
 from typing import Any
 import numpy as np
+import fastnn as fnn
+
+
+def _infer_shape(lst):
+    """Infer the shape of a regular nested list."""
+    shape = []
+    current = lst
+    while isinstance(current, list):
+        shape.append(len(current))
+        if current:
+            current = current[0]
+        else:
+            break
+    return tuple(shape)
 
 
 def to_numpy(tensor: Any) -> np.ndarray:
@@ -57,9 +71,10 @@ def to_tensor(array: Any, device: Any = None) -> Any:
     """
     if hasattr(array, "numpy"):
         return array
-    import fastnn as fnn
     if isinstance(array, np.ndarray):
-        return fnn.tensor(array.flatten().tolist(), list(array.shape), device=device)
-    # Handle list by converting to numpy first
-    arr = np.array(array)
-    return fnn.tensor(arr.flatten().tolist(), list(arr.shape), device=device)
+        return fnn.from_numpy(array, device)
+    # Infer shape from nested list and pass directly to fnn.tensor
+    shape = _infer_shape(array)
+    return fnn.tensor(array, shape, device)
+
+__all__ = ["to_numpy", "to_tensor"]

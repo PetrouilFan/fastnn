@@ -27,10 +27,38 @@ from fastnn.callbacks import (  # noqa: E402
     LearningRateScheduler,
     CSVLogger,
 )
+from fastnn.losses import *  # noqa: F403
 from fastnn.parallel import DataParallel  # noqa: E402
-from fastnn.tensor import _flatten  # noqa: F401
-from fastnn.tensor import from_numpy as tensor_from_numpy  # noqa: F401
-from fastnn.layers import Flatten, PySequential, BasicBlock, MaxPool2d  # noqa: F401, E402
+from fastnn.optimizers import (  # noqa: E402
+    SGD,
+    Adam,
+    AdamW,
+    Muon,
+    Lion,
+    RMSprop,
+    clip_grad_norm_,
+    clip_grad_value_,
+)
+from fastnn.tensor import (  # noqa: E402
+    Tensor,
+    zeros,
+    ones,
+    full,
+    eye,
+    arange,
+    linspace,
+    randint,
+    zeros_like,
+    ones_like,
+    full_like,
+    rand,
+    randn,
+    tensor,
+    from_numpy as tensor_from_numpy,
+    _flatten,
+)
+from fastnn.layers import Flatten, PySequential, BasicBlock  # noqa: F401, E402
+MaxPool2d = _core.MaxPool2d
 from fastnn.io import (  # noqa: E402
     save as io_save,
     load as io_load,
@@ -39,20 +67,46 @@ from fastnn.io import (  # noqa: E402
 )
 
 __all__ = [
+    # Context managers and utilities
     "no_grad",
     "set_seed",
     "set_num_threads",
     "set_default_device",
     "checkpoint",
+    "load_state_dict",
+    "import_onnx",
+    "allocator_stats",
+    "list_registered_ops",
+    "batched_mlp_forward",
+    # Tensor and factories
     "Tensor",
+    "zeros",
+    "ones",
+    "full",
+    "eye",
+    "arange",
+    "linspace",
+    "randint",
+    "zeros_like",
+    "ones_like",
+    "full_like",
+    "rand",
+    "randn",
+    "tensor",
+    "tensor_from_numpy",
+    "_flatten",
+    # Data loading
     "DataLoader",
     "Dataset",
     "TensorDataset",
+    # Callbacks
     "EarlyStopping",
     "ModelCheckpoint",
     "LearningRateScheduler",
     "CSVLogger",
+    # Parallel
     "DataParallel",
+    # Models
     "models",
     # Exception hierarchy
     "FastnnError",
@@ -63,14 +117,116 @@ __all__ = [
     "OptimizerError",
     "IoError",
     "CudaError",
+    # Layers and modules (Rust implementations)
+    "Linear",
+    "Conv2d",
+    "Conv1d",
+    "Conv3d",
+    "ConvTranspose2d",
+    "LayerNorm",
+    "RMSNorm",
+    "GroupNorm",
+    "BatchNorm1d",
+    "BatchNorm2d",
+    "Dropout",
+    "Dropout2d",
+    "Embedding",
+    "Upsample",
+    "MaxPool2d",
+    "AdaptiveAvgPool2d",
+    "ReLU",
+    "GELU",
+    "Sigmoid",
+    "Tanh",
+    "SiLU",
+    "LeakyReLU",
+    "Softplus",
+    "Hardswish",
+    "Elu",
+    "Mish",
+    "Sequential",
+    "ModuleList",
+    "FusedConvBn",
+    "FusedConvBnRelu",
+    "FusedConvBnGelu",
+    "ResidualBlock",
+    # Python layers
+    "Flatten",
+    "PySequential",
+    "BasicBlock",
+    # Activation functions (functional)
+    "relu",
+    "gelu",
+    "sigmoid",
+    "tanh",
+    "silu",
+    "softmax",
+    "log_softmax",
+    "fused_add_relu",
+    "fused_conv_bn_silu",
+    # Tensor operations
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "matmul",
+    "im2col",
+    "neg",
+    "abs",
+    "exp",
+    "log",
+    "sqrt",
+    "pow",
+    "clamp",
+    "argmax",
+    "argmin",
+    "cat",
+    "stack",
+    "sum",
+    "mean",
+    "max",
+    "min",
+    "maximum",
+    "minimum",
+    "einsum",
+    "flash_attention",
+    # Loss functions
+    "mse_loss",
+    "cross_entropy_loss",
+    "bce_with_logits",
+    "huber_loss",
+    # Optimizers
+    "SGD",
+    "Adam",
+    "AdamW",
+    "Muon",
+    "Lion",
+    "RMSprop",
+    "clip_grad_norm_",
+    "clip_grad_value_",
+    # Schedulers
+    "LRScheduler",
+    "StepLR",
+    "CosineAnnealingLR",
+    "ExponentialLR",
+    "ReduceLROnPlateau",
+    # Activations module
+    "activations",
+    # IO functions
+    "io_save",
+    "io_load",
+    "convert_from_pytorch",
+    "convert_from_onnx",
 ]
 
 
 def __getattr__(name):
     if name == "models":
         import fastnn.models
-
         return fastnn.models
+    if name == "activations":
+        import fastnn.activations
+        return fastnn.activations
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -84,22 +240,24 @@ except ImportError:
 
 
 
+_NUMPY_DTYPE_MAP = {
+    "f32": np.float32,
+    "f64": np.float64,
+    "i32": np.int32,
+    "i64": np.int64,
+    "bool": np.bool_,
+    "f16": np.float16,
+    "bf16": np.float32,
+}
+
+
 def _patch_numpy(tensor_cls):
     _original_numpy = tensor_cls.numpy
 
     def _new_numpy(self):
         data = _original_numpy(self)
         shape = self.shape
-        dtype_map = {
-            "f32": np.float32,
-            "f64": np.float64,
-            "i32": np.int32,
-            "i64": np.int64,
-            "bool": np.bool_,
-            "f16": np.float16,
-            "bf16": np.float32,
-        }
-        np_dtype = dtype_map.get(self.dtype, np.float32)
+        np_dtype = _NUMPY_DTYPE_MAP.get(self.dtype, np.float32)
         return np.array(data, dtype=np_dtype).reshape(shape)
 
     tensor_cls.numpy = _new_numpy
@@ -116,29 +274,6 @@ def _patch_backward(tensor_cls):
 
 _patch_numpy(_core.PyTensor)
 _patch_backward(_core.PyTensor)
-
-Tensor = _core.PyTensor
-zeros = _core.zeros
-ones = _core.ones
-full = _core.full
-eye = _core.eye
-arange = _core.arange
-linspace = _core.linspace
-randint = _core.randint
-zeros_like = _core.zeros_like
-ones_like = _core.ones_like
-full_like = _core.full_like
-
-
-# Re-export with proper device handling
-def rand(shape, device=None):
-    """Generate random tensor with uniform distribution."""
-    return _core.rand_uniform(shape, device=device)
-
-
-def randn(shape, device=None):
-    """Generate random tensor with normal distribution."""
-    return _core.randn(shape, device=device)
 
 
 add = _core.add
@@ -192,37 +327,51 @@ Tanh = _core.Tanh
 SiLU = _core.SiLU
 Sequential = _core.Sequential_
 
-ModuleList = _core.ModuleList
-SGD = _core.PySGD
-Adam = _core.PyAdam
-AdamW = _core.PyAdamW
-Muon = _core.PyMuon
 LeakyReLU = _core.LeakyReLU
 Softplus = _core.Softplus
 Hardswish = _core.Hardswish
-cat = _core.cat
 RMSNorm = _core.RMSNorm
 GroupNorm = _core.GroupNorm
 BatchNorm2d = _core.BatchNorm2d
 Lion = _core.PyLion
 bce_with_logits = _core.bce_with_logits
-huber_loss = _core.huber_loss
 ConvTranspose2d = _core.ConvTranspose2d
 Conv1d = _core.Conv1d
 Conv3d = _core.Conv3d
 einsum = _core.einsum
 flash_attention = _core.flash_attention
 ResidualBlock = _core.ResidualBlock
-clip_grad_norm_ = _core.clip_grad_norm_
-clip_grad_value_ = _core.clip_grad_value_
 Dropout2d = _core.Dropout2d
 Upsample = _core.Upsample
 RMSprop = _core.PyRMSprop
 Elu = _core.Elu
-Mish = _core.Mish
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
 
 
+def import_onnx(onnx_path: str, fnn_path: str):
+    """Import an ONNX model and save it in fastnn format.
+
+    Args:
+        onnx_path: Path to .onnx file
+        fnn_path: Path to output .fnn file
+
+    Returns:
+        Dictionary with model info (layers, input_shape, output_shape)
+    """
+    from fastnn.io.onnx import import_onnx as _import
+
+    return _import(onnx_path, fnn_path)
+
+
+def load_state_dict(model, state_dict):
+    params = model.parameters()
+    loaded = list(state_dict.values())
+    if len(params) != len(loaded):
+        raise ValueError(
+            f"state_dict has {len(loaded)} params, model has {len(params)}"
+        )
+    for p, loaded_t in zip(params, loaded):
+        p.copy_(loaded_t)
 from fastnn.schedulers import LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau  # noqa: F401
 
 allocator_stats = _core.allocator_stats
@@ -251,6 +400,11 @@ class _TensorModuleWrapper:
 
 
 import sys
+
+
+
+
+
 
 _tensor_module = sys.modules.get("fastnn.tensor")
 if _tensor_module is not None:

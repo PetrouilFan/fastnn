@@ -1,3 +1,5 @@
+use smallvec::SmallVec;
+
 pub struct ViewBackward {
     pub input: Tensor,
     pub edges: Vec<Edge>,
@@ -10,8 +12,10 @@ impl ViewBackward {
 }
 
 impl Node for ViewBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
         let shape = self.input.shape();
         vec![Some(grad.reshape(shape))]
     }
@@ -33,7 +37,6 @@ impl Node for ViewBackward {
     }
 }
 
-#[allow(dead_code)]
 pub struct SliceBackward {
     pub input: Tensor,
     pub dim: usize,
@@ -64,8 +67,10 @@ impl SliceBackward {
 }
 
 impl Node for SliceBackward {
-    fn apply(&self, grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        let grad = grad_outputs.into_iter().next().flatten().unwrap();
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
 
         let input_shape = self.input.shape();
         let mut grad_input = Tensor::zeros(
@@ -93,13 +98,16 @@ impl Node for SliceBackward {
 
                 let ndim = grad_shape.len();
                 // Pre-allocate coordinate arrays once instead of per-element
-                let mut grad_coords = vec![0usize; ndim];
-                let mut input_coords = vec![0usize; ndim];
+                let mut grad_coords: SmallVec<[usize; 8]> = SmallVec::new();
+                grad_coords.resize(ndim, 0);
+                let mut input_coords: SmallVec<[usize; 8]> = SmallVec::new();
+                input_coords.resize(ndim, 0);
                 let start = self.start as usize;
                 let step = self.step as usize;
 
                 // Pre-compute shape strides for index decomposition
-                let mut shape_strides = vec![0usize; ndim];
+                let mut shape_strides: SmallVec<[usize; 8]> = SmallVec::new();
+                shape_strides.resize(ndim, 0);
                 let mut stride = 1usize;
                 for d in (0..ndim).rev() {
                     shape_strides[d] = stride;
@@ -180,27 +188,44 @@ impl CheckpointNode {
 }
 
 impl Node for CheckpointNode {
-    #[allow(clippy::unused_async)]
-    fn apply(&self, _grad_outputs: Vec<Option<Tensor>>) -> Vec<Option<Tensor>> {
-        // For checkpointing, we need to recompute the forward pass
-        // to get the intermediate activations needed for backward
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        // For gradient checkpointing, we need to recompute the forward pass
+        // WITH gradient tracking to build a computation graph for backward.
+        // Save current gradient state and ensure gradients are enabled.
+        let prev_grad_enabled = is_grad_enabled();
 
-        // Recompute forward pass with gradients enabled
-        let _outputs = (self.checkpoint_fn)(&self.inputs);
+        // Enable gradients for recomputation if they're currently disabled
+        if !prev_grad_enabled {
+            no_grad_exit(); // Decrement no_grad counter to enable gradients
+        }
 
-        // The grad_outputs contain gradients from the output side.
-        // We need to propagate these gradients back through the recomputed graph.
-        // For now, we'll return zeros for all inputs as a placeholder.
-        // A proper implementation would:
-        // 1. Build a temporary computation graph from the recomputed outputs
-        // 2. Call backward on that graph with grad_outputs
-        // 3. Return the computed input gradients
-        //
-        // This is a simplified implementation that returns None for all inputs,
-        // which means gradients won't flow through checkpointed sections.
-        // TODO: Properly implement checkpointing by rebuilding the subgraph
+        // Recompute the forward pass, building computation graph
+        let recomputed_outputs = (self.checkpoint_fn)(&self.inputs);
 
-        vec![None; self.inputs.len()]
+        // Restore previous gradient tracking state after recomputation
+        if !prev_grad_enabled {
+            no_grad_enter(); // Re-disable gradients if they were disabled before
+        }
+
+        // Find which output the gradient is for using output_ids
+        let output_idx = self
+            .output_ids
+            .iter()
+            .position(|&id| id == output_tensor_id)
+            .expect("output_tensor_id not found in checkpoint output_ids");
+
+        // Backpropagate through the specific output that triggered backward
+        if let Some(grad) = grad_outputs.into_iter().next().flatten() {
+            crate::autograd::backward(&recomputed_outputs[output_idx], Some(grad));
+        }
+
+        // Collect gradients for each input tensor
+        let input_grads: Vec<Option<Tensor>> = self.inputs
+            .iter()
+            .map(|input| input.grad())
+            .collect();
+
+        input_grads
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -275,4 +300,3 @@ where
 
     outputs
 }
-
