@@ -36,21 +36,21 @@ def _flatten(nested):
 def tensor(data, shape, device=None, dtype=None):
     if isinstance(data, np.ndarray):
         data = _ensure_tensor_ready(data)
-        return _core.tensor_from_buffer(data, device)
+        return _core.tensor_from_buffer(data)
     flat_data = _flatten(data)
     return _core.tensor_from_data(flat_data, shape, device)
 
 
 def zeros(shape, dtype=None, device=None):
-    return _core.zeros(shape, device=device)
+    return _core.zeros(shape, dtype=dtype, device=device)
 
 
 def ones(shape, dtype=None, device=None):
-    return _core.ones(shape, device=device)
+    return _core.ones(shape, dtype=dtype, device=device)
 
 
 def full(shape, value: float, dtype=None, device=None):
-    return _core.full(shape, value, device=device)
+    return _core.full(shape, value, dtype=dtype, device=device)
 
 
 def eye(n: int, device=None):
@@ -74,7 +74,7 @@ def randn(shape, device=None):
 
 
 def randint(low: int, high: int, shape, device=None):
-    return _core.randint(low, high, shape, device=device)
+    return _core.randint(shape, low, high, device=device)
 
 
 def zeros_like(tensor, device=None):

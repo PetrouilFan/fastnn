@@ -1,4 +1,4 @@
-import fastnn.core as core
+import fastnn._core as _core
 from fastnn.models.base import BaseModel
 
 
@@ -14,7 +14,7 @@ class Transformer(BaseModel):
         num_classes: int,
         dropout_p: float = 0.1,
     ):
-        self._model = core.PyTransformerEncoder(
+        self._model = _core.TransformerEncoder(
             vocab_size,
             max_seq_len,
             d_model,
