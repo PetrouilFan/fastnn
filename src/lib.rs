@@ -2,6 +2,7 @@
 
 pub mod autograd;
 pub mod dispatcher;
+pub mod error;
 pub mod io;
 pub mod iterator;
 pub mod kernels;
@@ -15,6 +16,7 @@ pub mod storage_quantized;
 pub mod tensor;
 pub mod train;
 
+pub use error::{FastnnError, FastnnResult};
 pub use storage_quantized::QuantizedTensor;
 
 // Re-export core types

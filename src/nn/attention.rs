@@ -1,9 +1,9 @@
 use crate::dtypes::PackedWord;
 use crate::nn::linear::Linear;
 use crate::nn::Module;
+use crate::{impl_training_state, nn::TrainingState};
 use crate::packed_tensor::PackedTensor;
 use crate::tensor::Tensor;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Quantized Multi-Head Attention with block-wise KV cache.
 /// Uses packed precision for weights and activations to reduce memory bandwidth.
@@ -18,7 +18,7 @@ pub struct PackedMultiHeadAttention<T: PackedWord> {
     pub d_model: i64,
     pub dropout_p: f32,
     pub causal: bool,
-    training: AtomicBool,
+    training: TrainingState,
     /// Scale factor for attention scores
     scale: f32,
     /// Cached KV cache for efficient autoregressive decoding
@@ -57,7 +57,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
             d_model,
             dropout_p,
             causal,
-            training: AtomicBool::new(true),
+            training: TrainingState::new(),
             scale: 1.0 / (head_dim as f32).sqrt(),
             kv_cache: None,
         }
@@ -65,7 +65,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
 
     /// Forward pass with quantized inputs.
     /// Input should be a 3D tensor [batch, seq_len, d_model].
-    pub fn forward(&self, x: &Tensor) -> Tensor {
+    pub fn forward_impl(&self, x: &Tensor) -> Tensor {
         let shape = x.shape();
         assert_eq!(shape.len(), 3, "Input must be 3D [batch, seq_len, d_model]");
         let batch = shape[0] as usize;
@@ -346,11 +346,10 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
 
 impl<T: PackedWord> Module for PackedMultiHeadAttention<T> {
     fn forward(&self, x: &Tensor) -> Tensor {
-        PackedMultiHeadAttention::forward(self, x)
+        self.forward_impl(x)
     }
 
     fn parameters(&self) -> Vec<Tensor> {
-        // Packed layers don't have Tensor parameters in the traditional sense
         vec![]
     }
 
@@ -358,21 +357,9 @@ impl<T: PackedWord> Module for PackedMultiHeadAttention<T> {
         vec![]
     }
 
-    fn zero_grad(&self) {
-        // Packed layers don't maintain gradients in the same way
-    }
+    fn zero_grad(&self) {}
 
-    fn train_mode(&self) {
-        self.training.store(true, Ordering::Relaxed);
-    }
-
-    fn eval_mode(&self) {
-        self.training.store(false, Ordering::Relaxed);
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(Ordering::Relaxed)
-    }
+impl_training_state!(self, self.training);
 }
 
 #[cfg(test)]
@@ -450,7 +437,7 @@ pub struct MultiHeadAttention {
     #[allow(dead_code)]
     pub dropout_p: f32,
     pub causal: bool,
-    training: AtomicBool,
+    training: TrainingState,
     // Fused projection for better memory locality
     pub qkv_proj: Option<Linear>,
     // Pre-allocated scale tensor to avoid per-forward allocation
@@ -487,7 +474,7 @@ impl MultiHeadAttention {
             d_model,
             dropout_p,
             causal,
-            training: AtomicBool::new(true),
+            training: TrainingState::new(),
             qkv_proj: None,
             scale: 1.0 / (head_dim as f32).sqrt(),
         }
@@ -518,7 +505,7 @@ impl MultiHeadAttention {
             d_model,
             dropout_p,
             causal,
-            training: AtomicBool::new(true),
+            training: TrainingState::new(),
             qkv_proj: Some(qkv_proj),
             scale: 1.0 / (head_dim as f32).sqrt(),
         }
@@ -703,41 +690,5 @@ impl Module for MultiHeadAttention {
         self.out_proj.zero_grad();
     }
 
-    fn train_mode(&self) {
-        self.training.store(true, Ordering::Relaxed);
-        if let Some(ref q_proj) = self.q_proj {
-            q_proj.train_mode();
-        }
-        if let Some(ref k_proj) = self.k_proj {
-            k_proj.train_mode();
-        }
-        if let Some(ref v_proj) = self.v_proj {
-            v_proj.train_mode();
-        }
-        if let Some(ref qkv_proj) = self.qkv_proj {
-            qkv_proj.train_mode();
-        }
-        self.out_proj.train_mode();
-    }
-
-    fn eval_mode(&self) {
-        self.training.store(false, Ordering::Relaxed);
-        if let Some(ref q_proj) = self.q_proj {
-            q_proj.eval_mode();
-        }
-        if let Some(ref k_proj) = self.k_proj {
-            k_proj.eval_mode();
-        }
-        if let Some(ref v_proj) = self.v_proj {
-            v_proj.eval_mode();
-        }
-        if let Some(ref qkv_proj) = self.qkv_proj {
-            qkv_proj.eval_mode();
-        }
-        self.out_proj.eval_mode();
-    }
-
-    fn is_training(&self) -> bool {
-        self.training.load(Ordering::Relaxed)
-    }
+    impl_training_state!(self, self.training);
 }

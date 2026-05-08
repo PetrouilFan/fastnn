@@ -2,42 +2,40 @@ import sys
 import pytest
 import numpy as np
 import fastnn as fnn
+from tests.test_utils import assert_shape_equal
 
 
-def test_zeros():
-    t = fnn.zeros([3, 4], dtype="f32")
-    assert t.shape == [3, 4]
-    assert t.dtype == "f32"
-
-
-def test_ones():
-    t = fnn.ones([2, 3], dtype="f32")
-    assert t.shape == [2, 3]
-    assert np.allclose(t.numpy(), 1.0)
-
-
-def test_full():
-    t = fnn.full([2, 2], 5.0, dtype="f32")
-    assert t.shape == [2, 2]
-    assert np.allclose(t.numpy(), 5.0)
+@pytest.mark.parametrize("factory, shape, dtype, expected_fill", [
+    (fnn.zeros, [3, 4], "f32", 0.0),
+    (fnn.ones, [2, 3], "f32", 1.0),
+    (fnn.full, [2, 2], "f32", 5.0),
+])
+def test_creation_ops(factory, shape, dtype, expected_fill):
+    if factory == fnn.full:
+        t = factory(shape, expected_fill, dtype=dtype)
+    else:
+        t = factory(shape, dtype=dtype)
+    assert_shape_equal(t, shape)
+    assert t.dtype == dtype
+    assert np.allclose(t.numpy(), expected_fill)
 
 
 def test_arange():
     t = fnn.arange(0.0, 5.0, 1.0)
-    assert t.shape == [5]
+    assert_shape_equal(t, [5])
     assert np.allclose(t.numpy(), [0, 1, 2, 3, 4])
 
 
 def test_linspace():
     t = fnn.linspace(0.0, 1.0, 5)
-    assert t.shape == [5]
+    assert_shape_equal(t, [5])
     expected = np.linspace(0.0, 1.0, 5)
     assert np.allclose(t.numpy(), expected)
 
 
 def test_eye():
     t = fnn.eye(3)
-    assert t.shape == [3, 3]
+    assert_shape_equal(t, [3, 3])
     expected = np.eye(3)
     assert np.allclose(t.numpy(), expected)
 
@@ -74,19 +72,19 @@ def test_matmul():
 def test_view():
     t = fnn.zeros([2, 3, 4])
     v = t.view([6, 4])
-    assert v.shape == [6, 4]
+    assert_shape_equal(v, [6, 4])
 
 
 def test_reshape():
     t = fnn.zeros([2, 3, 4])
     r = t.reshape([6, 4])
-    assert r.shape == [6, 4]
+    assert_shape_equal(r, [6, 4])
 
 
 def test_transpose():
     t = fnn.zeros([2, 3])
     tr = t.transpose(0, 1)
-    assert tr.shape == [3, 2]
+    assert_shape_equal(tr, [3, 2])
 
 
 def test_numpy_roundtrip():

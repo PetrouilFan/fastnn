@@ -1,37 +1,9 @@
-from fastnn import Linear, ReLU, GELU, SiLU, Dropout, BatchNorm1d
-from fastnn.layers import PySequential as Seq
 import fastnn as fnn
+from fastnn.models.base import BaseModel
+from fastnn.models.builder import create_mlp
 
 
-def create_mlp(
-    input_dim: int,
-    hidden_dims: list,
-    output_dim: int,
-    activation: str = "relu",
-    dropout: float = 0.0,
-    batch_norm: bool = False,
-):
-    act_map = {"relu": ReLU, "gelu": GELU, "silu": SiLU}
-    if activation not in act_map:
-        raise ValueError(
-            f"activation must be one of {list(act_map.keys())}, got {activation!r}"
-        )
-
-    layers = []
-    dims = [input_dim] + hidden_dims
-    for i in range(len(dims) - 1):
-        layers.append(Linear(dims[i], dims[i + 1], bias=True))
-        if batch_norm:
-            layers.append(BatchNorm1d(dims[i + 1]))
-        layers.append(act_map[activation]())
-        if dropout > 0.0:
-            layers.append(Dropout(dropout))
-    layers.append(Linear(dims[-1], output_dim, bias=True))
-
-    return Seq(layers)
-
-
-class MLP:
+class MLP(BaseModel):
     def __init__(
         self,
         input_dim: int,
@@ -47,11 +19,12 @@ class MLP:
         self.activation = activation
         self.dropout = dropout
         self.batch_norm = batch_norm
-        self.model = create_mlp(
+        self._model = create_mlp(
             input_dim, hidden_dims, output_dim, activation, dropout, batch_norm
         )
         self._weights = None
         self._biases = None
+        self._activations = [self.activation] * len(self.hidden_dims)
 
     def _prepare_weights(self):
         if self._weights is not None:
@@ -60,7 +33,7 @@ class MLP:
         weights = []
         biases = []
 
-        for layer in self.model.layers:
+        for layer in self._model.layers:
             if not hasattr(layer, "parameters"):
                 continue
             params = layer.parameters()
@@ -74,33 +47,18 @@ class MLP:
 
         self._weights = weights
         self._biases = biases
-        print(f"Prepared {len(weights)} weights and {len(biases)} biases")
 
     def fast_forward(self, x):
         self._prepare_weights()
 
-        activations = [self.activation] * len(self.hidden_dims)
+        activations = self._activations
 
-        weight_tensors = []
-        bias_tensors = []
-        for w in self._weights:
-            weight_tensors.append(w)
-        for b in self._biases:
-            bias_tensors.append(b)
+        # batched_mlp_forward expects weights in [out_features, in_features] format (PyTorch convention)
+        # but Linear stores weights as [in_features, out_features], so we need to transpose
+        weight_tensors = [w.transpose(0, 1) for w in self._weights]
+        bias_tensors = list(self._biases)
 
         return fnn.batched_mlp_forward(x, weight_tensors, bias_tensors, activations)
 
-    def __call__(self, x):
-        return self.model(x)
-
     def forward(self, x):
-        return self.model(x)
-
-    def parameters(self):
-        return self.model.parameters()
-
-    def train(self):
-        return self.model.train()
-
-    def eval(self):
-        return self.model.eval()
+        return self.fast_forward(x)

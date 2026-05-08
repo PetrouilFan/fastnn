@@ -1,50 +1,12 @@
 //! Benchmark comparing FastNN quantized performance vs PyTorch quantization
 //! This benchmark demonstrates the memory and speed advantages of native packed precision
 
-use fastnn::backends::cpu;
+// Use bench_util module for shared benchmark functions
+#[path = "bench_util.rs"]
+mod bench_util;
+
+use bench_util::bench_gemv_with_metrics;
 use fastnn::dtypes::{F16x2, F32x1, U4x8, U8x4};
-use fastnn::packed_tensor::PackedTensor;
-use std::time::Instant;
-
-/// Benchmark GEMV performance at different precisions
-fn bench_gemv<T: fastnn::dtypes::PackedWord>(
-    m: usize,
-    k: usize,
-    iters: usize,
-    label: &str,
-) -> (f64, f64, f64) {
-    let weight_data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.01).sin() * 2.0).collect();
-    let activation: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01).cos()).collect();
-    let mut output = vec![0.0f32; m];
-
-    let weights = PackedTensor::<T>::from_f32_auto(&weight_data, &[m, k]);
-
-    // Warmup
-    for _ in 0..5 {
-        cpu::gemv_cpu(&weights, &activation, &mut output);
-    }
-
-    let start = Instant::now();
-    for _ in 0..iters {
-        cpu::gemv_cpu(&weights, &activation, &mut output);
-    }
-    let elapsed = start.elapsed();
-
-    let ms = elapsed.as_secs_f64() * 1000.0 / iters as f64;
-    let gflops = (2.0 * m as f64 * k as f64) / (ms / 1000.0) / 1e9;
-    let memory_mb = (weights.packed_len() * 4) as f64 / (1024.0 * 1024.0);
-
-    println!(
-        "  {:<10} {:>10.3} ms {:>10.2} GFLOP/s {:>10.2} MB {:>10.1}x speedup",
-        label,
-        ms,
-        gflops,
-        memory_mb,
-        gflops / 8.3
-    );
-
-    (ms, gflops, memory_mb)
-}
 
 /// Benchmark memory efficiency
 fn bench_memory_efficiency() {
@@ -110,17 +72,11 @@ fn bench_large_k() {
         println!("GEMV {}x{} (K={} > TILED_K_THRESHOLD=4096)", m, k, k);
         let iters = 10;
 
-        let (f32_ms, f32_gflops, _) = bench_gemv::<F32x1>(m, k, iters, "F32x1");
-        let (f16_ms, f16_gflops, _) = bench_gemv::<F16x2>(m, k, iters, "F16x2");
-        let (u8_ms, u8_gflops, _) = bench_gemv::<U8x4>(m, k, iters, "U8x4");
-        let (u4_ms, u4_gflops, _) = bench_gemv::<U4x8>(m, k, iters, "U4x8");
+        bench_gemv_with_metrics::<F32x1>(m, k, iters, "F32x1");
+        bench_gemv_with_metrics::<F16x2>(m, k, iters, "F16x2");
+        bench_gemv_with_metrics::<U8x4>(m, k, iters, "U8x4");
+        bench_gemv_with_metrics::<U4x8>(m, k, iters, "U4x8");
 
-        println!(
-            "  Speedup vs F32: F16x2={:.1}x, U8x4={:.1}x, U4x8={:.1}x",
-            f32_ms / f16_ms,
-            f32_ms / u8_ms,
-            f32_ms / u4_ms
-        );
         println!();
     }
 }
@@ -136,17 +92,11 @@ fn bench_small_k() {
         println!("GEMV {}x{} (K={} <= TILED_K_THRESHOLD=4096)", m, k, k);
         let iters = 100;
 
-        let (f32_ms, f32_gflops, _) = bench_gemv::<F32x1>(m, k, iters, "F32x1");
-        let (f16_ms, f16_gflops, _) = bench_gemv::<F16x2>(m, k, iters, "F16x2");
-        let (u8_ms, u8_gflops, _) = bench_gemv::<U8x4>(m, k, iters, "U8x4");
-        let (u4_ms, u4_gflops, _) = bench_gemv::<U4x8>(m, k, iters, "U4x8");
+        bench_gemv_with_metrics::<F32x1>(m, k, iters, "F32x1");
+        bench_gemv_with_metrics::<F16x2>(m, k, iters, "F16x2");
+        bench_gemv_with_metrics::<U8x4>(m, k, iters, "U8x4");
+        bench_gemv_with_metrics::<U4x8>(m, k, iters, "U4x8");
 
-        println!(
-            "  Speedup vs F32: F16x2={:.1}x, U8x4={:.1}x, U4x8={:.1}x",
-            f32_ms / f16_ms,
-            f32_ms / u8_ms,
-            f32_ms / u4_ms
-        );
         println!();
     }
 }

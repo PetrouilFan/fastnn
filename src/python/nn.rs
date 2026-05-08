@@ -1,59 +1,215 @@
+macro_rules! impl_nn_module {
+    ($struct_name:ident { $($methods:tt)* }) => {
+        #[pymethods]
+        impl $struct_name {
+            fn __call__(&self, x: &PyTensor) -> PyTensor {
+                PyTensor::from_tensor(self.inner.forward(&x.inner))
+            }
+
+            fn parameters(&self) -> Vec<PyTensor> {
+                self.inner
+                    .parameters()
+                    .into_iter()
+                    .map(PyTensor::from_tensor)
+                    .collect()
+            }
+
+            fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+                self.inner
+                    .named_parameters()
+                    .into_iter()
+                    .map(|(n, t)| (n, PyTensor::from_tensor(t)))
+                    .collect()
+            }
+
+            fn zero_grad(&self) {
+                self.inner.zero_grad();
+            }
+
+            fn train(&self) {
+                self.inner.train_mode();
+            }
+
+            fn eval(&self) {
+                self.inner.eval_mode();
+            }
+
+            fn is_training(&self) -> bool {
+                self.inner.is_training()
+            }
+
+            $($methods)*
+        }
+    };
+}
+
+macro_rules! impl_nn_module_with_gpu {
+    ($struct_name:ident { $($methods:tt)* }) => {
+        impl_nn_module!($struct_name {
+            #[pyo3(signature = (device_id))]
+            #[allow(clippy::wrong_self_convention)]
+            fn to_gpu(&mut self, device_id: usize) {
+                self.inner.weight = self.inner.weight.to_gpu(device_id);
+                self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
+            }
+
+            $($methods)*
+        });
+    };
+}
+
+macro_rules! impl_fused_conv_bn {
+    ($name:ident, $inner_type:ty) => {
+        impl_fused_conv_bn!($name, $inner_type, {});
+    };
+    ($name:ident, $inner_type:ty, { $($extra_methods:tt)* }) => {
+        #[pyclass]
+        struct $name {
+            inner: $inner_type,
+        }
+
+        impl_nn_module!($name {
+            #[new]
+            #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
+            fn new(
+                in_channels: i64,
+                out_channels: i64,
+                kernel_size: i64,
+                stride: i64,
+                padding: i64,
+                dilation: i64,
+                groups: i64,
+                eps: f64,
+                bias: bool,
+            ) -> Self {
+                $name {
+                    inner: <$inner_type>::new(
+                        in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
+                    ),
+                }
+            }
+
+            fn forward(&self, x: &PyTensor) -> PyTensor {
+                PyTensor::from_tensor(self.inner.forward(&x.inner))
+            }
+
+            fn set_conv_weight(&mut self, weight: PyTensor) {
+                self.inner.set_conv_weight(weight.inner);
+            }
+
+            fn set_conv_bias(&mut self, bias: PyTensor) {
+                self.inner.set_conv_bias(bias.inner);
+            }
+
+            fn set_bn_weight(&mut self, weight: PyTensor) {
+                self.inner.set_bn_weight(weight.inner);
+            }
+
+            fn set_bn_bias(&mut self, bias: PyTensor) {
+                self.inner.set_bn_bias(bias.inner);
+            }
+
+            fn set_bn_running_mean(&mut self, mean: PyTensor) {
+                self.inner.set_bn_running_mean(mean.inner);
+            }
+
+            fn set_bn_running_var(&mut self, var: PyTensor) {
+                self.inner.set_bn_running_var(var.inner);
+            }
+
+            $($extra_methods)*
+        });
+    };
+}
+
+macro_rules! impl_activation {
+    // Parameterless activation
+    ($name:ident, $method:ident) => {
+        #[pyclass]
+        struct $name;
+
+        #[pymethods]
+        impl $name {
+            #[new]
+            fn new() -> Self {
+                $name
+            }
+
+            fn __call__(&self, x: &PyTensor) -> PyTensor {
+                PyTensor::from_tensor(x.inner.$method())
+            }
+
+            fn parameters(&self) -> Vec<PyTensor> {
+                vec![]
+            }
+
+            fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+                vec![]
+            }
+
+            fn zero_grad(&self) {}
+
+            fn train(&self) {}
+
+            fn eval(&self) {}
+
+            fn is_training(&self) -> bool {
+                false
+            }
+        }
+    };
+    // Activation with parameters (f64 converted to f32)
+    ($name:ident, $method:ident, $($param_name:ident : $param_type:ty = $default:expr),*) => {
+        #[pyclass]
+        struct $name {
+            $( $param_name: $param_type, )*
+        }
+
+        #[pymethods]
+        impl $name {
+            #[new]
+            #[pyo3(signature = ( $($param_name = $default),* ))]
+            fn new($( $param_name: $param_type, )*) -> Self {
+                $name { $( $param_name, )* }
+            }
+
+            fn __call__(&self, x: &PyTensor) -> PyTensor {
+                PyTensor::from_tensor(x.inner.$method($(self.$param_name as f32),*))
+            }
+
+            fn parameters(&self) -> Vec<PyTensor> {
+                vec![]
+            }
+
+            fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+                vec![]
+            }
+
+            fn zero_grad(&self) {}
+
+            fn train(&self) {}
+
+            fn eval(&self) {}
+
+            fn is_training(&self) -> bool {
+                false
+            }
+        }
+    };
+}
+
 #[pyclass]
 struct Linear {
     inner: core_nn::linear::Linear,
 }
 
-#[pymethods]
-impl Linear {
+impl_nn_module_with_gpu!(Linear {
     #[new]
     #[pyo3(signature = (in_features, out_features, bias = true))]
     fn new(in_features: i64, out_features: i64, bias: bool) -> Self {
         Linear {
             inner: core_nn::linear::Linear::new(in_features, out_features, bias),
         }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&self) {
-        self.inner.eval_mode();
-    }
-
-    fn is_training(&self) -> bool {
-        self.inner.is_training()
-    }
-
-    #[pyo3(signature = (device_id))]
-    #[allow(clippy::wrong_self_convention)]
-    fn to_gpu(&mut self, device_id: usize) {
-        self.inner.weight = self.inner.weight.to_gpu(device_id);
-        self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -77,15 +233,14 @@ impl Linear {
         }
         Linear { inner }
     }
-}
+});
 
 #[pyclass]
 struct Conv2d {
     inner: core_nn::conv::Conv2d,
 }
 
-#[pymethods]
-impl Conv2d {
+impl_nn_module_with_gpu!(Conv2d {
     #[new]
     #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=true))]
     #[allow(clippy::too_many_arguments)]
@@ -111,45 +266,6 @@ impl Conv2d {
                 bias,
             ),
         }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&self) {
-        self.inner.eval_mode();
-    }
-
-    #[pyo3(signature = (device_id))]
-    #[allow(clippy::wrong_self_convention)]
-    fn to_gpu(&mut self, device_id: usize) {
-        self.inner.weight = self.inner.weight.to_gpu(device_id);
-        self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -190,15 +306,14 @@ impl Conv2d {
         }
         Conv2d { inner }
     }
-}
+});
 
 #[pyclass]
 struct MaxPool2d {
     inner: core_nn::pooling::MaxPool2d,
 }
 
-#[pymethods]
-impl MaxPool2d {
+impl_nn_module!(MaxPool2d {
     #[new]
     #[pyo3(signature = (kernel_size, stride=2, padding=1, dilation=1))]
     fn new(kernel_size: i64, stride: i64, padding: i64, dilation: i64) -> Self {
@@ -206,47 +321,14 @@ impl MaxPool2d {
             inner: core_nn::pooling::MaxPool2d::new(kernel_size, stride, padding, dilation),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct ConvTranspose2d {
     inner: core_nn::conv::ConvTranspose2d,
 }
 
-#[pymethods]
-impl ConvTranspose2d {
+impl_nn_module!(ConvTranspose2d {
     #[new]
     #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, bias = true))]
     fn new(
@@ -269,50 +351,17 @@ impl ConvTranspose2d {
         }
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
     }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&mut self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct Conv1d {
     inner: core_nn::conv::Conv1d,
 }
 
-#[pymethods]
-impl Conv1d {
+impl_nn_module!(Conv1d {
     #[new]
     #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, dilation = 1, bias = true))]
     fn new(
@@ -337,50 +386,17 @@ impl Conv1d {
         }
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
     }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&mut self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct Conv3d {
     inner: core_nn::conv::Conv3d,
 }
 
-#[pymethods]
-impl Conv3d {
+impl_nn_module!(Conv3d {
     #[new]
     #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, dilation = 1, bias = true))]
     fn new(
@@ -405,50 +421,17 @@ impl Conv3d {
         }
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
     }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&mut self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct ResidualBlock {
     inner: residual::ResidualBlock,
 }
 
-#[pymethods]
-impl ResidualBlock {
+impl_nn_module!(ResidualBlock {
     #[new]
     #[pyo3(signature = (
         conv1_in, conv1_out, conv1_kernel, conv1_stride, conv1_padding,
@@ -492,295 +475,35 @@ impl ResidualBlock {
         }
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
     }
+});
 
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&mut self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
-
-#[pyclass]
-struct FusedConvBn {
-    inner: core_nn::fused::FusedConvBn,
-}
-
-#[pymethods]
-impl FusedConvBn {
-    #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
-    fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        groups: i64,
-        eps: f64,
-        bias: bool,
-    ) -> Self {
-        FusedConvBn {
-            inner: core_nn::fused::FusedConvBn::new(
-                in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
-            ),
-        }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn forward(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
-    }
-
-    fn set_conv_weight(&mut self, weight: PyTensor) {
-        self.inner.set_conv_weight(weight.inner);
-    }
-
-    fn set_conv_bias(&mut self, bias: PyTensor) {
-        self.inner.set_conv_bias(bias.inner);
-    }
-
-    fn set_bn_weight(&mut self, weight: PyTensor) {
-        self.inner.set_bn_weight(weight.inner);
-    }
-
-    fn set_bn_bias(&mut self, bias: PyTensor) {
-        self.inner.set_bn_bias(bias.inner);
-    }
-
-    fn set_bn_running_mean(&mut self, mean: PyTensor) {
-        self.inner.set_bn_running_mean(mean.inner);
-    }
-
-    fn set_bn_running_var(&mut self, var: PyTensor) {
-        self.inner.set_bn_running_var(var.inner);
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-
+impl_fused_conv_bn!(FusedConvBn, core_nn::fused::FusedConvBn, {
     #[staticmethod]
     fn from_conv_bn(conv: &Conv2d, bn: &BatchNorm2d) -> Self {
         FusedConvBn {
             inner: core_nn::fused::FusedConvBn::from_conv_bn(&conv.inner, &bn.inner),
         }
     }
-}
+});
 
-#[pyclass]
-struct FusedConvBnRelu {
-    inner: core_nn::fused::FusedConvBnRelu,
-}
-
-#[pymethods]
-impl FusedConvBnRelu {
-    #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
-    fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        groups: i64,
-        eps: f64,
-        bias: bool,
-    ) -> Self {
-        FusedConvBnRelu {
-            inner: core_nn::fused::FusedConvBnRelu::new(
-                in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
-            ),
-        }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn forward(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
-    }
-
-    fn set_conv_weight(&mut self, weight: PyTensor) {
-        self.inner.set_conv_weight(weight.inner);
-    }
-
-    fn set_conv_bias(&mut self, bias: PyTensor) {
-        self.inner.set_conv_bias(bias.inner);
-    }
-
-    fn set_bn_weight(&mut self, weight: PyTensor) {
-        self.inner.set_bn_weight(weight.inner);
-    }
-
-    fn set_bn_bias(&mut self, bias: PyTensor) {
-        self.inner.set_bn_bias(bias.inner);
-    }
-
-    fn set_bn_running_mean(&mut self, mean: PyTensor) {
-        self.inner.set_bn_running_mean(mean.inner);
-    }
-
-    fn set_bn_running_var(&mut self, var: PyTensor) {
-        self.inner.set_bn_running_var(var.inner);
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
-
-#[pyclass]
-struct FusedConvBnGelu {
-    inner: core_nn::fused::FusedConvBnGelu,
-}
-
-#[pymethods]
-impl FusedConvBnGelu {
-    #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=1, dilation=1, groups=1, eps=1e-5, bias=true))]
-    fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        groups: i64,
-        eps: f64,
-        bias: bool,
-    ) -> Self {
-        FusedConvBnGelu {
-            inner: core_nn::fused::FusedConvBnGelu::new(
-                in_channels, out_channels, kernel_size, stride, padding, dilation, groups, eps, bias,
-            ),
-        }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn forward(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner.parameters().into_iter().map(PyTensor::from_tensor).collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner.named_parameters().into_iter().map(|(n, t)| (n, PyTensor::from_tensor(t))).collect()
-    }
-
-    fn set_conv_weight(&mut self, weight: PyTensor) {
-        self.inner.set_conv_weight(weight.inner);
-    }
-
-    fn set_conv_bias(&mut self, bias: PyTensor) {
-        self.inner.set_conv_bias(bias.inner);
-    }
-
-    fn set_bn_weight(&mut self, weight: PyTensor) {
-        self.inner.set_bn_weight(weight.inner);
-    }
-
-    fn set_bn_bias(&mut self, bias: PyTensor) {
-        self.inner.set_bn_bias(bias.inner);
-    }
-
-    fn set_bn_running_mean(&mut self, mean: PyTensor) {
-        self.inner.set_bn_running_mean(mean.inner);
-    }
-
-    fn set_bn_running_var(&mut self, var: PyTensor) {
-        self.inner.set_bn_running_var(var.inner);
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
+impl_fused_conv_bn!(FusedConvBnRelu, core_nn::fused::FusedConvBnRelu);
+impl_fused_conv_bn!(FusedConvBnGelu, core_nn::fused::FusedConvBnGelu);
 
 #[pyclass]
 struct LayerNorm {
     inner: core_nn::norm::LayerNorm,
 }
 
-#[pymethods]
-impl LayerNorm {
+impl_nn_module!(LayerNorm {
     #[new]
     #[pyo3(signature = (normalized_shape, eps = 1e-5))]
     fn new(normalized_shape: i64, eps: f64) -> Self {
         LayerNorm {
             inner: core_nn::norm::LayerNorm::new(normalized_shape, eps),
         }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn zero_grad(&self) {
-        self.inner.zero_grad();
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -804,49 +527,20 @@ impl LayerNorm {
         inner.bias = Some(bias.inner);
         LayerNorm { inner }
     }
-}
+});
 
 #[pyclass]
 struct BatchNorm1d {
     inner: core_nn::norm::BatchNorm1d,
 }
 
-#[pymethods]
-impl BatchNorm1d {
+impl_nn_module!(BatchNorm1d {
     #[new]
     #[pyo3(signature = (num_features, eps=1e-5, momentum=0.1))]
     fn new(num_features: i64, eps: f64, momentum: f64) -> Self {
         BatchNorm1d {
             inner: core_nn::norm::BatchNorm1d::new(num_features, eps, momentum),
         }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn zero_grad(&self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&self) {
-        self.inner.eval_mode();
-    }
-
-    fn is_training(&self) -> bool {
-        self.inner.is_training()
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -884,88 +578,56 @@ impl BatchNorm1d {
         inner.running_var = Arc::new(RwLock::new(running_var.inner));
         BatchNorm1d { inner }
     }
-}
+});
 
 #[pyclass]
 struct Dropout {
     inner: core_nn::dropout::Dropout,
 }
 
-#[pymethods]
-impl Dropout {
+impl_nn_module!(Dropout {
     #[new]
     fn new(p: f64) -> Self {
         Dropout {
             inner: core_nn::dropout::Dropout::new(p),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn train(&self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct Dropout2d {
     inner: core_nn::dropout::Dropout2d,
 }
 
-#[pymethods]
-impl Dropout2d {
+impl_nn_module!(Dropout2d {
     #[new]
     fn new(p: f64) -> Self {
         Dropout2d {
             inner: core_nn::dropout::Dropout2d::new(p),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn train(&self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct Upsample {
     inner: core_nn::upsample::Upsample,
 }
 
-#[pymethods]
-impl Upsample {
+impl_nn_module!(Upsample {
     #[new]
     fn new(scale_factor: f64, mode: String) -> Self {
         Upsample {
             inner: core_nn::upsample::Upsample::new(scale_factor, mode),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-}
+});
 
 #[pyclass]
 struct Embedding {
     inner: core_nn::embedding::Embedding,
 }
 
-#[pymethods]
-impl Embedding {
+impl_nn_module!(Embedding {
     #[new]
     fn new(num_embeddings: i64, embedding_dim: i64) -> Self {
         Embedding {
@@ -973,16 +635,8 @@ impl Embedding {
         }
     }
 
-    fn __call__(&self, indices: &PyTensor) -> PyTensor {
+    fn forward(&self, indices: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&indices.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -1000,15 +654,14 @@ impl Embedding {
         inner.weight = weight.inner;
         Embedding { inner }
     }
-}
+});
 
 #[pyclass]
 struct RMSNorm {
     inner: core_nn::norm::RMSNorm,
 }
 
-#[pymethods]
-impl RMSNorm {
+impl_nn_module!(RMSNorm {
     #[new]
     #[pyo3(signature = (normalized_shape, eps = 1e-5))]
     fn new(normalized_shape: i64, eps: f32) -> Self {
@@ -1017,50 +670,17 @@ impl RMSNorm {
         }
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
     }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&mut self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct GroupNorm {
     inner: core_nn::norm::GroupNorm,
 }
 
-#[pymethods]
-impl GroupNorm {
+impl_nn_module!(GroupNorm {
     #[new]
     #[pyo3(signature = (num_groups, num_channels, eps = 1e-5))]
     fn new(num_groups: i64, num_channels: i64, eps: f32) -> Self {
@@ -1069,50 +689,17 @@ impl GroupNorm {
         }
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
     }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&mut self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
+});
 
 #[pyclass]
 struct BatchNorm2d {
     inner: core_nn::norm::BatchNorm2d,
 }
 
-#[pymethods]
-impl BatchNorm2d {
+impl_nn_module!(BatchNorm2d {
     #[new]
     #[pyo3(signature = (num_features, eps = 1e-5, momentum = 0.1))]
     fn new(num_features: i64, eps: f32, momentum: f32) -> Self {
@@ -1121,40 +708,8 @@ impl BatchNorm2d {
         }
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
-        self.inner
-            .named_parameters()
-            .into_iter()
-            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
-            .collect()
-    }
-
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&mut self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
@@ -1172,152 +727,18 @@ impl BatchNorm2d {
     fn set_running_var(&mut self, var: PyTensor) {
         *self.inner.running_var.write() = var.inner;
     }
-}
+});
 
-#[pyclass]
-struct ReLU;
+impl_activation!(ReLU, relu);
+impl_activation!(Gelu, gelu);
+impl_activation!(Sigmoid, sigmoid);
+impl_activation!(Tanh, tanh);
+impl_activation!(SiLU, silu);
+impl_activation!(Hardswish, hardswish);
 
-#[pymethods]
-impl ReLU {
-    #[new]
-    fn new() -> Self {
-        ReLU
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.relu())
-    }
-}
-
-#[pyclass]
-struct Gelu;
-
-#[pymethods]
-impl Gelu {
-    #[new]
-    fn new() -> Self {
-        Gelu
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.gelu())
-    }
-}
-
-#[pyclass]
-struct Sigmoid;
-
-#[pymethods]
-impl Sigmoid {
-    #[new]
-    fn new() -> Self {
-        Sigmoid
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.sigmoid())
-    }
-}
-
-#[pyclass]
-struct Tanh;
-
-#[pymethods]
-impl Tanh {
-    #[new]
-    fn new() -> Self {
-        Tanh
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.tanh())
-    }
-}
-
-#[pyclass]
-struct SiLU;
-
-#[pymethods]
-impl SiLU {
-    #[new]
-    fn new() -> Self {
-        SiLU
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.silu())
-    }
-}
-
-#[pyclass]
-struct LeakyReLU {
-    negative_slope: f64,
-}
-
-#[pymethods]
-impl LeakyReLU {
-    #[new]
-    #[pyo3(signature = (negative_slope = 0.01))]
-    fn new(negative_slope: f64) -> Self {
-        LeakyReLU { negative_slope }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.leaky_relu(self.negative_slope as f32))
-    }
-}
-
-#[pyclass]
-struct Softplus {
-    beta: f64,
-    threshold: f64,
-}
-
-#[pymethods]
-impl Softplus {
-    #[new]
-    #[pyo3(signature = (beta = 1.0, threshold = 20.0))]
-    fn new(beta: f64, threshold: f64) -> Self {
-        Softplus { beta, threshold }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.softplus(self.beta as f32, self.threshold as f32))
-    }
-}
-
-#[pyclass]
-struct Hardswish;
-
-#[pymethods]
-impl Hardswish {
-    #[new]
-    fn new() -> Self {
-        Hardswish
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.hardswish())
-    }
-}
-
-#[pyclass]
-struct Elu {
-    alpha: f64,
-}
-
-#[pymethods]
-impl Elu {
-    #[new]
-    #[pyo3(signature = (alpha = 1.0))]
-    fn new(alpha: f64) -> Self {
-        Elu { alpha }
-    }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(x.inner.elu(self.alpha as f32))
-    }
-}
+impl_activation!(LeakyReLU, leaky_relu, negative_slope: f64 = 0.01);
+impl_activation!(Softplus, softplus, beta: f64 = 1.0, threshold: f64 = 20.0);
+impl_activation!(Elu, elu, alpha: f64 = 1.0);
 
 #[pyclass]
 struct Mish;
@@ -1336,6 +757,24 @@ impl Mish {
         let tanh_sp = sp.tanh();
         PyTensor::from_tensor(x.inner.mul(&tanh_sp))
     }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        vec![]
+    }
+
+    fn zero_grad(&self) {}
+
+    fn train(&self) {}
+
+    fn eval(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
+    }
 }
 
 #[pyclass]
@@ -1343,19 +782,14 @@ struct AdaptiveAvgPool2d {
     inner: core_nn::activations::AdaptiveAvgPool2d,
 }
 
-#[pymethods]
-impl AdaptiveAvgPool2d {
+impl_nn_module!(AdaptiveAvgPool2d {
     #[new]
     fn new(output_h: i64, output_w: i64) -> Self {
         AdaptiveAvgPool2d {
             inner: core_nn::activations::AdaptiveAvgPool2d::new((output_h, output_w)),
         }
     }
-
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-}
+});
 
 #[pyclass(name = "Sequential_")]
 struct Sequential {
@@ -1412,8 +846,7 @@ struct PyTransformerEncoder {
     inner: core_nn::transformer::TransformerEncoder,
 }
 
-#[pymethods]
-impl PyTransformerEncoder {
+impl_nn_module!(PyTransformerEncoder {
     #[new]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1440,32 +873,8 @@ impl PyTransformerEncoder {
         }
     }
 
-    fn __call__(&self, x: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.forward(&x.inner))
-    }
-
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
     }
-
-    fn parameters(&self) -> Vec<PyTensor> {
-        self.inner
-            .parameters()
-            .into_iter()
-            .map(PyTensor::from_tensor)
-            .collect()
-    }
-
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
-    }
-
-    fn train(&mut self) {
-        self.inner.train_mode();
-    }
-
-    fn eval(&mut self) {
-        self.inner.eval_mode();
-    }
-}
+});
 

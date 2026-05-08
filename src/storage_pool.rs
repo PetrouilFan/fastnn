@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use crate::storage::{DType, Device, Storage};
 
@@ -13,7 +14,8 @@ const MAX_SMALL_CACHE: usize = 32;
 
 thread_local! {
     /// Thread-local cache for small storage buffers.
-    static SMALL_CACHE: RefCell<Vec<(usize, Arc<Storage>)>> = const { RefCell::new(Vec::new()) };
+    /// Maps buffer size in bytes to a list of available storages of that size.
+    static SMALL_CACHE: RefCell<HashMap<usize, Vec<Arc<Storage>>>> = RefCell::new(HashMap::new());
 }
 
 pub struct StoragePool {
@@ -35,18 +37,12 @@ impl StoragePool {
                 if nbytes < SMALL_TENSOR_THRESHOLD {
                     let cached = SMALL_CACHE.with(|cache| {
                         let mut cache = cache.borrow_mut();
-                        // Find a matching size entry
-                        let mut found_idx = None;
-                        for (i, entry) in cache.iter().enumerate() {
-                            if entry.0 == nbytes {
-                                found_idx = Some(i);
-                                break;
-                            }
+                        let storages = cache.get_mut(&nbytes)?;
+                        let storage = storages.pop()?;
+                        if storages.is_empty() {
+                            cache.remove(&nbytes);
                         }
-                        found_idx.map(|idx| {
-                            let (_, storage) = cache.remove(idx);
-                            storage
-                        })
+                        Some(storage)
                     });
                     if let Some(storage) = cached {
                         return storage;
@@ -76,27 +72,29 @@ impl StoragePool {
                 if nbytes < SMALL_TENSOR_THRESHOLD {
                     let cached = SMALL_CACHE.with(|cache| {
                         let mut cache = cache.borrow_mut();
-                        let mut found_idx = None;
-                        for (i, entry) in cache.iter().enumerate() {
-                            if entry.0 == nbytes {
-                                found_idx = Some(i);
-                                break;
-                            }
-                        }
-                        if let Some(idx) = found_idx {
-                            let (_, storage) = cache.remove(idx);
-                            // Zero the storage before returning
-                            if let Ok(mut s) = Arc::try_unwrap(storage) {
-                                match &mut s {
-                                    Storage::Cpu(cpu) => {
-                                        let data = Arc::make_mut(&mut cpu.data);
-                                        data.fill(0);
-                                    }
-                                    Storage::Wgpu(_) => {}
+                        if let Some(storages) = cache.get_mut(&nbytes) {
+                            if let Some(storage) = storages.pop() {
+                                if storages.is_empty() {
+                                    cache.remove(&nbytes);
                                 }
-                                return Some(Arc::new(s));
+                                // Zero the storage before returning
+                                match Arc::try_unwrap(storage) {
+                                    Ok(mut s) => {
+                                        match &mut s {
+                                            Storage::Cpu(cpu) => {
+                                                let data = Arc::make_mut(&mut cpu.data);
+                                                data.fill(0);
+                                            }
+                                            Storage::Wgpu(_) => {}
+                                        }
+                                        return Some(Arc::new(s));
+                                    }
+                                    Err(_) => {
+                                        // try_unwrap failed, storage is shared - skip cache
+                                        return None;
+                                    }
+                                }
                             }
-                            // If try_unwrap fails, storage is shared - skip cache
                         }
                         None
                     });
@@ -142,12 +140,15 @@ impl StoragePool {
                 // For small tensors, cache in thread-local to avoid DashMap overhead
                 if nbytes < SMALL_TENSOR_THRESHOLD {
                     let can_cache = SMALL_CACHE.with(|cache| {
-                        cache.borrow().len() < MAX_SMALL_CACHE
+                        let cache = cache.borrow();
+                        let total_storages: usize = cache.values().map(|v| v.len()).sum();
+                        total_storages < MAX_SMALL_CACHE
                     });
                     
                     if can_cache {
                         SMALL_CACHE.with(|cache| {
-                            cache.borrow_mut().push((nbytes, storage));
+                            let mut cache = cache.borrow_mut();
+                            cache.entry(nbytes).or_insert_with(Vec::new).push(storage);
                         });
                         return;
                     }

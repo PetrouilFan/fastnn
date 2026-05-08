@@ -36,14 +36,19 @@ impl PyTensor {
 
     /// Create a tensor from a Python buffer object (zero-copy where possible)
     #[staticmethod]
-    fn from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (buf, device = None))]
+    fn from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>, device: Option<String>) -> PyResult<Self> {
         use pyo3::buffer::PyBuffer;
         let buffer = PyBuffer::<f32>::get(buf)?;
         let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
         let data_len: usize = shape.iter().product::<i64>() as usize;
         let mut data = vec![0.0f32; data_len];
         buffer.copy_to_slice(py, &mut data)?;
-        Ok(PyTensor::from_tensor(crate::tensor::Tensor::from_vec(data, shape)))
+        let device = device
+            .as_ref()
+            .and_then(|s| crate::storage::Device::from_str_label(s))
+            .unwrap_or_else(crate::python::get_default_device);
+        Ok(PyTensor::from_tensor(crate::tensor::Tensor::from_vec_with_device(data, shape, device)))
     }
 
     #[getter]
@@ -77,16 +82,11 @@ impl PyTensor {
     }
 
     fn item(&self) -> f32 {
-        // Move to CPU if on GPU
-        let tensor = if matches!(
-            self.inner.inner.storage.as_ref(),
-            crate::storage::Storage::Wgpu(_)
-        ) {
-            self.inner.to_cpu()
+        if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
+            self.inner.to_cpu().item()
         } else {
-            self.inner.clone()
-        };
-        tensor.item()
+            self.inner.item()
+        }
     }
 
     fn numpy(&self) -> Vec<f32> {
@@ -315,15 +315,5 @@ impl PyTensor {
     }
 }
 
-#[pyfunction]
-#[allow(private_interfaces)]
-pub(crate) fn tensor_from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
-    use pyo3::buffer::PyBuffer;
-    let buffer = PyBuffer::<f32>::get(buf)?;
-    let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
-    let data_len: usize = shape.iter().product::<i64>() as usize;
-    let mut data = vec![0.0f32; data_len];
-    buffer.copy_to_slice(py, &mut data)?;
-    Ok(PyTensor::from_tensor(Tensor::from_vec(data, shape)))
-}
+
 
