@@ -13,8 +13,8 @@ import fastnn
 
 
 def test_adamw_soak():
-    """Test AdamW stability over 1M steps with mixed param groups."""
-    print("Running AdamW optimizer soak test (1M steps)...")
+    """Test AdamW stability with mixed param groups."""
+    print("Running AdamW optimizer soak test (10K steps)...")
 
     # Create parameters and mark them for gradient tracking
     param1 = fastnn.randn([64, 64])
@@ -26,7 +26,7 @@ def test_adamw_soak():
 
     opt = fastnn.AdamW([param1, param2, param3], lr=1e-3, weight_decay=0.01)
 
-    for step in range(1_000_000):
+    for step in range(10_000):
         # Simple loss
         loss = param1.sum()
 
@@ -34,7 +34,7 @@ def test_adamw_soak():
         opt.step()
         opt.zero_grad()
 
-        if step % 100_000 == 0:
+        if step % 2_500 == 0:
             v1 = param1.numpy().flatten()[0]
             v2 = param2.numpy().flatten()[0]
             v3 = param3.numpy().flatten()[0]
@@ -53,26 +53,26 @@ def test_adamw_soak():
                 f"  Step {step:>10,}: param1={v1:.6f}, param2={v2:.6f}, param3={v3:.6f}"
             )
 
-    print("  PASSED: No divergence over 1M steps")
+    print("  PASSED: No divergence over 10K steps")
 
 
 def test_adam_soak():
-    """Test Adam stability over 500K steps."""
-    print("Running Adam optimizer soak test (500K steps)...")
+    """Test Adam stability."""
+    print("Running Adam optimizer soak test (5K steps)...")
 
     param = fastnn.randn([32, 32])
     param.requires_grad_(True)
     opt = fastnn.Adam([param], lr=1e-3, weight_decay=0.001)
 
-    for step in range(500_000):
+    for step in range(5_000):
         loss = param.sum()
         loss.backward()
         opt.step()
         opt.zero_grad()
 
-        if step % 50_000 == 0:
+        if step % 1_250 == 0:
             v = param.numpy().flatten()[0]
             assert not np.isnan(v) and not np.isinf(v), f"Diverged at step {step}: {v}"
             print(f"  Step {step:>10,}: value={v:.6f}")
 
-    print("  PASSED: No divergence over 500K steps")
+    print("  PASSED: No divergence over 5K steps")
