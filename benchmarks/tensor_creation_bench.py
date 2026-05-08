@@ -1,55 +1,42 @@
 """Benchmark tensor creation from various sources."""
-import time
+from tests.benchmark_utils import BenchmarkTimer
 import numpy as np
 import fastnn as fnn
+
 
 def benchmark_tensor_from_numpy(num_iters=1000):
     """Benchmark tensor creation from numpy array."""
     arr = np.random.randn(32, 32).astype(np.float32)
     shape = list(arr.shape)
     
-    # Warmup
-    for _ in range(10):
+    timer = BenchmarkTimer(warmup=10, iterations=num_iters, unit="ms")
+    def create_from_numpy():
         fnn.tensor(arr, shape)
-    
-    start = time.perf_counter()
-    for _ in range(num_iters):
-        fnn.tensor(arr, shape)
-    elapsed = time.perf_counter() - start
-    return elapsed / num_iters * 1000  # ms
+    return timer.value(create_from_numpy)
+
 
 def benchmark_tensor_from_list(num_iters=1000):
     """Benchmark tensor creation from Python list (slow path)."""
     lst = [float(i) for i in range(1024)]
     shape = [32, 32]
     
-    # Warmup
-    for _ in range(10):
+    timer = BenchmarkTimer(warmup=10, iterations=num_iters, unit="ms")
+    def create_from_list():
         fnn.tensor(lst, shape)
-    
-    start = time.perf_counter()
-    for _ in range(num_iters):
-        fnn.tensor(lst, shape)
-    elapsed = time.perf_counter() - start
-    return elapsed / num_iters * 1000  # ms
+    return timer.value(create_from_list)
+
 
 def benchmark_collate_fastnn(num_iters=500):
     """Benchmark collate with fastnn tensors (fast path)."""
-    import fastnn as fnn
+    from fastnn.data import default_collate
     tensors = [fnn.randn([3, 32, 32]) for _ in range(16)]
     
-    # Warmup
-    for _ in range(10):
-        from fastnn.data import default_collate
+    timer = BenchmarkTimer(warmup=10, iterations=num_iters, unit="ms")
+    def run_collate():
         batch = [t for t in tensors[:2]]
         default_collate(batch)
-    
-    start = time.perf_counter()
-    for _ in range(num_iters):
-        batch = [t for t in tensors[:2]]
-        default_collate(batch)
-    elapsed = time.perf_counter() - start
-    return elapsed / num_iters * 1000  # ms
+    return timer.value(run_collate)
+
 
 if __name__ == "__main__":
     print("Benchmarking tensor creation:")

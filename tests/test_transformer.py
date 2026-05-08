@@ -4,139 +4,60 @@ Pytest test suite for Transformer encoder.
 
 import numpy as np
 import fastnn as fnn
-from fastnn.models import Transformer
+from tests.test_utils import (
+    make_transformer,
+    make_tensor,
+    train_model,
+    assert_shape_equal,
+    assert_has_grad,
+)
 
 
 def test_transformer_forward():
     """Test basic transformer forward pass."""
-    VOCAB_SIZE = 100
-    MAX_SEQ_LEN = 16
-    D_MODEL = 64
-    NUM_HEADS = 4
-    NUM_LAYERS = 2
-    FF_DIM = 128
-    NUM_CLASSES = 2
-    DROPOUT_P = 0.1
-
-    model = Transformer(
-        vocab_size=VOCAB_SIZE,
-        max_seq_len=MAX_SEQ_LEN,
-        d_model=D_MODEL,
-        num_heads=NUM_HEADS,
-        num_layers=NUM_LAYERS,
-        ff_dim=FF_DIM,
-        num_classes=NUM_CLASSES,
-        dropout_p=DROPOUT_P,
-    )
+    model = make_transformer()
 
     # Test forward pass with batch
-    x = fnn.randint(low=0, high=VOCAB_SIZE, shape=[32, MAX_SEQ_LEN])
+    x = fnn.randint(low=0, high=100, shape=[32, 16])
     logits = model(x)
-    assert logits.shape == [32, NUM_CLASSES], (
-        f"Expected shape [32, {NUM_CLASSES}], got {logits.shape}"
-    )
+    assert_shape_equal(logits, [32, 2])
 
 
 def test_transformer_training():
     """Test transformer training step."""
-    VOCAB_SIZE = 100
-    MAX_SEQ_LEN = 16
-    D_MODEL = 64
-    NUM_HEADS = 4
-    NUM_LAYERS = 2
-    FF_DIM = 128
-    NUM_CLASSES = 2
-    DROPOUT_P = 0.1
-    BATCH_SIZE = 32
-    EPOCHS = 1  # Single epoch for now
-    MAX_BATCHES = 10  # Limit batches to avoid hanging
-    LR = 1e-3
-    SEED = 42
-    fnn.set_seed(SEED)
+    model = make_transformer()
+    optimizer = fnn.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
 
-    model = Transformer(
-        vocab_size=VOCAB_SIZE,
-        max_seq_len=MAX_SEQ_LEN,
-        d_model=D_MODEL,
-        num_heads=NUM_HEADS,
-        num_layers=NUM_LAYERS,
-        ff_dim=FF_DIM,
-        num_classes=NUM_CLASSES,
-        dropout_p=DROPOUT_P,
-    )
+    # Create self-contained sample data (no external files)
+    X_np = np.random.randint(0, 100, (32, 16), dtype=np.int64)
+    y_np = np.random.randint(0, 2, (32,), dtype=np.int64)
 
-    optimizer = fnn.AdamW(model.parameters(), lr=LR, weight_decay=0.01)
-
-    # Load dataset
-    X_train = np.load("tests/X_train.npy")
-    y_train = np.load("tests/y_train.npy")
-
-    def np_to_fnn(arr):
-        return fnn.tensor(arr.flatten().tolist(), list(arr.shape))
-
-    X_train_t = np_to_fnn(X_train)
-    y_train_t = np_to_fnn(y_train.astype(np.float32).reshape(-1))
+    X_train_t = make_tensor(X_np)
+    y_train_t = make_tensor(y_np)
 
     train_ds = fnn.TensorDataset(X_train_t, y_train_t)
-    train_loader = fnn.DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = fnn.DataLoader(train_ds, batch_size=32, shuffle=False)
 
-    model.train()
-    initial_loss = None
-    final_loss: float | None = None
-
-    for epoch in range(EPOCHS):
-        epoch_loss = 0.0
-        batch_count = 0
-        for x_batch, y_batch in train_loader:
-            if batch_count >= MAX_BATCHES:
-                break
-            logits = model(x_batch)
-            y_int = fnn.tensor(
-                [int(v) for v in y_batch.numpy().flatten()],
-                [len(y_batch.numpy().flatten())],
-            )
-            loss = fnn.cross_entropy_loss(logits, y_int)
-
-            loss_val = loss.item()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss_val
-            batch_count += 1
-
-        avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
-        if epoch == 0:
-            initial_loss = avg_loss
-        if epoch == EPOCHS - 1:
-            final_loss = avg_loss
-
-    # Basic assertions
-    assert initial_loss is not None, "Initial loss should be recorded"
-    assert final_loss is not None, "Final loss should be recorded"
-    assert initial_loss > 0, "Initial loss should be positive"
-    assert final_loss > 0, f"Final loss should be positive, got {final_loss}"
-
-    # With deterministic initialization, loss should generally decrease
-    assert final_loss <= initial_loss, (
-        f"Loss should decrease (initial: {initial_loss:.4f}, final: {final_loss:.4f})"
+    # Use train_model helper instead of manual loop
+    result = train_model(
+        model,
+        train_loader,
+        optimizer,
+        loss_fn=fnn.cross_entropy_loss,
+        epochs=1,
+        max_batches=10,
     )
 
-    # Loss should generally decrease (not strictly required but good for verification)
-    # assert final_loss <= initial_loss, f"Loss should decrease (initial: {initial_loss:.4f}, final: {final_loss:.4f})"
+    # Basic assertions
+    assert result["initial_loss"] is not None, "Initial loss should be recorded"
+    assert result["final_loss"] is not None, "Final loss should be recorded"
+    assert result["initial_loss"] > 0, "Initial loss should be positive"
+    assert result["final_loss"] > 0, f"Final loss should be positive, got {result['final_loss']}"
 
 
 def test_transformer_parameters():
     """Test that transformer parameters are accessible."""
-    model = Transformer(
-        vocab_size=100,
-        max_seq_len=16,
-        d_model=64,
-        num_heads=4,
-        num_layers=2,
-        ff_dim=128,
-        num_classes=2,
-        dropout_p=0.1,
-    )
+    model = make_transformer()
 
     params = list(model.parameters())
     assert len(params) > 0, "Transformer should have parameters"
@@ -151,20 +72,4 @@ def test_transformer_parameters():
     loss.backward()
 
     # Check that at least some parameters have gradients
-    params_with_grad = [p for p in params if p.grad is not None]
-    assert len(params_with_grad) > 0, (
-        "At least some parameters should have gradients after backward pass"
-    )
-
-
-if __name__ == "__main__":
-    test_transformer_forward()
-    print("✓ test_transformer_forward passed")
-
-    test_transformer_training()
-    print("✓ test_transformer_training passed")
-
-    test_transformer_parameters()
-    print("✓ test_transformer_parameters passed")
-
-    print("\nAll transformer tests passed!")
+    assert_has_grad(params[0])

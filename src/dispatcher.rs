@@ -1,3 +1,4 @@
+use crate::error::{FastnnError, FastnnResult};
 use crate::storage::Device;
 use crate::tensor::Tensor;
 use parking_lot::RwLock;
@@ -43,14 +44,14 @@ pub fn register(op: &'static str, key: DispatchKey, kernel: KernelFn) {
     guard.ops.insert((op, key), kernel);
 }
 
-pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Result<Vec<Tensor>, String> {
+pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> FastnnResult<Vec<Tensor>> {
     let dispatcher = get_dispatcher();
     let guard = dispatcher.read();
 
     let kernel = guard
         .ops
         .get(&(op, key))
-        .ok_or_else(|| format!("No kernel registered for op '{}' with key {:?}", op, key))?;
+        .ok_or_else(|| FastnnError::Computation(format!("No kernel registered for op '{}' with key {:?}", op, key)))?;
 
     Ok(unsafe { kernel(args) })
 }

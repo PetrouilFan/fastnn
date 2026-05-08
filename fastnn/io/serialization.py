@@ -3,6 +3,7 @@
 Provides functions to save and load models, state dicts, and optimizer states.
 Supports versioned serialization format for backward and forward compatibility.
 """
+__all__ = ["SerializationError", "save_model", "load_model", "save_optimizer", "load_optimizer", "save_state_dict", "load_state_dict"]
 
 from typing import Dict, Any, Optional
 import numpy as np
@@ -10,7 +11,7 @@ import struct
 
 from fastnn.tensor import tensor
 from fastnn._core import IoError
-from fastnn.serialization_utils import (
+from fastnn.io import (
     write_tensor,
     read_tensor,
     _pack_u64,
@@ -27,19 +28,16 @@ from fastnn.serialization_utils import (
     OPTIMIZER_MAGIC,
     MODEL_VERSION,
     OPTIMIZER_VERSION,
+    serialization_error,
 )
 from fastnn.utils.tensor_utils import to_numpy
-
-# Current serialization format version
-CURRENT_VERSION = MODEL_VERSION
-
 
 class SerializationError(IoError):
     """Raised when serialization or deserialization fails."""
     pass
 
 
-def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
+def save_model(model: Any, path: str, version: int = MODEL_VERSION) -> None:
     """Save a model's parameters to a file.
     
     The serialization format is versioned to allow future extensions while
@@ -59,7 +57,7 @@ def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
         >>> model = fnn.models.MLP(input_dim=10, hidden_dims=[20], output_dim=1)
         >>> fnn.save_model(model, "model.fnn")
     """
-    try:
+    with serialization_error("save model"):
         params = model.parameters() if hasattr(model, "parameters") else []
         named = model.named_parameters() if hasattr(model, "named_parameters") else []
         if named:
@@ -72,40 +70,27 @@ def save_model(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
             f.write(_pack_u32(version))
             
             if version == 1:
-                # Original format: no version field per tensor, no grad storage
+                # Version 1 format: uses write_tensor for consistency
                 f.write(_pack_u64(len(param_list)))
                 for name, tensor in param_list:
-                    name_bytes = name.encode("utf-8")
-                    f.write(_pack_u64(len(name_bytes)))
-                    f.write(name_bytes)
-                    shape = tensor.shape
-                    f.write(_pack_u64(len(shape)))
-                    for d in shape:
-                        f.write(_pack_i64(d))
-                    data = to_numpy(tensor).astype(np.float32).flatten()
-                    f.write(_pack_u64(len(data)))
-                    f.write(data.tobytes())
+                    write_tensor(f, name, to_numpy(tensor))
             
             elif version == 2:
-                # Version 2 adds per-tensor version and optional gradient storage
+                # Version 2 adds optional gradient storage
                 f.write(_pack_u64(len(param_list)))
                 for name, tensor in param_list:
-                    # Write tensor header with version
-                    f.write(_pack_u32(2))  # tensor format version
-                    write_tensor(f, name, to_numpy(tensor).astype(np.float32))
+                    # Write tensor using unified format
+                    write_tensor(f, name, to_numpy(tensor))
                     # Write gradient if present
                     grad = tensor.grad
                     if grad is not None:
                         f.write(_pack_u8(1))
-                        write_tensor(f, name + ".grad", to_numpy(grad).astype(np.float32))
+                        write_tensor(f, name + ".grad", to_numpy(grad))
                     else:
                         f.write(_pack_u8(0))
             
             else:
                 raise SerializationError(f"Unsupported serialization version: {version}")
-    
-    except (OSError, ValueError) as e:
-        raise SerializationError(f"Failed to save model: {e}") from e
 
 
 def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
@@ -128,7 +113,7 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
         >>> params = fnn.load_model("model.fnn")
         >>> model.load_state_dict(params)
     """
-    try:
+    with serialization_error("load model"):
         with open(path, "rb") as f:
             magic = f.read(4)
             if magic != MODEL_MAGIC:
@@ -136,37 +121,29 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
             
             file_version = _unpack_u32(f.read(4))
             if version is not None and file_version != version:
-                raise ValueError(f"File version {file_version} does not match expected {version}")
+                raise SerializationError(f"File version {file_version} does not match expected {version}")
             
             if file_version == 1:
                 num_params = _unpack_u64(f.read(8))
                 result = {}
                 for _ in range(num_params):
-                    name_len = _unpack_u64(f.read(8))
-                    name = f.read(name_len).decode("utf-8")
-                    shape_len = _unpack_u64(f.read(8))
-                    shape = [_unpack_i64(f.read(8)) for _ in range(shape_len)]
-                    data_len = _unpack_u64(f.read(8))
-                    data = np.frombuffer(f.read(data_len * 4), dtype=np.float32)
-                    result[name] = tensor(data.copy(), list(shape))
+                    name, data = read_tensor(f)
+                    result[name] = tensor(data, list(data.shape))
                 return result
             
             elif file_version == 2:
                 num_params = _unpack_u64(f.read(8))
                 result = {}
                 for _ in range(num_params):
-                    tensor_version = _unpack_u32(f.read(4))
-                    if tensor_version != 2:
-                        raise SerializationError(f"Unsupported tensor version: {tensor_version}")
                     name, data = read_tensor(f)
-                    result[name] = tensor(data.copy().flatten().tolist(), list(data.shape))
+                    result[name] = tensor(data, list(data.shape))
                     # Read gradient flag
                     has_grad = _unpack_u8(f.read(1))
                     if has_grad:
                         grad_name = name + ".grad"
                         _, grad_data = read_tensor(f)
                         # Attach gradient to the tensor
-                        grad_tensor = tensor(grad_data.copy().flatten().tolist(), list(grad_data.shape))
+                        grad_tensor = tensor(grad_data, list(grad_data.shape))
                         # Store gradient in autograd metadata if available
                         if hasattr(result[name], 'inner') and hasattr(result[name].inner, 'autograd_meta'):
                             meta = result[name].inner.autograd_meta
@@ -178,39 +155,29 @@ def load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
             
             else:
                 raise SerializationError(f"Unsupported file version: {file_version}")
-    
-    except (OSError, ValueError) as e:
-        raise SerializationError(f"Failed to load model: {e}") from e
 
 
-def save_state_dict(model: Any, path: str, version: int = CURRENT_VERSION) -> None:
+def save_state_dict(model: Any, path: str, version: int = MODEL_VERSION) -> None:
     """Save model state dictionary (parameters and gradients) to a file.
     
-    Args:
-        model: Model object with `named_parameters()` method.
-        path: Path to output file.
-        version: Serialization format version.
-    
-    Examples:
-        >>> fnn.save_state_dict(model, "state.fnn")
+    Deprecated: Use save_model instead.
     """
-    # For now, same as save_model but only named parameters
+    import warnings
+    warnings.warn("save_state_dict is deprecated, use save_model instead", DeprecationWarning, stacklevel=2)
     save_model(model, path, version)
 
 
 def load_state_dict(path: str) -> Dict[str, Any]:
     """Load state dictionary from file.
     
-    Args:
-        path: Path to input file.
-    
-    Returns:
-        State dictionary.
+    Deprecated: Use load_model instead.
     """
+    import warnings
+    warnings.warn("load_state_dict is deprecated, use load_model instead", DeprecationWarning, stacklevel=2)
     return load_model(path)
 
 
-def save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
+def save_optimizer(opt: Any, path: str, version: int = OPTIMIZER_VERSION) -> None:
     """Save optimizer state to a file.
     
     Args:
@@ -225,7 +192,7 @@ def save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
         >>> optimizer = fnn.SGD(model.parameters(), lr=0.01)
         >>> fnn.save_optimizer(optimizer, "opt.fno")
     """
-    try:
+    with serialization_error("save optimizer"):
         with open(path, "wb") as f:
             f.write(OPTIMIZER_MAGIC)
             f.write(_pack_u32(version))
@@ -244,7 +211,7 @@ def save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
                 for state_tensor_name in ["m", "v", "v_hat"]:
                     state_list = getattr(opt, state_tensor_name, None)
                     if state_list and i < len(state_list):
-                        data = to_numpy(state_list[i]).astype(np.float32).flatten()
+                        data = to_numpy(state_list[i]).astype(np.float32, copy=False).ravel()
                         f.write(_pack_u8(1))
                         f.write(_pack_u64(len(data)))
                         f.write(data.tobytes())
@@ -255,9 +222,6 @@ def save_optimizer(opt: Any, path: str, version: int = CURRENT_VERSION) -> None:
             if step_list and not callable(step_list):
                 for s in step_list:
                     f.write(_pack_u64(s))
-    
-    except (OSError, ValueError) as e:
-        raise SerializationError(f"Failed to save optimizer: {e}") from e
 
 
 def load_optimizer(opt: Any, path: str) -> None:
@@ -274,7 +238,7 @@ def load_optimizer(opt: Any, path: str) -> None:
         >>> optimizer = fnn.SGD(model.parameters(), lr=0.01)
         >>> fnn.load_optimizer(optimizer, "opt.fno")
     """
-    try:
+    with serialization_error("load optimizer"):
         with open(path, "rb") as f:
             magic = f.read(4)
             if magic != OPTIMIZER_MAGIC:
@@ -308,6 +272,3 @@ def load_optimizer(opt: Any, path: str) -> None:
             if step_list:
                 for i in range(len(step_list)):
                     step_list[i] = _unpack_u64(f.read(8))
-    
-    except (OSError, ValueError) as e:
-        raise SerializationError(f"Failed to load optimizer: {e}") from e

@@ -66,14 +66,7 @@ def test_dlpack_device_query():
     t = fastnn.randn([32, 32])
     try:
         device = t.__dlpack_device__()
-        assert device == (1, 0), f"Expected (1, 0) for CPU, got {device}"
-        print("  PASSED: Device query returns (1, 0) for CPU")
+        assert device == (1,0), f"Expected (1,0) for CPU, got {device}"
+        print("  PASSED: Device query returns (1,0) for CPU")
     except AttributeError:
         print("  SKIPPED: __dlpack_device__ not available")
-
-
-if __name__ == "__main__":
-    test_dlpack_basic()
-    test_dlpack_gc_stress()
-    test_dlpack_device_query()
-    print("\n=== DLPack GC Stress Tests PASSED ===")
