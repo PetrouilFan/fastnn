@@ -1,64 +1,136 @@
 """Layer definitions for fastnn.
 
-This module provides neural network layers, including both Python implementations
-and re-exports of high-performance Rust layers. All layers are callable and
-implement the `train()` and `eval()` methods for switching between training
-and inference modes.
+This module provides Python-implemented neural network layers.
+For high-performance Rust layers, import directly from `fastnn` (e.g., `fastnn.Linear`).
 
 Examples:
     >>> import fastnn as fnn
-    >>> layer = fnn.layers.Linear(128, 64)
+    >>> from fastnn.layers import Flatten, PySequential
+    >>> layer = fnn.Linear(128, 64)  # Rust implementation
     >>> x = fnn.randn([32, 128])
     >>> y = layer(x)
 """
 
-from typing import Optional, Tuple, List, Any, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import math
 import fastnn._core as _core
 from fastnn.module import Module
 
-# Re-export Rust layer classes with improved naming (remove 'Py' prefix)
-# We'll keep the original names but also provide aliases without 'Py' for consistency.
-# However we cannot modify the original class names, so we re-export them as is.
-# Users can import from fastnn.layers directly.
 
-Linear = _core.Linear
-Conv2d = _core.Conv2d
-LayerNorm = _core.LayerNorm
-BatchNorm1d = _core.BatchNorm1d
-Dropout = _core.Dropout
-Embedding = _core.Embedding
-ReLU = _core.ReLU
-GELU = _core.Gelu
-Sigmoid = _core.Sigmoid
-Tanh = _core.Tanh
-SiLU = _core.SiLU
-Sequential = _core.Sequential_
-ModuleList = _core.ModuleList
-MaxPool2d = _core.MaxPool2d
-ConvTranspose2d = _core.ConvTranspose2d
-Conv1d = _core.Conv1d
-Conv3d = _core.Conv3d
-RMSNorm = _core.RMSNorm
-GroupNorm = _core.GroupNorm
-BatchNorm2d = _core.BatchNorm2d
-LeakyReLU = _core.LeakyReLU
-Softplus = _core.Softplus
-Hardswish = _core.Hardswish
-Dropout2d = _core.Dropout2d
-Upsample = _core.Upsample
-AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
-FusedConvBnSilu = getattr(_core, "PyFusedConvBnSilu", None)
-ResidualBlock = _core.ResidualBlock
+def _to_scalar(value: Union[int, Tuple[int, int]], name: str) -> int:
+    """Convert a tuple or int to a scalar value.
+    
+    Args:
+        value: Either an int or a tuple of ints.
+        name: Name of the parameter (for error messages).
+    
+    Returns:
+        The scalar value.
+    
+    Raises:
+        NotImplementedError: If tuple values are not equal (non-square).
+    """
+    if isinstance(value, tuple):
+        if value[0] != value[1]:
+            raise NotImplementedError(f"Non-square {name} not supported yet")
+        return value[0]
+    return value
+
+
+class _BaseModule(Module):
+    """Base class for modules with common layer iteration logic."""
+    __slots__ = ('_param_layers', '_zero_grad_layers', '_train_layers', 
+                 '_eval_layers', '_gpu_layers', '_named_param_pairs')
+    
+    def __init__(self):
+        super().__init__()
+        self._param_layers = []
+        self._zero_grad_layers = []
+        self._train_layers = []
+        self._eval_layers = []
+        self._gpu_layers = []
+        self._named_param_pairs = []
+    
+    def _register_layer(self, layer: Any, name: Optional[str] = None) -> None:
+        """Register a layer for parameter iteration, training mode, etc."""
+        has_params = hasattr(layer, "parameters")
+        has_zero_grad = hasattr(layer, "zero_grad")
+        has_train = hasattr(layer, "train_mode")
+        has_eval = hasattr(layer, "eval_mode")
+        has_gpu = hasattr(layer, "to_gpu")
+        has_named_params = name and hasattr(layer, "named_parameters")
+        
+        if has_params:
+            self._param_layers.append(layer)
+        if has_zero_grad:
+            self._zero_grad_layers.append(layer)
+        if has_train:
+            self._train_layers.append(layer)
+        if has_eval:
+            self._eval_layers.append(layer)
+        if has_gpu:
+            self._gpu_layers.append(layer)
+        if has_named_params:
+            self._named_param_pairs.append((name, layer))
+    
+    def parameters(self) -> List[Any]:
+        params = []
+        for layer in self._param_layers:
+            params.extend(layer.parameters())
+        return params
+    
+    def named_parameters(self) -> List[Tuple[str, Any]]:
+        params = []
+        for name, layer in self._named_param_pairs:
+            for n, p in layer.named_parameters():
+                params.append((f"{name}.{n}", p))
+        return params
+    
+    def zero_grad(self):
+        for layer in self._zero_grad_layers:
+            layer.zero_grad()
+    
+    def train_mode(self) -> None:
+        super().train_mode()
+        for layer in self._train_layers:
+            layer.train_mode()
+    
+    def eval_mode(self) -> None:
+        super().eval_mode()
+        for layer in self._eval_layers:
+            layer.eval_mode()
+    
+    def to_gpu(self, device_id: int) -> None:
+        for layer in self._gpu_layers:
+            layer.to_gpu(device_id)
+    
+    def state_dict(self) -> Dict[str, Any]:
+        result = {}
+        for name, param in self.named_parameters():
+            result[name] = param
+        return result
+    
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        current_state = self.state_dict()
+        for name, value in state_dict.items():
+            if name in current_state:
+                # Get the current tensor and copy data from value
+                current_tensor = current_state[name]
+                # Use numpy to copy data
+                current_tensor_numpy = current_tensor.numpy()
+                value_numpy = value.numpy() if hasattr(value, 'numpy') else value
+                current_tensor_numpy[:] = value_numpy
+
 
 # Python-implemented layers (for compatibility and educational purposes)
 
-class MaxPool2dPy:
+class MaxPool2dPy(Module):
     """Max pooling 2D layer (Python implementation).
     
     This is a pure-Python implementation of 2D max pooling, provided for
     compatibility and educational purposes. For performance, use the Rust
-    implementation `fastnn.layers.MaxPool2d`.
+    implementation `fastnn.MaxPool2d`.
     
     Args:
         kernel_size: Size of the pooling window. If int, square kernel.
@@ -73,6 +145,8 @@ class MaxPool2dPy:
         >>> x = fnn.randn([1, 3, 32, 32])
         >>> y = pool(x)
     """
+    __slots__ = ('return_indices', 'ceil_mode', '_kernel_size_scalar', 
+                 '_stride_scalar', '_padding_scalar', '_dilation_scalar', '_rust_maxpool')
     
     def __init__(
         self,
@@ -83,68 +157,39 @@ class MaxPool2dPy:
         return_indices: bool = False,
         ceil_mode: bool = False,
     ):
-        self.kernel_size = (
-            kernel_size
-            if isinstance(kernel_size, tuple)
-            else (kernel_size, kernel_size)
-        )
-        self.stride = stride if stride is not None else kernel_size
-        if isinstance(self.stride, int):
-            self.stride = (self.stride, self.stride)
-        self.padding = padding if isinstance(padding, tuple) else (padding, padding)
-        self.dilation = (
-            dilation if isinstance(dilation, tuple) else (dilation, dilation)
-        )
+        # Process parameters to scalars using helper
+        kernel_size_scalar = _to_scalar(kernel_size, "kernel_size")
+        
+        stride = kernel_size if stride is None else stride
+        stride_scalar = _to_scalar(stride, "stride")
+        
+        padding_scalar = _to_scalar(padding, "padding")
+        dilation_scalar = _to_scalar(dilation, "dilation")
+        
         self.return_indices = return_indices
         self.ceil_mode = ceil_mode
+        
+        self._kernel_size_scalar = kernel_size_scalar
+        self._stride_scalar = stride_scalar
+        self._padding_scalar = padding_scalar
+        self._dilation_scalar = dilation_scalar
+        
+        # Pre-create Rust object
+        self._rust_maxpool = _core.MaxPool2d(
+            self._kernel_size_scalar,
+            self._stride_scalar,
+            self._padding_scalar,
+            self._dilation_scalar
+        )
+    
+    def parameters(self):
+        return []
     
     def __call__(self, x):
-        # x shape: (batch, channels, height, width)
-        # Use Rust implementation for performance
-        import fastnn._core as _core
-        
-        # For now, only support symmetric kernel_size, stride, padding, dilation
-        # Check if they are tuples and convert to single value if possible
-        if isinstance(self.kernel_size, tuple):
-            if self.kernel_size[0] != self.kernel_size[1]:
-                raise NotImplementedError("Non-square kernel_size not supported yet")
-            kernel_size = self.kernel_size[0]
-        else:
-            kernel_size = self.kernel_size
-        
-        if isinstance(self.stride, tuple):
-            if self.stride[0] != self.stride[1]:
-                raise NotImplementedError("Non-square stride not supported yet")
-            stride = self.stride[0]
-        else:
-            stride = self.stride
-        
-        if isinstance(self.padding, tuple):
-            if self.padding[0] != self.padding[1]:
-                raise NotImplementedError("Non-square padding not supported yet")
-            padding = self.padding[0]
-        else:
-            padding = self.padding
-        
-        if isinstance(self.dilation, tuple):
-            if self.dilation[0] != self.dilation[1]:
-                raise NotImplementedError("Non-square dilation not supported yet")
-            dilation = self.dilation[0]
-        else:
-            dilation = self.dilation
-        
-        # Call the Rust implementation
-        rust_maxpool = _core.MaxPool2d(kernel_size, stride, padding, dilation)
-        return rust_maxpool(x)
-    
-    def train(self):
-        pass
-    
-    def eval(self):
-        pass
+        return self._rust_maxpool(x)
 
 
-class Flatten:
+class Flatten(Module):
     """Flatten layer.
     
     Flattens the input tensor starting from a given dimension.
@@ -158,10 +203,15 @@ class Flatten:
         >>> x = fnn.randn([32, 3, 32, 32])
         >>> y = flatten(x)  # shape [32, 3072]
     """
+    __slots__ = ('start_dim', 'end_dim')
     
     def __init__(self, start_dim: int = 1, end_dim: int = -1):
+        super().__init__()
         self.start_dim = start_dim
         self.end_dim = end_dim
+    
+    def parameters(self):
+        return []
     
     def __call__(self, x):
         shape = x.shape
@@ -170,25 +220,17 @@ class Flatten:
         end = self.end_dim if self.end_dim >= 0 else ndim + self.end_dim
         end = end + 1
         new_shape = list(shape[:start])
-        flattened_size = 1
-        for dim in shape[start:end]:
-            flattened_size *= dim
+        flattened_size = math.prod(shape[start:end])
         new_shape.append(flattened_size)
         new_shape.extend(shape[end:])
         return x.view(new_shape)
-    
-    def train(self):
-        pass
-    
-    def eval(self):
-        pass
 
 
-class PySequential(Module):
+class PySequential(_BaseModule):
     """Sequential container (Python implementation).
     
     A simple sequential container that applies layers in order.
-    This is provided for compatibility; prefer `fastnn.layers.Sequential`
+    This is provided for compatibility; prefer `fastnn.Sequential`
     (the Rust implementation) for better performance.
     
     Args:
@@ -196,51 +238,32 @@ class PySequential(Module):
     
     Examples:
         >>> model = PySequential([
-        ...     fnn.layers.Linear(784, 256),
-        ...     fnn.layers.ReLU(),
-        ...     fnn.layers.Linear(256, 10),
+        ...     fnn.Linear(784, 256),
+        ...     fnn.ReLU(),
+        ...     fnn.Linear(256, 10),
         ... ])
         >>> x = fnn.randn([32, 784])
         >>> y = model(x)
     """
+    __slots__ = ('layers',)
     
     def __init__(self, layers: List[Any]):
+        super().__init__()
         self.layers = layers
-        self._param_layers = [l for l in layers if hasattr(l, "parameters")]
-        self._gpu_layers = [l for l in layers if hasattr(l, "to_gpu")]
-        self._train_layers = [l for l in layers if hasattr(l, "train")]
-        self._eval_layers = [l for l in layers if hasattr(l, "eval")]
+        for i, l in enumerate(layers):
+            # Only register with name if layer has named_parameters
+            if hasattr(l, "named_parameters"):
+                self._register_layer(l, str(i))
+            else:
+                self._register_layer(l)
     
     def __call__(self, x):
         for layer in self.layers:
             x = layer(x)
         return x
-    
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-    
-    def parameters(self):
-        params = []
-        for layer in self._param_layers:
-            params.extend(layer.parameters())
-        return params
-    
-    def to_gpu(self, device_id: int):
-        for layer in self._gpu_layers:
-            layer.to_gpu(device_id)
-    
-    def train(self):
-        for layer in self._train_layers:
-            layer.train()
-    
-    def eval(self):
-        for layer in self._eval_layers:
-            layer.eval()
 
 
-class BasicBlock(Module):
+class BasicBlock(_BaseModule):
     """ResNet BasicBlock with skip connection.
     
     This is a building block for ResNet architectures.
@@ -258,27 +281,29 @@ class BasicBlock(Module):
         >>> x = fnn.randn([1, 64, 32, 32])
         >>> y = block(x)
     """
+    __slots__ = ('conv1', 'bn1', 'relu', 'conv2', 'bn2', 'downsample')
     
     def __init__(self, conv1, bn1, relu, conv2, bn2, downsample=None):
+        super().__init__()
         self.conv1 = conv1
         self.bn1 = bn1
         self.relu = relu
         self.conv2 = conv2
         self.bn2 = bn2
         self.downsample = downsample
-        self._sublayers = [conv1, bn1, conv2, bn2]
+        
+        # Register layers with names for named_parameters using a loop
+        layers_to_register = [
+            (conv1, "conv1"),
+            (bn1, "bn1"),
+            (conv2, "conv2"),
+            (bn2, "bn2"),
+        ]
         if downsample is not None:
-            self._sublayers.append(downsample)
-        self._param_layers = [l for l in self._sublayers if hasattr(l, "parameters")]
-        self._named_param_pairs = []
-        for name, layer in [("conv1", conv1), ("bn1", bn1), ("conv2", conv2), ("bn2", bn2)]:
-            if hasattr(layer, "named_parameters"):
-                self._named_param_pairs.append((name, layer))
-        if downsample is not None and hasattr(downsample, "named_parameters"):
-            self._named_param_pairs.append(("downsample", downsample))
-        self._zero_grad_layers = [l for l in self._sublayers if hasattr(l, "zero_grad")]
-        self._train_layers = [l for l in self._sublayers if hasattr(l, "train")]
-        self._eval_layers = [l for l in self._sublayers if hasattr(l, "eval")]
+            layers_to_register.append((downsample, "downsample"))
+        
+        for layer, name in layers_to_register:
+            self._register_layer(layer, name)
     
     def __call__(self, x):
         identity = x
@@ -297,31 +322,6 @@ class BasicBlock(Module):
         out = self.relu(out)
         
         return out
-    
-    def parameters(self):
-        params = []
-        for layer in self._param_layers:
-            params.extend(layer.parameters())
-        return params
-    
-    def named_parameters(self):
-        params = []
-        for name, layer in self._named_param_pairs:
-            for n, p in layer.named_parameters():
-                params.append((f"{name}.{n}", p))
-        return params
-    
-    def zero_grad(self):
-        for layer in self._zero_grad_layers:
-            layer.zero_grad()
-    
-    def train(self):
-        for layer in self._train_layers:
-            layer.train()
-    
-    def eval(self):
-        for layer in self._eval_layers:
-            layer.eval()
 
 
 # Alias for backward compatibility

@@ -1,3 +1,4 @@
+use crate::error::{FastnnError, FastnnResult};
 use crate::storage::{DType, Device as TensorDevice, GpuStorage, Storage};
 use crate::tensor::Tensor;
 use parking_lot::RwLock;
@@ -105,21 +106,21 @@ impl Clone for GpuContext {
 
 #[allow(dead_code)]
 impl GpuContext {
-    fn new(device_id: usize) -> Result<Self, String> {
+    fn new(device_id: usize) -> FastnnResult<Self> {
         let instance = wgpu::Instance::default();
         let mut adapters = instance.enumerate_adapters(wgpu::Backends::all());
 
         let adapter = if device_id < adapters.len() {
             adapters.swap_remove(device_id)
         } else {
-            return Err(format!(
+            return Err(FastnnError::Cuda(format!(
                 "No GPU adapter found for device_id {}. Available adapters: {}",
                 device_id,
                 adapters.len()
-            ));
+            )));
         };
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
+        let (device, queue) = match pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some(&format!("fastnn-gpu-device-{}", device_id)),
                 required_features: wgpu::Features::empty(),
@@ -127,8 +128,15 @@ impl GpuContext {
                 memory_hints: wgpu::MemoryHints::Performance,
             },
             None,
-        ))
-        .map_err(|e| format!("Failed to request GPU device: {}. Ensure a valid WGPU backend (Vulkan/Metal/DX12) is available.", e))?;
+        )) {
+            Ok(result) => result,
+            Err(e) => {
+                return Err(FastnnError::Cuda(format!(
+                    "Failed to request GPU device: {}. Ensure a valid WGPU backend (Vulkan/Metal/DX12) is available.",
+                    e
+                )));
+            }
+        };
 
         // Initialize shader cache directory
         let shader_cache_dir = Self::get_shader_cache_dir();

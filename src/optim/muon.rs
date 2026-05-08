@@ -1,7 +1,11 @@
-use crate::optim::{Optimizer, OptimizerState, ParamGroup, ParamState};
+use crate::optim::{
+    apply_weight_decay, get_grad, Optimizer, OptimizerState, ParamGroup,
+    ParamState, WeightDecayType, zeros_like,
+};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
-use std::sync::Arc;
+
+use crate::impl_params_mut;
 
 pub struct Muon {
     pub params: Vec<Tensor>,
@@ -10,12 +14,6 @@ pub struct Muon {
     pub weight_decay: f64,
     pub nesterov: bool,
     pub m: Vec<Tensor>, // momentum buffers
-    // Pre-allocated buffers
-    pub temp_wd: Vec<Tensor>,
-    pub temp_eg: Vec<Tensor>,
-    pub temp_ortho: Vec<Tensor>,
-    pub temp_mom_ortho: Vec<Tensor>,
-    pub temp_update_dir: Vec<Tensor>,
 }
 
 impl Muon {
@@ -26,30 +24,7 @@ impl Muon {
         weight_decay: f64,
         nesterov: bool,
     ) -> Self {
-        let m: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_wd: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_eg: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_ortho: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_mom_ortho: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_update_dir: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
+        let m = zeros_like(&params);
 
         Muon {
             params,
@@ -58,11 +33,6 @@ impl Muon {
             weight_decay,
             nesterov,
             m,
-            temp_wd,
-            temp_eg,
-            temp_ortho,
-            temp_mom_ortho,
-            temp_update_dir,
         }
     }
 
@@ -112,13 +82,15 @@ impl Muon {
 }
 
 impl Optimizer for Muon {
+    impl_params_mut!();
+
     fn step(&mut self) {
         let lr = self.lr as f32;
         let momentum = self.momentum as f32;
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = param.grad() {
+            let grad = if let Some(g) = get_grad(param) {
                 g
             } else {
                 continue;
@@ -127,93 +99,41 @@ impl Optimizer for Muon {
             let shape = param.shape();
             let is_2d = shape.len() == 2;
 
-            // Apply weight decay: effective_grad = grad + weight_decay * param
+            // Apply L2 weight decay
             let effective_grad = if weight_decay != 0.0 {
-                self.temp_wd[i] = param.clone();
-                self.temp_wd[i].mul_scalar_(weight_decay);
-                self.temp_eg[i] = grad.clone();
-                self.temp_eg[i].add_(&self.temp_wd[i]);
-                &self.temp_eg[i]
+                apply_weight_decay(param, &grad, weight_decay, lr, WeightDecayType::L2)
             } else {
-                &grad
+                grad
             };
 
             if is_2d {
                 // Standard momentum: m = momentum * m + grad
-                self.m[i].mul_scalar_(momentum);
-                self.m[i].add_(effective_grad);
+                self.m[i].mul_scalar_(momentum).add_(&effective_grad);
 
                 // Orthogonalize the momentum
-                Self::newton_schulz_iteration_inplace(&self.m[i], 5, &mut self.temp_ortho[i]);
+                let mut ortho_m = Tensor::zeros(self.m[i].shape(), self.m[i].dtype(), self.m[i].device());
+                Self::newton_schulz_iteration_inplace(&self.m[i], 5, &mut ortho_m);
 
                 // For Nesterov: update_dir = effective_grad + momentum * ortho_momentum
-                if self.nesterov {
-                    self.temp_mom_ortho[i] = self.temp_ortho[i].clone();
-                    self.temp_mom_ortho[i].mul_scalar_(momentum);
-                    self.temp_update_dir[i] = (*effective_grad).clone();
-                    self.temp_update_dir[i].add_(&self.temp_mom_ortho[i]);
+                let update_dir = if self.nesterov {
+                    effective_grad.add(&ortho_m.mul_scalar(momentum))
                 } else {
-                    self.temp_update_dir[i] = self.temp_ortho[i].clone();
-                }
+                    ortho_m
+                };
 
                 // param = param - lr * update_dir
-                self.temp_update_dir[i].mul_scalar_(lr);
-                param.sub_(&self.temp_update_dir[i]);
+                param.sub_(&update_dir.mul_scalar(lr));
             } else {
                 // Fallback SGD with momentum for 1D params
-                self.m[i].mul_scalar_(momentum);
-                self.m[i].add_(effective_grad);
-
-                self.temp_update_dir[i] = self.m[i].clone();
-                self.temp_update_dir[i].mul_scalar_(lr);
-                param.sub_(&self.temp_update_dir[i]);
-            }
-        }
-    }
-
-    fn zero_grad(&mut self) {
-        for param in &mut self.params {
-            let inner = Arc::make_mut(&mut param.inner);
-            if let Some(meta) = &mut inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
+                self.m[i].mul_scalar_(momentum).add_(&effective_grad);
+                param.sub_(&self.m[i].clone().mul_scalar(lr));
             }
         }
     }
 
     fn add_param_group(&mut self, params: Vec<Tensor>) {
-        let m: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_wd: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_eg: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_ortho: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_mom_ortho: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-        let temp_update_dir: Vec<Tensor> = params
-            .iter()
-            .map(|p| Tensor::zeros(p.shape(), p.dtype(), p.device()))
-            .collect();
-
+        let m = zeros_like(&params);
         self.m.extend(m);
-        self.temp_wd.extend(temp_wd);
-        self.temp_eg.extend(temp_eg);
-        self.temp_ortho.extend(temp_ortho);
-        self.temp_mom_ortho.extend(temp_mom_ortho);
-        self.temp_update_dir.extend(temp_update_dir);
         self.params.extend(params);
     }
 
