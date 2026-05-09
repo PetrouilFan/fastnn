@@ -21,10 +21,10 @@ impl Node for MatmulBackward {
         let b = &self.inputs[1];
 
         // If grad is a scalar (e.g., from sum()), we need to expand it to the output shape
-        let grad_shape = grad.shape();
+        let grad_shape = grad.shape_ref();
         let grad = if grad_shape.is_empty() {
             // Expand scalar gradient to match the output shape [a.shape[0], b.shape[1]]
-            let output_shape = vec![a.shape()[0], b.shape()[1]];
+            let output_shape = vec![a.shape_ref()[0], b.shape_ref()[1]];
             grad.expand(output_shape)
         } else {
             grad

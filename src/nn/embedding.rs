@@ -1,6 +1,9 @@
 use crate::dispatcher::{dispatch, DispatchKey};
-use crate::{impl_training_state, nn::{clear_grad, Module, TrainingState}};
 use crate::tensor::Tensor;
+use crate::{
+    impl_training_state,
+    nn::{clear_grad, Module, TrainingState},
+};
 
 pub struct Embedding {
     pub weight: Tensor,

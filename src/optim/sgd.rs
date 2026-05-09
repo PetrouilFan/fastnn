@@ -1,11 +1,10 @@
 use crate::optim::{
-    apply_weight_decay, get_grad, Optimizer, OptimizerState, ParamGroup,
-    ParamState, WeightDecayType, zeros_like,
+    apply_weight_decay, zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState,
+    WeightDecayOptimizer, WeightDecayType,
 };
 use crate::tensor::Tensor;
+use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;
-
-use crate::impl_params_mut;
 
 #[allow(clippy::upper_case_acronyms)]
 pub struct SGD {
@@ -17,6 +16,7 @@ pub struct SGD {
     pub weight_decay: f64,
     pub nesterov: bool,
     pub velocity: Vec<Tensor>,
+    pub no_decay: Vec<bool>,
 }
 
 impl SGD {
@@ -29,6 +29,7 @@ impl SGD {
         nesterov: bool,
     ) -> Self {
         let velocity = zeros_like(&params);
+        let no_decay = vec![false; params.len()];
 
         SGD {
             params,
@@ -38,7 +39,20 @@ impl SGD {
             weight_decay,
             nesterov,
             velocity,
+            no_decay,
         }
+    }
+}
+
+impl WeightDecayOptimizer for SGD {
+    fn params(&self) -> &Vec<Tensor> {
+        &self.params
+    }
+    fn no_decay(&self) -> &Vec<bool> {
+        &self.no_decay
+    }
+    fn no_decay_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.no_decay
     }
 }
 
@@ -52,11 +66,7 @@ impl Optimizer for SGD {
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = get_grad(param) {
-                g
-            } else {
-                continue;
-            };
+            let grad = get_grad_or_skip!(param);
 
             // Apply L2 weight decay (consistent with WeightDecayType::L2)
             let grad = if weight_decay != 0.0 {
@@ -88,6 +98,7 @@ impl Optimizer for SGD {
     fn add_param_group(&mut self, params: Vec<Tensor>) {
         let velocity = zeros_like(&params);
         self.velocity.extend(velocity);
+        self.no_decay.extend(vec![false; params.len()]);
         self.params.extend(params);
     }
 

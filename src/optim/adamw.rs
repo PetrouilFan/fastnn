@@ -1,11 +1,9 @@
 use crate::optim::{
-    get_grad, Optimizer, OptimizerState, ParamGroup,
-    ParamState, WeightDecayOptimizer, zeros_like,
+    zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState, WeightDecayOptimizer,
 };
 use crate::tensor::Tensor;
+use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;
-
-use crate::impl_params_mut;
 
 pub struct AdamW {
     pub params: Vec<Tensor>,
@@ -82,11 +80,7 @@ impl Optimizer for AdamW {
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = get_grad(param) {
-                g
-            } else {
-                continue;
-            };
+            let grad = get_grad_or_skip!(param);
 
             self.step[i] += 1;
 

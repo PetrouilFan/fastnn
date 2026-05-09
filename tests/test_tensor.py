@@ -100,62 +100,35 @@ def test_tensor_from_numpy():
     assert np.allclose(t.numpy(), arr)
 
 
-@pytest.mark.skipif(
-    sys.platform in ("darwin", "linux"),
-    reason="Memory pool test crashes on macOS/Ubuntu CI",
-)
 def test_memory_pool_reuse():
-    # Test that memory is reused from the pool
-    # We check allocator_stats before and after creating/dropping tensors
-
-    # Get initial stats
-    fnn.allocator_stats()
-    # Create a tensor
-    t = fnn.zeros([1000], dtype="f32")
-    # Drop it (by reassigning or letting it go out of scope)
-    del t
-
-    # Create another tensor of same size (should reuse memory)
-    t2 = fnn.zeros([1000], dtype="f32")
-    del t2
-
-    # Get final stats
-    fnn.allocator_stats()
-
-    # If pooling works, total_allocated should not increase significantly
-    # (it might increase slightly for initial setup, but not per tensor)
-    # For this test, we just check that it doesn't panic or leak
-
-    # A more robust test would check that address is reused,
-    # but we don't expose data_ptr in Python API easily.
-    # So we rely on the fact that this test runs without error
-    # and the stats don't explode.
-
-    # We can't easily assert on stats because the pool might hold onto memory
-    # and stats would show high allocated.
-    # The key is that creating many tensors doesn't keep allocating new memory.
-
-    # Let's create many tensors and see if allocated memory grows.
-    # If pooling works, it should stabilize.
-
     import gc
-
-    gc.collect()  # Force garbage collection
-
-    # Create 10 tensors of same size
-    tensors = []
-    for _ in range(10):
-        tensors.append(fnn.zeros([1000], dtype="f32"))
-
-    # Drop them
-    tensors = []
+    import json
     gc.collect()
 
-    # Create one more
-    t_final = fnn.zeros([1000], dtype="f32")
-    del t_final
-    gc.collect()
+    def allocs():
+        return json.loads(fnn.allocator_stats())["num_allocs"]
 
-    # If we got here without crashing, basic pooling logic is likely working.
-    # The specific assertion is hard without exposing internal pool state.
-    pass
+    # First allocation: pool creates a new block.
+    t1 = fnn.zeros([1000], dtype="f32")
+    del t1
+    gc.collect()
+    n_first = allocs()
+
+    # Second allocation of same size: pool may reuse.
+    t2 = fnn.zeros([1000], dtype="f32")
+    n_second = allocs()
+    del t2
+    gc.collect()
+    assert n_second >= n_first, (
+        f"pool reuse check: num_allocs decreased from {n_first} to {n_second}"
+    )
+
+    # Different size: should trigger at most one new allocation.
+    t3 = fnn.zeros([2000], dtype="f32")
+    n_third = allocs()
+    assert n_third <= n_second + 1, (
+        f"expected at most one new allocation for larger tensor: "
+        f"{n_second} -> {n_third}"
+    )
+    del t3
+    gc.collect()

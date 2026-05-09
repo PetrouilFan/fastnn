@@ -200,7 +200,7 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_fused_add_relu(a, b, device_id);
     }
 
-    let a_shape = a.shape();
+    let a_shape = a.shape_ref();
     let output_shape = a_shape.to_vec();
     let numel: i64 = output_shape.iter().product();
 
@@ -292,8 +292,8 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         return gpu::gpu_matmul(&a_gpu, &b_gpu, device_id);
     }
 
-    let a_shape = a.shape();
-    let b_shape = b.shape();
+    let a_shape = a.shape_ref();
+    let b_shape = b.shape_ref();
 
     if a_shape.len() < 2 || b_shape.len() < 2 {
         panic!("matmul: both tensors must have at least 2 dimensions");

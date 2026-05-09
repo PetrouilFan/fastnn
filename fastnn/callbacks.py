@@ -168,7 +168,8 @@ class ModelCheckpoint(MonitorCallback):
 
     def save_model(self, model: Any) -> None:
         if self.should_save:
-            fnn.save_model(model, self.filepath)
+            import fastnn as fnn
+            fnn.io.save(model, self.filepath)
             self.should_save = False
 
 

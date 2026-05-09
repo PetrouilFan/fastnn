@@ -6,17 +6,17 @@
 #![allow(unused_imports)]
 #![allow(clippy::missing_safety_doc)]
 
+use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
-    matmul_blas, matmul_blas_into, matmul_blas_with_transpose,
-    matmul_blas_with_transpose_into, MIN_BLAS_SIZE,
+    matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
+    MIN_BLAS_SIZE,
 };
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
-use super::*;
 
 use wide::f32x4;
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
@@ -66,19 +66,45 @@ impl SimdVector for ScalarVector {
         *ptr = self.0;
     }
 
-    fn add(self, other: Self) -> Self { ScalarVector(self.0 + other.0) }
-    fn sub(self, other: Self) -> Self { ScalarVector(self.0 - other.0) }
-    fn mul(self, other: Self) -> Self { ScalarVector(self.0 * other.0) }
-    fn div(self, other: Self) -> Self { ScalarVector(self.0 / other.0) }
-    fn neg(self) -> Self { ScalarVector(-self.0) }
-    fn abs(self) -> Self { ScalarVector(self.0.abs()) }
-    fn sqrt(self) -> Self { ScalarVector(self.0.sqrt()) }
-    fn exp(self) -> Self { ScalarVector(self.0.exp()) }
-    fn ln(self) -> Self { ScalarVector(self.0.ln()) }
-    fn max(self, other: Self) -> Self { ScalarVector(self.0.max(other.0)) }
-    fn min(self, other: Self) -> Self { ScalarVector(self.0.min(other.0)) }
-    fn zero() -> Self { ScalarVector(0.0) }
-    fn one() -> Self { ScalarVector(1.0) }
+    fn add(self, other: Self) -> Self {
+        ScalarVector(self.0 + other.0)
+    }
+    fn sub(self, other: Self) -> Self {
+        ScalarVector(self.0 - other.0)
+    }
+    fn mul(self, other: Self) -> Self {
+        ScalarVector(self.0 * other.0)
+    }
+    fn div(self, other: Self) -> Self {
+        ScalarVector(self.0 / other.0)
+    }
+    fn neg(self) -> Self {
+        ScalarVector(-self.0)
+    }
+    fn abs(self) -> Self {
+        ScalarVector(self.0.abs())
+    }
+    fn sqrt(self) -> Self {
+        ScalarVector(self.0.sqrt())
+    }
+    fn exp(self) -> Self {
+        ScalarVector(self.0.exp())
+    }
+    fn ln(self) -> Self {
+        ScalarVector(self.0.ln())
+    }
+    fn max(self, other: Self) -> Self {
+        ScalarVector(self.0.max(other.0))
+    }
+    fn min(self, other: Self) -> Self {
+        ScalarVector(self.0.min(other.0))
+    }
+    fn zero() -> Self {
+        ScalarVector(0.0)
+    }
+    fn one() -> Self {
+        ScalarVector(1.0)
+    }
 }
 
 //=============================================================================
@@ -96,19 +122,45 @@ impl SimdVector for f32x4 {
         *(ptr as *mut [f32; 4]) = self.into();
     }
 
-    fn add(self, other: Self) -> Self { self + other }
-    fn sub(self, other: Self) -> Self { self - other }
-    fn mul(self, other: Self) -> Self { self * other }
-    fn div(self, other: Self) -> Self { self / other }
-    fn neg(self) -> Self { -self }
-    fn abs(self) -> Self { self.abs() }
-    fn sqrt(self) -> Self { self.sqrt() }
-    fn exp(self) -> Self { self.exp() }
-    fn ln(self) -> Self { self.ln() }
-    fn max(self, other: Self) -> Self { self.max(other) }
-    fn min(self, other: Self) -> Self { self.min(other) }
-    fn zero() -> Self { f32x4::new([0.0; 4]) }
-    fn one() -> Self { f32x4::new([1.0; 4]) }
+    fn add(self, other: Self) -> Self {
+        self + other
+    }
+    fn sub(self, other: Self) -> Self {
+        self - other
+    }
+    fn mul(self, other: Self) -> Self {
+        self * other
+    }
+    fn div(self, other: Self) -> Self {
+        self / other
+    }
+    fn neg(self) -> Self {
+        -self
+    }
+    fn abs(self) -> Self {
+        self.abs()
+    }
+    fn sqrt(self) -> Self {
+        self.sqrt()
+    }
+    fn exp(self) -> Self {
+        self.exp()
+    }
+    fn ln(self) -> Self {
+        self.ln()
+    }
+    fn max(self, other: Self) -> Self {
+        self.max(other)
+    }
+    fn min(self, other: Self) -> Self {
+        self.min(other)
+    }
+    fn zero() -> Self {
+        f32x4::new([0.0; 4])
+    }
+    fn one() -> Self {
+        f32x4::new([1.0; 4])
+    }
 }
 
 //=============================================================================
@@ -127,38 +179,88 @@ impl SimdVector for f32x8 {
         *(ptr as *mut [f32; 8]) = self.into();
     }
 
-    fn add(self, other: Self) -> Self { self + other }
-    fn sub(self, other: Self) -> Self { self - other }
-    fn mul(self, other: Self) -> Self { self * other }
-    fn div(self, other: Self) -> Self { self / other }
-    fn neg(self) -> Self { -self }
-    fn abs(self) -> Self { self.abs() }
-    fn sqrt(self) -> Self { self.sqrt() }
-    fn exp(self) -> Self { self.exp() }
-    fn ln(self) -> Self { self.ln() }
-    fn max(self, other: Self) -> Self { self.max(other) }
-    fn min(self, other: Self) -> Self { self.min(other) }
-    fn zero() -> Self { f32x8::new([0.0; 8]) }
-    fn one() -> Self { f32x8::new([1.0; 8]) }
+    fn add(self, other: Self) -> Self {
+        self + other
+    }
+    fn sub(self, other: Self) -> Self {
+        self - other
+    }
+    fn mul(self, other: Self) -> Self {
+        self * other
+    }
+    fn div(self, other: Self) -> Self {
+        self / other
+    }
+    fn neg(self) -> Self {
+        -self
+    }
+    fn abs(self) -> Self {
+        self.abs()
+    }
+    fn sqrt(self) -> Self {
+        self.sqrt()
+    }
+    fn exp(self) -> Self {
+        self.exp()
+    }
+    fn ln(self) -> Self {
+        self.ln()
+    }
+    fn max(self, other: Self) -> Self {
+        self.max(other)
+    }
+    fn min(self, other: Self) -> Self {
+        self.min(other)
+    }
+    fn zero() -> Self {
+        f32x8::new([0.0; 8])
+    }
+    fn one() -> Self {
+        f32x8::new([1.0; 8])
+    }
 }
 
 //=============================================================================
 // Scalar operation functions for tail processing
 //=============================================================================
 
-fn scalar_add(a: f32, b: f32) -> f32 { a + b }
-fn scalar_sub(a: f32, b: f32) -> f32 { a - b }
-fn scalar_mul(a: f32, b: f32) -> f32 { a * b }
-fn scalar_div(a: f32, b: f32) -> f32 { a / b }
-fn scalar_relu(a: f32) -> f32 { a.max(0.0) }
-fn scalar_neg(a: f32) -> f32 { -a }
-fn scalar_abs(a: f32) -> f32 { a.abs() }
-fn scalar_sqrt(a: f32) -> f32 { a.sqrt() }
+fn scalar_add(a: f32, b: f32) -> f32 {
+    a + b
+}
+fn scalar_sub(a: f32, b: f32) -> f32 {
+    a - b
+}
+fn scalar_mul(a: f32, b: f32) -> f32 {
+    a * b
+}
+fn scalar_div(a: f32, b: f32) -> f32 {
+    a / b
+}
+fn scalar_relu(a: f32) -> f32 {
+    a.max(0.0)
+}
+fn scalar_neg(a: f32) -> f32 {
+    -a
+}
+fn scalar_abs(a: f32) -> f32 {
+    a.abs()
+}
+fn scalar_sqrt(a: f32) -> f32 {
+    a.sqrt()
+}
 #[allow(dead_code)] // Used as fallback in SIMD operations when needed
-fn scalar_exp(a: f32) -> f32 { a.exp() }
-fn scalar_ln(a: f32) -> f32 { a.ln() }
-fn scalar_sigmoid(a: f32) -> f32 { 1.0 / (1.0 + (-a).exp()) }
-fn scalar_tanh(a: f32) -> f32 { a.tanh() }
+fn scalar_exp(a: f32) -> f32 {
+    a.exp()
+}
+fn scalar_ln(a: f32) -> f32 {
+    a.ln()
+}
+fn scalar_sigmoid(a: f32) -> f32 {
+    1.0 / (1.0 + (-a).exp())
+}
+fn scalar_tanh(a: f32) -> f32 {
+    a.tanh()
+}
 fn scalar_gelu(a: f32) -> f32 {
     let sqrt_2_over_pi = 0.7978846;
     let coeff = 0.044715;
@@ -293,8 +395,14 @@ pub unsafe fn add_parallel_avx2(
     out_usize: usize,
 ) {
     parallel_binary_op::<f32x8, _>(
-        chunk_idx, chunk_size, numel,
-        BinaryOpBuffers { a: a_usize, b: b_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        BinaryOpBuffers {
+            a: a_usize,
+            b: b_usize,
+            out: out_usize,
+        },
         |a, b| a.add(b),
         scalar_add,
     );
@@ -310,8 +418,14 @@ pub unsafe fn add_parallel_neon(
     out_usize: usize,
 ) {
     parallel_binary_op::<f32x4, _>(
-        chunk_idx, chunk_size, numel,
-        BinaryOpBuffers { a: a_usize, b: b_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        BinaryOpBuffers {
+            a: a_usize,
+            b: b_usize,
+            out: out_usize,
+        },
         |a, b| a.add(b),
         scalar_add,
     );
@@ -374,8 +488,14 @@ pub unsafe fn mul_parallel_avx2(
     out_usize: usize,
 ) {
     parallel_binary_op::<f32x8, _>(
-        chunk_idx, chunk_size, numel,
-        BinaryOpBuffers { a: a_usize, b: b_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        BinaryOpBuffers {
+            a: a_usize,
+            b: b_usize,
+            out: out_usize,
+        },
         |a, b| a.mul(b),
         scalar_mul,
     );
@@ -391,8 +511,14 @@ pub unsafe fn mul_parallel_neon(
     out_usize: usize,
 ) {
     parallel_binary_op::<f32x4, _>(
-        chunk_idx, chunk_size, numel,
-        BinaryOpBuffers { a: a_usize, b: b_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        BinaryOpBuffers {
+            a: a_usize,
+            b: b_usize,
+            out: out_usize,
+        },
         |a, b| a.mul(b),
         scalar_mul,
     );
@@ -428,8 +554,13 @@ pub unsafe fn relu_parallel_avx2(
     out_usize: usize,
 ) {
     parallel_unary_op::<f32x8, _>(
-        chunk_idx, chunk_size, numel,
-        UnaryOpBuffers { a: a_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        UnaryOpBuffers {
+            a: a_usize,
+            out: out_usize,
+        },
         |a| a.max(f32x8::new([0.0; 8])),
         scalar_relu,
     );
@@ -444,8 +575,13 @@ pub unsafe fn relu_parallel_neon(
     out_usize: usize,
 ) {
     parallel_unary_op::<f32x4, _>(
-        chunk_idx, chunk_size, numel,
-        UnaryOpBuffers { a: a_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        UnaryOpBuffers {
+            a: a_usize,
+            out: out_usize,
+        },
         |a| a.max(f32x4::new([0.0; 4])),
         scalar_relu,
     );
@@ -481,8 +617,14 @@ pub unsafe fn div_parallel_avx2(
     out_usize: usize,
 ) {
     parallel_binary_op::<f32x8, _>(
-        chunk_idx, chunk_size, numel,
-        BinaryOpBuffers { a: a_usize, b: b_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        BinaryOpBuffers {
+            a: a_usize,
+            b: b_usize,
+            out: out_usize,
+        },
         |a, b| a.div(b),
         scalar_div,
     );
@@ -498,8 +640,14 @@ pub unsafe fn div_parallel_neon(
     out_usize: usize,
 ) {
     parallel_binary_op::<f32x4, _>(
-        chunk_idx, chunk_size, numel,
-        BinaryOpBuffers { a: a_usize, b: b_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        BinaryOpBuffers {
+            a: a_usize,
+            b: b_usize,
+            out: out_usize,
+        },
         |a, b| a.div(b),
         scalar_div,
     );
@@ -535,8 +683,13 @@ pub unsafe fn neg_parallel_avx2(
     out_usize: usize,
 ) {
     parallel_unary_op::<f32x8, _>(
-        chunk_idx, chunk_size, numel,
-        UnaryOpBuffers { a: a_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        UnaryOpBuffers {
+            a: a_usize,
+            out: out_usize,
+        },
         |a| a.neg(),
         scalar_neg,
     );
@@ -551,8 +704,13 @@ pub unsafe fn neg_parallel_neon(
     out_usize: usize,
 ) {
     parallel_unary_op::<f32x4, _>(
-        chunk_idx, chunk_size, numel,
-        UnaryOpBuffers { a: a_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        UnaryOpBuffers {
+            a: a_usize,
+            out: out_usize,
+        },
         |a| a.neg(),
         scalar_neg,
     );
@@ -586,8 +744,13 @@ pub unsafe fn abs_parallel_avx2(
     out_usize: usize,
 ) {
     parallel_unary_op::<f32x8, _>(
-        chunk_idx, chunk_size, numel,
-        UnaryOpBuffers { a: a_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        UnaryOpBuffers {
+            a: a_usize,
+            out: out_usize,
+        },
         |a| a.abs(),
         scalar_abs,
     );
@@ -602,8 +765,13 @@ pub unsafe fn abs_parallel_neon(
     out_usize: usize,
 ) {
     parallel_unary_op::<f32x4, _>(
-        chunk_idx, chunk_size, numel,
-        UnaryOpBuffers { a: a_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        UnaryOpBuffers {
+            a: a_usize,
+            out: out_usize,
+        },
         |a| a.abs(),
         scalar_abs,
     );
@@ -638,8 +806,14 @@ pub unsafe fn sub_parallel_avx2(
     out_usize: usize,
 ) {
     parallel_binary_op::<f32x8, _>(
-        chunk_idx, chunk_size, numel,
-        BinaryOpBuffers { a: a_usize, b: b_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        BinaryOpBuffers {
+            a: a_usize,
+            b: b_usize,
+            out: out_usize,
+        },
         |a, b| a.sub(b),
         scalar_sub,
     );
@@ -655,8 +829,14 @@ pub unsafe fn sub_parallel_neon(
     out_usize: usize,
 ) {
     parallel_binary_op::<f32x4, _>(
-        chunk_idx, chunk_size, numel,
-        BinaryOpBuffers { a: a_usize, b: b_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        BinaryOpBuffers {
+            a: a_usize,
+            b: b_usize,
+            out: out_usize,
+        },
         |a, b| a.sub(b),
         scalar_sub,
     );
@@ -1092,8 +1272,13 @@ pub unsafe fn exp_parallel_neon(
     out_usize: usize,
 ) {
     parallel_unary_op::<f32x4, _>(
-        chunk_idx, chunk_size, numel,
-        UnaryOpBuffers { a: a_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        UnaryOpBuffers {
+            a: a_usize,
+            out: out_usize,
+        },
         |a| a.exp(),
         scalar_exp,
     );
@@ -1185,8 +1370,13 @@ pub unsafe fn sqrt_parallel_avx2(
     out_usize: usize,
 ) {
     parallel_unary_op::<f32x8, _>(
-        chunk_idx, chunk_size, numel,
-        UnaryOpBuffers { a: a_usize, out: out_usize },
+        chunk_idx,
+        chunk_size,
+        numel,
+        UnaryOpBuffers {
+            a: a_usize,
+            out: out_usize,
+        },
         |a| a.sqrt(),
         scalar_sqrt,
     );
@@ -1320,7 +1510,9 @@ pub unsafe fn fused_mul_add_parallel_avx512(
     c_usize: usize,
     out_usize: usize,
 ) {
-    fused_mul_add_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize);
+    fused_mul_add_parallel_avx2(
+        chunk_idx, chunk_size, numel, a_usize, b_usize, c_usize, out_usize,
+    );
 }
 
 //=============================================================================
@@ -1613,6 +1805,6 @@ pub unsafe fn hsum256_ps(v: __m256) -> f32 {
     let sum128 = _mm_add_ps(lo128, hi128);
     let shuf = _mm_shuffle_ps(sum128, sum128, 0x0E);
     let sums = _mm_add_ps(sum128, shuf);
-  let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
+    let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
     _mm_cvtss_f32(_mm_add_ss(sums, shuf2))
 }

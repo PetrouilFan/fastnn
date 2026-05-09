@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Python 3.13 or higher
+- Python 3.12 or higher
 - numpy >= 1.24
 
 ### Build from Source
@@ -15,21 +15,21 @@ git clone <repository-url>
 cd fastnn
 
 # Install/build the library
-make install
+uv pip install -e .
 ```
 
 This will build the Rust extension and install the Python package.
 
 ## Quick Start
 
-Here's a complete example of training a simple MLP on XOR data:
+Here's a complete example of training a MLP on XOR data:
 
 ```python
 import fastnn as fnn
 
 # Create training data (XOR problem)
-X = fnn.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], [4, 2])
-y = fnn.tensor([[0.0], [1.0], [1.0], [0.0]], [4, 1])
+X = fnn.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], [4, 2])
+y = fnn.tensor([0.0, 1.0, 1.0, 0.0], [4, 1])
 
 # Build model
 model = fnn.models.MLP(
@@ -73,17 +73,17 @@ with fnn.no_grad():
 
 ### Tensors
 
-Tensors are the core data structure in FastNN. Create them from Python lists:
+Tensors are the core data structure in FastNN. Create them from Python lists (flattened data + shape):
 
 ```python
 # 2D tensor (matrix)
-x = fnn.tensor([[1.0, 2.0], [3.0, 4.0]])
+x = fnn.tensor([1.0, 2.0, 3.0, 4.0], [2, 2])
 
 # 1D tensor (vector)
-v = fnn.tensor([1.0, 2.0, 3.0])
+v = fnn.tensor([1.0, 2.0, 3.0], [3])
 
 # Scalar
-s = fnn.tensor([5.0])
+s = fnn.tensor([5.0], [1])
 ```
 
 ### Autograd

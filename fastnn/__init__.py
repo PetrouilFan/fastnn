@@ -59,21 +59,11 @@ from fastnn.tensor import (  # noqa: E402
 )
 from fastnn.layers import Flatten, PySequential, BasicBlock  # noqa: F401, E402
 MaxPool2d = _core.MaxPool2d
-from fastnn.io import (  # noqa: E402, F403
+from fastnn.io import (  # noqa: E402
     save as io_save,
     load as io_load,
     convert_from_pytorch,
     convert_from_onnx,
-    save_model,
-    load_model,
-    save_optimizer,
-    load_optimizer,
-    MODEL_MAGIC,
-    OPTIMIZER_MAGIC,
-    MODEL_VERSION,
-    OPTIMIZER_VERSION,
-    write_tensor,
-    read_tensor,
 )
 
 __all__ = [
@@ -223,19 +213,10 @@ __all__ = [
     # Activations module
     "activations",
     # IO functions
-    "load_model",
-    "save_optimizer",
-    "load_optimizer",
     "io_save",
     "io_load",
     "convert_from_pytorch",
     "convert_from_onnx",
-    "MODEL_MAGIC",
-    "OPTIMIZER_MAGIC",
-    "MODEL_VERSION",
-    "OPTIMIZER_VERSION",
-    "write_tensor",
-    "read_tensor",
 ]
 
 
@@ -391,8 +372,6 @@ def load_state_dict(model, state_dict):
         )
     for p, loaded_t in zip(params, loaded):
         p.copy_(loaded_t)
-
-
 from fastnn.schedulers import LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau  # noqa: F401
 
 allocator_stats = _core.allocator_stats
@@ -421,6 +400,8 @@ class _TensorModuleWrapper:
 
 
 import sys
+
+
 
 
 

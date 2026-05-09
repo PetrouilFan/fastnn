@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use std::cell::RefCell;
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::storage::{DType, Device, Storage};
 
@@ -54,7 +54,9 @@ impl StoragePool {
                     if let Some(storage) = storages.pop() {
                         match Arc::try_unwrap(storage) {
                             Ok(owned_storage) => return Arc::new(owned_storage),
-                            Err(storage) => { storages.push(storage); }
+                            Err(storage) => {
+                                storages.push(storage);
+                            }
                         }
                     }
                 }
@@ -117,7 +119,9 @@ impl StoragePool {
                                 }
                                 return Arc::new(owned_storage);
                             }
-                            Err(storage) => { storages.push(storage); }
+                            Err(storage) => {
+                                storages.push(storage);
+                            }
                         }
                     }
                 }
@@ -144,7 +148,7 @@ impl StoragePool {
                         let total_storages: usize = cache.values().map(|v| v.len()).sum();
                         total_storages < MAX_SMALL_CACHE
                     });
-                    
+
                     if can_cache {
                         SMALL_CACHE.with(|cache| {
                             let mut cache = cache.borrow_mut();

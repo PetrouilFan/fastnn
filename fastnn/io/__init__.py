@@ -153,27 +153,14 @@ def read_fnn_parameters(f, num_params):
     return params
 
 
-from fastnn.io.serialization import (
-    save_model,
-    load_model,
-    save_optimizer,
-    load_optimizer,
-    save_state_dict,
-    load_state_dict,
-)
-from fastnn.io.export import (
-    export_pytorch_model,
-    save_fnn_model,
-    load_fnn_model,
-)
-from fastnn.io.onnx import (
-    import_onnx,
-)
+from fastnn.io.serialization import _save_model as save_model, _load_model as load_model
+from fastnn.io.export import save_fnn_model
+from fastnn.io.onnx import import_onnx
 
 
 def save(model, path: str, format: str = "fnn-v2") -> None:
     """Save a model to file.
-    
+
     Args:
         model: The model to save.
         path: Path to save to.
@@ -188,10 +175,10 @@ def save(model, path: str, format: str = "fnn-v2") -> None:
 
 def load(path: str) -> object:
     """Load a model from file.
-    
+
     Args:
         path: Path to load from.
-        
+
     Returns:
         The loaded model.
     """
@@ -200,7 +187,7 @@ def load(path: str) -> object:
 
 def convert_from_pytorch(torch_model, path: str) -> None:
     """Convert a PyTorch model to fastnn format.
-    
+
     Args:
         torch_model: The PyTorch model to convert.
         path: Path to save the converted model.
@@ -210,11 +197,11 @@ def convert_from_pytorch(torch_model, path: str) -> None:
 
 def convert_from_onnx(onnx_path: str, fnn_path: str) -> dict:
     """Convert an ONNX model to fastnn format.
-    
+
     Args:
         onnx_path: Path to the ONNX model.
         fnn_path: Path to save the fastnn model.
-        
+
     Returns:
         Dictionary with model info.
     """
@@ -226,30 +213,4 @@ __all__ = [
     "load",
     "convert_from_pytorch",
     "convert_from_onnx",
-    "save_model",
-    "load_model",
-    "save_optimizer",
-    "load_optimizer",
-    "save_fnn_model",
-    "import_onnx",
-    "MODEL_MAGIC",
-    "OPTIMIZER_MAGIC",
-    "MODEL_VERSION",
-    "OPTIMIZER_VERSION",
-    "write_tensor",
-    "read_tensor",
-    "_pack_u64",
-    "_pack_i64",
-    "_pack_u32",
-    "_pack_u8",
-    "_pack_f64",
-    "_unpack_u64",
-    "_unpack_i64",
-    "_unpack_u32",
-    "_unpack_u8",
-    "_unpack_f64",
-    "write_fnn_file",
-    "read_fnn_header",
-    "read_fnn_parameters",
-    "serialization_error",
 ]

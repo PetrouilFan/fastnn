@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "fastnn"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "blas-src",
  "bytemuck",

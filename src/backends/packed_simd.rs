@@ -16,33 +16,20 @@ use std::arch::x86_64::*;
 /// Tiles the K dimension to keep activation blocks in L2 cache.
 const K_BLOCK_SIZE: usize = 4096; // 16KB of f32 activations per block
 
-/// Aligned scratch buffer for unpacking operations
-#[repr(align(32))]
-struct AlignedScratchBuffer {
-    data: Vec<f32>,
+// Thread-local scratch buffer, reused across calls.
+thread_local! {
+    static PACKED_SCRATCH: std::cell::RefCell<Vec<f32>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
 }
 
-impl AlignedScratchBuffer {
-    fn new() -> Self {
-        Self { data: Vec::new() }
-    }
-
-    fn resize(&mut self, size: usize) {
-        self.data.resize(size, 0.0);
-    }
-
-    fn as_slice(&self) -> &[f32] {
-        &self.data
-    }
-
-    fn as_mut_slice(&mut self) -> &mut [f32] {
-        &mut self.data
-    }
-
-    #[allow(dead_code)]
-    fn len(&self) -> usize {
-        self.data.len()
-    }
+/// Run `f` with a thread-local scratch buffer resized to `size`.
+fn with_scratch<R>(size: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
+    PACKED_SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.resize(size, 0.0);
+        f(&mut buf)
+    })
 }
 
 // ============================================================
@@ -916,40 +903,24 @@ fn gemv_packed_inner<T: PackedWord>(
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
                 let start_row = chunk_idx * rows_per_chunk;
-                // Pre-allocate aligned buffer for unpacking
-                let mut unpack_buf = AlignedScratchBuffer::new();
-                unpack_buf.resize(k_packed * T::ITEMS);
-                for (local_row, out) in out_chunk.iter_mut().enumerate() {
-                    let row = start_row + local_row;
-                    let dot = gemv_row::<T>(
-                        weights,
-                        activation,
-                        row,
-                        k,
-                        k_packed,
-                        unpack_buf.as_mut_slice(),
-                    );
-                    *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
-                }
+                with_scratch(k_packed * T::ITEMS, |unpack_buf| {
+                    for (local_row, out) in out_chunk.iter_mut().enumerate() {
+                        let row = start_row + local_row;
+                        let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf);
+                        *out = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+                    }
+                });
             });
     }
 
     #[cfg(not(feature = "parallel"))]
     {
-        // Pre-allocate aligned buffer for unpacking
-        let mut unpack_buf = AlignedScratchBuffer::new();
-        unpack_buf.resize(k_packed * T::ITEMS);
-        for row in 0.._m {
-            let dot = gemv_row::<T>(
-                weights,
-                activation,
-                row,
-                k,
-                k_packed,
-                unpack_buf.as_mut_slice(),
-            );
-            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
-        }
+        with_scratch(k_packed * T::ITEMS, |unpack_buf| {
+            for row in 0.._m {
+                let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf);
+                output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            }
+        });
     }
 }
 
@@ -967,45 +938,45 @@ fn gemv_packed_blocked<T: PackedWord>(
     }
 
     let items = T::ITEMS;
-    let mut unpack_buf = AlignedScratchBuffer::new();
-    unpack_buf.resize(K_BLOCK_SIZE);
 
-    let mut k_offset = 0;
-    while k_offset < k {
-        let k_end = (k_offset + K_BLOCK_SIZE).min(k);
-        let k_block = k_end - k_offset;
+    with_scratch(K_BLOCK_SIZE, |unpack_buf| {
+        let mut k_offset = 0;
+        while k_offset < k {
+            let k_end = (k_offset + K_BLOCK_SIZE).min(k);
+            let k_block = k_end - k_offset;
 
-        for row in 0..m {
-            let row_offset = row * k_packed;
-            let packed_start = k_offset / items;
-            let packed_end = k_end.div_ceil(items);
-            let unpack_len = (packed_end - packed_start) * items;
+            for row in 0..m {
+                let row_offset = row * k_packed;
+                let packed_start = k_offset / items;
+                let packed_end = k_end.div_ceil(items);
+                let unpack_len = (packed_end - packed_start) * items;
 
-            if unpack_len <= unpack_buf.data.len() {
-                for (i, p) in (packed_start..packed_end).enumerate() {
-                    let word = weights.as_packed()[row_offset + p];
-                    let unpacked = word.unpack_to_f32();
-                    let dst_start = i * items;
-                    for j in 0..items {
-                        if dst_start + j < k_block {
-                            unpack_buf.data[dst_start + j] = unpacked.as_ref()[j];
+                if unpack_len <= K_BLOCK_SIZE {
+                    for (i, p) in (packed_start..packed_end).enumerate() {
+                        let word = weights.as_packed()[row_offset + p];
+                        let unpacked = word.unpack_to_f32();
+                        let dst_start = i * items;
+                        for j in 0..items {
+                            if dst_start + j < k_block {
+                                unpack_buf[dst_start + j] = unpacked.as_ref()[j];
+                            }
                         }
                     }
+                    let acc = fma_f32_slice(
+                        &unpack_buf[..k_block.min(unpack_len)],
+                        &activation[k_offset..k_end],
+                    );
+                    output[row] += acc;
                 }
-                let acc = fma_f32_slice(
-                    &unpack_buf.data[..k_block.min(unpack_len)],
-                    &activation[k_offset..k_end],
-                );
-                output[row] += acc;
             }
+
+            k_offset += K_BLOCK_SIZE;
         }
 
-        k_offset += K_BLOCK_SIZE;
-    }
-
-    for row in 0..m {
-        output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
-    }
+        for row in 0..m {
+            output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
+        }
+    });
 }
 
 #[inline]
@@ -1192,54 +1163,54 @@ pub fn gemm_packed_batched<T: PackedWord>(
         (0..m).into_par_iter().for_each(|row| {
             let scale = weights.scale_for_row(row);
             let zero = weights.zero_for_row(row);
-            let mut unpack_buf = AlignedScratchBuffer::new();
-            unpack_buf.resize(k);
-            let row_offset = row * k_packed;
-            for p in 0..k_packed {
-                let word = weights.as_packed()[row_offset + p];
-                let unpacked = word.unpack_to_f32();
-                let base = p * k_items;
-                for j in 0..k_items {
-                    let idx = base + j;
-                    if idx < k {
-                        unpack_buf.as_mut_slice()[idx] = unpacked.as_ref()[j];
+            with_scratch(k, |unpack_buf| {
+                let row_offset = row * k_packed;
+                for p in 0..k_packed {
+                    let word = weights.as_packed()[row_offset + p];
+                    let unpacked = word.unpack_to_f32();
+                    let base = p * k_items;
+                    for j in 0..k_items {
+                        let idx = base + j;
+                        if idx < k {
+                            unpack_buf[idx] = unpacked.as_ref()[j];
+                        }
                     }
                 }
-            }
 
-            for (bi, input) in batch_inputs.iter().enumerate() {
-                let acc = fma_f32_slice(unpack_buf.as_slice(), input);
-                unsafe {
-                    *((out_addrs[bi] as *mut f32).add(row)) = acc * scale + zero;
+                for (bi, input) in batch_inputs.iter().enumerate() {
+                    let acc = fma_f32_slice(unpack_buf, input);
+                    unsafe {
+                        *((out_addrs[bi] as *mut f32).add(row)) = acc * scale + zero;
+                    }
                 }
-            }
+            });
         });
     }
 
     #[cfg(not(feature = "parallel"))]
     {
-        let mut unpack_buf = AlignedScratchBuffer::new();
-        unpack_buf.resize(k);
-        for row in 0..m {
-            let scale = weights.scale_for_row(row);
-            let zero = weights.zero_for_row(row);
-            let row_offset = row * k_packed;
-            for p in 0..k_packed {
-                let word = weights.as_packed()[row_offset + p];
-                let unpacked = word.unpack_to_f32();
-                let base = p * T::ITEMS;
-                for j in 0..T::ITEMS {
-                    let idx = base + j;
-                    if idx < k {
-                        unpack_buf.as_mut_slice()[idx] = unpacked.as_ref()[j];
+        with_scratch(k, |unpack_buf| {
+            for row in 0..m {
+                let scale = weights.scale_for_row(row);
+                let zero = weights.zero_for_row(row);
+                let row_offset = row * k_packed;
+                for p in 0..k_packed {
+                    let word = weights.as_packed()[row_offset + p];
+                    let unpacked = word.unpack_to_f32();
+                    let base = p * T::ITEMS;
+                    for j in 0..T::ITEMS {
+                        let idx = base + j;
+                        if idx < k {
+                            unpack_buf[idx] = unpacked.as_ref()[j];
+                        }
                     }
                 }
+                for (bi, input) in batch_inputs.iter().enumerate() {
+                    let acc = fma_f32_slice(unpack_buf, input);
+                    outputs[bi][row] = acc * scale + zero;
+                }
             }
-            for (bi, input) in batch_inputs.iter().enumerate() {
-                let acc = fma_f32_slice(unpack_buf.as_slice(), input);
-                outputs[bi][row] = acc * scale + zero;
-            }
-        }
+        });
     }
 }
 

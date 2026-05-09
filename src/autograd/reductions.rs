@@ -21,16 +21,16 @@ impl Node for SumBackward {
         let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
             return vec![None];
         };
-        let shape = self.input.shape();
-        let grad_shape = grad.shape();
+        let shape = self.input.shape_ref();
+        let grad_shape = grad.shape_ref();
 
         if grad_shape.is_empty() {
             // Scalar gradient: multiply by ones to broadcast to input shape
             // (expand creates non-contiguous views that many kernels can't handle)
-            let ones = Tensor::ones(shape.clone(), grad.dtype(), grad.device());
+            let ones = Tensor::ones(shape.to_vec(), grad.dtype(), grad.device());
             vec![Some(grad.mul(&ones))]
         } else if self.keepdim {
-            vec![Some(grad.expand(shape))]
+            vec![Some(grad.expand(shape.to_vec()))]
         } else {
             let mut expanded_shape: Vec<i64> = grad_shape.to_vec();
             expanded_shape.insert(self.dim, 1);
@@ -82,26 +82,26 @@ impl Node for MeanBackward {
         };
         let scale = 1.0 / self.numel as f32;
 
-        let shape = self.input.shape();
-        let grad_shape = grad.shape();
+        let shape = self.input.shape_ref();
+        let grad_shape = grad.shape_ref();
 
         let result = if grad_shape.is_empty() {
             // Scalar gradient: create ones and multiply
-            let ones = Tensor::ones(shape.clone(), grad.dtype(), grad.device());
+            let ones = Tensor::ones(shape.to_vec(), grad.dtype(), grad.device());
             let mut scaled = grad;
             scaled.mul_scalar_(scale);
             scaled.mul(&ones)
         } else if self.keepdim {
             let mut scaled = grad;
             scaled.mul_scalar_(scale);
-            scaled.expand(shape)
+            scaled.expand(shape.to_vec())
         } else {
-            let mut new_shape = shape.clone();
+            let mut new_shape = shape.to_vec();
             new_shape[self.dim] = 1;
-            let reshaped = grad.reshape(new_shape);
+            let reshaped = grad.reshape(new_shape.to_vec());
             let mut scaled = reshaped;
             scaled.mul_scalar_(scale);
-            scaled.expand(shape)
+            scaled.expand(shape.to_vec())
         };
 
         vec![Some(result)]

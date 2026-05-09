@@ -169,6 +169,6 @@ mod tests {
         let a = 0x0002_0001u32; // [1, 2]
         let b = 0x0003_0000u32; // [0, 3]
         let result = swar_min_u16x2(a, b);
-        assert_eq!(result, 0x0000_0001u32); // min([1,2], [0,3]) = [0,1]
+        assert_eq!(result, 0x0002_0000u32); // min([1,2], [0,3]) = [0,2]
     }
 }

@@ -180,7 +180,7 @@ impl AdaptiveAvgPool2d {
 
 impl Module for AdaptiveAvgPool2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let x_shape = x.shape();
+        let x_shape = x.shape_ref();
         let batch = x_shape[0];
         let channels = x_shape[1];
         let in_h = x_shape[2];

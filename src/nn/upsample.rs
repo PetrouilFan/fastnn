@@ -14,7 +14,7 @@ impl Upsample {
 
 impl Module for Upsample {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let x_shape = x.shape();
+        let x_shape = x.shape_ref();
         let ndim = x_shape.len();
         if ndim < 2 {
             return x.clone();

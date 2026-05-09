@@ -3,17 +3,17 @@
 #![allow(unused_imports)]
 #![allow(clippy::missing_safety_doc)]
 
+use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
-    matmul_blas, matmul_blas_into, matmul_blas_with_transpose,
-    matmul_blas_with_transpose_into, MIN_BLAS_SIZE,
+    matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
+    MIN_BLAS_SIZE,
 };
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
-use super::*;
 
 pub unsafe fn zeros_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let shape = args[0].shape();
@@ -228,4 +228,3 @@ pub fn write_f32(slice: &[u8], val: f32, dtype: DType) {
         }
     }
 }
-

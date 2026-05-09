@@ -6,6 +6,7 @@
 
 use fastnn::dtypes::U4x8;
 use fastnn::nn::transformer::PackedTransformerEncoder;
+use fastnn::nn::Module;
 use fastnn::tensor::Tensor;
 
 fn main() {
@@ -83,7 +84,7 @@ fn main() {
         .collect();
     let input = Tensor::from_vec(
         token_ids.iter().map(|&x| x as f32).collect(),
-        &[batch_size, seq_len],
+        vec![batch_size, seq_len],
     );
 
     // Run forward pass
@@ -91,11 +92,11 @@ fn main() {
 
     println!("\nOutput shape: {:?}", output.shape());
     println!("Output values (first batch):");
-    let output_data = output.to_vec();
+    let output_data = output.to_numpy();
     for i in 0..batch_size {
         print!("  Batch {}: [", i);
         for j in 0..num_classes.min(5) {
-            print!(" {:.4}", output_data[i * num_classes as usize + j]);
+            print!(" {:.4}", output_data[i as usize * num_classes as usize + j as usize]);
         }
         if num_classes > 5 {
             print!(" ...");

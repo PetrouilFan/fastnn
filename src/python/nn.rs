@@ -227,7 +227,9 @@ impl_nn_module_with_gpu!(Linear {
         let in_features = weight_shape[1];
         let has_bias = bias.is_some();
         let mut inner = core_nn::linear::Linear::new(in_features, out_features, has_bias);
-        inner.weight = weight.inner;
+        // Incoming weight is [out_features, in_features] (PyTorch convention);
+        // transpose to [in_features, out_features] for FastNN's direct matmul.
+        inner.weight = weight.inner.transpose(0, 1).contiguous();
         if let Some(b) = bias {
             inner.bias = Some(b.inner);
         }
