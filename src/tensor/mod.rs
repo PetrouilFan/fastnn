@@ -378,15 +378,11 @@ impl Tensor {
     }
 
     pub(crate) fn attach_grad_fn(mut output: Tensor, backward: Arc<dyn autograd::Node + 'static>) -> Tensor {
-        if autograd::is_grad_enabled() && output.requires_grad() {
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(backward);
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            output
-        }
+        let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+        meta.grad_fn = Some(backward);
+        Arc::make_mut(&mut output.inner).autograd_meta =
+            Some(Arc::new(std::sync::Mutex::new(meta)));
+        output
     }
 
     pub fn requires_grad(&self) -> bool {
