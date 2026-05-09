@@ -209,11 +209,11 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
         let act = _mm256_loadu_ps(activation.as_ptr().add(kk));
 
         // Row 0
-        let row0 = _mm256_loadu_ps(row_bufs.as_ptr().add(0 * KC + kk));
+        let row0 = _mm256_loadu_ps(row_bufs.as_ptr().add(kk));
         acc0 = _mm256_fmadd_ps(row0, act, acc0);
 
         // Row 1
-        let row1 = _mm256_loadu_ps(row_bufs.as_ptr().add(1 * KC + kk));
+        let row1 = _mm256_loadu_ps(row_bufs.as_ptr().add(KC + kk));
         acc1 = _mm256_fmadd_ps(row1, act, acc1);
 
         // Row 2
@@ -232,11 +232,11 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
         let act = _mm256_set1_ps(*activation.as_ptr().add(kk));
 
         // Row 0
-        let row0 = _mm256_set1_ps(*row_bufs.as_ptr().add(0 * KC + kk));
+        let row0 = _mm256_set1_ps(*row_bufs.as_ptr().add(kk));
         acc0 = _mm256_fmadd_ps(row0, act, acc0);
 
         // Row 1
-        let row1 = _mm256_set1_ps(*row_bufs.as_ptr().add(1 * KC + kk));
+        let row1 = _mm256_set1_ps(*row_bufs.as_ptr().add(KC + kk));
         acc1 = _mm256_fmadd_ps(row1, act, acc1);
 
         // Row 2
