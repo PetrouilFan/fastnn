@@ -220,7 +220,7 @@ impl WgpuContext {
             })
     }
 
-    /// Read a GPU buffer back to a Vec<u8>.
+    /// Read a GPU buffer back to a `Vec<u8>`.
     pub fn read_buffer(&self, buffer: &wgpu::Buffer, size: usize) -> Vec<u8> {
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging"),

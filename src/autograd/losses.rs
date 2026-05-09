@@ -39,7 +39,7 @@ impl Node for LayerNormBackward {
         let weight = &self.inputs[1];
         let _bias = &self.inputs[2];
 
-        let shape = input.shape();
+        let shape = input.shape_ref();
         let outer_size: usize = shape[..shape.len() - 1]
             .iter()
             .map(|&d| d as usize)
@@ -74,7 +74,7 @@ impl Node for LayerNormBackward {
             &mut grad_bias_data,
         );
 
-        let grad_input = Tensor::from_vec(grad_input_data, shape.clone());
+        let grad_input = Tensor::from_vec(grad_input_data, shape.to_vec());
         let grad_weight = Tensor::from_vec(grad_weight_data, vec![norm_dim as i64]);
         let grad_bias = Tensor::from_vec(grad_bias_data, vec![norm_dim as i64]);
 
@@ -162,8 +162,8 @@ impl Node for CrossEntropyBackward {
 
         let logits = &self.logits;
         let targets = &self.targets;
-        let batch_size = logits.shape()[0] as usize;
-        let num_classes = logits.shape()[1] as usize;
+        let batch_size = logits.shape_ref()[0] as usize;
+        let num_classes = logits.shape_ref()[1] as usize;
 
         let logits_cpu = crate::autograd::ensure_cpu(logits);
         let logits_data = logits_cpu.as_f32_slice();

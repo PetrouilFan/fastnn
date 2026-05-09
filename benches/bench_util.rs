@@ -17,14 +17,8 @@ use std::time::Instant;
 ///
 /// # Returns
 /// Tuple of (elapsed_time_ms, packed_bytes)
-pub fn bench_gemv<T: PackedWord>(
-    m: usize,
-    k: usize,
-    iters: usize,
-) -> (f64, usize) {
-    let weight_data: Vec<f32> = (0..m * k)
-        .map(|i| (i as f32 * 0.01).sin() * 2.0)
-        .collect();
+pub fn bench_gemv<T: PackedWord>(m: usize, k: usize, iters: usize) -> (f64, usize) {
+    let weight_data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.01).sin() * 2.0).collect();
     let activation: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01).cos()).collect();
     let mut output = vec![0.0f32; m];
 
@@ -62,9 +56,7 @@ pub fn bench_gemv_with_metrics<T: PackedWord>(
     iters: usize,
     label: &str,
 ) -> (f64, f64, f64) {
-    let weight_data: Vec<f32> = (0..m * k)
-        .map(|i| (i as f32 * 0.01).sin() * 2.0)
-        .collect();
+    let weight_data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.01).sin() * 2.0).collect();
     let activation: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01).cos()).collect();
     let mut output = vec![0.0f32; m];
 
@@ -106,11 +98,7 @@ pub fn bench_gemv_with_metrics<T: PackedWord>(
 ///
 /// # Returns
 /// Elapsed time in ms
-pub fn bench_relu<T: PackedWord>(
-    data: &[f32],
-    shape: &[usize],
-    iters: usize,
-) -> f64 {
+pub fn bench_relu<T: PackedWord>(data: &[f32], shape: &[usize], iters: usize) -> f64 {
     // Create tensor OUTSIDE the timing loop
     let mut tensor = PackedTensor::<T>::from_f32_auto(data, shape);
 

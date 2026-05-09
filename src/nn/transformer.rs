@@ -86,10 +86,7 @@ impl TransformerBlock {
         let x_norm2 = self.norm2.forward(&x);
 
         // Fused feed-forward: linear -> gelu
-        let ff_gelu = x_norm2.fused_linear_gelu(
-            &self.ff1.weight,
-            self.ff1.bias.as_ref(),
-        );
+        let ff_gelu = x_norm2.fused_linear_gelu(&self.ff1.weight, self.ff1.bias.as_ref());
         let ff_out = self.ff2.forward(&ff_gelu);
         let ff_dropped = self.dropout.forward(&ff_out);
 
@@ -205,11 +202,7 @@ impl TransformerEncoder {
 
         // Precompute max-length position tensor for fast slice
         let positions: Vec<f32> = (0..max_seq_len).map(|i| i as f32).collect();
-        let pos_tensor = Tensor::from_vec(
-            positions,
-            vec![1, max_seq_len],
-        )
-        .requires_grad_(false);
+        let pos_tensor = Tensor::from_vec(positions, vec![1, max_seq_len]).requires_grad_(false);
 
         let transformer = TransformerEncoder {
             embedding,
@@ -228,7 +221,7 @@ impl TransformerEncoder {
     }
 
     pub fn forward(&self, token_ids: &Tensor) -> Tensor {
-        let shape = token_ids.shape();
+        let shape = token_ids.shape_ref();
         if shape.len() < 2 {
             panic!(
                 "TransformerEncoder expected input with at least 2 dimensions (batch, seq_len), got shape {:?}",
@@ -420,7 +413,7 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
         let ff_out = self.ff2.forward(&ff_gelu);
         let ff_dropped = self.dropout.forward(&Tensor::from_vec(
             ff_out.clone(),
-            vec![x.shape()[0], x.shape()[1], self.d_model],
+            vec![x.shape_ref()[0], x.shape_ref()[1], self.d_model],
         ));
 
         ff_dropped.add(&x)
@@ -523,7 +516,7 @@ impl<T: PackedWord> PackedTransformerEncoder<T> {
 
     /// Forward pass through quantized transformer.
     pub fn forward(&self, token_ids: &Tensor) -> Tensor {
-        let shape = token_ids.shape();
+        let shape = token_ids.shape_ref();
         if shape.len() < 2 {
             panic!(
                 "PackedTransformerEncoder expected input with at least 2 dimensions (batch, seq_len), got shape {:?}",

@@ -1,11 +1,7 @@
-use crate::optim::{
-    get_grad, Optimizer, OptimizerState, ParamGroup,
-    ParamState, zeros_like,
-};
+use crate::optim::{zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState};
 use crate::tensor::Tensor;
+use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;
-
-use crate::impl_params_mut;
 
 pub struct RMSprop {
     pub params: Vec<Tensor>,
@@ -69,11 +65,7 @@ impl Optimizer for RMSprop {
         let momentum = self.momentum as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = get_grad(param) {
-                g
-            } else {
-                continue;
-            };
+            let grad = get_grad_or_skip!(param);
 
             // Apply decoupled weight decay
             if weight_decay != 0.0 {
@@ -91,14 +83,20 @@ impl Optimizer for RMSprop {
                 self.grad_avg[i].mul_scalar_(alpha).add_(&grad_avg_update);
                 // denom = sqrt(avg - avg_grad^2) + eps
                 let grad_avg_sq = self.grad_avg[i].pow(2.0);
-                self.square_avg[i].clone().sub(&grad_avg_sq).sqrt().add_scalar(eps)
+                self.square_avg[i]
+                    .clone()
+                    .sub(&grad_avg_sq)
+                    .sqrt()
+                    .add_scalar(eps)
             } else {
                 self.square_avg[i].clone().sqrt().add_scalar(eps)
             };
 
             if momentum != 0.0 {
                 let momentum_update = grad.div(&denom);
-                self.momentum_buf[i].mul_scalar_(momentum).add_(&momentum_update);
+                self.momentum_buf[i]
+                    .mul_scalar_(momentum)
+                    .add_(&momentum_update);
                 param.sub_(&self.momentum_buf[i].clone().mul_scalar(lr));
             } else {
                 let update = grad.div(&denom).mul_scalar(lr);

@@ -7,15 +7,17 @@ use std::io::{BufReader, BufWriter, Read, Write};
 
 // Magic bytes to identify fastnn checkpoint format
 const MAGIC_BYTES: [u8; 4] = [0x46, 0x4E, 0x4E, 0x00]; // "FNN\0"
-// Magic bytes to identify fastnn optimizer state format
+                                                       // Magic bytes to identify fastnn optimizer state format
 #[allow(dead_code)] // Reserved for future optimizer state serialization
 const OPTIMIZER_MAGIC: [u8; 4] = [0x46, 0x4E, 0x4F, 0x00]; // "FNO\0"
-// Format version for forward compatibility
+                                                           // Format version for forward compatibility
 const FORMAT_VERSION: u32 = 2;
 
 /// Write a length-prefixed byte slice (length as little-endian u64, then data).
 fn write_length_prefixed(writer: &mut impl Write, bytes: &[u8]) -> FastnnResult<()> {
-    writer.write_all(&(bytes.len() as u64).to_le_bytes()).map_err(FastnnError::Io)?;
+    writer
+        .write_all(&(bytes.len() as u64).to_le_bytes())
+        .map_err(FastnnError::Io)?;
     writer.write_all(bytes).map_err(FastnnError::Io)?;
     Ok(())
 }
@@ -43,7 +45,16 @@ fn read_slice_i64(reader: &mut impl Read) -> FastnnResult<Vec<i64>> {
     let mut result = Vec::with_capacity(len);
     for i in 0..len {
         let start = i * 8;
-        let val = i64::from_le_bytes([bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3], bytes[start + 4], bytes[start + 5], bytes[start + 6], bytes[start + 7]]);
+        let val = i64::from_le_bytes([
+            bytes[start],
+            bytes[start + 1],
+            bytes[start + 2],
+            bytes[start + 3],
+            bytes[start + 4],
+            bytes[start + 5],
+            bytes[start + 6],
+            bytes[start + 7],
+        ]);
         result.push(val);
     }
     Ok(result)
@@ -54,15 +65,21 @@ fn read_slice_i64(reader: &mut impl Read) -> FastnnResult<Vec<i64>> {
 fn read_tensor_v1(reader: &mut impl Read) -> FastnnResult<(String, Vec<u32>, Vec<f32>)> {
     // Read name length and name
     let mut name_len_bytes = [0u8; 8];
-    reader.read_exact(&mut name_len_bytes).map_err(FastnnError::Io)?;
+    reader
+        .read_exact(&mut name_len_bytes)
+        .map_err(FastnnError::Io)?;
     let name_len = u64::from_le_bytes(name_len_bytes) as usize;
     let mut name_bytes = vec![0u8; name_len];
-    reader.read_exact(&mut name_bytes).map_err(FastnnError::Io)?;
+    reader
+        .read_exact(&mut name_bytes)
+        .map_err(FastnnError::Io)?;
     let name = String::from_utf8(name_bytes).map_err(FastnnError::Utf8)?;
 
     // Read shape length and shape
     let mut shape_len_bytes = [0u8; 8];
-    reader.read_exact(&mut shape_len_bytes).map_err(FastnnError::Io)?;
+    reader
+        .read_exact(&mut shape_len_bytes)
+        .map_err(FastnnError::Io)?;
     let shape_len = u64::from_le_bytes(shape_len_bytes) as usize;
     let mut shape = Vec::with_capacity(shape_len);
     for _ in 0..shape_len {
@@ -73,11 +90,15 @@ fn read_tensor_v1(reader: &mut impl Read) -> FastnnResult<(String, Vec<u32>, Vec
 
     // Read data length and data
     let mut data_len_bytes = [0u8; 8];
-    reader.read_exact(&mut data_len_bytes).map_err(FastnnError::Io)?;
+    reader
+        .read_exact(&mut data_len_bytes)
+        .map_err(FastnnError::Io)?;
     let data_len = u64::from_le_bytes(data_len_bytes) as usize;
     let mut data_bytes = vec![0u8; data_len * 4]; // f32 is 4 bytes
-    reader.read_exact(&mut data_bytes).map_err(FastnnError::Io)?;
-    
+    reader
+        .read_exact(&mut data_bytes)
+        .map_err(FastnnError::Io)?;
+
     // Convert bytes to f32 values
     let data: Vec<f32> = data_bytes
         .chunks_exact(4)
@@ -96,17 +117,14 @@ pub fn save_model(model: &dyn Module, path: &str) -> FastnnResult<()> {
     let mut writer = BufWriter::new(file);
 
     // Write magic bytes for format identification
-    writer
-        .write_all(&MAGIC_BYTES)?;
+    writer.write_all(&MAGIC_BYTES)?;
 
     // Write format version
-    writer
-        .write_all(&FORMAT_VERSION.to_le_bytes())?;
+    writer.write_all(&FORMAT_VERSION.to_le_bytes())?;
 
     // Write number of parameters
     let num_params = params.len() as u64;
-    writer
-        .write_all(&num_params.to_le_bytes())?;
+    writer.write_all(&num_params.to_le_bytes())?;
 
     // Write each parameter
     for (name, tensor) in &params {
@@ -122,22 +140,18 @@ pub fn save_model(model: &dyn Module, path: &str) -> FastnnResult<()> {
         } else {
             // Fallback for non-contiguous or GPU tensors
             let data = tensor.to_numpy();
-            let bytes = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-            };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
             write_length_prefixed(&mut writer, bytes)?;
         }
     }
 
-    writer
-        .flush()?;
+    writer.flush()?;
     Ok(())
 }
 
 #[allow(dead_code)]
-pub fn load_model(
-    path: &str,
-) -> FastnnResult<HashMap<String, Tensor>> {
+pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
     let mut result = HashMap::new();
 
     let file = File::open(path)?;
@@ -145,8 +159,7 @@ pub fn load_model(
 
     // Read and validate magic bytes
     let mut magic_bytes = [0u8; 4];
-    reader
-        .read_exact(&mut magic_bytes)?;
+    reader.read_exact(&mut magic_bytes)?;
     if magic_bytes != MAGIC_BYTES {
         return Err(FastnnError::Serialization(format!(
             "Invalid file format: expected magic bytes {:?}, got {:?}",
@@ -156,8 +169,7 @@ pub fn load_model(
 
     // Read format version
     let mut version_bytes = [0u8; 4];
-    reader
-        .read_exact(&mut version_bytes)?;
+    reader.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
     if version > FORMAT_VERSION {
         return Err(FastnnError::Serialization(format!(
@@ -168,8 +180,7 @@ pub fn load_model(
 
     // Read number of parameters
     let mut num_params_bytes = [0u8; 8];
-    reader
-        .read_exact(&mut num_params_bytes)?;
+    reader.read_exact(&mut num_params_bytes)?;
     let num_params = u64::from_le_bytes(num_params_bytes);
 
     if version == 1 {
@@ -184,8 +195,7 @@ pub fn load_model(
         for _ in 0..num_params {
             // Read name using helper
             let name_bytes = read_length_prefixed(&mut reader)?;
-            let name = String::from_utf8(name_bytes)
-                .map_err(FastnnError::Utf8)?;
+            let name = String::from_utf8(name_bytes).map_err(FastnnError::Utf8)?;
 
             // Read shape using helper
             let shape = read_slice_i64(&mut reader)?;

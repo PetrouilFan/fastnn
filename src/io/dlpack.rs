@@ -207,7 +207,9 @@ extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
 #[allow(dead_code)]
 pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor> {
     if capsule.is_null() {
-        return Err(FastnnError::Serialization("DLPack capsule is null".to_string()));
+        return Err(FastnnError::Serialization(
+            "DLPack capsule is null".to_string(),
+        ));
     }
 
     unsafe {
@@ -215,7 +217,9 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor>
         let dl_tensor = &managed.dl_tensor;
 
         if dl_tensor.data.is_null() {
-            return Err(FastnnError::Serialization("DLPack tensor data is null".to_string()));
+            return Err(FastnnError::Serialization(
+                "DLPack tensor data is null".to_string(),
+            ));
         }
 
         // Extract shape
@@ -232,7 +236,7 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor>
         // F64 is not supported - return an error instead of silent conversion
         if dtype == DType::F64 {
             return Err(FastnnError::Dtype(
-                "F64 tensors are not supported. Use F32 instead.".to_string()
+                "F64 tensors are not supported. Use F32 instead.".to_string(),
             ));
         }
 
@@ -250,10 +254,12 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor>
                 );
                 src.to_vec()
             }
-            _ => return Err(FastnnError::Dtype(format!(
-                "Unsupported dtype for from_dlpack: {:?}",
-                dtype
-            ))),
+            _ => {
+                return Err(FastnnError::Dtype(format!(
+                    "Unsupported dtype for from_dlpack: {:?}",
+                    dtype
+                )))
+            }
         };
 
         // Call the deleter if provided

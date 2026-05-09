@@ -154,7 +154,7 @@ mod tests {
         let b: u32 = 0x6787_6543; // nibbles: [3,4,5,6,7,8,7,6]
         let result = swar_min_u4x8(a, b);
         // Expected: min([8,9,0,1,2,3,4,5], [3,4,5,6,7,8,7,6]) = [3,4,0,1,2,3,4,5]
-        assert_eq!(result, 0x5432_1098 & 0x6787_6543); // This is approximate, but for this test
+        assert_eq!(result, 0x5432_1043u32);
     }
 
     #[test]

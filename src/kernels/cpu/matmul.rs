@@ -3,17 +3,17 @@
 #![allow(unused_imports)]
 #![allow(clippy::missing_safety_doc)]
 
+use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
-    matmul_blas, matmul_blas_into, matmul_blas_with_transpose,
-    matmul_blas_with_transpose_into, MIN_BLAS_SIZE,
+    matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
+    MIN_BLAS_SIZE,
 };
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
-use super::*;
 
 pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     // Removed debug file writing that was causing issues on Windows
@@ -21,8 +21,8 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let b = args[1];
 
-    let a_shape = a.shape();
-    let b_shape = b.shape();
+    let a_shape = a.shape_ref();
+    let b_shape = b.shape_ref();
 
     if a_shape.len() < 2 || b_shape.len() < 2 {
         panic!("matmul: both tensors must have at least 2 dimensions");
@@ -38,9 +38,9 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_strides = a.strides();
     let b_strides = b.strides();
     let _a_is_transposed =
-        a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] >= a_shape[a_shape.len() - 2];
+        a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] == a_shape[a_shape.len() - 2];
     let b_is_transposed =
-        b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] >= b_shape[b_shape.len() - 2];
+        b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] == b_shape[b_shape.len() - 2];
 
     // For matmul: A[m, k] @ B[k, n] = C[m, n]
     // When B is transposed (shape [n, k] representing original [k, n]):
@@ -86,7 +86,7 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let batch = batch_a.max(batch_b);
 
     // Save original shapes for output reshape
-    let orig_a_shape = a_shape.clone();
+    let orig_a_shape = a_shape;
 
     // For N-D tensors (N > 3), flatten all batch dims into a single batch dim
     // by reshaping to 3D. This avoids incorrect batch stride calculations.
@@ -97,6 +97,7 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             a_shape[a_shape.len() - 2],
             a_shape[a_shape.len() - 1],
         ])
+        .contiguous()
     } else {
         a.clone()
     };
@@ -107,14 +108,15 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             b_shape[b_shape.len() - 2],
             b_shape[b_shape.len() - 1],
         ])
+        .contiguous()
     } else {
         b.clone()
     };
 
     let a = &a_3d;
     let b = &b_3d;
-    let a_shape = a.shape();
-    let b_shape = b.shape();
+    let a_shape = a.shape_ref();
+    let b_shape = b.shape_ref();
     let a_strides = a.strides();
     let b_strides = b.strides();
 
@@ -703,8 +705,8 @@ pub unsafe fn linear_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let w = args[1];
     let bias = if args.len() > 2 { Some(args[2]) } else { None };
 
-    let x_shape = x.shape();
-    let w_shape = w.shape();
+    let x_shape = x.shape_ref();
+    let w_shape = w.shape_ref();
 
     let batch_size: i64 = if x_shape.len() > 1 {
         x_shape[..x_shape.len() - 1].iter().product()
@@ -742,8 +744,8 @@ pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let w = args[1];
     let bias = if args.len() > 2 { Some(args[2]) } else { None };
 
-    let x_shape = x.shape();
-    let w_shape = w.shape();
+    let x_shape = x.shape_ref();
+    let w_shape = w.shape_ref();
 
     let batch_size: i64 = if x_shape.len() > 1 {
         x_shape[..x_shape.len() - 1].iter().product()
@@ -751,7 +753,7 @@ pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         1
     };
     let in_features = x_shape[x_shape.len() - 1];
-    let out_features = w_shape[0];
+    let out_features = w_shape[1];
 
     let x_ptr = x.data_ptr_f32();
     let w_ptr = w.data_ptr_f32();
@@ -796,8 +798,7 @@ pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let out_slice =
             unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_size * out_features) };
 
-        // GEMM: [batch, in] @ [out, in]^T = [batch, out]
-        // w is [out, in] contiguous, use trans_b=true so BLAS reads it as [in, out]
+        // GEMM: [batch, in] @ [in, out] = [batch, out]
         matmul_blas_with_transpose_into(
             x_slice,
             w_slice,
@@ -806,7 +807,7 @@ pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             in_features,
             out_features,
             false,
-            true,
+            false,
         );
 
         // Parallel bias + relu pass over all output elements
@@ -876,7 +877,7 @@ pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let mut sum = 0.0f32;
                 for k in 0..in_features {
                     let x_offset = batch_idx * in_features + k;
-                    let w_offset = out_idx * in_features + k;
+                    let w_offset = k * out_features + out_idx;
                     let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
                     let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                     sum += x_val * w_val;
@@ -899,7 +900,7 @@ pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let mut sum = 0.0f32;
                     for k in 0..in_features {
                         let x_offset = batch_idx * in_features + k;
-                        let w_offset = out_idx * in_features + k;
+                        let w_offset = k * out_features + out_idx;
                         let x_val = unsafe { *x_ptr.add(x_offset) };
                         let w_val = unsafe { *w_ptr.add(w_offset) };
                         sum += x_val * w_val;
@@ -926,8 +927,8 @@ pub unsafe fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let w = args[1];
     let bias = if args.len() > 2 { Some(args[2]) } else { None };
 
-    let x_shape = x.shape();
-    let w_shape = w.shape();
+    let x_shape = x.shape_ref();
+    let w_shape = w.shape_ref();
 
     let batch_size: i64 = if x_shape.len() > 1 {
         x_shape[..x_shape.len() - 1].iter().product()
@@ -935,7 +936,7 @@ pub unsafe fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         1
     };
     let in_features = x_shape[x_shape.len() - 1];
-    let out_features = w_shape[0];
+    let out_features = w_shape[1];
 
     let x_ptr = x.data_ptr_f32();
     let w_ptr = w.data_ptr_f32();
@@ -985,7 +986,7 @@ pub unsafe fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             in_features,
             out_features,
             false,
-            true,
+            false,
         );
 
         let total = batch_size * out_features;
@@ -1053,7 +1054,7 @@ pub unsafe fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let mut sum = 0.0f32;
                 for k in 0..in_features {
                     let x_offset = batch_idx * in_features + k;
-                    let w_offset = out_idx * in_features + k;
+                    let w_offset = k * out_features + out_idx;
                     let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
                     let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                     sum += x_val * w_val;
@@ -1078,7 +1079,7 @@ pub unsafe fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let mut sum = 0.0f32;
                     for k in 0..in_features {
                         let x_offset = batch_idx * in_features + k;
-                        let w_offset = out_idx * in_features + k;
+                        let w_offset = k * out_features + out_idx;
                         let x_val = unsafe { *x_ptr.add(x_offset) };
                         let w_val = unsafe { *w_ptr.add(w_offset) };
                         sum += x_val * w_val;
@@ -1107,8 +1108,8 @@ pub unsafe fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let w = args[1];
     let bias = if args.len() > 2 { Some(args[2]) } else { None };
 
-    let x_shape = x.shape();
-    let w_shape = w.shape();
+    let x_shape = x.shape_ref();
+    let w_shape = w.shape_ref();
 
     let batch_size: i64 = if x_shape.len() > 1 {
         x_shape[..x_shape.len() - 1].iter().product()
@@ -1116,7 +1117,7 @@ pub unsafe fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         1
     };
     let in_features = x_shape[x_shape.len() - 1];
-    let out_features = w_shape[0];
+    let out_features = w_shape[1];
 
     let x_ptr = x.data_ptr_f32();
     let w_ptr = w.data_ptr_f32();
@@ -1145,8 +1146,8 @@ pub unsafe fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let batch_size = batch_size as usize;
     let in_features = in_features as usize;
     let out_features = out_features as usize;
-const SQRT_2_OVER_PI: f32 = 0.7978846;
-const GELU_COEFF: f32 = 0.044715;
+    const SQRT_2_OVER_PI: f32 = 0.7978846;
+    const GELU_COEFF: f32 = 0.044715;
     let sqrt_2_over_pi = SQRT_2_OVER_PI;
     let coeff = GELU_COEFF;
 
@@ -1170,7 +1171,7 @@ const GELU_COEFF: f32 = 0.044715;
             in_features,
             out_features,
             false,
-            true,
+            false,
         );
 
         let total = batch_size * out_features;
@@ -1246,7 +1247,7 @@ const GELU_COEFF: f32 = 0.044715;
                 let mut sum = 0.0f32;
                 for k in 0..in_features {
                     let x_offset = batch_idx * in_features + k;
-                    let w_offset = out_idx * in_features + k;
+                    let w_offset = k * out_features + out_idx;
                     let x_val = unsafe { *((x_usize + x_offset * 4) as *const f32) };
                     let w_val = unsafe { *((w_usize + w_offset * 4) as *const f32) };
                     sum += x_val * w_val;
@@ -1273,7 +1274,7 @@ const GELU_COEFF: f32 = 0.044715;
                     let mut sum = 0.0f32;
                     for k in 0..in_features {
                         let x_offset = batch_idx * in_features + k;
-                        let w_offset = out_idx * in_features + k;
+                        let w_offset = k * out_features + out_idx;
                         let x_val = unsafe { *x_ptr.add(x_offset) };
                         let w_val = unsafe { *w_ptr.add(w_offset) };
                         sum += x_val * w_val;

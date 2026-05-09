@@ -8,7 +8,7 @@ def test_save_load_model():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "model.fastnn")
-        fnn.save_model(model, path)
+        fnn.io.save(model, path)
 
         assert os.path.exists(path) or True
 

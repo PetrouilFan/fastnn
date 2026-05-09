@@ -48,10 +48,12 @@ pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> FastnnResul
     let dispatcher = get_dispatcher();
     let guard = dispatcher.read();
 
-    let kernel = guard
-        .ops
-        .get(&(op, key))
-        .ok_or_else(|| FastnnError::Computation(format!("No kernel registered for op '{}' with key {:?}", op, key)))?;
+    let kernel = guard.ops.get(&(op, key)).ok_or_else(|| {
+        FastnnError::Computation(format!(
+            "No kernel registered for op '{}' with key {:?}",
+            op, key
+        ))
+    })?;
 
     Ok(unsafe { kernel(args) })
 }

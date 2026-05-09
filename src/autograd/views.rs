@@ -16,8 +16,8 @@ impl Node for ViewBackward {
         let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
             return vec![None];
         };
-        let shape = self.input.shape();
-        vec![Some(grad.reshape(shape))]
+        let shape = self.input.shape_ref();
+        vec![Some(grad.reshape(shape.to_vec()))]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -72,9 +72,9 @@ impl Node for SliceBackward {
             return vec![None];
         };
 
-        let input_shape = self.input.shape();
+        let input_shape = self.input.shape_ref();
         let mut grad_input = Tensor::zeros(
-            input_shape.clone(),
+            input_shape.to_vec(),
             crate::storage::DType::F32,
             self.input.device(),
         );
@@ -93,7 +93,7 @@ impl Node for SliceBackward {
 
                 // Compute the sliced shape
                 let sliced_size = (self.end - self.start + self.step - 1) / self.step;
-                let mut grad_shape = input_shape.clone();
+                let mut grad_shape = input_shape.to_vec();
                 grad_shape[self.dim] = sliced_size;
 
                 let ndim = grad_shape.len();
