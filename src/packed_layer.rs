@@ -32,7 +32,7 @@ pub fn is_wgpu() -> bool {
 pub struct PackedLinear<T: PackedWord> {
     /// Packed weights [out_features, in_features]
     pub weight: PackedTensor<T>,
-    /// Bias in f32 [out_features]
+    /// Bias in f32 with shape `[out_features]`
     pub bias: Option<Vec<f32>>,
     /// Master weights in f32 for optimizer updates (training only)
     pub master_weight: Option<Vec<f32>>,

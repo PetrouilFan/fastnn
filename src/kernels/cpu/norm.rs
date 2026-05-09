@@ -159,7 +159,7 @@ pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 /// Fused RMSNorm kernel: single-pass computation combining x^2, mean, add(eps), sqrt, div, mul(weight).
 /// Eliminates 6+ intermediate operations and allocations.
-/// Returns [output].
+/// Returns the normalized output tensor.
 pub unsafe fn rms_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let weight = if args.len() > 1 && args[1].numel() > 0 {
@@ -564,7 +564,7 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 }
 
 /// Fused layer norm + GELU: single-pass with GELU activation.
-/// Returns [output].
+/// Returns the normalized output tensor.
 pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let weight = if args.len() > 1 && args[1].numel() > 0 {
@@ -689,7 +689,7 @@ pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 }
 
 /// Fused RMSNorm + GELU: single-pass with GELU activation.
-/// Returns [output].
+/// Returns the normalized output tensor.
 pub unsafe fn fused_rms_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let x = args[0];
     let weight = if args.len() > 1 && args[1].numel() > 0 {

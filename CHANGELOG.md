@@ -1,5 +1,77 @@
 # Changelog
 
+## v1.2.0 — Fused Kernel Optimizations & Performance Overhaul
+
+### Performance: Fused Operator Kernels
+
+- **Conv+BN+SiLU fusion**: Single-pass `fused_conv_bn_silu` kernel achieves **14-25× speedup** over PyTorch's separate Conv2d+BatchNorm2d+SiLU on CPU.
+- **Conv+BN+ReLU/GELU fusion**: Added `fused_conv_bn_relu` and `fused_conv_bn_gelu` kernels with matching fused module implementations.
+- **LayerNorm+GELU & RMSNorm+GELU fusion**: Single-pass norm+activation kernels for BERT/GPT and LLaMA architectures.
+- **GELU backward fusion**: Eliminated ~9 intermediate tensors in GELU backward pass.
+- **SiLU backward fusion**: Eliminated ~4 intermediate tensors in SiLU backward pass.
+- **Softmax backward fusion**: Single-pass fused softmax backward kernel.
+- **AdamW/Adam fused update**: Single-pass optimizer step eliminating redundant loops.
+
+### Performance: Memory & Dispatch Optimizations
+
+- **`zeros()` → `empty()`**: Replaced unnecessary zero initialization with uninitialized memory in 12+ kernels (conv1d, conv2d, conv3d, pooling, clamp, sign, pow, gt_scalar, embedding, log_softmax, softmax_last_dim_simd, maximum, minimum).
+- **`TensorIterator`**: Replaced `broadcast_index_decomposition` with a unified iterator, eliminating bounds-check branching in hot loops.
+- **FxHashMap in autograd**: Faster integer-key lookups in the autograd engine.
+- **`OpId` enum dispatcher**: Replaced string-based operation lookup with integer enum dispatch.
+- **Smart parallel thresholds**: Rayon parallelism now uses cache-aware thresholds for both memory-bound and compute-bound workloads.
+- **Storage pool split**: Separated `acquire` into uninit/zeroed paths to avoid unnecessary memset.
+- **Backward workspace reuse**: Autograd backward passes reuse pre-allocated workspaces.
+- **Lower parallel thresholds**: Reduction kernels now parallelize at smaller sizes.
+- **`shape_ref()` → `&[i64]`**: Added zero-copy shape accessor; converted 163 hot-path call sites.
+
+### New Features
+
+- **FusedConvBn**: Inference module fusing Conv2d+BatchNorm2d with ~7× speedup.
+- **FusedConvBnReLU, FusedConvBnGELU**: Fused conv+bn+activation modules.
+- **`Tensor::empty()`**: Exposed to Python API for advanced users.
+
+### Bug Fixes
+
+- **Weight convention alignment**: `Linear::from_weights` transpose, matmul transposition detection, and 4D+ reshape stride invalidation — all aligned to FastNN's [in, out] weight layout.
+- **Transformer matmul crash**: Fused linear kernels now correctly use FastNN's weight convention.
+- **Conv2d weight shadowing**: Fixed `n` variable shadowing `out_channels` in all 5 `conv2d_3x3_direct` variants (plain, fused_bn, fused_bn_silu, fused_bn_relu, fused_bn_gelu).
+- **sgemm transpose stride**: Fixed buffer overflow and wrong values when `matrixmultiply` path uses transposed inputs.
+- **SWAR test values**: Fixed 2 incorrect expected values in `swar_min_u16x2` and `swar_min_u4x8` tests.
+- **`cat()` storage_offset**: Fixed double-counting storage offset in tensor concatenation.
+- **`TensorIterator` broadcasting**: Fixed broadcasting bug in iterator.
+- **BatchNorm2d variance**: Corrected variance formula.
+- **GELU backward argument order**: Fixed argument order in GELU backward autograd node.
+- **NEON SIMD**: Fixed undefined NEON functions in elementwise kernels.
+- **ONNX import**: Made lazy to avoid import error when not installed.
+- **MaxPool2d**: Fixed Rust module reuse across forward passes.
+- **Iterator bounds check**: Fixed bounds check edge case (Task 1 + Task 2).
+
+### Code Quality & Cleanup
+
+- **Removed deprecated API**: Deleted `save_model`/`load_model`/`save_optimizer`/`load_optimizer` — users should use `state_dict`/`load_state_dict`.
+- **Tensor submodule extraction**: Split monolithic `src/tensor/mod.rs` (3567→1040 lines) into 6 domain files (shape, device, factories, indexing, ops, reductions).
+- **Duplicate code elimination**: Added macros (`get_grad_or_skip!`, `impl_nn_params!`, `impl_nn_named_params!`, helpers `attach_grad_fn`, `new_view_from`, `new_on_device`) removing hundreds of lines of boilerplate.
+- **DIV/MOD flattening**: Replaced flat index arithmetic with nested loops in conv2d kernels (9 inner + 10 outer sites).
+- **Thread-local scratch buffers**: Replaced per-call heap allocations in packed SIMD/BLAS paths with reusable thread-local buffers.
+- **All clippy warnings fixed**: CI builds clean at `-D warnings`.
+- **All ruff lint errors fixed**: Python code fully linted.
+
+### Testing
+
+- 100+ Rust unit tests pass (0 failures).
+- Comprehensive conv2d tests (scratch reuse, im2col correctness, stride/dilation configurations).
+- All 20 SWAR operation tests pass.
+- Optimizer soak test fixed (runtime and memory pool).
+- Examples compile and pass (`packed_gemv_bench`, `quantized_transformer`).
+
+### Documentation
+
+- Added development architecture and performance roadmap docs.
+- Updated README with fused kernel benchmark results.
+- Fixed 8 documentation warnings (broken links, unclosed HTML tags).
+
+---
+
 ## v1.1.0 — Modular Backend Architecture & Packed Precision Optimization
 
 ### Architecture
