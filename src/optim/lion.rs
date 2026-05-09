@@ -1,11 +1,7 @@
-use crate::optim::{
-    get_grad, Optimizer, OptimizerState, ParamGroup,
-    ParamState, zeros_like,
-};
+use crate::optim::{zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState, WeightDecayOptimizer};
 use crate::tensor::Tensor;
+use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;
-
-use crate::impl_params_mut;
 
 pub struct Lion {
     pub params: Vec<Tensor>,
@@ -14,12 +10,14 @@ pub struct Lion {
     pub weight_decay: f64,
     pub m: Vec<Tensor>,
     pub step: Vec<u64>,
+    pub no_decay: Vec<bool>,
 }
 
 impl Lion {
     pub fn new(params: Vec<Tensor>, lr: f64, betas: (f64, f64), weight_decay: f64) -> Self {
         let m = zeros_like(&params);
         let step = vec![0u64; params.len()];
+        let no_decay = vec![false; params.len()];
 
         Lion {
             params,
@@ -28,7 +26,20 @@ impl Lion {
             weight_decay,
             m,
             step,
+            no_decay,
         }
+    }
+}
+
+impl WeightDecayOptimizer for Lion {
+    fn params(&self) -> &Vec<Tensor> {
+        &self.params
+    }
+    fn no_decay(&self) -> &Vec<bool> {
+        &self.no_decay
+    }
+    fn no_decay_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.no_decay
     }
 }
 
@@ -42,11 +53,7 @@ impl Optimizer for Lion {
         let weight_decay = self.weight_decay as f32;
 
         for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = if let Some(g) = get_grad(param) {
-                g
-            } else {
-                continue;
-            };
+            let grad = get_grad_or_skip!(param);
 
             self.step[i] += 1;
 
@@ -57,12 +64,18 @@ impl Optimizer for Lion {
 
             // Update momentum: m = beta1 * m + (1 - beta1) * grad
             let beta1_c = 1.0 - beta1;
-            let m_update = self.m[i].clone().mul_scalar(beta1).add(&grad.mul_scalar(beta1_c));
+            let m_update = self.m[i]
+                .clone()
+                .mul_scalar(beta1)
+                .add(&grad.mul_scalar(beta1_c));
             self.m[i] = m_update;
 
             // Compute sign of (beta2 * m + (1 - beta2) * grad)
             let beta2_c = 1.0 - beta2;
-            let update_term = self.m[i].clone().mul_scalar(beta2).add(&grad.mul_scalar(beta2_c));
+            let update_term = self.m[i]
+                .clone()
+                .mul_scalar(beta2)
+                .add(&grad.mul_scalar(beta2_c));
             let signed = update_term.sign();
 
             // param = param - lr * sign(update)
@@ -75,6 +88,7 @@ impl Optimizer for Lion {
 
         self.m.extend(m);
         self.step.extend(vec![0u64; params.len()]);
+        self.no_decay.extend(vec![false; params.len()]);
         self.params.extend(params);
     }
 

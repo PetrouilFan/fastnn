@@ -1,7 +1,10 @@
 use crate::autograd::{self, AutogradMeta, Conv2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
-use crate::{impl_training_state, impl_zero_grad, nn::{Module, TrainingState}};
 use crate::tensor::Tensor;
+use crate::{
+    impl_nn_named_params, impl_nn_params, impl_training_state, impl_zero_grad,
+    nn::{Module, TrainingState},
+};
 use std::sync::Arc;
 
 pub struct Conv2d {
@@ -125,24 +128,9 @@ impl Module for Conv2d {
         }
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        let mut params = vec![self.weight.clone()];
-        if let Some(b) = &self.bias {
-            params.push(b.clone());
-        }
-        params
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        let mut params = vec![("weight".to_string(), self.weight.clone())];
-        if let Some(b) = &self.bias {
-            params.push(("bias".to_string(), b.clone()));
-        }
-        params
-    }
-
+    impl_nn_params!(weight, bias);
+    impl_nn_named_params!(weight, bias, "weight", "bias");
     impl_zero_grad!(self, self.weight, self.bias);
-
     impl_training_state!(self, self.training);
 }
 
@@ -209,7 +197,7 @@ impl ConvTranspose2d {
 
 impl Module for ConvTranspose2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let x_shape = x.shape();
+        let x_shape = x.shape_ref();
         let _batch = x_shape[0];
         let _in_channels = x_shape[1];
         let h_in = x_shape[2];
@@ -222,12 +210,7 @@ impl Module for ConvTranspose2d {
         let result = crate::dispatcher::dispatch(
             "conv_transpose2d",
             dispatch_key,
-            &[
-                x,
-                &self.weight,
-                &self.stride_scalar,
-                &self.padding_scalar,
-            ],
+            &[x, &self.weight, &self.stride_scalar, &self.padding_scalar],
         );
         let mut output = result[0].clone();
 
@@ -268,24 +251,9 @@ impl Module for ConvTranspose2d {
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        let mut params = vec![self.weight.clone()];
-        if let Some(ref b) = self.bias {
-            params.push(b.clone());
-        }
-        params
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        let mut params = vec![("weight".to_string(), self.weight.clone())];
-        if let Some(ref b) = self.bias {
-            params.push(("bias".to_string(), b.clone()));
-        }
-        params
-    }
-
+    impl_nn_params!(weight, bias);
+    impl_nn_named_params!(weight, bias, "weight", "bias");
     impl_zero_grad!(self, self.weight, self.bias);
-
     impl_training_state!(self, self.training);
 }
 
@@ -355,7 +323,7 @@ impl Conv1d {
 impl Module for Conv1d {
     fn forward(&self, x: &Tensor) -> Tensor {
         // Conv1d = Conv2d with height=1, so reshape [B, C, L] -> [B, C, 1, L]
-        let x_shape = x.shape();
+        let x_shape = x.shape_ref();
         let batch = x_shape[0];
         let channels = x_shape[1];
         let length = x_shape[2];
@@ -385,34 +353,18 @@ impl Module for Conv1d {
         }
 
         // Reshape back to 3D: [B, C_out, 1, L_out] -> [B, C_out, L_out]
-        let out_shape = output.shape();
+        let out_shape = output.shape_ref();
         let out_channels = out_shape[1];
         let out_length = out_shape[3];
         output.reshape(vec![batch, out_channels, out_length])
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        let mut params = vec![self.weight.clone()];
-        if let Some(ref b) = self.bias {
-            params.push(b.clone());
-        }
-        params
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        let mut params = vec![("weight".to_string(), self.weight.clone())];
-        if let Some(ref b) = self.bias {
-            params.push(("bias".to_string(), b.clone()));
-        }
-        params
-    }
-
+    impl_nn_params!(weight, bias);
+    impl_nn_named_params!(weight, bias, "weight", "bias");
     impl_zero_grad!(self, self.weight, self.bias);
-
     impl_training_state!(self, self.training);
 }
 
-#[allow(dead_code)]
 pub struct Conv3d {
     pub weight: Tensor,
     pub bias: Option<Tensor>,
@@ -488,7 +440,7 @@ impl Conv3d {
 impl Module for Conv3d {
     fn forward(&self, x: &Tensor) -> Tensor {
         // Conv3d = Conv2d with depth as batch, so reshape [B, C, D, H, W] -> [B*D, C, H, W]
-        let x_shape = x.shape();
+        let x_shape = x.shape_ref();
         let batch = x_shape[0];
         let channels = x_shape[1];
         let depth = x_shape[2];
@@ -522,30 +474,15 @@ impl Module for Conv3d {
         }
 
         // Reshape back to 5D: [B*D, C_out, H_out, W_out] -> [B, C_out, D, H_out, W_out]
-        let out_shape = output.shape();
+        let out_shape = output.shape_ref();
         let out_channels = out_shape[1];
         let out_height = out_shape[2];
         let out_width = out_shape[3];
         output.reshape(vec![batch, out_channels, depth, out_height, out_width])
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        let mut params = vec![self.weight.clone()];
-        if let Some(ref b) = self.bias {
-            params.push(b.clone());
-        }
-        params
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        let mut params = vec![("weight".to_string(), self.weight.clone())];
-        if let Some(ref b) = self.bias {
-            params.push(("bias".to_string(), b.clone()));
-        }
-        params
-    }
-
+    impl_nn_params!(weight, bias);
+    impl_nn_named_params!(weight, bias, "weight", "bias");
     impl_zero_grad!(self, self.weight, self.bias);
-
     impl_training_state!(self, self.training);
 }

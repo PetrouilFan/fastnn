@@ -3,17 +3,17 @@
 #![allow(unused_imports)]
 #![allow(clippy::missing_safety_doc)]
 
+use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
-    matmul_blas, matmul_blas_into, matmul_blas_with_transpose,
-    matmul_blas_with_transpose_into, MIN_BLAS_SIZE,
+    matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
+    MIN_BLAS_SIZE,
 };
 use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
-use super::*;
 
 pub unsafe fn mse_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let pred = args[0];
@@ -67,8 +67,8 @@ pub unsafe fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let logits_data = logits.as_f32_slice();
     let targets_data = targets.as_f32_slice();
 
-    let batch_size = logits.shape()[0] as usize;
-    let num_classes = logits.shape()[1] as usize;
+    let batch_size = logits.shape_ref()[0] as usize;
+    let num_classes = logits.shape_ref()[1] as usize;
 
     // Fused log-sum-exp forward pass, parallelized over batch rows.
     // For each row i:
@@ -216,4 +216,3 @@ pub unsafe fn huber_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let avg_loss = loss / numel as f32;
     vec![Tensor::from_vec(vec![avg_loss], vec![1])]
 }
-

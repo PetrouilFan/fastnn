@@ -1,6 +1,9 @@
 use crate::dispatcher::{dispatch, DispatchKey};
-use crate::{impl_training_state, nn::{clear_grad, Module, TrainingState}};
 use crate::tensor::Tensor;
+use crate::{
+    impl_training_state,
+    nn::{clear_grad, Module, TrainingState},
+};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -35,7 +38,7 @@ impl LayerNorm {
 
 impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let shape = x.shape();
+        let shape = x.shape_ref();
         let _ndim = shape.len();
 
         // Use references to avoid cloning weight/bias on every forward pass
@@ -224,7 +227,7 @@ impl Module for BatchNorm1d {
         // In training mode, update the running stats
         if is_training {
             // Compute batch statistics for updating running stats
-            let x_shape = x.shape();
+            let x_shape = x.shape_ref();
             let batch_size = x_shape[0];
             let num_features = x_shape[1];
             let spatial_size: i64 = if x_shape.len() > 2 {
@@ -397,7 +400,7 @@ impl GroupNorm {
 
 impl Module for GroupNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let x_shape = x.shape();
+        let x_shape = x.shape_ref();
         let batch = x_shape[0];
         let channels = x_shape[1];
         let spatial: i64 = x_shape[2..].iter().product();
@@ -407,7 +410,7 @@ impl Module for GroupNorm {
         let mean = x_reshaped.mean(2, true).mean(3, true);
         let var = x_reshaped.sub(&mean).pow(2.0).mean(2, true).mean(3, true);
         let x_norm = x_reshaped.sub(&mean).div(&var.add_scalar(self.eps).sqrt());
-        let x_norm = x_norm.reshape(x_shape.clone());
+        let x_norm = x_norm.reshape(x_shape.to_vec());
 
         let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
         weight_shape.push(1);
@@ -539,7 +542,7 @@ impl Module for BatchNorm2d {
 
         // In training mode, update the running stats
         if is_training {
-            let x_shape = x.shape();
+            let x_shape = x.shape_ref();
             let batch = x_shape[0];
             let channels = x_shape[1];
             let spatial: i64 = x_shape[2..].iter().product();

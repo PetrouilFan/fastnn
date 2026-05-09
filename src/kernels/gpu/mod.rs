@@ -1188,7 +1188,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invo
 
 fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) -> Tensor {
     let ctx = get_context(device_id);
-    let shape = input.shape().to_vec();
+    let shape = input.shape_ref().to_vec();
     let numel = shape.iter().product::<i64>() as usize;
 
     // Get or create GPU buffer - check cache first
@@ -1258,7 +1258,7 @@ fn run_unary_kernel(input: &Tensor, shader: &str, name: &str, device_id: usize) 
 
 fn run_binary_kernel(a: &Tensor, b: &Tensor, shader: &str, name: &str, device_id: usize) -> Tensor {
     let ctx = get_context(device_id);
-    let shape = a.shape().to_vec();
+    let shape = a.shape_ref().to_vec();
     let numel = shape.iter().product::<i64>() as usize;
 
     // Get or create GPU buffers - use cache to avoid repeated CPU->GPU transfers
@@ -1415,8 +1415,8 @@ pub fn gpu_fused_add_relu(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tenso
 
 pub fn gpu_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Vec<Tensor> {
     let ctx = get_context(device_id);
-    let a_shape = a.shape();
-    let b_shape = b.shape();
+    let a_shape = a.shape_ref();
+    let b_shape = b.shape_ref();
 
     let m = a_shape[a_shape.len() - 2] as usize;
     let k = a_shape[a_shape.len() - 1] as usize;
@@ -1576,7 +1576,7 @@ fn run_reduction_kernel(
     op: &str,
 ) -> Tensor {
     let ctx = get_context(device_id);
-    let input_shape = input.shape().to_vec();
+    let input_shape = input.shape_ref().to_vec();
     let ndim = input_shape.len();
 
     // Validate dim
@@ -2041,7 +2041,7 @@ fn run_scalar_kernel(
     device_id: usize,
 ) -> Tensor {
     let ctx = get_context(device_id);
-    let shape = input.shape().to_vec();
+    let shape = input.shape_ref().to_vec();
     let numel = shape.iter().product::<i64>() as usize;
 
     let input_buffer = if let Some(buffer) = input.inner.get_or_create_gpu_buffer(device_id) {
@@ -2132,7 +2132,7 @@ pub fn gpu_lt_scalar(input: &Tensor, scalar: f32, device_id: usize) -> Vec<Tenso
 
 pub fn gpu_logical_not(input: &Tensor, device_id: usize) -> Vec<Tensor> {
     let ctx = get_context(device_id);
-    let shape = input.shape().to_vec();
+    let shape = input.shape_ref().to_vec();
     let numel = shape.iter().product::<i64>() as usize;
 
     let input_buffer = if let Some(buffer) = input.inner.get_or_create_gpu_buffer(device_id) {

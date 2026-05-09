@@ -2,7 +2,7 @@
 
 **fastnn** is a high-performance neural network library built from scratch in Rust, with seamless Python bindings. It supports both CPU and GPU training and inference — with sub-byte quantization, hand-written SIMD kernels, and a clean PyTorch-compatible API.
 
-> **Version:** v1.1.0 — Modular backend architecture & GPU execution improvements
+> **Version:** v1.2.0 — Fused kernel optimizations & performance overhaul
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
@@ -452,10 +452,8 @@ output = fnn_model(fnn.tensor(data, shape))
 
 | Function                                 | Description          |
 |------------------------------------------|----------------------|
-| `fnn.save_model(model, path)`            | Save model weights   |
-| `fnn.load_model(path)`                   | Load model weights   |
-| `fnn.save_optimizer(opt, path)`          | Save optimizer state |
-| `fnn.load_optimizer(opt, path)`          | Load optimizer state |
+| `fnn.io.save(model, path)`               | Save model weights   |
+| `fnn.io.load(path)`                      | Load model weights   |
 
 ### Attention
 

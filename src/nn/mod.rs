@@ -4,6 +4,7 @@ pub mod conv;
 pub mod dropout;
 pub mod embedding;
 pub mod fused;
+#[macro_use]
 pub mod linear;
 pub mod norm;
 pub mod pooling;
@@ -93,6 +94,44 @@ macro_rules! impl_training_state {
 
         fn is_training(&$self) -> bool {
             $field.is_training()
+        }
+    };
+}
+
+/// Macro to implement parameters() for modules with weight (+ optional bias)
+#[macro_export]
+macro_rules! impl_nn_params {
+    ($weight:ident, $bias:ident) => {
+        fn parameters(&self) -> Vec<$crate::tensor::Tensor> {
+            let mut params = vec![self.$weight.clone()];
+            if let Some(ref b) = self.$bias {
+                params.push(b.clone());
+            }
+            params
+        }
+    };
+    ($weight:ident) => {
+        fn parameters(&self) -> Vec<$crate::tensor::Tensor> {
+            vec![self.$weight.clone()]
+        }
+    };
+}
+
+/// Macro to implement named_parameters() for modules with weight (+ optional bias)
+#[macro_export]
+macro_rules! impl_nn_named_params {
+    ($weight:ident, $bias:ident, $wname:literal, $bname:literal) => {
+        fn named_parameters(&self) -> Vec<(String, $crate::tensor::Tensor)> {
+            let mut params = vec![($wname.to_string(), self.$weight.clone())];
+            if let Some(ref b) = self.$bias {
+                params.push(($bname.to_string(), b.clone()));
+            }
+            params
+        }
+    };
+    ($weight:ident, $wname:literal) => {
+        fn named_parameters(&self) -> Vec<(String, $crate::tensor::Tensor)> {
+            vec![($wname.to_string(), self.$weight.clone())]
         }
     };
 }
