@@ -68,10 +68,13 @@ impl<T: PackedWord> QuantizedTensor<T> {
     /// Convert to PackedTensor for computation.
     pub fn to_packed(&self) -> PackedTensor<T> {
         let numel: usize = self.shape.iter().product();
+        let packed_len = numel.div_ceil(T::ITEMS);
+        let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
 
-        let mut dequantized = Vec::with_capacity(numel);
+        // Pass 1: compute global max_abs across all dequantized values (no full buffer)
+        let mut global_max_abs = 0.0f32;
         for block_idx in 0..self.scale_zp.len() {
-            let (scale, zero) = self.scale_zp[block_idx];
+            let (scale, _zero) = self.scale_zp[block_idx];
             let start = block_idx * self.block_size;
             let end = (start + self.block_size).min(numel);
             let packed_start = start / T::ITEMS;
@@ -84,15 +87,58 @@ impl<T: PackedWord> QuantizedTensor<T> {
                 for j in 0..T::ITEMS {
                     let idx = base + j;
                     if idx >= start && idx < end {
-                        let val = unpacked.as_ref()[j];
-                        dequantized.push(val * scale + zero);
+                        let val = unpacked.as_ref()[j] * scale;
+                        let abs_val = val.abs();
+                        if abs_val > global_max_abs {
+                            global_max_abs = abs_val;
+                        }
                     }
                 }
             }
         }
 
-        let scale = PackedTensor::<T>::compute_scale(&dequantized);
-        PackedTensor::from_f32_slice(&dequantized, &self.shape, scale, 0.0)
+        let global_scale = if global_max_abs == 0.0 {
+            1.0
+        } else {
+            global_max_abs / max_val
+        };
+        let inv_global = 1.0 / global_scale;
+
+        // Pass 2: write directly to pre-allocated packed buffer
+        let mut packed = Vec::with_capacity(packed_len);
+        unsafe { packed.set_len(packed_len); }
+
+        for block_idx in 0..self.scale_zp.len() {
+            let (block_scale, _zero) = self.scale_zp[block_idx];
+            let start = block_idx * self.block_size;
+            let end = (start + self.block_size).min(numel);
+            let packed_start = start / T::ITEMS;
+            let packed_end = end.div_ceil(T::ITEMS);
+
+            let ratio = block_scale * inv_global;
+
+            for p in packed_start..packed_end {
+                let word = self.data[p];
+                let unpacked = word.unpack_to_f32();
+                let mut arr = <T as PackedWord>::Array::default();
+                let arr_ref = arr.as_mut();
+                let base = p * T::ITEMS;
+                for j in 0..T::ITEMS {
+                    let idx = base + j;
+                    if idx >= start && idx < end {
+                        arr_ref[j] = unpacked.as_ref()[j] * ratio;
+                    }
+                }
+                packed[p] = T::pack_from_f32(arr);
+            }
+        }
+
+        PackedTensor {
+            data: packed,
+            shape: self.shape.clone(),
+            scales: vec![global_scale],
+            zeros: vec![0.0],
+        }
     }
 
     /// Convert to f32 vec (dequantized).
@@ -135,20 +181,31 @@ fn pack_block<T: PackedWord>(block_data: &[f32], scale: f32, zero: f32, packed: 
     let items = T::ITEMS;
     let packed_len = block_data.len().div_ceil(items);
 
-    for chunk_idx in 0..packed_len {
-        let mut arr: <T as PackedWord>::Array = <T as PackedWord>::Array::default();
-        let arr_ref = arr.as_mut();
-        for i in 0..items {
-            let elem_idx = chunk_idx * items + i;
-            if elem_idx < block_data.len() {
-                arr_ref[i] = if scale != 1.0 {
-                    (block_data[elem_idx] - zero) / scale
-                } else {
-                    block_data[elem_idx]
-                };
+    if scale != 1.0 || zero != 0.0 {
+        let inv_scale = 1.0 / scale;
+        for chunk_idx in 0..packed_len {
+            let mut arr: <T as PackedWord>::Array = <T as PackedWord>::Array::default();
+            let arr_ref = arr.as_mut();
+            for i in 0..items {
+                let elem_idx = chunk_idx * items + i;
+                if elem_idx < block_data.len() {
+                    arr_ref[i] = (block_data[elem_idx] - zero) * inv_scale;
+                }
             }
+            packed.push(T::pack_from_f32(arr));
         }
-        packed.push(T::pack_from_f32(arr));
+    } else {
+        for chunk_idx in 0..packed_len {
+            let mut arr: <T as PackedWord>::Array = <T as PackedWord>::Array::default();
+            let arr_ref = arr.as_mut();
+            for i in 0..items {
+                let elem_idx = chunk_idx * items + i;
+                if elem_idx < block_data.len() {
+                    arr_ref[i] = block_data[elem_idx];
+                }
+            }
+            packed.push(T::pack_from_f32(arr));
+        }
     }
 }
 

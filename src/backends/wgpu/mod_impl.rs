@@ -15,6 +15,10 @@ pub struct WgpuContext {
     pipelines: HashMap<String, wgpu::ComputePipeline>,
     /// Bind group layout (reused across pipelines)
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Cached staging buffer for GPU readback (avoids re-allocation per call)
+    pub staging_buffer: Option<wgpu::Buffer>,
+    /// Size of the cached staging buffer in bytes
+    pub staging_buffer_size: u64,
 }
 
 impl WgpuContext {
@@ -71,6 +75,8 @@ impl WgpuContext {
             queue,
             pipelines: HashMap::new(),
             bind_group_layout,
+            staging_buffer: None,
+            staging_buffer_size: 0,
         }
     }
 
@@ -134,23 +140,29 @@ impl WgpuContext {
     }
 
     /// Read a GPU buffer back to a `Vec<u8>`.
-    pub fn read_buffer(&self, buffer: &wgpu::Buffer, size: usize) -> Vec<u8> {
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: size as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    pub fn read_buffer(&mut self, buffer: &wgpu::Buffer, size: usize) -> Vec<u8> {
+        let staging_size = size as u64;
+        if self.staging_buffer_size < staging_size {
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("staging"),
+                size: staging_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.staging_buffer = Some(buf);
+            self.staging_buffer_size = staging_size;
+        }
+        let staging = self.staging_buffer.as_ref().unwrap();
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("copy_encoder"),
             });
-        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size as u64);
+        encoder.copy_buffer_to_buffer(buffer, 0, staging, 0, staging_size);
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        let buffer_slice = staging.slice(..);
+        let buffer_slice = staging.slice(..staging_size);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
@@ -276,7 +288,7 @@ pub fn gemv_wgpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32]) -
         });
 
         // Dispatch
-        let workgroup_count = m.div_ceil(64);
+        let workgroup_count = m.div_ceil(256);
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -363,16 +375,22 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         }
         let bind_group = bg_guard.as_ref().unwrap();
 
-        let workgroup_count = m.div_ceil(64);
+        let workgroup_count = m.div_ceil(256);
 
-        // Create staging buffer for readback
+        // Reusable staging buffer for readback
         let output_size = m as usize * std::mem::size_of::<f32>();
-        let staging = wctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: output_size as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let staging_size = output_size as u64;
+        if wctx.staging_buffer_size < staging_size {
+            let buf = wctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("staging"),
+                size: staging_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            wctx.staging_buffer = Some(buf);
+            wctx.staging_buffer_size = staging_size;
+        }
+        let staging = wctx.staging_buffer.as_ref().unwrap();
 
         // Single encoder: compute + copy-to-staging
         let mut encoder = wctx
@@ -438,7 +456,7 @@ fn unpack_word(packed: u32) -> {return_type} {{
 {unpack_body}
 }}
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let row = gid.x;
     if (row >= params.m) {{ return; }}
@@ -466,16 +484,16 @@ fn generate_dot_logic<T: PackedWord>() -> String {
             concat!(
                 "        let act_base = k * ITEMS;\n",
                 "        let act0 = vec4<f32>(\n",
-                "            select(0.0, activations[act_base],     act_base < params.k),\n",
-                "            select(0.0, activations[act_base + 1u], act_base + 1u < params.k),\n",
-                "            select(0.0, activations[act_base + 2u], act_base + 2u < params.k),\n",
-                "            select(0.0, activations[act_base + 3u], act_base + 3u < params.k),\n",
+                "            activations[act_base],\n",
+                "            activations[act_base + 1u],\n",
+                "            activations[act_base + 2u],\n",
+                "            activations[act_base + 3u],\n",
                 "        );\n",
                 "        let act1 = vec4<f32>(\n",
-                "            select(0.0, activations[act_base + 4u], act_base + 4u < params.k),\n",
-                "            select(0.0, activations[act_base + 5u], act_base + 5u < params.k),\n",
-                "            select(0.0, activations[act_base + 6u], act_base + 6u < params.k),\n",
-                "            select(0.0, activations[act_base + 7u], act_base + 7u < params.k),\n",
+                "            activations[act_base + 4u],\n",
+                "            activations[act_base + 5u],\n",
+                "            activations[act_base + 6u],\n",
+                "            activations[act_base + 7u],\n",
                 "        );\n",
                 "        acc += dot(unpacked[0], act0) + dot(unpacked[1], act1);\n",
             ).to_string()
@@ -485,10 +503,10 @@ fn generate_dot_logic<T: PackedWord>() -> String {
             concat!(
                 "        let act_base = k * ITEMS;\n",
                 "        let act0 = vec4<f32>(\n",
-                "            select(0.0, activations[act_base],     act_base < params.k),\n",
-                "            select(0.0, activations[act_base + 1u], act_base + 1u < params.k),\n",
-                "            select(0.0, activations[act_base + 2u], act_base + 2u < params.k),\n",
-                "            select(0.0, activations[act_base + 3u], act_base + 3u < params.k),\n",
+                "            activations[act_base],\n",
+                "            activations[act_base + 1u],\n",
+                "            activations[act_base + 2u],\n",
+                "            activations[act_base + 3u],\n",
                 "        );\n",
                 "        acc += dot(unpacked, act0);\n",
             ).to_string()
@@ -498,8 +516,8 @@ fn generate_dot_logic<T: PackedWord>() -> String {
             concat!(
                 "        let act_base = k * ITEMS;\n",
                 "        let act0 = vec2<f32>(\n",
-                "            select(0.0, activations[act_base],     act_base < params.k),\n",
-                "            select(0.0, activations[act_base + 1u], act_base + 1u < params.k),\n",
+                "            activations[act_base],\n",
+                "            activations[act_base + 1u],\n",
                 "        );\n",
                 "        acc += dot(unpacked, act0);\n",
             ).to_string()

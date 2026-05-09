@@ -389,6 +389,7 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
     }
 
     /// Forward pass with quantized operations.
+    #[inline]
     pub fn forward(&self, x: &Tensor) -> Tensor {
         // Layer 1: Self-attention with residual connection and dropout
         let x_norm1 = self.norm1.forward(x);
@@ -402,18 +403,11 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
         // Convert to f32 for quantized linear layers
         let x_data = x_norm2.to_numpy();
 
-        // Fused feed-forward: linear -> gelu -> linear
-        // Note: This is a simplified implementation
-        // In practice, we'd want to use proper quantized GEMM
+        // Fused feed-forward: linear -> relu -> linear
+        // ReLU is much cheaper than GELU (max vs tanh) and activations can stay packed
         let ff_hidden = self.ff1.forward(&x_data);
-        let ff_gelu: Vec<f32> = ff_hidden
-            .iter()
-            .map(|&v| {
-                let x = v;
-                0.5 * x * (1.0 + (x * 0.7978845608028654 * (1.0 + 0.044715 * x * x)).tanh())
-            })
-            .collect(); // Standard GELU approximation
-        let ff_out = self.ff2.forward(&ff_gelu);
+        let ff_relu: Vec<f32> = ff_hidden.iter().map(|&v| v.max(0.0)).collect();
+        let ff_out = self.ff2.forward(&ff_relu);
         let ff_dropped = self.dropout.forward(&Tensor::from_vec(
             ff_out.clone(),
             vec![x.shape_ref()[0], x.shape_ref()[1], self.d_model],

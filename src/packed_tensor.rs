@@ -1,6 +1,5 @@
 use crate::dtypes::PackedWord;
 
-/// Create a zero-initialized Vec<T>.
 fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
     if len == 0 {
         return Vec::new();
@@ -13,27 +12,14 @@ fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
     v
 }
 
-/// A tensor whose values are packed into u32 words using a PackedWord type.
-///
-/// For U4x8: 8 values per u32 (8x memory savings vs f32)
-/// For U8x4: 4 values per u32 (4x memory savings vs f32)
-/// For F16x2: 2 values per u32 (2x memory savings vs f32)
-/// For F32x1: 1 value per u32 (baseline, no packing)
 pub struct PackedTensor<T: PackedWord> {
-    /// Packed storage
-    data: Vec<T>,
-    /// Logical shape in element counts (not word counts)
-    shape: Vec<usize>,
-    /// Scale factors for dequantization: real = packed * scale + zero.
-    /// Length 1 = global scale, length M = per-row scale (for 2D tensors).
-    scales: Vec<f32>,
-    /// Zero points for dequantization.
-    /// Length 1 = global zero, length M = per-row zero.
-    zeros: Vec<f32>,
+    pub(crate) data: Vec<T>,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) scales: Vec<f32>,
+    pub(crate) zeros: Vec<f32>,
 }
 
 impl<T: PackedWord> PackedTensor<T> {
-    /// Create a zero-initialized packed tensor with the given logical shape.
     pub fn zeros(shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
         let packed_len = numel.div_ceil(T::ITEMS);
@@ -46,8 +32,6 @@ impl<T: PackedWord> PackedTensor<T> {
         }
     }
 
-    /// Create a packed tensor from an f32 slice with the given scale and zero point.
-    /// Values are quantized and packed.
     pub fn from_f32_slice(data: &[f32], shape: &[usize], scale: f32, zero: f32) -> Self {
         let numel: usize = shape.iter().product();
         assert_eq!(
@@ -60,22 +44,34 @@ impl<T: PackedWord> PackedTensor<T> {
         );
 
         let packed_len = numel.div_ceil(T::ITEMS);
-        let mut packed = zeroed_vec(packed_len);
+        let mut packed = Vec::with_capacity(packed_len);
+        unsafe { packed.set_len(packed_len); }
 
-        for chunk_idx in 0..packed_len {
-            let mut arr = T::Array::default();
-            let arr_ref = arr.as_mut();
-            for i in 0..T::ITEMS {
-                let elem_idx = chunk_idx * T::ITEMS + i;
-                if elem_idx < numel {
-                    arr_ref[i] = if scale != 1.0 || zero != 0.0 {
-                        (data[elem_idx] - zero) / scale
-                    } else {
-                        data[elem_idx]
-                    };
+        if scale != 1.0 || zero != 0.0 {
+            let inv_scale = 1.0 / scale;
+            for chunk_idx in 0..packed_len {
+                let mut arr = T::Array::default();
+                let arr_ref = arr.as_mut();
+                for i in 0..T::ITEMS {
+                    let elem_idx = chunk_idx * T::ITEMS + i;
+                    if elem_idx < numel {
+                        arr_ref[i] = (data[elem_idx] - zero) * inv_scale;
+                    }
                 }
+                packed[chunk_idx] = T::pack_from_f32(arr);
             }
-            packed[chunk_idx] = T::pack_from_f32(arr);
+        } else {
+            for chunk_idx in 0..packed_len {
+                let mut arr = T::Array::default();
+                let arr_ref = arr.as_mut();
+                for i in 0..T::ITEMS {
+                    let elem_idx = chunk_idx * T::ITEMS + i;
+                    if elem_idx < numel {
+                        arr_ref[i] = data[elem_idx];
+                    }
+                }
+                packed[chunk_idx] = T::pack_from_f32(arr);
+            }
         }
 
         PackedTensor {
@@ -86,7 +82,6 @@ impl<T: PackedWord> PackedTensor<T> {
         }
     }
 
-    /// Unpack all values to a `Vec<f32>`, applying scale and zero correction.
     pub fn to_f32_vec(&self) -> Vec<f32> {
         let numel = self.numel();
         let inner_stride = if self.shape.len() >= 2 {
@@ -101,63 +96,62 @@ impl<T: PackedWord> PackedTensor<T> {
         for (i, word) in self.data.iter().enumerate() {
             let unpacked = word.unpack_to_f32();
             let arr = unpacked.as_ref();
-            for j in 0..items {
-                let elem_idx = i * items + j;
-                if elem_idx < numel {
-                    let row = elem_idx / inner_stride;
-                    let s = if is_per_row {
-                        self.scales[row]
-                    } else {
-                        self.scales[0]
-                    };
-                    let z = if is_per_row {
-                        self.zeros[row]
-                    } else {
-                        self.zeros[0]
-                    };
-                    let val = if s != 1.0 || z != 0.0 {
-                        arr[j] * s + z
-                    } else {
-                        arr[j]
-                    };
-                    result.push(val);
+            let elem_idx_base = i * items;
+            let row = elem_idx_base / inner_stride;
+            let s = if is_per_row {
+                self.scales[row]
+            } else {
+                self.scales[0]
+            };
+            let z = if is_per_row {
+                self.zeros[row]
+            } else {
+                self.zeros[0]
+            };
+            if s != 1.0 || z != 0.0 {
+                for j in 0..items {
+                    let elem_idx = elem_idx_base + j;
+                    if elem_idx < numel {
+                        result.push(arr[j] * s + z);
+                    }
+                }
+            } else {
+                for j in 0..items {
+                    let elem_idx = elem_idx_base + j;
+                    if elem_idx < numel {
+                        result.push(arr[j]);
+                    }
                 }
             }
         }
         result
     }
 
-    /// Number of u32 words in the packed representation.
     #[inline]
     pub fn packed_len(&self) -> usize {
         self.data.len()
     }
 
-    /// Total number of logical elements.
     #[inline]
     pub fn numel(&self) -> usize {
         self.shape.iter().product()
     }
 
-    /// Get the logical shape.
     #[inline]
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
 
-    /// Get the scale factor (first element for per-row, or global).
     #[inline]
     pub fn scale(&self) -> f32 {
         self.scales[0]
     }
 
-    /// Get the zero point (first element for per-row, or global).
     #[inline]
     pub fn zero(&self) -> f32 {
         self.zeros[0]
     }
 
-    /// Get scale for a specific row (per-row quantization).
     #[inline]
     pub fn scale_for_row(&self, row: usize) -> f32 {
         if self.scales.len() == 1 {
@@ -167,7 +161,6 @@ impl<T: PackedWord> PackedTensor<T> {
         }
     }
 
-    /// Get zero for a specific row (per-row quantization).
     #[inline]
     pub fn zero_for_row(&self, row: usize) -> f32 {
         if self.zeros.len() == 1 {
@@ -177,13 +170,11 @@ impl<T: PackedWord> PackedTensor<T> {
         }
     }
 
-    /// Whether this tensor uses per-row quantization.
     #[inline]
     pub fn is_per_channel(&self) -> bool {
         self.scales.len() > 1
     }
 
-    /// Get a single element as f32.
     pub fn get(&self, idx: usize) -> f32 {
         assert!(idx < self.numel(), "Index out of bounds");
         let word_idx = idx / T::ITEMS;
@@ -205,7 +196,6 @@ impl<T: PackedWord> PackedTensor<T> {
         }
     }
 
-    /// Set a single element from f32.
     pub fn set(&mut self, idx: usize, val: f32) {
         assert!(idx < self.numel(), "Index out of bounds");
         let word_idx = idx / T::ITEMS;
@@ -228,41 +218,52 @@ impl<T: PackedWord> PackedTensor<T> {
         self.data[word_idx] = T::pack_from_f32(arr);
     }
 
-    /// Get the raw packed data as a slice of T.
     #[inline]
     pub fn as_packed(&self) -> &[T] {
         &self.data
     }
 
-    /// Get the raw packed data as a mutable slice of T.
     #[inline]
     pub fn as_packed_mut(&mut self) -> &mut [T] {
         &mut self.data
     }
 
-    /// Get the raw packed data as a byte slice (for wgpu buffer upload).
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::cast_slice(&self.data)
     }
 
-    /// Get the raw packed data as a slice of u32.
     #[inline]
     pub fn as_u32(&self) -> &[u32] {
-        // SAFETY: T is repr(transparent) over u32 for all our types
         unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const u32, self.data.len()) }
     }
 
-    /// Compute optimal scale for packing from an f32 slice.
-    /// For INT4: scale = max_abs / 7.0
-    /// For INT8: scale = max_abs / 127.0
-    /// For FP types: scale = 1.0
+    pub fn add(&self, other: &Self) -> Self {
+        crate::backends::cpu::add_cpu(self, other)
+    }
+
+    pub fn sub(&self, other: &Self) -> Self {
+        crate::backends::cpu::sub_cpu(self, other)
+    }
+
+    pub fn max(&self, other: &Self) -> Self {
+        crate::backends::cpu::max_cpu(self, other)
+    }
+
+    pub fn min(&self, other: &Self) -> Self {
+        crate::backends::cpu::min_cpu(self, other)
+    }
+
+    pub fn relu_backward_inplace(&mut self, pre_relu: &Self) {
+        crate::backends::cpu::relu_backward_cpu(self, pre_relu);
+    }
+
     pub fn compute_scale(data: &[f32]) -> f32 {
         if T::IS_FLOAT {
             return 1.0;
         }
         let max_abs = data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32; // 7 for 4-bit, 127 for 8-bit
+        let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
         if max_abs == 0.0 {
             1.0
         } else {
@@ -270,20 +271,16 @@ impl<T: PackedWord> PackedTensor<T> {
         }
     }
 
-    /// Create from f32 slice with automatic scale computation.
     pub fn from_f32_auto(data: &[f32], shape: &[usize]) -> Self {
         let scale = Self::compute_scale(data);
         Self::from_f32_slice(data, shape, scale, 0.0)
     }
 
-    /// Compute per-row scale factors for a 2D tensor.
-    /// Each row gets its own scale = max_abs_in_row / max_val.
     pub fn compute_scales_per_channel(data: &[f32], shape: &[usize]) -> Vec<f32> {
         if T::IS_FLOAT {
             return vec![1.0];
         }
         assert!(shape.len() >= 2, "Per-channel requires 2D+ shape");
-        // For 3D+ tensors, inner stride is the product of all trailing dimensions
         let m = shape[0];
         let inner_stride: usize = shape[1..].iter().product();
         let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
@@ -304,7 +301,6 @@ impl<T: PackedWord> PackedTensor<T> {
         scales
     }
 
-    /// Create from f32 slice with per-row quantization (better accuracy for heterogeneous distributions).
     pub fn from_f32_per_channel(data: &[f32], shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
         assert_eq!(data.len(), numel);
@@ -314,26 +310,33 @@ impl<T: PackedWord> PackedTensor<T> {
         let inner_stride = if shape.len() >= 2 { shape[1..].iter().product() } else { numel };
 
         let packed_len = numel.div_ceil(T::ITEMS);
-        let mut packed = zeroed_vec(packed_len);
+        let mut packed = Vec::with_capacity(packed_len);
+        unsafe { packed.set_len(packed_len); }
 
         for chunk_idx in 0..packed_len {
             let mut arr = T::Array::default();
             let arr_ref = arr.as_mut();
-            for i in 0..T::ITEMS {
-                let elem_idx = chunk_idx * T::ITEMS + i;
-                if elem_idx < numel {
-                    let row = elem_idx / inner_stride;
-                    let s = if scales.len() == 1 {
-                        scales[0]
-                    } else {
-                        scales[row]
-                    };
-                    let z = 0.0;
-                    arr_ref[i] = if s != 1.0 || z != 0.0 {
-                        (data[elem_idx] - z) / s
-                    } else {
-                        data[elem_idx]
-                    };
+            let elem_idx_base = chunk_idx * T::ITEMS;
+            let row = elem_idx_base / inner_stride;
+            let s = if scales.len() == 1 {
+                scales[0]
+            } else {
+                scales[row]
+            };
+            if s != 1.0 {
+                let inv_s = 1.0 / s;
+                for i in 0..T::ITEMS {
+                    let elem_idx = elem_idx_base + i;
+                    if elem_idx < numel {
+                        arr_ref[i] = data[elem_idx] * inv_s;
+                    }
+                }
+            } else {
+                for i in 0..T::ITEMS {
+                    let elem_idx = elem_idx_base + i;
+                    if elem_idx < numel {
+                        arr_ref[i] = data[elem_idx];
+                    }
                 }
             }
             packed[chunk_idx] = T::pack_from_f32(arr);
@@ -382,7 +385,7 @@ mod tests {
     fn test_packed_tensor_zeros() {
         let t = PackedTensor::<U4x8>::zeros(&[16]);
         assert_eq!(t.numel(), 16);
-        assert_eq!(t.packed_len(), 2); // 16 elements / 8 per word
+        assert_eq!(t.packed_len(), 2);
         let vals = t.to_f32_vec();
         assert!(vals.iter().all(|v| *v == 0.0));
     }
@@ -397,10 +400,7 @@ mod tests {
             assert!(
                 (orig - rec).abs() <= tolerance,
                 "Mismatch at index {}: orig={}, rec={}, scale={}",
-                i,
-                orig,
-                rec,
-                t.scale()
+                i, orig, rec, t.scale()
             );
         }
     }
@@ -413,10 +413,7 @@ mod tests {
         for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
             assert!(
                 (orig - rec).abs() <= t.scale() + 0.01,
-                "Mismatch at index {}: orig={}, rec={}",
-                i,
-                orig,
-                rec
+                "Mismatch at index {}: orig={}, rec={}", i, orig, rec
             );
         }
     }
@@ -427,12 +424,7 @@ mod tests {
         let t = PackedTensor::<F16x2>::from_f32_auto(&data, &[2]);
         let recovered = t.to_f32_vec();
         for (orig, rec) in data.iter().zip(recovered.iter()) {
-            assert!(
-                (orig - rec).abs() < 0.01,
-                "Mismatch: orig={}, rec={}",
-                orig,
-                rec
-            );
+            assert!((orig - rec).abs() < 0.01, "Mismatch: orig={}, rec={}", orig, rec);
         }
     }
 
@@ -451,10 +443,7 @@ mod tests {
         let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
         let mut t = PackedTensor::<U8x4>::from_f32_auto(&data, &[4]);
         let val = t.get(2);
-        // Value should be approximately 3.0 (with quantization error)
         assert!((val - 3.0).abs() <= t.scale() + 0.01);
-        // Set to a value within the representable range (scale is ~0.03 for this data)
-        // Quantized: 3.5 / scale ≈ 111, fits in i8 range
         t.set(2, 3.5);
         let val2 = t.get(2);
         assert!((val2 - 3.5).abs() <= t.scale() + 0.01);
