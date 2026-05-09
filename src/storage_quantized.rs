@@ -8,9 +8,6 @@ use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 use std::marker::PhantomData;
 
-/// Block size for quantization (in elements).
-pub const DEFAULT_BLOCK_SIZE: usize = 32;
-
 /// A quantizable tensor that stores data in blocks with independent scale/zero.
 /// Each block has independent scale/zero for better accuracy.
 pub struct QuantizedTensor<T: PackedWord> {
@@ -20,12 +17,19 @@ pub struct QuantizedTensor<T: PackedWord> {
     data: Vec<T>,
     /// Shape of the tensor
     shape: Vec<usize>,
+    /// Block size (in elements) used for quantization
+    block_size: usize,
     _marker: PhantomData<T>,
 }
 
 impl<T: PackedWord> QuantizedTensor<T> {
     /// Create a new quantized tensor from f32 data with block-wise quantization.
     pub fn from_f32_blockwise(data: &[f32], shape: &[usize], block_size: usize) -> Self {
+        assert!(
+            block_size % T::ITEMS == 0,
+            "block_size ({}) must be a multiple of T::ITEMS ({}) for QuantizedTensor",
+            block_size, T::ITEMS
+        );
         let numel: usize = shape.iter().product();
         let n_blocks = numel.div_ceil(block_size);
 
@@ -35,9 +39,6 @@ impl<T: PackedWord> QuantizedTensor<T> {
         for block_idx in 0..n_blocks {
             let start = block_idx * block_size;
             let end = (start + block_size).min(numel);
-            let _block_len = end - start;
-            let _packed_start = start / T::ITEMS;
-            let _packed_end = end.div_ceil(T::ITEMS);
 
             let max_abs = data[start..end]
                 .iter()
@@ -59,6 +60,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
             scale_zp,
             data: packed_data,
             shape: shape.to_vec(),
+            block_size,
             _marker: PhantomData,
         }
     }
@@ -67,21 +69,11 @@ impl<T: PackedWord> QuantizedTensor<T> {
     pub fn to_packed(&self) -> PackedTensor<T> {
         let numel: usize = self.shape.iter().product();
 
-        // Build scales array
-        let _scales: Vec<f32> = (0..numel)
-            .map(|i| {
-                let block_idx = i / DEFAULT_BLOCK_SIZE;
-                self.scale_zp.get(block_idx).map(|&(s, _)| s).unwrap_or(1.0)
-            })
-            .collect();
-
-        // Dequantize all data
         let mut dequantized = Vec::with_capacity(numel);
         for block_idx in 0..self.scale_zp.len() {
             let (scale, zero) = self.scale_zp[block_idx];
-            let start = block_idx * DEFAULT_BLOCK_SIZE;
-            let end = (start + DEFAULT_BLOCK_SIZE).min(numel);
-            let _block_len = end - start;
+            let start = block_idx * self.block_size;
+            let end = (start + self.block_size).min(numel);
             let packed_start = start / T::ITEMS;
             let packed_end = end.div_ceil(T::ITEMS);
 
@@ -99,7 +91,8 @@ impl<T: PackedWord> QuantizedTensor<T> {
             }
         }
 
-        PackedTensor::from_f32_slice(&dequantized, &self.shape, 1.0, 0.0)
+        let scale = PackedTensor::<T>::compute_scale(&dequantized);
+        PackedTensor::from_f32_slice(&dequantized, &self.shape, scale, 0.0)
     }
 
     /// Convert to f32 vec (dequantized).
@@ -109,8 +102,8 @@ impl<T: PackedWord> QuantizedTensor<T> {
 
         for block_idx in 0..self.scale_zp.len() {
             let (scale, zero) = self.scale_zp[block_idx];
-            let start = block_idx * DEFAULT_BLOCK_SIZE;
-            let end = (start + DEFAULT_BLOCK_SIZE).min(numel);
+            let start = block_idx * self.block_size;
+            let end = (start + self.block_size).min(numel);
 
             let packed_start = start / T::ITEMS;
             let packed_end = end.div_ceil(T::ITEMS);
@@ -163,6 +156,14 @@ fn pack_block<T: PackedWord>(block_data: &[f32], scale: f32, zero: f32, packed: 
 mod tests {
     use super::*;
     use crate::dtypes::U4x8;
+    use crate::dtypes::U8x4;
+
+    fn max_absolute_error(orig: &[f32], recovered: &[f32]) -> f32 {
+        orig.iter()
+            .zip(recovered.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max)
+    }
 
     #[test]
     fn test_quantized_tensor_creation() {
@@ -170,5 +171,51 @@ mod tests {
         let qt = QuantizedTensor::<U4x8>::from_f32_blockwise(&data, &[128], 32);
         assert_eq!(qt.scale_zp.len(), 4);
         assert!(qt.memory_bytes() < data.len());
+    }
+
+    #[test]
+    fn test_quantized_tensor_roundtrip_u4x8() {
+        let data: Vec<f32> = (0..64).map(|i| ((i as f32) - 32.0) * 0.5).collect();
+        let qt = QuantizedTensor::<U4x8>::from_f32_blockwise(&data, &[64], 16);
+        let recovered = qt.to_f32_vec();
+        let max_err = max_absolute_error(&data, &recovered);
+        let max_scale = qt.scale_zp.iter().map(|&(s, _)| s).fold(0.0f32, f32::max);
+        assert!(
+            max_err <= max_scale + 1e-4,
+            "U4x8 roundtrip max error {} exceeds scale {}",
+            max_err,
+            max_scale
+        );
+    }
+
+    #[test]
+    fn test_quantized_tensor_roundtrip_u8x4() {
+        let data: Vec<f32> = (0..64).map(|i| ((i as f32) - 32.0) * 2.0).collect();
+        let qt = QuantizedTensor::<U8x4>::from_f32_blockwise(&data, &[64], 16);
+        let recovered = qt.to_f32_vec();
+        let max_err = max_absolute_error(&data, &recovered);
+        let max_scale = qt.scale_zp.iter().map(|&(s, _)| s).fold(0.0f32, f32::max);
+        assert!(
+            max_err <= max_scale + 1e-4,
+            "U8x4 roundtrip max error {} exceeds scale {}",
+            max_err,
+            max_scale
+        );
+    }
+
+    #[test]
+    fn test_quantized_tensor_to_packed_u4x8() {
+        let data: Vec<f32> = (0..64).map(|i| ((i as f32) - 32.0) * 0.5).collect();
+        let qt = QuantizedTensor::<U4x8>::from_f32_blockwise(&data, &[64], 16);
+        let packed = qt.to_packed();
+        let recovered = packed.to_f32_vec();
+        let max_err = max_absolute_error(&data, &recovered);
+        let max_scale = qt.scale_zp.iter().map(|&(s, _)| s).fold(0.0f32, f32::max);
+        assert!(
+            max_err <= max_scale + 1e-4,
+            "to_packed roundtrip max error {} exceeds scale {}",
+            max_err,
+            max_scale
+        );
     }
 }
