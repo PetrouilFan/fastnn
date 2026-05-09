@@ -108,18 +108,27 @@ impl<T: PackedWord> PackedLinear<T> {
         }
     }
 
-    /// Forward pass on CPU.
-    pub fn forward_cpu(&self, input: &[f32]) -> Vec<f32> {
+    /// Forward pass with caller-provided output buffer (avoids allocation).
+    pub fn forward_into(&self, input: &[f32], output: &mut [f32]) {
         assert_eq!(input.len(), self.in_features,
-            "PackedLinear::forward_cpu: input length {} != in_features {}",
+            "PackedLinear::forward_into: input length {} != in_features {}",
             input.len(), self.in_features);
-        let mut output = vec![0.0; self.out_features];
-        cpu::gemv_cpu(&self.weight, input, &mut output);
+        assert_eq!(output.len(), self.out_features,
+            "PackedLinear::forward_into: output length {} != out_features {}",
+            output.len(), self.out_features);
+        output.fill(0.0);
+        cpu::gemv_cpu(&self.weight, input, output);
         if let Some(ref bias) = self.bias {
             for (o, b) in output.iter_mut().zip(bias.iter()) {
                 *o += *b;
             }
         }
+    }
+
+    /// Forward pass on CPU.
+    pub fn forward_cpu(&self, input: &[f32]) -> Vec<f32> {
+        let mut output = vec![0.0; self.out_features];
+        self.forward_into(input, &mut output);
         output
     }
 

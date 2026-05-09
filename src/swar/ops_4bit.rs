@@ -54,8 +54,8 @@ pub fn swar_sub_u4x8(a: u32, b: u32) -> u32 {
 pub fn swar_relu_s4x8(v: u32) -> u32 {
     // Extract sign bits (bit 3 of each nibble)
     let sign_bits = v & U4_SIGN;
-    // Spread each sign bit to fill its entire nibble
-    let neg_mask = sign_bits | (sign_bits >> 1) | (sign_bits >> 2) | (sign_bits >> 3);
+    // Spread each sign bit to fill its entire nibble (no cross-byte borrow because LSB of each byte is 0)
+    let neg_mask = sign_bits | sign_bits.wrapping_sub(sign_bits >> 3);
     // Zero out negative lanes
     v & !neg_mask
 }
@@ -122,7 +122,7 @@ pub fn swar_min_u4x8(a: u32, b: u32) -> u32 {
 pub fn swar_relu_backward_u4x8(grad: u32, pre_relu: u32) -> u32 {
     // Block negative values (sign bit set)
     let sign_bits = pre_relu & U4_SIGN;
-    let neg_mask = sign_bits | (sign_bits >> 1) | (sign_bits >> 2) | (sign_bits >> 3);
+    let neg_mask = sign_bits | sign_bits.wrapping_sub(sign_bits >> 3);
 
     // Detect zero: collapse nibble bits into bit 0, isolate, spread to fill nibble
     let pre_even = pre_relu & U4_EVEN;
@@ -140,6 +140,29 @@ pub fn swar_relu_backward_u4x8(grad: u32, pre_relu: u32) -> u32 {
     let zero_odd = ((!nz_odd_spread) & U4_EVEN) << 4;
 
     grad & !(neg_mask | zero_even | zero_odd)
+}
+
+/// Fused SWAR ReLU forward + backward for U4x8.
+/// Returns (relu_output, mask_for_grad) computed in a single pass
+/// sharing the sign-bit computation.
+#[inline(always)]
+pub fn swar_fused_relu_u4x8(v: u32) -> (u32, u32) {
+    let sign_bits = v & U4_SIGN;
+    let neg_mask = sign_bits | sign_bits.wrapping_sub(sign_bits >> 3);
+    let pre_even = v & U4_EVEN;
+    let nz_even_raw = pre_even | (pre_even >> 1) | (pre_even >> 2) | (pre_even >> 3);
+    let nz_even_bit0 = nz_even_raw & 0x0101_0101;
+    let nz_even_spread = nz_even_bit0.wrapping_mul(0x0F);
+    let zero_even = !nz_even_spread & U4_EVEN;
+    let pre_odd_shifted = (v >> 4) & U4_EVEN;
+    let nz_odd_raw =
+        pre_odd_shifted | (pre_odd_shifted >> 1) | (pre_odd_shifted >> 2) | (pre_odd_shifted >> 3);
+    let nz_odd_bit0 = nz_odd_raw & 0x0101_0101;
+    let nz_odd_spread = nz_odd_bit0.wrapping_mul(0x0F);
+    let zero_odd = ((!nz_odd_spread) & U4_EVEN) << 4;
+    let relu_out = v & !neg_mask;
+    let mask = !(neg_mask | zero_even | zero_odd);
+    (relu_out, mask)
 }
 
 #[cfg(test)]
