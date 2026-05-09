@@ -101,7 +101,8 @@ def test_tensor_from_numpy():
 
 
 def test_memory_pool_reuse():
-    import gc, json
+    import gc
+    import json
     gc.collect()
 
     def allocs():
