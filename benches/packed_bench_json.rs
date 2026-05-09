@@ -19,28 +19,32 @@ struct Output {
     results: Vec<BenchRow>,
 }
 
+fn run_one(precision: &str, size: usize, results: &mut Vec<BenchRow>) {
+    let iters = if size <= 1024 { 200 } else { 20 };
+    let (ms, packed_bytes) = match precision {
+        "F32x1" => bench_gemv::<F32x1>(size, size, iters),
+        "F16x2" => bench_gemv::<F16x2>(size, size, iters),
+        "U8x4" => bench_gemv::<U8x4>(size, size, iters),
+        "U4x8" => bench_gemv::<U4x8>(size, size, iters),
+        _ => unreachable!(),
+    };
+    let memory_mb = packed_bytes as f64 / (1024.0 * 1024.0);
+    results.push(BenchRow {
+        precision: precision.to_string(),
+        size,
+        ms: (ms * 1000.0).round() / 1000.0,
+        memory_mb: (memory_mb * 100.0).round() / 100.0,
+    });
+}
+
 fn main() {
     let sizes = [256usize, 512, 1024, 4096];
-    let precisions: &[( &str, fn(usize, usize, usize) -> (f64, usize))] = &[
-        ("F32x1", bench_gemv::<F32x1>),
-        ("F16x2", bench_gemv::<F16x2>),
-        ("U8x4", bench_gemv::<U8x4>),
-        ("U4x8", bench_gemv::<U4x8>),
-    ];
-
+    let precisions = ["F32x1", "F16x2", "U8x4", "U4x8"];
     let mut results = Vec::new();
 
-    for &(name, bench_fn) in precisions {
+    for &name in &precisions {
         for &size in &sizes {
-            let iters = if size <= 1024 { 200 } else { 20 };
-            let (ms, packed_bytes) = bench_fn(size, size, iters);
-            let memory_mb = packed_bytes as f64 / (1024.0 * 1024.0);
-            results.push(BenchRow {
-                precision: name.to_string(),
-                size,
-                ms: (ms * 1000.0).round() / 1000.0,  // 3 decimal places
-                memory_mb: (memory_mb * 100.0).round() / 100.0,  // 2 decimal places
-            });
+            run_one(name, size, &mut results);
         }
     }
 
