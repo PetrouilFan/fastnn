@@ -1,9 +1,28 @@
+use crate::backends::cpu;
 use crate::dtypes::PackedWord;
 use crate::nn::linear::Linear;
 use crate::nn::Module;
 use crate::packed_tensor::PackedTensor;
 use crate::tensor::Tensor;
 use crate::{impl_training_state, nn::TrainingState};
+
+
+/// Quantized matrix multiplication using packed weights (GEMV per row).
+/// input: [m, k], weight: [n, k], output: [m, n]
+#[inline]
+fn quantized_matmul<T: PackedWord>(
+    input: &[f32],
+    weight: &PackedTensor<T>,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; m * n];
+    for i in 0..m {
+        cpu::gemv_cpu(weight, &input[i * k..(i + 1) * k], &mut output[i * n..(i + 1) * n]);
+    }
+    output
+}
 
 /// Quantized Multi-Head Attention with block-wise KV cache.
 /// Uses packed precision for weights and activations to reduce memory bandwidth.
@@ -46,7 +65,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
             .collect();
 
         let qkv_proj =
-            PackedTensor::<T>::from_f32_auto(&qkv_data, &[d_model_usize, d_model_usize * 3]);
+            PackedTensor::<T>::from_f32_auto(&qkv_data, &[d_model_usize * 3, d_model_usize]);
         let out_proj = PackedTensor::<T>::from_f32_auto(&out_data, &[d_model_usize, d_model_usize]);
 
         PackedMultiHeadAttention {
@@ -76,7 +95,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         let x_data = x.to_numpy();
 
         // QKV projection: [batch, seq_len, d_model] @ [d_model*3, d_model]^T -> [batch, seq_len, d_model * 3]
-        let qkv = self.quantized_matmul(&x_data, &self.qkv_proj, batch * seq_len, d_model, d_model * 3);
+        let qkv = quantized_matmul(&x_data, &self.qkv_proj, batch * seq_len, d_model, d_model * 3);
 
         // Split Q, K, V
         let q: Vec<f32> = qkv
@@ -122,40 +141,15 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         let context = self.reshape_from_heads(&context, batch, seq_len);
 
         // Output projection: [batch, seq_len, d_model] @ [d_model, d_model]^T -> [batch, seq_len, d_model]
-        let output = self.quantized_matmul(&context, &self.out_proj, batch * seq_len, d_model, d_model);
+        let output = quantized_matmul(&context, &self.out_proj, batch * seq_len, d_model, d_model);
 
         Tensor::from_vec(output, vec![batch as i64, seq_len as i64, d_model as i64])
     }
 
-    /// Quantized matrix multiplication using packed weights.
-    /// input: [m, k], weight: [k, n], output: [m, n]
-    fn quantized_matmul(
-        &self,
-        input: &[f32],
-        weight: &PackedTensor<T>,
-        m: usize,
-        k: usize,
-        n: usize,
-    ) -> Vec<f32> {
-        debug_assert_eq!(weight.shape()[0], k);
-        debug_assert_eq!(weight.shape()[1], n);
-        let mut output = vec![0.0f32; m * n];
-        for i in 0..m {
-            let row_start = i * k;
-            for j in 0..n {
-                let mut sum = 0.0f32;
-                for l in 0..k {
-                    let w_idx = l * n + j;
-                    let w = weight.get(w_idx);
-                    sum += input[row_start + l] * w;
-                }
-                output[i * n + j] = sum;
-            }
-        }
-        output
-    }
+
 
     /// Reshape tensor to [batch, num_heads, seq_len, head_dim]
+    #[inline]
     fn reshape_heads(&self, x: &[f32], batch: usize, seq_len: usize) -> Vec<f32> {
         let d_model = self.d_model as usize;
         let num_heads = self.num_heads as usize;
@@ -182,6 +176,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
     }
 
     /// Compute attention scores: Q @ K^T
+    #[inline]
     fn compute_attention_scores(
         &self,
         q: &[f32],
@@ -245,6 +240,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
     }
 
     /// Softmax along the last dimension
+    #[inline]
     fn softmax(&self, x: &[f32], batch: usize, seq_len: usize) -> Vec<f32> {
         let num_heads = self.num_heads as usize;
         let mut output = vec![0.0f32; x.len()];
@@ -280,6 +276,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
     }
 
     /// Apply attention weights to values
+    #[inline]
     fn apply_attention(&self, attn: &[f32], v: &[f32], batch: usize, seq_len: usize) -> Vec<f32> {
         let num_heads = self.num_heads as usize;
         let head_dim = self.head_dim as usize;
@@ -316,6 +313,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
     }
 
     /// Reshape from [batch, num_heads, seq_len, head_dim] to [batch, seq_len, d_model]
+    #[inline]
     fn reshape_from_heads(&self, x: &[f32], batch: usize, seq_len: usize) -> Vec<f32> {
         let num_heads = self.num_heads as usize;
         let head_dim = self.head_dim as usize;
