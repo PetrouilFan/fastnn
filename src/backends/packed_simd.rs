@@ -485,29 +485,6 @@ unsafe fn gemv_row_u4x8_avx2(
         let al1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 8));
         acc1 = _mm256_fmadd_ps(fl1, al1, acc1);
 
-        // Extract high nibbles (bits 2,6,10,14,18,22,26,30)
-        let shift_hi0 = _mm256_set_epi32(30, 26, 22, 18, 14, 10, 6, 2);
-        let nib_hi0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift_hi0), mask_lo);
-        let nib_hi1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift_hi0), mask_lo);
-
-        let neg_hi0 =
-            _mm256_cmpgt_epi32(_mm256_and_si256(nib_hi0, sign_bit), _mm256_setzero_si256());
-        let signed_hi0 =
-            _mm256_or_si256(nib_hi0, _mm256_and_si256(neg_hi0, _mm256_set1_epi32(-16)));
-        let neg_hi1 =
-            _mm256_cmpgt_epi32(_mm256_and_si256(nib_hi1, sign_bit), _mm256_setzero_si256());
-        let signed_hi1 =
-            _mm256_or_si256(nib_hi1, _mm256_and_si256(neg_hi1, _mm256_set1_epi32(-16)));
-
-        let fh0 = _mm256_cvtepi32_ps(signed_hi0);
-        let fh1 = _mm256_cvtepi32_ps(signed_hi1);
-
-        let ah0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 4));
-        acc0 = _mm256_fmadd_ps(fh0, ah0, acc0);
-
-        let ah1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 12));
-        acc1 = _mm256_fmadd_ps(fh1, ah1, acc1);
-
         p += 2;
         act_idx += 16;
     }
@@ -594,33 +571,6 @@ unsafe fn gemv_row_u4x8_avx512(
         acc0 = _mm512_fmadd_ps(fl0, al0, acc0);
         let al1 = _mm512_loadu_ps(activation.as_ptr().add(act_idx + 8));
         acc1 = _mm512_fmadd_ps(fl1, al1, acc1);
-
-        // High nibbles (bits 2,6,10,14,18,22,26,30)
-        let shift_hi = _mm256_set_epi32(30, 26, 22, 18, 14, 10, 6, 2);
-        let nib_hi0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift_hi), mask_lo);
-        let nib_hi1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift_hi), mask_lo);
-
-        let signed_hi0 = _mm256_or_si256(
-            nib_hi0,
-            _mm256_and_si256(
-                _mm256_cmpgt_epi32(_mm256_and_si256(nib_hi0, sign_bit), _mm256_setzero_si256()),
-                _mm256_set1_epi32(-16),
-            ),
-        );
-        let signed_hi1 = _mm256_or_si256(
-            nib_hi1,
-            _mm256_and_si256(
-                _mm256_cmpgt_epi32(_mm256_and_si256(nib_hi1, sign_bit), _mm256_setzero_si256()),
-                _mm256_set1_epi32(-16),
-            ),
-        );
-
-        let fh0 = _mm512_cvtepi32_ps(_mm512_castsi256_si512(signed_hi0));
-        let fh1 = _mm512_cvtepi32_ps(_mm512_castsi256_si512(signed_hi1));
-        let ah0 = _mm512_loadu_ps(activation.as_ptr().add(act_idx + 4));
-        acc0 = _mm512_fmadd_ps(fh0, ah0, acc0);
-        let ah1 = _mm512_loadu_ps(activation.as_ptr().add(act_idx + 12));
-        acc1 = _mm512_fmadd_ps(fh1, ah1, acc1);
 
         p += 2;
         act_idx += 16;
@@ -952,13 +902,14 @@ fn gemv_packed_blocked<T: PackedWord>(
                 let unpack_len = (packed_end - packed_start) * items;
 
                 if unpack_len <= K_BLOCK_SIZE {
-                    for (i, p) in (packed_start..packed_end).enumerate() {
+                    for p in packed_start..packed_end {
                         let word = weights.as_packed()[row_offset + p];
                         let unpacked = word.unpack_to_f32();
-                        let dst_start = i * items;
+                        let base = p * items;
                         for j in 0..items {
-                            if dst_start + j < k_block {
-                                unpack_buf[dst_start + j] = unpacked.as_ref()[j];
+                            let idx = base + j;
+                            if idx >= k_offset && idx < k_end {
+                                unpack_buf[idx - k_offset] = unpacked.as_ref()[j];
                             }
                         }
                     }

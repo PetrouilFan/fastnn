@@ -36,11 +36,11 @@ pub fn swar_sub_u4x8(a: u32, b: u32) -> u32 {
     // Add 0x10 per nibble to handle underflow wrapping
     // For even nibbles: (a + 0x10 - b) masked to nibble
     let diff_even = ((a & U4_EVEN)
-        .wrapping_add(U4_EVEN)
+        .wrapping_add(0x1010_1010)
         .wrapping_sub(b & U4_EVEN))
         & U4_EVEN;
     let diff_odd = ((a_odd_shifted
-        .wrapping_add(U4_EVEN)
+        .wrapping_add(0x1010_1010)
         .wrapping_sub(b_odd_shifted))
         & U4_EVEN)
         << 4;
@@ -60,55 +60,58 @@ pub fn swar_relu_s4x8(v: u32) -> u32 {
     v & !neg_mask
 }
 
-/// SWAR element-wise max for two U4x8 words (treating as unsigned).
+/// SWAR element-wise max for two U4x8 words (signed 4-bit).
 /// For each lane: returns a if a >= b, else b.
 #[inline(always)]
 pub fn swar_max_u4x8(a: u32, b: u32) -> u32 {
+    // XOR with sign mask to convert to unsigned-biased representation for correct signed comparison
+    let a_biased = a ^ U4_SIGN;
+    let b_biased = b ^ U4_SIGN;
+
     // Even lanes
-    let a_even = a & U4_EVEN;
-    let b_even = b & U4_EVEN;
-    // If (a - b) underflows, borrow propagates into the gap bit above the nibble
-    // We use wrapping_add(U4_EVEN) to prevent underflow wrapping around
-    let diff_even = a_even.wrapping_add(U4_EVEN).wrapping_sub(b_even);
-    // The bit just above each even nibble (position 4, 12, 20, 28) will be 0 if borrow occurred
+    let a_even_biased = a_biased & U4_EVEN;
+    let b_even_biased = b_biased & U4_EVEN;
+    // If (a_biased - b_biased) underflows, borrow propagates into the gap bit above the nibble
+    let diff_even = a_even_biased.wrapping_add(U4_EVEN).wrapping_sub(b_even_biased);
     let borrow_even = (diff_even >> 4) & 0x0101_0101u32;
-    // Spread borrow bit to fill the nibble
-    let mask_even = borrow_even * 0x0F; // broadcast: 1 nibble → 0x0F, 0 → 0x00
-    let result_even = (a_even & mask_even) | (b_even & !mask_even);
+    let mask_even = borrow_even * 0x0F;
+    let result_even = ((a & U4_EVEN) & mask_even) | ((b & U4_EVEN) & !mask_even);
 
     // Odd lanes
-    let a_odd = (a >> 4) & U4_EVEN;
-    let b_odd = (b >> 4) & U4_EVEN;
-    let diff_odd = a_odd.wrapping_add(U4_EVEN).wrapping_sub(b_odd);
+    let a_odd_biased = (a_biased >> 4) & U4_EVEN;
+    let b_odd_biased = (b_biased >> 4) & U4_EVEN;
+    let diff_odd = a_odd_biased.wrapping_add(U4_EVEN).wrapping_sub(b_odd_biased);
     let borrow_odd = (diff_odd >> 4) & 0x0101_0101u32;
     let mask_odd = borrow_odd * 0x0F;
-    let result_odd = ((a_odd & mask_odd) | (b_odd & !mask_odd)) << 4;
+    let result_odd = ((((a >> 4) & U4_EVEN) & mask_odd) | (((b >> 4) & U4_EVEN) & !mask_odd)) << 4;
 
     result_even | result_odd
 }
 
-/// SWAR element-wise min for two U4x8 words (treating as unsigned).
+/// SWAR element-wise min for two U4x8 words (signed 4-bit).
 /// For each lane: returns a if a <= b, else b.
 #[inline(always)]
 pub fn swar_min_u4x8(a: u32, b: u32) -> u32 {
+    // XOR with sign mask to convert to unsigned-biased representation for correct signed comparison
+    let a_biased = a ^ U4_SIGN;
+    let b_biased = b ^ U4_SIGN;
+
     // Even lanes
-    let a_even = a & U4_EVEN;
-    let b_even = b & U4_EVEN;
-    // If (b - a) underflows, borrow propagates into the gap bit above the nibble
-    let diff_even = b_even.wrapping_add(U4_EVEN).wrapping_sub(a_even);
-    // The bit just above each even nibble (position 4, 12, 20, 28) will be 0 if borrow occurred
+    let a_even_biased = a_biased & U4_EVEN;
+    let b_even_biased = b_biased & U4_EVEN;
+    // If (b_biased - a_biased) underflows, borrow propagates into the gap bit above the nibble
+    let diff_even = b_even_biased.wrapping_add(U4_EVEN).wrapping_sub(a_even_biased);
     let borrow_even = (diff_even >> 4) & 0x0101_0101u32;
-    // Spread borrow bit to fill the nibble
-    let mask_even = borrow_even * 0x0F; // broadcast: 1 nibble → 0x0F, 0 → 0x00
-    let result_even = (a_even & mask_even) | (b_even & !mask_even);
+    let mask_even = borrow_even * 0x0F;
+    let result_even = ((a & U4_EVEN) & mask_even) | ((b & U4_EVEN) & !mask_even);
 
     // Odd lanes
-    let a_odd = (a >> 4) & U4_EVEN;
-    let b_odd = (b >> 4) & U4_EVEN;
-    let diff_odd = b_odd.wrapping_add(U4_EVEN).wrapping_sub(a_odd);
+    let a_odd_biased = (a_biased >> 4) & U4_EVEN;
+    let b_odd_biased = (b_biased >> 4) & U4_EVEN;
+    let diff_odd = b_odd_biased.wrapping_add(U4_EVEN).wrapping_sub(a_odd_biased);
     let borrow_odd = (diff_odd >> 4) & 0x0101_0101u32;
     let mask_odd = borrow_odd * 0x0F;
-    let result_odd = ((a_odd & mask_odd) | (b_odd & !mask_odd)) << 4;
+    let result_odd = ((((a >> 4) & U4_EVEN) & mask_odd) | (((b >> 4) & U4_EVEN) & !mask_odd)) << 4;
 
     result_even | result_odd
 }
@@ -136,11 +139,7 @@ pub fn swar_relu_backward_u4x8(grad: u32, pre_relu: u32) -> u32 {
     let nz_odd_spread = nz_odd_bit0 | (nz_odd_bit0 << 1) | (nz_odd_bit0 << 2) | (nz_odd_bit0 << 3);
     let zero_odd = ((!nz_odd_spread) & U4_EVEN) << 4;
 
-    // Spread zero detection to fill nibbles
-    let zero_even_spread = zero_even | (zero_even << 1) | (zero_even << 2) | (zero_even << 3);
-    let zero_odd_spread = zero_odd | (zero_odd >> 1) | (zero_odd >> 2) | (zero_odd >> 3);
-
-    grad & !(neg_mask | zero_even_spread | zero_odd_spread)
+    grad & !(neg_mask | zero_even | zero_odd)
 }
 
 #[cfg(test)]
@@ -149,12 +148,12 @@ mod tests {
 
     #[test]
     fn test_swar_min_u4x8() {
-        // Test min operation
-        let a: u32 = 0x5432_1098; // nibbles: [8,9,0,1,2,3,4,5] (mixed values)
-        let b: u32 = 0x6787_6543; // nibbles: [3,4,5,6,7,8,7,6]
+        // Test signed min operation
+        let a: u32 = 0x5432_1098; // nibbles (lsb first): [0x8=-8, 0x9=-7, 0x0=0, 0x1=1, 0x2=2, 0x3=3, 0x4=4, 0x5=5]
+        let b: u32 = 0x6787_6543; // nibbles (lsb first): [0x3=3, 0x4=4, 0x5=5, 0x6=6, 0x7=7, 0x8=-8, 0x7=7, 0x6=6]
         let result = swar_min_u4x8(a, b);
-        // Expected: min([8,9,0,1,2,3,4,5], [3,4,5,6,7,8,7,6]) = [3,4,0,1,2,3,4,5]
-        assert_eq!(result, 0x5432_1043u32);
+        // Expected: signed min per lane = [0x8, 0x9, 0x0, 0x1, 0x2, 0x8, 0x4, 0x5] = 0x5482_1098
+        assert_eq!(result, 0x5482_1098u32);
     }
 
     #[test]

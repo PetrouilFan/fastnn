@@ -36,10 +36,6 @@ impl PackedWord for F16x2 {
     fn wgsl_return_type() -> &'static str {
         "vec2<f32>"
     }
-
-    fn wgsl_dot_logic() -> &'static str {
-        "acc += dot(unpacked, act0);"
-    }
 }
 
 #[cfg(test)]
