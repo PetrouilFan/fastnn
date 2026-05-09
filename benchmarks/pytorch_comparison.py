@@ -216,6 +216,28 @@ def bench_linear(iters):
     ]
 
 
+def bench_gemv(iters):
+    results = []
+    for size in [256, 512, 1024, 4096]:
+        cat = "large" if size > 1024 else "medium" if size > 512 else "small"
+        n = iters.get(cat, 50)
+        fnn_lin = fnn.Linear(size, size, bias=False)
+        x_fnn = fnn.randn([1, size])
+        th_lin = torch.nn.Linear(size, size, bias=False)
+        x_th = torch.randn(1, size)
+        results.append(
+            _bench(
+                f"gemv_{size}x{size}",
+                lambda lin=fnn_lin, x=x_fnn: lin(x),
+                lambda lin=th_lin, x=x_th: lin(x),
+                _WARMUP,
+                n,
+                shape=f"({size},{size})",
+            )
+        )
+    return results
+
+
 def bench_conv2d(iters):
     n = iters.get("medium", 100)
     fnn_conv = fnn.Conv2d(3, 16, 3, padding=1)
@@ -354,6 +376,7 @@ def bench_training_step(iters):
 # ---------------------------------------------------------------------------
 
 _ALL_BENCHMARKS = [
+    ("GEMV", bench_gemv),
     ("MatMul", bench_matmul),
     ("Elementwise", bench_elementwise),
     ("Softmax & Reductions", bench_softmax_reductions),
