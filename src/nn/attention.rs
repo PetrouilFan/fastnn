@@ -21,7 +21,7 @@ pub struct PackedMultiHeadAttention<T: PackedWord> {
     training: TrainingState,
     /// Scale factor for attention scores
     scale: f32,
-    /// Cached KV cache for efficient autoregressive decoding
+    // TODO: Implement KV cache for autoregressive decoding
     kv_cache: Option<(PackedTensor<T>, PackedTensor<T>)>,
 }
 
@@ -75,8 +75,8 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         // Convert to f32 for processing
         let x_data = x.to_numpy();
 
-        // QKV projection: [batch, seq_len, d_model] @ [d_model, d_model * 3] -> [batch, seq_len, d_model * 3]
-        let qkv = self.quantized_matmul(&x_data, batch * seq_len, d_model, d_model * 3);
+        // QKV projection: [batch, seq_len, d_model] @ [d_model*3, d_model]^T -> [batch, seq_len, d_model * 3]
+        let qkv = self.quantized_matmul(&x_data, &self.qkv_proj, batch * seq_len, d_model, d_model * 3);
 
         // Split Q, K, V
         let q: Vec<f32> = qkv
@@ -121,39 +121,37 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         // Reshape back to [batch, seq_len, d_model]
         let context = self.reshape_from_heads(&context, batch, seq_len);
 
-        // Output projection
-        let output = self.quantized_matmul(&context, batch * seq_len, d_model, d_model);
+        // Output projection: [batch, seq_len, d_model] @ [d_model, d_model]^T -> [batch, seq_len, d_model]
+        let output = self.quantized_matmul(&context, &self.out_proj, batch * seq_len, d_model, d_model);
 
         Tensor::from_vec(output, vec![batch as i64, seq_len as i64, d_model as i64])
     }
 
     /// Quantized matrix multiplication using packed weights.
-    fn quantized_matmul(&self, input: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-        // For now, use CPU GEMV for each row (can be optimized to batched GEMM)
+    /// input: [m, k], weight: [k, n], output: [m, n]
+    fn quantized_matmul(
+        &self,
+        input: &[f32],
+        weight: &PackedTensor<T>,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Vec<f32> {
+        debug_assert_eq!(weight.shape()[0], k);
+        debug_assert_eq!(weight.shape()[1], n);
         let mut output = vec![0.0f32; m * n];
-
-        // Create a temporary PackedTensor for the weight slice
-        // This is a simplified implementation - in practice, we'd want to use
-        // the full packed GEMM capabilities
         for i in 0..m {
             let row_start = i * k;
-            let row_end = row_start + k;
-            let input_row = &input[row_start..row_end];
-
-            // For each output column, compute dot product
             for j in 0..n {
                 let mut sum = 0.0f32;
-                // This would use the packed representation for efficiency
-                // For now, use a simple implementation
                 for l in 0..k {
-                    // Get weight value (would be unpacked from packed representation)
-                    let w = 0.0f32; // Placeholder
-                    sum += input_row[l] * w;
+                    let w_idx = l * n + j;
+                    let w = weight.get(w_idx);
+                    sum += input[row_start + l] * w;
                 }
                 output[i * n + j] = sum;
             }
         }
-
         output
     }
 

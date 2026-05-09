@@ -110,6 +110,9 @@ impl<T: PackedWord> PackedLinear<T> {
 
     /// Forward pass on CPU.
     pub fn forward_cpu(&self, input: &[f32]) -> Vec<f32> {
+        assert_eq!(input.len(), self.in_features,
+            "PackedLinear::forward_cpu: input length {} != in_features {}",
+            input.len(), self.in_features);
         let mut output = vec![0.0; self.out_features];
         cpu::gemv_cpu(&self.weight, input, &mut output);
         if let Some(ref bias) = self.bias {
@@ -127,7 +130,6 @@ impl<T: PackedWord> PackedLinear<T> {
         let (weight_buf, output_buf, params_buf, activation_buf) = self.ensure_gpu_bufs(&ctx);
 
         let mut output = gemv_wgpu_persistent::<T>(
-            &ctx,
             &self.gpu_bind_group,
             weight_buf,
             output_buf,
@@ -135,6 +137,7 @@ impl<T: PackedWord> PackedLinear<T> {
             activation_buf,
             input,
             self.out_features as u32,
+            self.in_features as u32,
             self.weight.packed_len() as u32,
             self.weight.scale(),
             self.weight.zero(),
@@ -188,7 +191,7 @@ impl<T: PackedWord> PackedLinear<T> {
             if guard.is_none() {
                 // GemvParams is bound as uniform — needs UNIFORM | COPY_DST usage
                 let buf = ctx.create_buffer_with_usage(
-                    16,
+                    20,
                     wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     "gemv_params",
                 );
@@ -252,7 +255,6 @@ impl<T: PackedWord> PackedLinear<T> {
             // Invalidate GPU cache because weights changed
             *self.gpu_weight_buf.lock().unwrap() = None;
             *self.gpu_params_buf.lock().unwrap() = None;
-            *self.gpu_activation_buf.lock().unwrap() = None;
             *self.gpu_bind_group.lock().unwrap() = None;
         }
     }
@@ -270,7 +272,7 @@ impl<T: PackedWord> PackedLinear<T> {
 
     /// Memory usage in bytes for the packed weights.
     pub fn packed_weight_bytes(&self) -> usize {
-        self.weight.packed_len() * std::mem::size_of::<u32>()
+        self.weight.packed_len() * std::mem::size_of::<T>()
     }
 
     /// Memory savings ratio vs f32.

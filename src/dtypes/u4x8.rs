@@ -62,10 +62,6 @@ impl PackedWord for U4x8 {
     fn wgsl_return_type() -> &'static str {
         "mat2x4<f32>"
     }
-
-    fn wgsl_dot_logic() -> &'static str {
-        "acc += dot(unpacked[0], act0) + dot(unpacked[1], act1);"
-    }
 }
 
 #[cfg(test)]

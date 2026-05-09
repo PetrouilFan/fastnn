@@ -27,11 +27,11 @@ pub fn swar_sub_u8x4(a: u32, b: u32) -> u32 {
     let b_odd_shifted = (b >> 8) & U8_EVEN;
 
     let diff_even = ((a & U8_EVEN)
-        .wrapping_add(U8_EVEN)
+        .wrapping_add(0x0100_0100)
         .wrapping_sub(b & U8_EVEN))
         & U8_EVEN;
     let diff_odd = ((a_odd_shifted
-        .wrapping_add(U8_EVEN)
+        .wrapping_add(0x0100_0100)
         .wrapping_sub(b_odd_shifted))
         & U8_EVEN)
         << 8;

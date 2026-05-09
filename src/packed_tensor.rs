@@ -89,8 +89,8 @@ impl<T: PackedWord> PackedTensor<T> {
     /// Unpack all values to a `Vec<f32>`, applying scale and zero correction.
     pub fn to_f32_vec(&self) -> Vec<f32> {
         let numel = self.numel();
-        let k = if self.shape.len() >= 2 {
-            self.shape[1]
+        let inner_stride = if self.shape.len() >= 2 {
+            self.shape[1..].iter().product()
         } else {
             numel
         };
@@ -104,7 +104,7 @@ impl<T: PackedWord> PackedTensor<T> {
             for j in 0..items {
                 let elem_idx = i * items + j;
                 if elem_idx < numel {
-                    let row = elem_idx / k;
+                    let row = elem_idx / inner_stride;
                     let s = if is_per_row {
                         self.scales[row]
                     } else {
@@ -190,12 +190,12 @@ impl<T: PackedWord> PackedTensor<T> {
         let elem_idx = idx % T::ITEMS;
         let unpacked = self.data[word_idx].unpack_to_f32();
         let val = unpacked.as_ref()[elem_idx];
-        let k = if self.shape.len() >= 2 {
-            self.shape[1]
+        let inner_stride = if self.shape.len() >= 2 {
+            self.shape[1..].iter().product()
         } else {
             self.numel()
         };
-        let row = idx / k;
+        let row = idx / inner_stride;
         let s = self.scale_for_row(row);
         let z = self.zero_for_row(row);
         if s != 1.0 || z != 0.0 {
@@ -211,12 +211,12 @@ impl<T: PackedWord> PackedTensor<T> {
         let word_idx = idx / T::ITEMS;
         let elem_idx = idx % T::ITEMS;
         let mut arr = self.data[word_idx].unpack_to_f32();
-        let k = if self.shape.len() >= 2 {
-            self.shape[1]
+        let inner_stride = if self.shape.len() >= 2 {
+            self.shape[1..].iter().product()
         } else {
             self.numel()
         };
-        let row = idx / k;
+        let row = idx / inner_stride;
         let s = self.scale_for_row(row);
         let z = self.zero_for_row(row);
         let quantized = if s != 1.0 || z != 0.0 {
@@ -283,13 +283,14 @@ impl<T: PackedWord> PackedTensor<T> {
             return vec![1.0];
         }
         assert!(shape.len() >= 2, "Per-channel requires 2D+ shape");
+        // For 3D+ tensors, inner stride is the product of all trailing dimensions
         let m = shape[0];
-        let k = shape[1];
+        let inner_stride: usize = shape[1..].iter().product();
         let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
         let mut scales = Vec::with_capacity(m);
         for row in 0..m {
-            let start = row * k;
-            let end = start + k;
+            let start = row * inner_stride;
+            let end = start + inner_stride;
             let max_abs = data[start..end]
                 .iter()
                 .map(|v| v.abs())
@@ -310,7 +311,7 @@ impl<T: PackedWord> PackedTensor<T> {
 
         let scales = Self::compute_scales_per_channel(data, shape);
         let m = if shape.len() >= 2 { shape[0] } else { 1 };
-        let k = if shape.len() >= 2 { shape[1] } else { numel };
+        let inner_stride = if shape.len() >= 2 { shape[1..].iter().product() } else { numel };
 
         let packed_len = numel.div_ceil(T::ITEMS);
         let mut packed = zeroed_vec(packed_len);
@@ -321,14 +322,15 @@ impl<T: PackedWord> PackedTensor<T> {
             for i in 0..T::ITEMS {
                 let elem_idx = chunk_idx * T::ITEMS + i;
                 if elem_idx < numel {
-                    let row = elem_idx / k;
+                    let row = elem_idx / inner_stride;
                     let s = if scales.len() == 1 {
                         scales[0]
                     } else {
                         scales[row]
                     };
-                    arr_ref[i] = if s != 1.0 {
-                        data[elem_idx] / s
+                    let z = 0.0;
+                    arr_ref[i] = if s != 1.0 || z != 0.0 {
+                        (data[elem_idx] - z) / s
                     } else {
                         data[elem_idx]
                     };

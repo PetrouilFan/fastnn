@@ -44,10 +44,6 @@ impl PackedWord for U8x4 {
     fn wgsl_return_type() -> &'static str {
         "vec4<f32>"
     }
-
-    fn wgsl_dot_logic() -> &'static str {
-        "acc += dot(unpacked, act0);"
-    }
 }
 
 #[cfg(test)]

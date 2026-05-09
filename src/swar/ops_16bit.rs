@@ -41,28 +41,37 @@ pub fn swar_relu_backward_f16x2(grad: u32, pre_relu: u32) -> u32 {
     grad & !(neg_mask | zero_mask_lo | zero_mask_hi)
 }
 
-/// SWAR element-wise max for two F16x2 words (treating bits as unsigned 16-bit).
-/// This is approximate — proper F16 max requires unpacking.
+/// SWAR element-wise max for two F16x2 words.
+/// Uses IEEE 754 total-order conversion for correct signed comparison.
 #[inline(always)]
 pub fn swar_max_u16x2(a: u32, b: u32) -> u32 {
-    let a_lo = a & U16_LO;
-    let b_lo = b & U16_LO;
-    // Compare low halves: if a >= b, no borrow
+    // IEEE 754 total-order: XOR with 0x8000 if non-negative, XOR with 0xFFFF if negative
+    // This makes unsigned comparison equivalent to IEEE 754 total order
+    let sa_lo = (a >> 15) & 1;
+    let sa_hi = a >> 31;
+    let mask_a = U16_SIGN | (sa_lo * 0x7FFF) | (sa_hi * 0x7FFF_0000);
+    let a_biased = a ^ mask_a;
+
+    let sb_lo = (b >> 15) & 1;
+    let sb_hi = b >> 31;
+    let mask_b = U16_SIGN | (sb_lo * 0x7FFF) | (sb_hi * 0x7FFF_0000);
+    let b_biased = b ^ mask_b;
+
+    // Low halves
+    let a_lo = a_biased & U16_LO;
+    let b_lo = b_biased & U16_LO;
     let diff_lo = a_lo.wrapping_add(U16_LO).wrapping_sub(b_lo);
     let borrow_lo = (diff_lo >> 16) & 1;
     let mask_lo = 0u32.wrapping_sub(borrow_lo);
-    // borrow_lo = 1 when a > b → mask = 0xFFFF → select a
-    let result_lo = (a_lo & mask_lo) | (b_lo & !mask_lo);
+    let result_lo = ((a & U16_LO) & mask_lo) | ((b & U16_LO) & !mask_lo);
 
-    // High halves (branchless)
-    let a_hi = a & U16_HI;
-    let b_hi = b & U16_HI;
-    let a_hi_shifted = a >> 16;
-    let b_hi_shifted = b >> 16;
+    // High halves
+    let a_hi_shifted = a_biased >> 16;
+    let b_hi_shifted = b_biased >> 16;
     let diff_hi = a_hi_shifted.wrapping_add(U16_LO).wrapping_sub(b_hi_shifted);
     let borrow_hi = (diff_hi >> 16) & 1;
     let mask_hi = 0u32.wrapping_sub(borrow_hi);
-    let result_hi = (a_hi & mask_hi) | (b_hi & !mask_hi);
+    let result_hi = ((a & U16_HI) & mask_hi) | ((b & U16_HI) & !mask_hi);
 
     result_lo | result_hi
 }

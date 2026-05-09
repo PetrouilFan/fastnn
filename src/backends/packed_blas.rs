@@ -120,6 +120,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
 
         for row in 0..m {
             output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
+            debug_assert_eq!(weights.zero_for_row(row), 0.0, "Non-zero zero_point not yet supported in GEMV kernels");
         }
     });
 }
@@ -405,17 +406,12 @@ pub fn gemv_f16x2_tiled(
 
                         for p in packed_start..packed_end {
                             let w = weights_u32[row_off + p];
-                            let half_bits = if p * 2 >= k_offset && p * 2 < k_end {
-                                w as u16
-                            } else {
-                                (w >> 16) as u16
-                            };
                             let idx = p * 2;
-                            if idx >= k_offset && idx < k_end {
+                            if idx < k_end {
                                 row_bufs[row_start + (idx - k_offset)] =
-                                    half::f16::from_bits(half_bits).to_f32();
+                                    half::f16::from_bits(w as u16).to_f32();
                             }
-                            if idx + 1 >= k_offset && idx + 1 < k_end {
+                            if idx + 1 < k_end {
                                 row_bufs[row_start + (idx + 1 - k_offset)] =
                                     half::f16::from_bits((w >> 16) as u16).to_f32();
                             }
@@ -566,85 +562,6 @@ pub fn gemv_u4x8_tiled(
 
     for row in 0..m {
         output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
-    }
-}
-
-// ============================================================
-// AVX512 micro-kernel (16-wide)
-// ============================================================
-
-/// AVX512 micro-kernel: MR=4 rows, 16-wide FMA.
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx512f")]
-#[allow(dead_code)]
-#[inline]
-#[allow(clippy::too_many_arguments)]
-unsafe fn micro_kernel_avx512(
-    row_bufs: &[[f32; KC]; MR],
-    activation: &[f32],
-    output: &mut [f32],
-    k: usize,
-) {
-    let mut acc0 = _mm512_setzero_ps();
-    let mut acc1 = _mm512_setzero_ps();
-    let mut acc2 = _mm512_setzero_ps();
-    let mut acc3 = _mm512_setzero_ps();
-
-    let mut kk = 0;
-
-    while kk + 16 <= k {
-        let act = _mm512_loadu_ps(activation.as_ptr().add(kk));
-
-        let w0 = _mm512_loadu_ps(row_bufs[0].as_ptr().add(kk));
-        let w1 = _mm512_loadu_ps(row_bufs[1].as_ptr().add(kk));
-        let w2 = _mm512_loadu_ps(row_bufs[2].as_ptr().add(kk));
-        let w3 = _mm512_loadu_ps(row_bufs[3].as_ptr().add(kk));
-
-        acc0 = _mm512_fmadd_ps(w0, act, acc0);
-        acc1 = _mm512_fmadd_ps(w1, act, acc1);
-        acc2 = _mm512_fmadd_ps(w2, act, acc2);
-        acc3 = _mm512_fmadd_ps(w3, act, acc3);
-
-        kk += 16;
-    }
-
-    // Reduce to f32
-    output[0] += _mm512_reduce_add_ps(acc0);
-    output[1] += _mm512_reduce_add_ps(acc1);
-    output[2] += _mm512_reduce_add_ps(acc2);
-    output[3] += _mm512_reduce_add_ps(acc3);
-
-    // AVX2 tail for remaining 8-wide chunks
-    let mut tail_acc0 = _mm256_setzero_ps();
-    let mut tail_acc1 = _mm256_setzero_ps();
-    let mut tail_acc2 = _mm256_setzero_ps();
-    let mut tail_acc3 = _mm256_setzero_ps();
-
-    while kk + 8 <= k {
-        let act = _mm256_loadu_ps(activation.as_ptr().add(kk));
-        let w0 = _mm256_loadu_ps(row_bufs[0].as_ptr().add(kk));
-        let w1 = _mm256_loadu_ps(row_bufs[1].as_ptr().add(kk));
-        let w2 = _mm256_loadu_ps(row_bufs[2].as_ptr().add(kk));
-        let w3 = _mm256_loadu_ps(row_bufs[3].as_ptr().add(kk));
-        tail_acc0 = _mm256_fmadd_ps(w0, act, tail_acc0);
-        tail_acc1 = _mm256_fmadd_ps(w1, act, tail_acc1);
-        tail_acc2 = _mm256_fmadd_ps(w2, act, tail_acc2);
-        tail_acc3 = _mm256_fmadd_ps(w3, act, tail_acc3);
-        kk += 8;
-    }
-
-    output[0] += hsum256_ps(tail_acc0);
-    output[1] += hsum256_ps(tail_acc1);
-    output[2] += hsum256_ps(tail_acc2);
-    output[3] += hsum256_ps(tail_acc3);
-
-    // Scalar tail
-    while kk < k {
-        output[0] += row_bufs[0][kk] * activation[kk];
-        output[1] += row_bufs[1][kk] * activation[kk];
-        output[2] += row_bufs[2][kk] * activation[kk];
-        output[3] += row_bufs[3][kk] * activation[kk];
-        kk += 1;
     }
 }
 
