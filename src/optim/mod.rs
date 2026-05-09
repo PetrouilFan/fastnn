@@ -5,6 +5,13 @@ pub mod muon;
 pub mod rmsprop;
 pub mod sgd;
 
+pub use adam::Adam;
+pub use adamw::AdamW;
+pub use lion::Lion;
+pub use muon::Muon;
+pub use rmsprop::RMSprop;
+pub use sgd::SGD;
+
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -136,39 +136,36 @@ pub fn matmul_blas_with_transpose_into(
 ) {
     use matrixmultiply::sgemm;
 
-    // matrixmultiply expects row-major order
-    // For C = A @ B with A[m×k], B[k×n], C[m×n]
-    // If A is transposed: A is stored as k×m, so dimensions become A[k×m], B[m×n], C[k×n]
-    // If B is transposed: B is stored as n×k, so dimensions become A[m×n], B[n×k], C[m×k]
-    let (m_final, k_final, n_final, lda, ldb, ldc) = if trans_a && trans_b {
-        // A transposed: k×m, B transposed: n×k -> C[k×n]
-        (k, n, m, k as isize, 1isize, k as isize)
-    } else if trans_a {
-        // A transposed: k×m, B not transposed: k×n -> C[k×n]
-        (k, m, n, k as isize, n as isize, k as isize)
-    } else if trans_b {
-        // A not transposed: m×k, B transposed: n×k -> C[m×n]
-        (m, n, k, k as isize, 1isize, n as isize)
-    } else {
-        // No transposes: A[m×k], B[k×n] -> C[m×n]
-        (m, k, n, k as isize, n as isize, n as isize)
-    };
+    // matrixmultiply::sgemm(M, K, N, A, rsa, csa, B, rsb, csb, C, rsc, csc) computes:
+    //   C[i][j] = Σ_{p=0}^{K-1} A[rsa·i + csa·p] · B[rsb·p + csb·j]
+    // where A is M×K, B is K×N, C is M×N.
+    //
+    // For row-major storage: rsa=K, csa=1 (next row = +K, next col = +1)
+    // For transposed (stored as [K][M], accessed as [M][K]): rsa=1, csa=M
+    //   because stored_A[p][i] = base + p·M + i = A[i][p] = base + rsa·i + csa·p
+    //   gives rsa=1, csa=M.
+    //
+    // We keep M=m, K=k, N=n constant and adjust strides for transposition:
+    let rsa: isize = if trans_a { 1 } else { k as isize };
+    let csa: isize = if trans_a { m as isize } else { 1 };
+    let rsb: isize = if trans_b { 1 } else { n as isize };
+    let csb: isize = if trans_b { k as isize } else { 1 };
 
     unsafe {
         sgemm(
-            m_final,
-            k_final,
-            n_final,
+            m,
+            k,
+            n,
             1.0f32,
             a.as_ptr(),
-            lda,
-            1isize,
+            rsa,
+            csa,
             b.as_ptr(),
-            ldb,
-            1isize,
+            rsb,
+            csb,
             0.0f32,
             out.as_mut_ptr(),
-            ldc,
+            n as isize,
             1isize,
         );
     }

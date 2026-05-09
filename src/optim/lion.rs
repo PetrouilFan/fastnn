@@ -1,4 +1,4 @@
-use crate::optim::{zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState};
+use crate::optim::{zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState, WeightDecayOptimizer};
 use crate::tensor::Tensor;
 use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;
@@ -10,12 +10,14 @@ pub struct Lion {
     pub weight_decay: f64,
     pub m: Vec<Tensor>,
     pub step: Vec<u64>,
+    pub no_decay: Vec<bool>,
 }
 
 impl Lion {
     pub fn new(params: Vec<Tensor>, lr: f64, betas: (f64, f64), weight_decay: f64) -> Self {
         let m = zeros_like(&params);
         let step = vec![0u64; params.len()];
+        let no_decay = vec![false; params.len()];
 
         Lion {
             params,
@@ -24,7 +26,20 @@ impl Lion {
             weight_decay,
             m,
             step,
+            no_decay,
         }
+    }
+}
+
+impl WeightDecayOptimizer for Lion {
+    fn params(&self) -> &Vec<Tensor> {
+        &self.params
+    }
+    fn no_decay(&self) -> &Vec<bool> {
+        &self.no_decay
+    }
+    fn no_decay_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.no_decay
     }
 }
 
@@ -73,6 +88,7 @@ impl Optimizer for Lion {
 
         self.m.extend(m);
         self.step.extend(vec![0u64; params.len()]);
+        self.no_decay.extend(vec![false; params.len()]);
         self.params.extend(params);
     }
 
