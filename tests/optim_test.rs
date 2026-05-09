@@ -1,4 +1,4 @@
-use fastnn::optim::{Adam, AdamW, Lion, Muon, RMSprop, SGD};
+use fastnn::optim::{Adam, AdamW, Lion, Muon, Optimizer, RMSprop, SGD, WeightDecayOptimizer};
 use fastnn::tensor::Tensor;
 
 fn create_test_params() -> Vec<Tensor> {
@@ -10,7 +10,7 @@ fn create_test_params() -> Vec<Tensor> {
 
 fn set_grads(params: &mut [Tensor]) {
     for p in params {
-        let grad = Tensor::from_vec(vec![0.1f32; p.numel()], p.shape());
+        let grad = Tensor::from_vec(vec![0.1f32; p.numel() as usize], p.shape());
         p.set_grad(Some(grad));
     }
 }

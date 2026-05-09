@@ -398,8 +398,8 @@ pub unsafe fn conv2d_3x3_direct(
 
     // --- Step 1: Pre-transpose weights into thread-local buffer, reuse across calls
     let k = in_channels * 9;
-    let n = out_channels;
-    let needed = k * n;
+    let oc_count = out_channels;
+    let needed = k * oc_count;
     let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
         let mut b = buf.borrow_mut();
         let v = if let Some(ref mut vec) = &mut *b {
@@ -419,7 +419,7 @@ pub unsafe fn conv2d_3x3_direct(
                     let k_idx = ic * 9 + kh * 3 + kw;
                     for oc in 0..out_channels {
                         let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
-                        unsafe { *v.get_unchecked_mut(k_idx * n + oc) = *w_ptr.add(w_idx) };
+                        unsafe { *v.get_unchecked_mut(k_idx * oc_count + oc) = *w_ptr.add(w_idx) };
                     }
                 }
             }
@@ -480,7 +480,7 @@ pub unsafe fn conv2d_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -519,7 +519,7 @@ pub unsafe fn conv2d_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     // lower 4
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
@@ -585,7 +585,7 @@ pub unsafe fn conv2d_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -609,7 +609,7 @@ pub unsafe fn conv2d_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -671,7 +671,7 @@ pub unsafe fn conv2d_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -710,7 +710,7 @@ pub unsafe fn conv2d_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     // lower 4
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
@@ -776,7 +776,7 @@ pub unsafe fn conv2d_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -800,7 +800,7 @@ pub unsafe fn conv2d_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -875,9 +875,9 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
 
     // --- Step 1: Get transposed weights from thread-local buffer (recompute per call)
     let k = in_channels * 9;
-    let n = out_channels;
+    let oc_count = out_channels;
     let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
-        let needed = k * n;
+        let needed = k * oc_count;
         let mut b = buf.borrow_mut();
         let v = if let Some(ref mut v) = &mut *b {
             v
@@ -895,14 +895,14 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                     let k_idx = ic * 9 + kh * 3 + kw;
                     for oc in 0..out_channels {
                         let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
-                        unsafe { *v.get_unchecked_mut(k_idx * n + oc) = *w_ptr.add(w_idx) };
+                        unsafe { *v.get_unchecked_mut(k_idx * oc_count + oc) = *w_ptr.add(w_idx) };
                     }
                 }
             }
         }
         v.as_ptr()
     });
-    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * n) };
+    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * oc_count) };
 
     // --- Step 2: Main kernel (parallel over output spatial+batch positions)
     #[cfg(feature = "parallel")]
@@ -963,7 +963,7 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -1014,7 +1014,7 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
                                     });
@@ -1101,7 +1101,7 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -1132,7 +1132,7 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -1201,7 +1201,7 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -1252,7 +1252,7 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
                                     });
@@ -1339,7 +1339,7 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -1370,7 +1370,7 @@ pub unsafe fn fused_conv_bn_silu_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -1451,9 +1451,9 @@ pub unsafe fn fused_conv_bn_3x3_direct(
     let in_w = in_width as isize;
 
     let k = in_channels * 9;
-    let n = out_channels;
+    let oc_count = out_channels;
     let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
-        let needed = k * n;
+        let needed = k * oc_count;
         let mut b = buf.borrow_mut();
         let v = if let Some(ref mut v) = &mut *b {
             v
@@ -1471,14 +1471,14 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                     let k_idx = ic * 9 + kh * 3 + kw;
                     for oc in 0..out_channels {
                         let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
-                        unsafe { *v.get_unchecked_mut(k_idx * n + oc) = *w_ptr.add(w_idx) };
+                        unsafe { *v.get_unchecked_mut(k_idx * oc_count + oc) = *w_ptr.add(w_idx) };
                     }
                 }
             }
         }
         v.as_ptr()
     });
-    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * n) };
+    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * oc_count) };
 
     #[cfg(feature = "parallel")]
     {
@@ -1538,7 +1538,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -1587,7 +1587,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
                                     });
@@ -1670,7 +1670,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -1699,7 +1699,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -1767,7 +1767,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -1816,7 +1816,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
                                     });
@@ -1899,7 +1899,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -1928,7 +1928,7 @@ pub unsafe fn fused_conv_bn_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -3045,9 +3045,9 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
 
     // --- Step 1: Get transposed weights from thread-local buffer (recompute per call)
     let k = in_channels * 9;
-    let n = out_channels;
+    let oc_count = out_channels;
     let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
-        let needed = k * n;
+        let needed = k * oc_count;
         let mut b = buf.borrow_mut();
         let v = if let Some(ref mut v) = &mut *b {
             v
@@ -3065,14 +3065,14 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                     let k_idx = ic * 9 + kh * 3 + kw;
                     for oc in 0..out_channels {
                         let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
-                        unsafe { *v.get_unchecked_mut(k_idx * n + oc) = *w_ptr.add(w_idx) };
+                        unsafe { *v.get_unchecked_mut(k_idx * oc_count + oc) = *w_ptr.add(w_idx) };
                     }
                 }
             }
         }
         v.as_ptr()
     });
-    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * n) };
+    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * oc_count) };
 
     // --- Step 2: Main kernel (parallel over output spatial+batch positions)
     #[cfg(feature = "parallel")]
@@ -3133,7 +3133,7 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -3184,7 +3184,7 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
                                     });
@@ -3271,7 +3271,7 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -3302,7 +3302,7 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -3371,7 +3371,7 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -3422,7 +3422,7 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
                                     });
@@ -3509,7 +3509,7 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -3540,7 +3540,7 @@ pub unsafe fn fused_conv_bn_relu_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -3623,9 +3623,9 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
 
     // --- Step 1: Get transposed weights from thread-local buffer (recompute per call)
     let k = in_channels * 9;
-    let n = out_channels;
+    let oc_count = out_channels;
     let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
-        let needed = k * n;
+        let needed = k * oc_count;
         let mut b = buf.borrow_mut();
         let v = if let Some(ref mut v) = &mut *b {
             v
@@ -3643,14 +3643,14 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                     let k_idx = ic * 9 + kh * 3 + kw;
                     for oc in 0..out_channels {
                         let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
-                        unsafe { *v.get_unchecked_mut(k_idx * n + oc) = *w_ptr.add(w_idx) };
+                        unsafe { *v.get_unchecked_mut(k_idx * oc_count + oc) = *w_ptr.add(w_idx) };
                     }
                 }
             }
         }
         v.as_ptr()
     });
-    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * n) };
+    let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, k * oc_count) };
 
     // --- Step 2: Main kernel (parallel over output spatial+batch positions)
     #[cfg(feature = "parallel")]
@@ -3711,7 +3711,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -3766,7 +3766,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
                                     });
@@ -3861,7 +3861,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -3896,7 +3896,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
@@ -3968,7 +3968,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let w_ptr_k =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_simd = from_slice_unaligned_f32x8(unsafe {
                                         std::slice::from_raw_parts(w_ptr_k, 8)
                                     });
@@ -4023,7 +4023,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                                 for k_idx in 0..k {
                                     let x_val = s[k_idx];
                                     let base_ptr =
-                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * n + oc) };
+                                        unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
                                         std::slice::from_raw_parts(base_ptr, 4)
                                     });
@@ -4118,7 +4118,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                                     for k_idx in 0..k {
                                         let x_val = s[k_idx];
                                         let w_val = unsafe {
-                                            *wt_trans_slice.get_unchecked(k_idx * n + oc_i)
+                                            *wt_trans_slice.get_unchecked(k_idx * oc_count + oc_i)
                                         };
                                         sum += x_val * w_val;
                                     }
@@ -4153,7 +4153,7 @@ pub unsafe fn fused_conv_bn_gelu_3x3_direct(
                             for k_idx in 0..k {
                                 let x_val = s[k_idx];
                                 let w_val =
-                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * n + oc) };
+                                    unsafe { *wt_trans_slice.get_unchecked(k_idx * oc_count + oc) };
                                 sum += x_val * w_val;
                             }
                             let bias_val = bias_scalar.unwrap_or_else(|| {
