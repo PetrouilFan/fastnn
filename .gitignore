@@ -30,6 +30,7 @@ maturin/
 *.so
 *.dll
 *.dylib
+*.rlib
 
 # Test / coverage
 .pytest_cache/
