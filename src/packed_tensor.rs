@@ -86,7 +86,7 @@ impl<T: PackedWord> PackedTensor<T> {
         }
     }
 
-    /// Unpack all values to a Vec<f32>, applying scale and zero correction.
+    /// Unpack all values to a `Vec<f32>`, applying scale and zero correction.
     pub fn to_f32_vec(&self) -> Vec<f32> {
         let numel = self.numel();
         let k = if self.shape.len() >= 2 {
