@@ -85,3 +85,7 @@ harness = false
 [[bin]]
 name = "matmul_direct"
 path = "benches/matmul_direct.rs"
+
+[[bin]]
+name = "packed_bench_json"
+path = "benches/packed_bench_json.rs"
