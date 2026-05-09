@@ -30,7 +30,7 @@ pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + 
     /// WGSL unpack function body (injected into shader at compile time)
     fn wgsl_unpack_body() -> &'static str;
 
-    /// WGSL type returned by unpack (e.g. "mat2x4<f32>", "vec4<f32>")
+    /// WGSL type returned by unpack (e.g. `"mat2x4<f32>"`, `"vec4<f32>"`)
     fn wgsl_return_type() -> &'static str;
 
     /// WGSL dot product accumulation line (injected into shader)
