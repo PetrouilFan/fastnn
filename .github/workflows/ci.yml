@@ -139,23 +139,24 @@ jobs:
           uv run python benchmarks/pytorch_comparison.py \
             --fast --output results.json
 
-      - name: Write benchmark summary
+      - name: Build packed precision benchmark binary
+        shell: bash
+        run: cargo build --release --bin packed_bench_json
+
+      - name: Run packed precision benchmarks
+        shell: bash
+        run: |
+          ./target/release/packed_bench_json > packed_results.json
+
+      - name: Merge and write benchmark summary
         if: always()
         shell: bash
         run: |
           {
-            echo "## ⚡ fastnn vs PyTorch Benchmark"
-            echo ""
             echo "**Commit:** ${{ github.sha }}"
             echo "**Run:** ${{ github.run_id }}"
             echo ""
-            python3 -c "
-          import json
-          with open('results.json') as f:
-              data = json.load(f)
-          md = data.get('markdown', '')
-          print(md)
-          "
+            uv run python .github/merge_benchmarks.py results.json packed_results.json
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark results
@@ -163,4 +164,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: results.json
+          path: |
+            results.json
+            packed_results.json
