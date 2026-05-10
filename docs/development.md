@@ -7,6 +7,13 @@ FastNN keeps the user-facing Python API stable while the Rust internals are spli
 ```text
 src/
   lib.rs                  # crate exports and module declarations
+  error.rs                # Error types
+  iterator.rs             # TensorIterator
+  residual.rs             # Residual connection helper
+  storage.rs              # Memory backend and device allocation
+  storage_pool.rs         # Storage pooling for output tensor reuse
+  storage_quantized.rs    # Quantized tensor storage
+  dispatcher.rs           # Dynamic kernel dispatch (CPU vs GPU)
   python/
     mod.rs                # PyO3 module registration
     tensor.rs             # PyTensor bindings and DLPack hooks
@@ -15,6 +22,10 @@ src/
     nn.rs                 # neural network class bindings
     optim.rs              # optimizer class bindings
     io.rs                 # save/load bindings
+    packed_tensor.rs      # packed tensor bindings
+    packed_linear.rs      # packed linear bindings
+    packed_optim.rs       # packed optimizer bindings
+    packed_quantized.rs   # quantized tensor bindings
   tensor/
     mod.rs                # Tensor and TensorImpl
     shape.rs              # view/reshape/transpose/permute/squeeze
@@ -23,8 +34,9 @@ src/
     reductions.rs         # sum/mean/max/min/softmax
     device.rs             # CPU/GPU movement and dtype conversion
     indexing.rs           # slice/cat/stack/repeat/where/einsum
-    grad.rs               # requires_grad, grad, detach, clipping
   kernels/
+    constants.rs          # Kernel tuning constants
+    blas.rs               # BLAS-accelerated matmul (optional)
     cpu/
       mod.rs              # register_cpu_kernels
       simd.rs
@@ -36,18 +48,29 @@ src/
       pooling.rs
       losses.rs
       factories.rs
-      compare.rs
     gpu/
       mod.rs
-      buffers.rs
-      sync.rs
-      bind_groups.rs
-      elementwise.rs
-      reductions.rs
-      matmul.rs
-      fusion.rs
-      embedding.rs
-      optim.rs
+      ops.rs              # GPU elementwise, matmul, fusion, optimizer ops
+  backends/
+    mod.rs
+    cpu.rs                # CPU backend registration
+    packed_simd.rs        # SIMD-accelerated packed GEMV kernels
+    packed_blas.rs        # BLIS-style tiled packed micro-kernel
+    wgpu/
+      mod.rs
+      mod_impl.rs
+  dtypes/
+    mod.rs                # PackedWord trait
+    u4x8.rs
+    u8x4.rs
+    f16x2.rs
+    f32x1.rs
+  swar/
+    mod.rs
+    ops_4bit.rs
+    ops_8bit.rs
+    ops_16bit.rs
+    ops_32bit.rs
   autograd/
     mod.rs                # Node trait, metadata, no_grad
     engine.rs
@@ -57,7 +80,42 @@ src/
     conv.rs
     losses.rs
     views.rs
-    checkpoint.rs
+  nn/
+    mod.rs                # Module trait, macros
+    linear.rs
+    conv.rs
+    activations.rs
+    attention.rs
+    transformer.rs
+    norm.rs
+    dropout.rs
+    embedding.rs
+    pooling.rs
+    fused.rs              # Fused Conv+BN+Activation layers
+    sequential.rs
+    residual.rs
+    upsample.rs
+  optim/
+    mod.rs
+    sgd.rs
+    adam.rs
+    adamw.rs
+    muon.rs
+    lion.rs
+    rmsprop.rs
+  train/
+    mod.rs
+    trainer.rs            # Training loop
+    loss.rs               # Loss functions
+    metrics.rs            # Accuracy and other metrics
+    callbacks.rs          # Training callbacks
+  io/
+    mod.rs
+    serialize.rs          # Model serialization (save/load)
+    dlpack.rs             # DLPack interop (Rust only)
+  packed_tensor.rs        # PackedTensor<T>
+  packed_layer.rs         # PackedLinear<T>
+  packed_train.rs         # MasterWeightOptimizer
 ```
 
 ## Adding A Tensor Operation

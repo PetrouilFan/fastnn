@@ -237,8 +237,6 @@ output = input_tensor.silu()
 output = input_tensor.leaky_relu(0.01)
 output = input_tensor.softplus(beta, threshold)
 output = input_tensor.hardswish()
-output = input_tensor.elu(alpha)
-output = input_tensor.mish()
 output = input_tensor.softmax(dim=-1)
 output = input_tensor.log_softmax(dim=-1)
 ```
