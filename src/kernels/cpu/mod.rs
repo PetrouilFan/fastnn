@@ -862,6 +862,10 @@ fn register_kernels() {
     register("elu", DispatchKey::Cpu, elu_kernel as KernelFn);
     register("clamp", DispatchKey::Cpu, clamp_kernel as KernelFn);
     register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
+    fn erf_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+        vec![args[0].erf()]
+    }
+    register("erf", DispatchKey::Cpu, erf_kernel as KernelFn);
     register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
     register("linear", DispatchKey::Cpu, linear_kernel as KernelFn);
     register(
@@ -1005,6 +1009,11 @@ fn register_kernels() {
         "max_pool2d",
         DispatchKey::Cpu,
         max_pool2d_kernel as KernelFn,
+    );
+    register(
+        "avg_pool2d",
+        DispatchKey::Cpu,
+        avg_pool2d_kernel as KernelFn,
     );
     register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
     register("lt_scalar", DispatchKey::Cpu, lt_scalar_kernel as KernelFn);

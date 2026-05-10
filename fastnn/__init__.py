@@ -59,12 +59,16 @@ from fastnn.tensor import (  # noqa: E402
 )
 from fastnn.layers import Flatten, PySequential, BasicBlock  # noqa: F401, E402
 MaxPool2d = _core.MaxPool2d
+AvgPool1d = _core.AvgPool1d
+MaxPool1d = _core.MaxPool1d
 from fastnn.io import (  # noqa: E402
     save as io_save,
     load as io_load,
     convert_from_pytorch,
     convert_from_onnx,
+    DAGModel,
 )
+from fastnn.io.graph_builder import build_model_from_fnn  # noqa: E402
 
 __all__ = [
     # Context managers and utilities
@@ -133,6 +137,8 @@ __all__ = [
     "Embedding",
     "Upsample",
     "MaxPool2d",
+    "AvgPool1d",
+    "MaxPool1d",
     "AdaptiveAvgPool2d",
     "ReLU",
     "GELU",
@@ -193,6 +199,8 @@ __all__ = [
     "minimum",
     "einsum",
     "flash_attention",
+    "cumsum",
+    "erf",
     # Loss functions
     "mse_loss",
     "cross_entropy_loss",
@@ -220,6 +228,34 @@ __all__ = [
     "io_load",
     "convert_from_pytorch",
     "convert_from_onnx",
+    "DAGModel",
+    "load_onnx_model",
+    # Phase 0 additions
+    "PReLU",
+    "AvgPool2d",
+    # Phase 1 additions
+    "DAGExecutor",
+    # Phase 3 additions
+    "where",
+    "gather",
+    "repeat",
+    "expand",
+    "fnn_slice",
+    "topk",
+    "leaky_relu",
+    "elu",
+    "softplus",
+    "hardswish",
+    # YOLO model wrapper
+    "YOLO",
+    "load_yolo",
+    "build_model_from_fnn",
+    # NMS utilities
+    "nms",
+    "yolo_decode",
+    "yolo_dfl_decode",
+    "xywh2xyxy",
+    "scale_boxes",
 ]
 
 
@@ -230,6 +266,24 @@ def __getattr__(name):
     if name == "activations":
         import fastnn.activations
         return fastnn.activations
+    if name == "YOLO":
+        from fastnn.models.yolo import YOLO
+        return YOLO
+    if name == "load_yolo":
+        from fastnn.models.yolo import load_yolo
+        return load_yolo
+    if name in ("nms", "yolo_decode", "yolo_dfl_decode", "xywh2xyxy", "scale_boxes"):
+        from fastnn.utils.nms import nms, yolo_decode, yolo_dfl_decode, xywh2xyxy, scale_boxes
+        return {
+            "nms": nms,
+            "yolo_decode": yolo_decode,
+            "yolo_dfl_decode": yolo_dfl_decode,
+            "xywh2xyxy": xywh2xyxy,
+            "scale_boxes": scale_boxes,
+        }[name]
+    if name == "load_onnx_model":
+        from fastnn.io import load_onnx_model
+        return load_onnx_model
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -331,6 +385,7 @@ SiLU = _core.SiLU
 Sequential = _core.Sequential_
 
 LeakyReLU = _core.LeakyReLU
+Softmax = _core.Softmax
 Softplus = _core.Softplus
 Hardswish = _core.Hardswish
 RMSNorm = _core.RMSNorm
@@ -480,6 +535,27 @@ class _TensorModuleWrapper:
     def __delattr__(self, name):
         delattr(self._module, name)
 
+
+# Phase 0: New module classes
+PReLU = _core.PReLU
+AvgPool2d = _core.AvgPool2d
+
+# Phase 1: DAG executor
+DAGExecutor = _core.DAGExecutor
+
+# Phase 3: New tensor operation functions
+where = _core.where_
+gather = _core.gather
+repeat = _core.repeat
+expand = _core.expand
+fnn_slice = _core.slice
+topk = _core.topk
+leaky_relu = _core.leaky_relu
+elu = _core.elu
+softplus = _core.softplus
+hardswish = _core.hardswish
+cumsum = _core.cumsum
+erf = _core.erf
 
 import sys
 

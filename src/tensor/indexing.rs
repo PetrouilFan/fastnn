@@ -432,4 +432,72 @@ impl Tensor {
             output
         }
     }
+
+    pub fn gather(&self, axis: i64, indices: &Tensor) -> Tensor {
+        let indices_data = indices.as_i64_slice();
+        let self_contig = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let x_data = self_contig.as_f32_slice();
+        let shape = self.shape_ref();
+        let axis = if axis < 0 { shape.len() as i64 + axis } else { axis } as usize;
+
+        let mut out_shape = shape.to_vec();
+        out_shape[axis] = indices_data.len() as i64;
+        let mut out_data = vec![0.0f32; out_shape.iter().product::<i64>() as usize];
+
+        let inner = if axis + 1 < shape.len() {
+            shape[axis + 1..].iter().product::<i64>() as usize
+        } else {
+            1
+        };
+        let outer = if axis > 0 {
+            shape[..axis].iter().product::<i64>() as usize
+        } else {
+            1
+        };
+
+        for o in 0..outer {
+            for (i, &idx) in indices_data.iter().enumerate() {
+                if idx as usize >= shape[axis] as usize {
+                    panic!("gather: index {} is out of bounds for dimension {} (size {})", idx, axis, shape[axis]);
+                }
+                let src_idx = (o * shape[axis] as usize + idx as usize) * inner;
+                let dst_idx = (o * out_shape[axis] as usize + i) * inner;
+                for k in 0..inner {
+                    out_data[dst_idx + k] = x_data[src_idx + k];
+                }
+            }
+        }
+
+        Tensor::from_vec(out_data, out_shape)
+    }
+
+    pub fn nonzero(&self) -> Vec<Vec<i64>> {
+        let data = self.as_f32_slice();
+        let shape = self.shape_ref();
+        let mut result = Vec::new();
+        
+        if shape.is_empty() {
+            return result;
+        }
+        
+        let total = data.len();
+        for i in 0..total {
+            if data[i] != 0.0 {
+                // Convert flat index to multi-dimensional index
+                let mut idx = i;
+                let mut coords = Vec::with_capacity(shape.len());
+                for &dim in shape.iter().rev() {
+                    coords.push((idx % dim as usize) as i64);
+                    idx /= dim as usize;
+                }
+                coords.reverse();
+                result.push(coords);
+            }
+        }
+        result
+    }
 }

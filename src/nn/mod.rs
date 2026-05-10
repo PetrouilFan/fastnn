@@ -11,6 +11,9 @@ pub mod pooling;
 pub mod sequential;
 pub mod transformer;
 pub mod upsample;
+pub mod dag;
+
+pub use pooling::{AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d};
 
 use std::sync::atomic::Ordering;
 
