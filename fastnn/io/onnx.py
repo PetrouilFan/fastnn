@@ -496,6 +496,69 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             layer_info["type"] = "SpaceToDepth"
             layer_info["blocksize"] = blocksize
 
+        elif op_type == "Compress":
+            axis = _get_attr(node, "axis", None)
+            layer_info["type"] = "Compress"
+            if axis is not None:
+                layer_info["axis"] = axis
+
+        elif op_type == "CumSum":
+            axis = _get_attr(node, "axis", None)
+            exclusive = _get_attr(node, "exclusive", 0)
+            reverse = _get_attr(node, "reverse", 0)
+            layer_info["type"] = "CumSum"
+            if axis is not None:
+                layer_info["axis"] = axis if not isinstance(axis, list) else axis[0]
+            layer_info["exclusive"] = bool(exclusive)
+            layer_info["reverse"] = bool(reverse)
+
+        elif op_type == "Einsum":
+            equation = _get_attr(node, "equation", "")
+            layer_info["type"] = "Einsum"
+            layer_info["equation"] = equation
+
+        elif op_type == "EyeLike":
+            dtype = _get_attr(node, "dtype", 1)
+            k = _get_attr(node, "k", 0)
+            layer_info["type"] = "EyeLike"
+            layer_info["k"] = k
+
+        elif op_type == "OneHot":
+            axis = _get_attr(node, "axis", -1)
+            layer_info["type"] = "OneHot"
+            layer_info["axis"] = axis
+
+        elif op_type == "RandomNormal":
+            dtype = _get_attr(node, "dtype", 1)
+            mean = _get_attr(node, "mean", 0.0)
+            scale = _get_attr(node, "scale", 1.0)
+            shape = _get_attr(node, "shape", None)
+            seed = _get_attr(node, "seed", None)
+            layer_info["type"] = "RandomNormal"
+            layer_info["mean"] = mean
+            layer_info["scale"] = scale
+            if shape is not None:
+                layer_info["shape"] = list(shape)
+            if seed is not None:
+                layer_info["seed"] = seed
+
+        elif op_type == "RandomUniform":
+            dtype = _get_attr(node, "dtype", 1)
+            low = _get_attr(node, "low", 0.0)
+            high = _get_attr(node, "high", 1.0)
+            shape = _get_attr(node, "shape", None)
+            seed = _get_attr(node, "seed", None)
+            layer_info["type"] = "RandomUniform"
+            layer_info["low"] = low
+            layer_info["high"] = high
+            if shape is not None:
+                layer_info["shape"] = list(shape)
+            if seed is not None:
+                layer_info["seed"] = seed
+
+        elif op_type == "Range":
+            layer_info["type"] = "RangeOp"
+
         else:
             logger.warning(f"Unsupported operator: {op_type}")
             layer_info["type"] = f"Unsupported_{op_type}"

@@ -480,6 +480,12 @@ impl DAGExecutor {
         let padding = node.attrs.get("padding")
             .and_then(|p| p.parse::<i64>().ok())
             .unwrap_or(0);
+        let _dilation = node.attrs.get("dilation")
+            .and_then(|d| d.parse::<i64>().ok())
+            .unwrap_or(1);
+        let _groups = node.attrs.get("groups")
+            .and_then(|g| g.parse::<i64>().ok())
+            .unwrap_or(1);
 
         let stride_t = Tensor::from_scalar(stride as f32);
         let pad_t = Tensor::from_scalar(padding as f32);

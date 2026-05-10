@@ -252,7 +252,7 @@ class DAGModel:
                     return [result]
                 return [tensors[0].transpose(0, 1)]
             elif op_type == "Shape" or op_type == "shapeop":
-                shape_arr = np.array(tensors[0].shape, dtype=np.float32)
+                shape_arr = np.array(tensors[0].shape, dtype=np.int64)
                 return [fnn.tensor(shape_arr, list(shape_arr.shape))]
             elif op_type == "Cast" or op_type == "castop":
                 return [tensors[0]]
@@ -272,24 +272,107 @@ class DAGModel:
                     result = fnn.mean(result)
                 return [result]
             elif op_type in ("ReduceSum",):
-                return [tensors[0]]
+                x = tensors[0]
+                axes = node.get("axes", None)
+                if axes is not None:
+                    result = x
+                    for ax in sorted(axes, reverse=True):
+                        result = fnn.sum(result, ax)
+                    return [result]
+                else:
+                    return [fnn.sum(x)]
             elif op_type in ("Slice", "sliceop"):
-                return [tensors[0]]
+                x = tensors[0]
+                starts = node.get("starts", None)
+                ends = node.get("ends", None)
+                axes = node.get("axes", None)
+                steps = node.get("steps", None)
+                if starts is not None and ends is not None:
+                    if axes is None:
+                        axes = list(range(len(starts)))
+                    if steps is None:
+                        steps = [1] * len(starts)
+                    result = x
+                    for i, ax in enumerate(axes):
+                        st = int(starts[i])
+                        en = int(ends[i])
+                        step = int(steps[i]) if i < len(steps) else 1
+                        slices = [slice(None)] * len(result.shape)
+                        slices[ax] = slice(st, en, step)
+                        result = result[tuple(slices)]
+                    return [result]
+                else:
+                    return [tensors[0]]
             elif op_type in ("Pad",):
+                x = tensors[0]
+                pads = node.get("pads", None)
+                if pads is not None and hasattr(x, "numpy"):
+                    x_np = x.numpy()
+                    rank = len(x_np.shape)
+                    pad_width = [(pads[i], pads[i + rank]) for i in range(rank)]
+                    padded = np.pad(x_np, pad_width, mode='constant', constant_values=0)
+                    return [fnn.tensor(padded, list(padded.shape))]
                 return [tensors[0]]
             elif op_type in ("Tile", "tileop"):
+                x = tensors[0]
+                if len(tensors) >= 2:
+                    repeats_tensor = tensors[1]
+                    repeats = repeats_tensor.numpy().astype(int).tolist() if hasattr(repeats_tensor, "numpy") else repeats_tensor
+                    return [fnn.repeat(x, repeats)]
                 return [tensors[0]]
             elif op_type in ("Where", "whereop"):
+                if len(tensors) >= 3:
+                    return [fnn.where(tensors[0], tensors[1], tensors[2])]
                 return [tensors[0]]
             elif op_type in ("NonMaxSuppression",):
                 return [tensors[0]]
             elif op_type in ("TopK", "topkop"):
+                if hasattr(fnn, "topk"):
+                    k = node.get("k", 1)
+                    axis = node.get("axis", -1)
+                    if isinstance(k, list) and len(k) > 0:
+                        k = k[0]
+                    return list(fnn.topk(tensors[0], k, axis))
                 return [tensors[0]]
             elif op_type in ("Split",):
-                return [tensors[0]] * len(node.get("outputs", [1]))
+                axis = node.get("axis", 0)
+                split_sizes = node.get("split", None)
+                x = tensors[0]
+                shape = x.shape
+                dim_size = shape[axis] if axis < len(shape) else shape[0]
+                num_outputs = len(node.get("outputs", [1]))
+                if split_sizes is not None:
+                    sizes = split_sizes
+                else:
+                    size = dim_size // num_outputs
+                    sizes = [size] * num_outputs
+                results = []
+                start = 0
+                for sz in sizes:
+                    slices = [slice(None)] * len(shape)
+                    slices[axis] = slice(start, start + sz)
+                    result = x[tuple(slices)]
+                    results.append(result)
+                    start += sz
+                return results
             elif op_type in ("Squeeze", "squeezeop"):
-                return [tensors[0]]
+                x = tensors[0]
+                axes = node.get("axes", None)
+                if axes is not None:
+                    shape = list(x.shape)
+                    new_shape = [s for i, s in enumerate(shape) if i not in axes]
+                    if new_shape:
+                        return [x.reshape(new_shape)]
+                    return [x.reshape([1])]
+                return [x.reshape([s for s in x.shape if s != 1])]
             elif op_type in ("Unsqueeze", "unsqueezeop"):
+                x = tensors[0]
+                axes = node.get("axes", None)
+                if axes is not None:
+                    shape = list(x.shape)
+                    for ax in sorted(axes):
+                        shape.insert(ax, 1)
+                    return [x.reshape(shape)]
                 return [tensors[0]]
             elif op_type in ("Constant", "constantop"):
                 return [tensors[0]] if tensors else None
