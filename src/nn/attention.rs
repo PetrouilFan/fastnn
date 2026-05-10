@@ -5,6 +5,7 @@ use crate::nn::Module;
 use crate::packed_tensor::PackedTensor;
 use crate::tensor::Tensor;
 use crate::{impl_training_state, nn::TrainingState};
+use std::sync::Mutex;
 
 
 /// Quantized matrix multiplication using packed weights (GEMV per row).
@@ -40,8 +41,7 @@ pub struct PackedMultiHeadAttention<T: PackedWord> {
     training: TrainingState,
     /// Scale factor for attention scores
     scale: f32,
-    // TODO: Implement KV cache for autoregressive decoding
-    kv_cache: Option<(PackedTensor<T>, PackedTensor<T>)>,
+    kv_cache: Mutex<Option<(Vec<f32>, Vec<f32>)>>,
 }
 
 impl<T: PackedWord> PackedMultiHeadAttention<T> {
@@ -78,22 +78,28 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
             causal,
             training: TrainingState::new(),
             scale: 1.0 / (head_dim as f32).sqrt(),
-            kv_cache: None,
+            kv_cache: Mutex::new(None),
         }
     }
 
-    /// Set the KV cache with pre-computed key/value tensors.
-    pub fn set_kv_cache(&mut self, k: PackedTensor<T>, v: PackedTensor<T>) {
-        self.kv_cache = Some((k, v));
+    /// Set the KV cache with pre-computed key/value tensors (as flat f32 arrays).
+    pub fn set_kv_cache(&self, k: Vec<f32>, v: Vec<f32>) {
+        *self.kv_cache.lock().unwrap() = Some((k, v));
     }
 
     /// Clear the KV cache.
-    pub fn clear_kv_cache(&mut self) {
-        self.kv_cache = None;
+    pub fn clear_kv_cache(&self) {
+        *self.kv_cache.lock().unwrap() = None;
+    }
+
+    /// Reset (clear) the KV cache.
+    pub fn reset_kv_cache(&self) {
+        *self.kv_cache.lock().unwrap() = None;
     }
 
     /// Forward pass with quantized inputs.
     /// Input should be a 3D tensor [batch, seq_len, d_model].
+    /// When causal and in eval mode, uses KV cache for autoregressive decoding.
     pub fn forward_impl(&self, x: &Tensor) -> Tensor {
         let shape = x.shape_ref();
         assert_eq!(shape.len(), 3, "Input must be 3D [batch, seq_len, d_model]");
@@ -113,39 +119,79 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
             .take(batch * seq_len * d_model)
             .cloned()
             .collect();
-        let k: Vec<f32> = qkv
+        let k_new: Vec<f32> = qkv
             .iter()
             .skip(batch * seq_len * d_model)
             .take(batch * seq_len * d_model)
             .cloned()
             .collect();
-        let v: Vec<f32> = qkv
+        let v_new: Vec<f32> = qkv
             .iter()
             .skip(batch * seq_len * d_model * 2)
             .take(batch * seq_len * d_model)
             .cloned()
             .collect();
 
-        // Reshape to [batch, num_heads, seq_len, head_dim]
-        let q = self.reshape_heads(&q, batch, seq_len);
-        let k = self.reshape_heads(&k, batch, seq_len);
-        let v = self.reshape_heads(&v, batch, seq_len);
+        // KV cache: only use during inference (eval mode) with causal attention
+        let use_cache = !self.training.is_training();
+        let (k, v, total_seq_len) = if self.causal && use_cache {
+            let mut cache_guard = self.kv_cache.lock().unwrap();
+            if let Some((ref k_cache, ref v_cache)) = *cache_guard {
+                let cached_len = k_cache.len() / (batch * d_model);
+                let total = cached_len + seq_len;
+                let mut k = Vec::with_capacity(batch * total * d_model);
+                k.extend_from_slice(k_cache);
+                k.extend_from_slice(&k_new);
+                let mut v = Vec::with_capacity(batch * total * d_model);
+                v.extend_from_slice(v_cache);
+                v.extend_from_slice(&v_new);
+                *cache_guard = Some((k.clone(), v.clone()));
+                (k, v, total)
+            } else {
+                *cache_guard = Some((k_new.clone(), v_new.clone()));
+                (k_new, v_new, seq_len)
+            }
+        } else {
+            (k_new, v_new, seq_len)
+        };
 
-        // Attention scores: Q @ K^T
-        let attn_scores = self.compute_attention_scores(&q, &k, batch, seq_len);
+        // Reshape to [batch, num_heads, seq_len, head_dim]
+        let q_heads = self.reshape_heads(&q, batch, seq_len);
+        let k_heads = self.reshape_heads(&k, batch, total_seq_len);
+        let v_heads = self.reshape_heads(&v, batch, total_seq_len);
+
+        // Attention scores: Q @ K^T (handle potentially different seq_lens when using cache)
+        let attn_scores = if use_cache && total_seq_len != seq_len {
+            self.compute_attention_scores_strided(&q_heads, &k_heads, batch, seq_len, total_seq_len)
+        } else {
+            self.compute_attention_scores(&q_heads, &k_heads, batch, total_seq_len)
+        };
 
         // Apply causal mask if enabled
         let attn_scores = if self.causal {
-            self.apply_causal_mask(attn_scores, batch, seq_len)
+            if use_cache && total_seq_len != seq_len {
+                let cached_len = total_seq_len - seq_len;
+                self.apply_causal_mask_with_cache(attn_scores, batch, seq_len, total_seq_len, cached_len)
+            } else {
+                self.apply_causal_mask(attn_scores, batch, total_seq_len)
+            }
         } else {
             attn_scores
         };
 
         // Softmax
-        let attn_weights = self.softmax(&attn_scores, batch, seq_len);
+        let attn_weights = if use_cache && total_seq_len != seq_len {
+            self.softmax_strided(&attn_scores, batch, seq_len, total_seq_len)
+        } else {
+            self.softmax(&attn_scores, batch, total_seq_len)
+        };
 
         // Apply attention to values: attn_weights @ V
-        let context = self.apply_attention(&attn_weights, &v, batch, seq_len);
+        let context = if use_cache && total_seq_len != seq_len {
+            self.apply_attention_strided(&attn_weights, &v_heads, batch, seq_len, total_seq_len)
+        } else {
+            self.apply_attention(&attn_weights, &v_heads, batch, total_seq_len)
+        };
 
         // Reshape back to [batch, seq_len, d_model]
         let context = self.reshape_from_heads(&context, batch, seq_len);
@@ -183,6 +229,158 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         }
 
         reshaped
+    }
+
+    /// Compute attention scores with different Q and K sequence lengths (for KV cache).
+    #[inline]
+    fn compute_attention_scores_strided(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        batch: usize,
+        seq_len_q: usize,
+        seq_len_k: usize,
+    ) -> Vec<f32> {
+        let num_heads = self.num_heads as usize;
+        let head_dim = self.head_dim as usize;
+
+        let mut scores = vec![0.0f32; batch * num_heads * seq_len_q * seq_len_k];
+
+        for b in 0..batch {
+            for h in 0..num_heads {
+                for i in 0..seq_len_q {
+                    for j in 0..seq_len_k {
+                        let mut sum = 0.0f32;
+                        for d in 0..head_dim {
+                            let q_idx = b * num_heads * seq_len_q * head_dim
+                                + h * seq_len_q * head_dim
+                                + i * head_dim
+                                + d;
+                            let k_idx = b * num_heads * seq_len_k * head_dim
+                                + h * seq_len_k * head_dim
+                                + j * head_dim
+                                + d;
+                            sum += q[q_idx] * k[k_idx];
+                        }
+                        scores[b * num_heads * seq_len_q * seq_len_k
+                            + h * seq_len_q * seq_len_k
+                            + i * seq_len_k
+                            + j] = sum * self.scale;
+                    }
+                }
+            }
+        }
+
+        scores
+    }
+
+    /// Apply causal mask when using KV cache: only mask future positions within the current tokens,
+    /// while allowing attention to all cached (past) positions.
+    fn apply_causal_mask_with_cache(
+        &self,
+        scores: Vec<f32>,
+        batch: usize,
+        seq_len_q: usize,
+        total_seq_len: usize,
+        cached_len: usize,
+    ) -> Vec<f32> {
+        let num_heads = self.num_heads as usize;
+        let mut masked = scores;
+
+        for b in 0..batch {
+            for h in 0..num_heads {
+                for i in 0..seq_len_q {
+                    let first_masked = cached_len + i + 1;
+                    for j in first_masked..total_seq_len {
+                        let idx = b * num_heads * seq_len_q * total_seq_len
+                            + h * seq_len_q * total_seq_len
+                            + i * total_seq_len
+                            + j;
+                        masked[idx] = f32::NEG_INFINITY;
+                    }
+                }
+            }
+        }
+
+        masked
+    }
+
+    /// Softmax for non-square attention score matrix (different Q and K seq_lens).
+    #[inline]
+    fn softmax_strided(&self, x: &[f32], batch: usize, seq_len_q: usize, seq_len_k: usize) -> Vec<f32> {
+        let num_heads = self.num_heads as usize;
+        let mut output = vec![0.0f32; x.len()];
+
+        for b in 0..batch {
+            for h in 0..num_heads {
+                for i in 0..seq_len_q {
+                    let start = b * num_heads * seq_len_q * seq_len_k
+                        + h * seq_len_q * seq_len_k
+                        + i * seq_len_k;
+                    let end = start + seq_len_k;
+                    let row = &x[start..end];
+
+                    let max_val = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+
+                    let mut sum = 0.0f32;
+                    for j in 0..seq_len_k {
+                        let exp_val = (row[j] - max_val).exp();
+                        output[start + j] = exp_val;
+                        sum += exp_val;
+                    }
+
+                    for j in 0..seq_len_k {
+                        output[start + j] /= sum;
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
+    /// Apply attention weights to values with different seq_lens (for KV cache).
+    #[inline]
+    fn apply_attention_strided(
+        &self,
+        attn: &[f32],
+        v: &[f32],
+        batch: usize,
+        seq_len_q: usize,
+        seq_len_k: usize,
+    ) -> Vec<f32> {
+        let num_heads = self.num_heads as usize;
+        let head_dim = self.head_dim as usize;
+
+        let mut context = vec![0.0f32; batch * num_heads * seq_len_q * head_dim];
+
+        for b in 0..batch {
+            for h in 0..num_heads {
+                for i in 0..seq_len_q {
+                    for d in 0..head_dim {
+                        let mut sum = 0.0f32;
+                        for j in 0..seq_len_k {
+                            let attn_idx = b * num_heads * seq_len_q * seq_len_k
+                                + h * seq_len_q * seq_len_k
+                                + i * seq_len_k
+                                + j;
+                            let v_idx = b * num_heads * seq_len_k * head_dim
+                                + h * seq_len_k * head_dim
+                                + j * head_dim
+                                + d;
+                            sum += attn[attn_idx] * v[v_idx];
+                        }
+                        let ctx_idx = b * num_heads * seq_len_q * head_dim
+                            + h * seq_len_q * head_dim
+                            + i * head_dim
+                            + d;
+                        context[ctx_idx] = sum;
+                    }
+                }
+            }
+        }
+
+        context
     }
 
     /// Compute attention scores: Q @ K^T
@@ -371,7 +569,7 @@ impl<T: PackedWord> Module for PackedMultiHeadAttention<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtypes::{F16x2, F32x1, U4x8, U8x4};
+    use crate::dtypes::{F32x1, U8x4};
 
     #[test]
     fn test_packed_attention_creation() {

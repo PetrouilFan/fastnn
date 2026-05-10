@@ -49,7 +49,8 @@ impl Tensor {
                 &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
-        );
+        )
+        .expect("Tensor::sum: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -75,7 +76,8 @@ impl Tensor {
                 &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
-        );
+        )
+        .expect("Tensor::max: dispatch failed");
         result[0].clone()
     }
 
@@ -89,7 +91,8 @@ impl Tensor {
                 &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
-        );
+        )
+        .expect("Tensor::mean: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let dim_size = self.shape()[dim as usize];

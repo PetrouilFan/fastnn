@@ -3057,6 +3057,9 @@ pub unsafe fn prelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             } else {
                 indices[1] as usize % w_numel
             };
+            // SAFETY: w_idx is computed as `indices[1] as usize % w_numel` (or 0 when w_numel==1),
+            // which is always < w_data.len(). The debug_assert confirms this at runtime.
+            debug_assert!(w_idx < w_data.len(), "leaky_relu weight index out of bounds");
             let w = *w_data.get_unchecked(w_idx);
             *ptr.add(i) = if v > 0.0 { v } else { v * w };
         }

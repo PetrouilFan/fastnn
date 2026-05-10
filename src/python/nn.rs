@@ -509,11 +509,11 @@ impl_nn_module!(LayerNorm {
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
-        self.inner.weight = Some(weight.inner);
+        self.inner.weight = weight.inner;
     }
 
-    fn set_bias(&mut self, bias: Option<PyTensor>) {
-        self.inner.bias = bias.map(|t| t.inner);
+    fn set_bias(&mut self, bias: PyTensor) {
+        self.inner.bias = bias.inner;
     }
 
     #[classmethod]
@@ -525,8 +525,8 @@ impl_nn_module!(LayerNorm {
         eps: f64,
     ) -> Self {
         let mut inner = core_nn::norm::LayerNorm::new(normalized_shape, eps);
-        inner.weight = Some(weight.inner);
-        inner.bias = Some(bias.inner);
+        inner.weight = weight.inner;
+        inner.bias = bias.inner;
         LayerNorm { inner }
     }
 });
@@ -909,11 +909,7 @@ impl_nn_module!(PyPackedMultiHeadAttention4 {
     fn set_kv_cache(&mut self, k: &PyTensor, v: &PyTensor) {
         let k_data = k.numpy();
         let v_data = v.numpy();
-        let k_shape: Vec<usize> = k.shape().iter().map(|&x| x as usize).collect();
-        let v_shape: Vec<usize> = v.shape().iter().map(|&x| x as usize).collect();
-        let k_packed = crate::packed_tensor::PackedTensor::<crate::dtypes::U4x8>::from_f32_auto(&k_data, &k_shape);
-        let v_packed = crate::packed_tensor::PackedTensor::<crate::dtypes::U4x8>::from_f32_auto(&v_data, &v_shape);
-        self.inner.set_kv_cache(k_packed, v_packed);
+        self.inner.set_kv_cache(k_data, v_data);
     }
 
     fn clear_kv_cache(&mut self) {
@@ -942,11 +938,7 @@ impl_nn_module!(PyPackedMultiHeadAttention8 {
     fn set_kv_cache(&mut self, k: &PyTensor, v: &PyTensor) {
         let k_data = k.numpy();
         let v_data = v.numpy();
-        let k_shape: Vec<usize> = k.shape().iter().map(|&x| x as usize).collect();
-        let v_shape: Vec<usize> = v.shape().iter().map(|&x| x as usize).collect();
-        let k_packed = crate::packed_tensor::PackedTensor::<crate::dtypes::U8x4>::from_f32_auto(&k_data, &k_shape);
-        let v_packed = crate::packed_tensor::PackedTensor::<crate::dtypes::U8x4>::from_f32_auto(&v_data, &v_shape);
-        self.inner.set_kv_cache(k_packed, v_packed);
+        self.inner.set_kv_cache(k_data, v_data);
     }
 
     fn clear_kv_cache(&mut self) {

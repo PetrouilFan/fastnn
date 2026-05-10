@@ -97,7 +97,8 @@ impl Module for Conv2d {
                 &self.dilation_scalar,
                 &self.groups_scalar,
             ],
-        );
+        )
+        .expect("Conv2d::forward: dispatch failed");
 
         let output = result.into_iter().next().unwrap();
 
@@ -211,7 +212,8 @@ impl Module for ConvTranspose2d {
             "conv_transpose2d",
             dispatch_key,
             &[x, &self.weight, &self.stride_scalar, &self.padding_scalar],
-        );
+        )
+        .expect("ConvTranspose2d::forward: dispatch failed");
         let mut output = result[0].clone();
 
         if let Some(ref bias) = self.bias {
@@ -378,7 +380,8 @@ impl Module for Conv1d {
                 &self.dilation_scalar,
                 &Tensor::from_scalar(1.0), // groups
             ],
-        );
+        )
+        .expect("Conv1d::forward: dispatch failed");
 
         let output = result.into_iter().next().unwrap();
 
@@ -481,7 +484,8 @@ impl Module for Conv3d {
                 &self.padding_scalar,
                 &self.dilation_scalar,
             ],
-        );
+        )
+        .expect("Conv3d::forward: dispatch failed");
         let mut output = result.into_iter().next().unwrap();
 
         // Add bias

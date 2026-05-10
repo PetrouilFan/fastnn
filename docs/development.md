@@ -50,7 +50,7 @@ src/
       factories.rs
     gpu/
       mod.rs
-      ops.rs              # GPU elementwise, matmul, fusion, optimizer ops
+      ops.rs              # GPU elementwise, matmul, reductions, embedding, fusion, optimizer ops
   backends/
     mod.rs
     cpu.rs                # CPU backend registration
@@ -154,5 +154,5 @@ Prefer adding fused kernels for common epilogues and bandwidth-bound op chains:
 - `residual + add + norm`
 - optimizer updates
 
-Fused kernels should live in `src/kernels/gpu/fusion.rs` or `src/kernels/gpu/optim.rs`, with Python bindings only when the fused op is part of the public API.
+Fused GPU kernels currently live in `src/kernels/gpu/mod.rs`. A future refactor may split them into `src/kernels/gpu/fusion.rs` and `src/kernels/gpu/optim.rs`.
 
