@@ -32,6 +32,10 @@ impl<T: PackedWord> PackedTensor<T> {
         }
     }
 
+    pub fn from_raw(data: Vec<T>, shape: Vec<usize>, scales: Vec<f32>, zeros: Vec<f32>) -> Self {
+        PackedTensor { data, shape, scales, zeros }
+    }
+
     pub fn from_f32_slice(data: &[f32], shape: &[usize], scale: f32, zero: f32) -> Self {
         let numel: usize = shape.iter().product();
         assert_eq!(

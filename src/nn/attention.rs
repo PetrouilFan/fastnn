@@ -82,6 +82,16 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         }
     }
 
+    /// Set the KV cache with pre-computed key/value tensors.
+    pub fn set_kv_cache(&mut self, k: PackedTensor<T>, v: PackedTensor<T>) {
+        self.kv_cache = Some((k, v));
+    }
+
+    /// Clear the KV cache.
+    pub fn clear_kv_cache(&mut self) {
+        self.kv_cache = None;
+    }
+
     /// Forward pass with quantized inputs.
     /// Input should be a 3D tensor [batch, seq_len, d_model].
     pub fn forward_impl(&self, x: &Tensor) -> Tensor {
