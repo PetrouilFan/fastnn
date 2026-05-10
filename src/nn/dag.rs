@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
+use crate::storage::DType;
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 
@@ -173,35 +174,37 @@ impl DAGExecutor {
                 "pad" => {
                     let x = &args[0];
                     let pads_str = node.attrs.get("pads");
-                    if let Some(pads_str) = pads_str {
-                        let pads: Vec<i64> = parse_int_list(pads_str);
-                        if pads.len() == 8 {
-                            let shape = x.shape_ref();
-                            let pad_t = pads[2] as usize;
-                            let pad_b = pads[6] as usize;
-                            let pad_l = pads[3] as usize;
-                            let pad_r = pads[7] as usize;
-                            let new_h = shape[2] as usize + pad_t + pad_b;
-                            let new_w = shape[3] as usize + pad_l + pad_r;
-                            let mut out_data = vec![0.0f32; (shape[0] * shape[1] * new_h as i64 * new_w as i64) as usize];
-                            let x_data = x.as_f32_slice();
-                            for b in 0..shape[0] as usize {
-                                for c in 0..shape[1] as usize {
-                                    for h in 0..shape[2] as usize {
-                                        for w in 0..shape[3] as usize {
-                                            let src_idx = ((b * shape[1] as usize + c) * shape[2] as usize + h) * shape[3] as usize + w;
-                                            let dst_idx = ((b * shape[1] as usize + c) * new_h + (h + pad_t)) * new_w + (w + pad_l);
-                                            out_data[dst_idx] = x_data[src_idx];
-                                        }
+                    let pads: Vec<i64> = if let Some(pads_str) = pads_str {
+                        parse_int_list(pads_str)
+                    } else if args.len() >= 2 {
+                        args[1].as_f32_slice().iter().map(|&v| v as i64).collect()
+                    } else {
+                        vec![]
+                    };
+                    if pads.len() == 8 {
+                        let shape = x.shape_ref();
+                        let pad_t = pads[2] as usize;
+                        let pad_b = pads[6] as usize;
+                        let pad_l = pads[3] as usize;
+                        let pad_r = pads[7] as usize;
+                        let new_h = shape[2] as usize + pad_t + pad_b;
+                        let new_w = shape[3] as usize + pad_l + pad_r;
+                        let mut out_data = vec![0.0f32; (shape[0] * shape[1] * new_h as i64 * new_w as i64) as usize];
+                        let x_data = x.as_f32_slice();
+                        for b in 0..shape[0] as usize {
+                            for c in 0..shape[1] as usize {
+                                for h in 0..shape[2] as usize {
+                                    for w in 0..shape[3] as usize {
+                                        let src_idx = ((b * shape[1] as usize + c) * shape[2] as usize + h) * shape[3] as usize + w;
+                                        let dst_idx = ((b * shape[1] as usize + c) * new_h + (h + pad_t)) * new_w + (w + pad_l);
+                                        out_data[dst_idx] = x_data[src_idx];
                                     }
                                 }
                             }
-                            Some(vec![Tensor::from_vec(out_data, vec![shape[0], shape[1], new_h as i64, new_w as i64])])
-                        } else {
-                            Some(vec![x.clone()])
                         }
+                        Some(vec![Tensor::from_vec(out_data, vec![shape[0], shape[1], new_h as i64, new_w as i64])])
                     } else {
-                        Some(vec![args[0].clone()])
+                        Some(vec![x.clone()])
                     }
                 }
 
@@ -216,11 +219,131 @@ impl DAGExecutor {
                 }
 
                 "castop" => {
-                    Some(vec![args[0].clone()])
+                    let to_dtype_val = node.attrs.get("to")
+                        .and_then(|a| a.parse::<i32>().ok())
+                        .unwrap_or(1);
+                    let target_dtype = match to_dtype_val {
+                        1 => DType::F32,
+                        9 => DType::Bool,
+                        10 => DType::I32,
+                        11 => DType::I64,
+                        _ => DType::F32,
+                    };
+                    Some(vec![args[0].to_dtype(target_dtype)])
                 }
 
                 "topkop" => {
-                    Some(vec![args[0].clone()])
+                    let mut axis = node.attrs.get("axis")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(-1) as usize;
+                    let rank = args[0].shape_ref().len();
+                    if axis >= rank { axis = rank - 1; }
+                    let keepdim = node.attrs.get("keepdims")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(1) != 0;
+                    Some(vec![args[0].max(axis as i32, keepdim), args[0].clone()])
+                }
+
+                "reducemean" | "reduce_mean" => {
+                    let axes_str = node.attrs.get("axes");
+                    let keepdim = node.attrs.get("keepdims")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(1) != 0;
+                    if let Some(axes_str) = axes_str {
+                        let axes: Vec<i64> = parse_int_list(axes_str);
+                        let mut result = args[0].clone();
+                        for &ax in axes.iter().rev() {
+                            result = result.mean(ax as i32, keepdim);
+                        }
+                        Some(vec![result])
+                    } else {
+                        let shape = args[0].shape_ref().to_vec();
+                        let mut result = args[0].clone();
+                        for ax in (0..shape.len() as i64).rev() {
+                            result = result.mean(ax as i32, true);
+                        }
+                        if !keepdim {
+                            result = result.reshape(vec![1]);
+                        }
+                        Some(vec![result])
+                    }
+                }
+
+                "reducesum" | "reduce_sum" => {
+                    let axes_str = node.attrs.get("axes");
+                    let keepdim = node.attrs.get("keepdims")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(1) != 0;
+                    if let Some(axes_str) = axes_str {
+                        let axes: Vec<i64> = parse_int_list(axes_str);
+                        let mut result = args[0].clone();
+                        for &ax in axes.iter().rev() {
+                            result = result.sum(ax as i32, keepdim);
+                        }
+                        Some(vec![result])
+                    } else {
+                        let shape = args[0].shape_ref().to_vec();
+                        let mut result = args[0].clone();
+                        for ax in (0..shape.len() as i64).rev() {
+                            result = result.sum(ax as i32, true);
+                        }
+                        if !keepdim {
+                            result = result.reshape(vec![1]);
+                        }
+                        Some(vec![result])
+                    }
+                }
+
+                "hardsigmoid" | "hard_sigmoid" => {
+                    let alpha = node.attrs.get("alpha")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(0.2);
+                    let beta = node.attrs.get("beta")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(0.5);
+                    let result = args[0].clone().mul(&Tensor::from_scalar(alpha));
+                    let result = result.add(&Tensor::from_scalar(beta));
+                    Some(vec![result.clamp(0.0, 1.0)])
+                }
+
+                "prelu" => {
+                    dispatch("prelu", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
+                }
+
+                "layernormalization" | "layer_norm" | "layernorm" => {
+                    let eps = node.attrs.get("epsilon")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(1e-5);
+                    let _axis = node.attrs.get("axis")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(-1);
+                    let _normalized_shape = args[0].shape_ref().to_vec();
+                    let weight = if args.len() > 1 { Some(&args[1]) } else { None };
+                    let bias = if args.len() > 2 { Some(&args[2]) } else { None };
+
+                    let eps_t = Tensor::from_scalar(eps);
+                    let mut dispatch_args = vec![&args[0], &eps_t];
+                    if let Some(w) = weight { dispatch_args.push(w); }
+                    if let Some(b) = bias { dispatch_args.push(b); }
+
+                    match dispatch("layer_norm", DispatchKey::Cpu, &dispatch_args) {
+                        Ok(r) => Some(r),
+                        Err(_) => Some(vec![args[0].clone()]),
+                    }
+                }
+
+                "erf" | "erfop" => {
+                    let x = &args[0];
+                    let data = x.as_f32_slice();
+                    let result_data: Vec<f32> = data.iter().map(|&v| {
+                        let sign = if v >= 0.0 { 1.0f32 } else { -1.0f32 };
+                        let x_abs = v.abs();
+                        let t = 1.0 / (1.0 + 0.3275911 * x_abs);
+                        let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x_abs * x_abs).exp();
+                        sign * y
+                    }).collect();
+                    let shape = x.shape_ref().to_vec();
+                    Some(vec![Tensor::from_vec(result_data, shape)])
                 }
 
                 "gatherop" | "gather" => {
@@ -271,11 +394,13 @@ impl DAGExecutor {
                     let axis = node.attrs.get("axis")
                         .and_then(|a| a.parse::<i64>().ok())
                         .unwrap_or(1) as usize;
-                    let split_str = node.attrs.get("split");
                     let shape = x.shape_ref();
                     let total_dim = shape[axis] as usize;
 
-                    let splits: Vec<usize> = if let Some(s) = split_str {
+                    let splits: Vec<usize> = if args.len() >= 2 {
+                        let splits_data = args[1].as_f32_slice();
+                        splits_data.iter().map(|&v| v as usize).collect()
+                    } else if let Some(s) = node.attrs.get("split") {
                         parse_int_list(s).iter().map(|&v| v as usize).collect()
                     } else {
                         let n = num_outputs.max(1);
@@ -300,6 +425,18 @@ impl DAGExecutor {
                     } else {
                         Some(vec![Tensor::from_scalar(0.0f32)])
                     }
+                }
+
+                "nonmaxsuppression" => {
+                    // NonMaxSuppression is complex; keep as pass-through for now
+                    // Real NMS is done in Python post-processing
+                    Some(vec![args[0].clone()])
+                }
+
+                "resize" => {
+                    // Resize/interpolation is not yet implemented in dispatcher
+                    // Keep as pass-through for now
+                    Some(vec![args[0].clone()])
                 }
 
                 _ => {

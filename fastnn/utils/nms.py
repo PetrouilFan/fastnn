@@ -229,8 +229,8 @@ def yolo_dfl_decode(
         box_dist = pred[:, :4 * reg_max].reshape(-1, 4, reg_max)
         class_scores = pred[:, 4 * reg_max:]
 
-        from scipy.special import softmax
-        box_probs = softmax(box_dist, axis=-1)
+        e_x = np.exp(box_dist - np.max(box_dist, axis=-1, keepdims=True))
+        box_probs = e_x / np.sum(e_x, axis=-1, keepdims=True)
         weights = np.arange(reg_max, dtype=np.float32)
         box_coords = np.sum(box_probs * weights, axis=-1)
 

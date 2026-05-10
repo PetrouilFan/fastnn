@@ -234,7 +234,7 @@ __all__ = [
     "gather",
     "repeat",
     "expand",
-    "slice",
+    "fnn_slice",
     "topk",
     "leaky_relu",
     "elu",
@@ -542,7 +542,7 @@ where = _core.where_
 gather = _core.gather
 repeat = _core.repeat
 expand = _core.expand
-slice = _core.slice
+fnn_slice = _core.slice
 topk = _core.topk
 leaky_relu = _core.leaky_relu
 elu = _core.elu

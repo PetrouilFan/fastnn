@@ -382,6 +382,120 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
         elif op_type == "If":
             layer_info["type"] = "IfOp"
 
+        elif op_type == "And":
+            layer_info["type"] = "AndOp"
+
+        elif op_type == "Or":
+            layer_info["type"] = "OrOp"
+
+        elif op_type == "Xor":
+            layer_info["type"] = "XorOp"
+
+        elif op_type == "Not":
+            layer_info["type"] = "NotOp"
+
+        elif op_type == "Less":
+            layer_info["type"] = "LessOp"
+
+        elif op_type == "Greater":
+            layer_info["type"] = "GreaterOp"
+
+        elif op_type == "Equal":
+            layer_info["type"] = "EqualOp"
+
+        elif op_type == "Ceil":
+            layer_info["type"] = "CeilOp"
+
+        elif op_type == "Floor":
+            layer_info["type"] = "FloorOp"
+
+        elif op_type == "Round":
+            layer_info["type"] = "RoundOp"
+
+        elif op_type == "Sign":
+            layer_info["type"] = "SignOp"
+
+        elif op_type == "Reciprocal":
+            layer_info["type"] = "ReciprocalOp"
+
+        elif op_type == "IsNaN":
+            layer_info["type"] = "IsNaNOp"
+
+        elif op_type == "IsInf":
+            layer_info["type"] = "IsInfOp"
+
+        elif op_type == "LogSoftmax":
+            axis = _get_attr(node, "axis", 1)
+            layer_info["type"] = "LogSoftmax"
+            layer_info["axis"] = axis
+
+        elif op_type == "Selu":
+            alpha = _get_attr(node, "alpha", 1.67326)
+            gamma = _get_attr(node, "gamma", 1.0507)
+            layer_info["type"] = "Selu"
+            layer_info["alpha"] = alpha
+            layer_info["gamma"] = gamma
+
+        elif op_type == "HardSigmoid":
+            alpha = _get_attr(node, "alpha", 0.2)
+            beta = _get_attr(node, "beta", 0.5)
+            layer_info["type"] = "HardSigmoid"
+            layer_info["alpha"] = alpha
+            layer_info["beta"] = beta
+
+        elif op_type == "HardSwish":
+            layer_info["type"] = "Hardswish"
+
+        elif op_type == "LayerNormalization":
+            layer_info["type"] = "LayerNorm"
+            axis = _get_attr(node, "axis", -1)
+            epsilon = _get_attr(node, "epsilon", 1e-5)
+            layer_info["axis"] = axis
+            layer_info["eps"] = epsilon
+            scale = initializer_map.get(node.input[1])
+            bias = initializer_map.get(node.input[2]) if len(node.input) > 2 else None
+            if scale is not None:
+                params.append((f"{node.name}.weight", scale))
+            if bias is not None:
+                params.append((f"{node.name}.bias", bias))
+
+        elif op_type == "ConvTranspose":
+            weight = initializer_map.get(node.input[1])
+            bias = initializer_map.get(node.input[2]) if len(node.input) > 2 else None
+            if weight is not None:
+                out_channels, in_channels = weight.shape[:2]
+                kernel_h, _ = weight.shape[2], weight.shape[3]
+                stride = _get_attr(node, "strides", [1, 1])
+                padding = _get_attr(node, "pads", [0, 0, 0, 0])
+                output_padding = _get_attr(node, "output_padding", [0, 0])
+                dilation = _get_attr(node, "dilations", [1, 1])
+                groups = _get_attr(node, "group", 1)
+                layer_info["type"] = "ConvTranspose"
+                layer_info["in_channels"] = in_channels
+                layer_info["out_channels"] = out_channels
+                layer_info["kernel_size"] = kernel_h
+                layer_info["stride"] = stride[0] if isinstance(stride, list) else stride
+                layer_info["padding"] = padding[0] if isinstance(padding, list) else padding
+                layer_info["output_padding"] = output_padding[0] if isinstance(output_padding, list) else output_padding
+                layer_info["dilation"] = dilation[0] if isinstance(dilation, list) else dilation
+                layer_info["groups"] = groups
+                layer_info["bias"] = bias is not None
+                params.append((f"{node.name}.weight", weight))
+                if bias is not None:
+                    params.append((f"{node.name}.bias", bias))
+
+        elif op_type == "DepthToSpace":
+            blocksize = _get_attr(node, "blocksize", 1)
+            mode = _get_attr(node, "mode", "DCR")
+            layer_info["type"] = "DepthToSpace"
+            layer_info["blocksize"] = blocksize
+            layer_info["mode"] = mode
+
+        elif op_type == "SpaceToDepth":
+            blocksize = _get_attr(node, "blocksize", 1)
+            layer_info["type"] = "SpaceToDepth"
+            layer_info["blocksize"] = blocksize
+
         else:
             logger.warning(f"Unsupported operator: {op_type}")
             layer_info["type"] = f"Unsupported_{op_type}"

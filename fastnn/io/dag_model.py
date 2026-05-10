@@ -55,14 +55,21 @@ class DAGModel:
         This method builds the bridge between them based on op-specific positional
         conventions (first input is data, subsequent inputs are params).
         """
+        OP_PARAM_SUFFIXES = [".weight", ".bias", ".running_mean", ".running_var", ".value", ".scale", ".beta", ".gamma"]
         OP_PARAM_MAP = {
             "Conv": [".weight", ".bias"],
             "Gemm": [".weight", ".bias"],
             "MatMul": [".weight", ".bias"],
             "BatchNormalization": [".weight", ".bias", ".running_mean", ".running_var"],
             "batchnormalization": [".weight", ".bias", ".running_mean", ".running_var"],
+            "InstanceNormalization": [".weight", ".bias"],
+            "instancenormalization": [".weight", ".bias"],
+            "Constant": [".value"],
         }
 
+        graph_input_names = set(self.input_names)
+
+        # Pass 1: Use OP_PARAM_MAP for known ops
         for node in self.nodes:
             node_name = node.get("name", "")
             if not node_name:
@@ -71,17 +78,29 @@ class DAGModel:
             op_type = node.get("op_type", "")
 
             suffixes = OP_PARAM_MAP.get(op_type, [])
-            if not suffixes or len(inputs) < 2:
-                continue
+            if suffixes and len(inputs) >= 2:
+                for i, input_name in enumerate(inputs[1:], 1):
+                    if input_name in self.params or input_name in graph_input_names:
+                        continue
+                    if i - 1 < len(suffixes):
+                        param_name = node_name + suffixes[i - 1]
+                        if param_name in self.params:
+                            self.initializer_to_param[input_name] = param_name
 
-            # First input is data; subsequent inputs map to params by position
-            for i, input_name in enumerate(inputs[1:], 1):
-                if input_name in self.params:
+        # Pass 2: Fallback for any remaining unresolved inputs
+        for node in self.nodes:
+            node_name = node.get("name", "")
+            if not node_name:
+                continue
+            inputs = node.get("inputs", [])
+            prefix = node_name + "."
+            for input_name in inputs:
+                if input_name in self.params or input_name in graph_input_names or input_name in self.initializer_to_param:
                     continue
-                if i - 1 < len(suffixes):
-                    param_name = node_name + suffixes[i - 1]
-                    if param_name in self.params:
+                for param_name in self.params:
+                    if param_name.startswith(prefix):
                         self.initializer_to_param[input_name] = param_name
+                        break
 
     def _resolve_input(self, in_name: str, buffer: Dict) -> Optional[Any]:
         """Resolve an input tensor by name.
