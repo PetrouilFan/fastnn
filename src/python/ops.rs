@@ -247,6 +247,33 @@ unary_op!(sigmoid, sigmoid);
 unary_op!(tanh, tanh);
 unary_op!(silu, silu);
 
+// Activation ops
+#[pyfunction]
+#[pyo3(signature = (a, negative_slope = 0.01))]
+fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyResult<PyTensor> {
+    let args = [&a.inner, &Tensor::from_scalar(negative_slope)];
+    Ok(PyTensor::from_tensor(dispatch_op("leaky_relu", &args)?))
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, alpha = 1.0))]
+fn elu(a: &PyTensor, alpha: f32) -> PyResult<PyTensor> {
+    let args = [&a.inner, &Tensor::from_scalar(alpha)];
+    Ok(PyTensor::from_tensor(dispatch_op("elu", &args)?))
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, beta = 1.0, threshold = 20.0))]
+fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyResult<PyTensor> {
+    let args = [&a.inner, &Tensor::from_scalar(beta), &Tensor::from_scalar(threshold)];
+    Ok(PyTensor::from_tensor(dispatch_op("softplus", &args)?))
+}
+
+#[pyfunction]
+fn hardswish(a: &PyTensor) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(dispatch_unary("hardswish", &a.inner)?))
+}
+
 #[pyfunction]
 fn softmax(py: Python<'_>, a: &PyTensor, dim: i32) -> PyTensor {
     let a_inner = a.inner.clone();
@@ -573,6 +600,42 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTen
     }))
 }
 
+// Tensor manipulation ops
+#[pyfunction]
+fn where_(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(x.inner.where_tensor(&condition.inner, &y.inner))
+}
+
+#[pyfunction]
+fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyTensor {
+    PyTensor::from_tensor(tensor.inner.repeat(&repeats))
+}
+
+#[pyfunction]
+fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyTensor {
+    PyTensor::from_tensor(tensor.inner.expand(shape))
+}
+
+#[pyfunction]
+#[pyo3(signature = (tensor, dim, start, end, step = 1))]
+fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTensor {
+    PyTensor::from_tensor(tensor.inner.slice(dim, start, end, step))
+}
+
+#[pyfunction]
+fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
+    let values = tensor.inner.max(dim as i32, false);
+    let args = [&tensor.inner, &dim_to_tensor(dim as i32), &Tensor::from_scalar(1.0)];
+    let indices = dispatch_op("max", &args)?;
+    Ok((PyTensor::from_tensor(values), PyTensor::from_tensor(indices)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (tensor, axis, indices))]
+fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(tensor.inner.gather(axis, &indices.inner))
+}
+
 #[pyfunction]
 fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
     let tensors: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
@@ -659,3 +722,20 @@ fn clip_grad_value_(tensors: Vec<PyTensor>, clip_value: f32) {
     let tensors: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     core_tensor::clip_grad_value_(&tensors, clip_value);
 }
+
+#[pyfunction]
+fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyTensor {
+    PyTensor::from_tensor(tensor.inner.cumsum(dim, exclusive, reverse))
+}
+
+#[pyfunction]
+fn erf(tensor: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(tensor.inner.erf())
+}
+
+#[pyfunction]
+fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
+    tensor.inner.nonzero()
+}
+
+

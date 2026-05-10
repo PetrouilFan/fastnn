@@ -1,9 +1,9 @@
-from fastnn import Linear, Dropout, BatchNorm1d
-from fastnn.layers import PySequential as Seq
 from fastnn.activations import get_activation
 
 
 def create_mlp(input_dim, hidden_dims, output_dim, activation="relu", dropout=0.0, batch_norm=False):
+    from fastnn import Linear, Dropout, BatchNorm1d
+    from fastnn.layers import PySequential as Seq
     activation_cls = get_activation(activation)
     layers = []
     in_dim = input_dim

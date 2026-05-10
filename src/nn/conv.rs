@@ -20,6 +20,7 @@ pub struct Conv2d {
     pub padding: i64,
     pub dilation: i64,
     pub groups: i64,
+    pub padding_mode: String,
     training: TrainingState,
     // Pre-allocated scalar tensors to avoid per-forward allocation
     stride_scalar: Tensor,
@@ -71,6 +72,7 @@ impl Conv2d {
             padding,
             dilation,
             groups,
+            padding_mode: "zeros".to_string(),
             training: TrainingState::new(),
             stride_scalar: Tensor::from_scalar(stride as f32),
             padding_scalar: Tensor::from_scalar(padding as f32),
@@ -83,17 +85,48 @@ impl Conv2d {
 
 impl Module for Conv2d {
     fn forward(&self, x: &Tensor) -> Tensor {
+        let (input, pad_scalar) = if self.padding_mode == "same" {
+            let x_shape = x.shape_ref();
+            let h_in = x_shape[2];
+            let w_in = x_shape[3];
+            let h_out = ((h_in as f64) / self.stride as f64).ceil() as i64;
+            let w_out = ((w_in as f64) / self.stride as f64).ceil() as i64;
+            let pad_h = ((h_out - 1) * self.stride + self.kernel_size - h_in).max(0);
+            let pad_w = ((w_out - 1) * self.stride + self.kernel_size - w_in).max(0);
+            let pad_top = pad_h / 2;
+            let pad_bottom = pad_h - pad_top;
+            let pad_left = pad_w / 2;
+            let pad_right = pad_w - pad_left;
+            let new_h = x_shape[2] + pad_top + pad_bottom;
+            let new_w = x_shape[3] + pad_left + pad_right;
+            let mut padded_data = vec![0.0f32; (x_shape[0] * x_shape[1] * new_h * new_w) as usize];
+            let x_data = x.as_f32_slice();
+            for b in 0..x_shape[0] {
+                for c in 0..x_shape[1] {
+                    for h in 0..x_shape[2] {
+                        for w in 0..x_shape[3] {
+                            let src = ((b * x_shape[1] + c) * x_shape[2] + h) * x_shape[3] + w;
+                            let dst = ((b * x_shape[1] + c) * new_h + (h + pad_top)) * new_w + (w + pad_left);
+                            padded_data[dst as usize] = x_data[src as usize];
+                        }
+                    }
+                }
+            }
+            (Tensor::from_vec(padded_data, vec![x_shape[0], x_shape[1], new_h, new_w]), Tensor::from_scalar(0.0f32))
+        } else {
+            (x.clone(), self.padding_scalar.clone())
+        };
         let bias_ref = self.bias.as_ref().unwrap_or(&self.default_bias);
 
         let result = dispatch(
             "conv2d",
             DispatchKey::Cpu,
             &[
-                x,
+                &input,
                 &self.weight,
                 bias_ref,
                 &self.stride_scalar,
-                &self.padding_scalar,
+                &pad_scalar,
                 &self.dilation_scalar,
                 &self.groups_scalar,
             ],
