@@ -125,7 +125,9 @@ def build_dag_model(header: dict, path: str) -> Any:
             if key not in ("name", "op_type", "inputs", "outputs"):
                 if isinstance(value, (list, tuple)):
                     dag_node[key] = str(list(value))
-                elif isinstance(value, (int, float, bool)):
+                elif isinstance(value, bool):
+                    dag_node[key] = "true" if value else "false"
+                elif isinstance(value, (int, float)):
                     dag_node[key] = str(value)
                 elif isinstance(value, str):
                     dag_node[key] = value
