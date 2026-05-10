@@ -115,16 +115,14 @@ pub unsafe fn randn_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let shape: Vec<i64> = shape_tensor.inner.sizes.iter().copied().collect();
     let numel: usize = shape.iter().product::<i64>() as usize;
 
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
     let mut values = vec![0.0f32; numel];
 
     // Box-Muller generates 2 normal samples from 2 uniform samples
     // Process in pairs to be 2x faster
     let mut i = 0;
     while i + 1 < numel {
-        let u1: f32 = rng.gen::<f32>().max(1e-10); // avoid ln(0)
-        let u2: f32 = rng.gen::<f32>();
+        let u1: f32 = crate::random_f32().max(1e-10); // avoid ln(0)
+        let u2: f32 = crate::random_f32();
         let r = (-2.0 * u1.ln()).sqrt();
         let theta = 2.0 * std::f32::consts::PI * u2;
         values[i] = r * theta.cos();
@@ -133,8 +131,8 @@ pub unsafe fn randn_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     }
     // Handle odd element
     if i < numel {
-        let u1: f32 = rng.gen::<f32>().max(1e-10);
-        let u2: f32 = rng.gen::<f32>();
+        let u1: f32 = crate::random_f32().max(1e-10);
+        let u2: f32 = crate::random_f32();
         values[i] = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
     }
 
@@ -146,9 +144,7 @@ pub unsafe fn rand_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let shape: Vec<i64> = shape_tensor.inner.sizes.iter().copied().collect();
     let numel: i64 = shape.iter().product();
 
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let values: Vec<f32> = (0..numel as usize).map(|_| rng.gen()).collect();
+    let values: Vec<f32> = (0..numel as usize).map(|_| crate::random_f32()).collect();
 
     vec![Tensor::from_vec(values, shape)]
 }
@@ -160,11 +156,10 @@ pub unsafe fn randint_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let low = args[1].item() as i32;
     let high = args[2].item() as i32;
 
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
     let numel: i64 = shape.iter().product();
+    let range = high - low;
     let values: Vec<f32> = (0..numel as usize)
-        .map(|_| rng.gen_range(low..high) as f32)
+        .map(|_| ((crate::random_f32() * range as f32) as i32 + low) as f32)
         .collect();
 
     vec![Tensor::from_vec(values, shape)]

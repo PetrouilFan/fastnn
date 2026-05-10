@@ -14,6 +14,7 @@ Examples:
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import math
+import numpy as np
 import fastnn._core as _core
 from fastnn.module import Module
 
@@ -112,15 +113,20 @@ class _BaseModule(Module):
         return result
     
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        current_state = self.state_dict()
-        for name, value in state_dict.items():
-            if name in current_state:
-                # Get the current tensor and copy data from value
-                current_tensor = current_state[name]
-                # Use numpy to copy data
-                current_tensor_numpy = current_tensor.numpy()
-                value_numpy = value.numpy() if hasattr(value, 'numpy') else value
-                current_tensor_numpy[:] = value_numpy
+        for name_prefix, layer in self._named_param_pairs:
+            for param_name, param in layer.named_parameters():
+                full_name = f"{name_prefix}.{param_name}"
+                if full_name not in state_dict:
+                    continue
+                src = state_dict[full_name]
+                if hasattr(src, 'numpy'):
+                    data = src.numpy().flatten().tolist()
+                else:
+                    data = np.array(src, dtype=np.float32).flatten().tolist()
+                new_param = _core.PyTensor(data, list(param.shape))
+                setter = f"set_{param_name}"
+                if hasattr(layer, setter):
+                    getattr(layer, setter)(new_param)
 
 
 # Python-implemented layers (for compatibility and educational purposes)
