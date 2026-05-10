@@ -42,7 +42,7 @@ minimum = _core.minimum
 where = _core.where_
 repeat = _core.repeat
 expand = _core.expand
-slice = _core.slice
+fnn_slice = _core.slice
 topk = _core.topk
 gather = _core.gather
 
@@ -97,7 +97,7 @@ __all__ = [
     "where",
     "repeat",
     "expand",
-    "slice",
+    "fnn_slice",
     "topk",
     "gather",
     "einsum",
