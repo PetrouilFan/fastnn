@@ -79,15 +79,10 @@ impl Tensor {
         Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 
-    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
+    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, _device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
-        Tensor::new(TensorImpl::new_with_device(
-            storage,
-            sizes,
-            device,
-            DType::F32,
-        ))
+        Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {

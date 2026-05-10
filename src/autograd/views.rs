@@ -245,6 +245,211 @@ impl Node for CheckpointNode {
     }
 }
 
+pub struct TransposeBackward {
+    pub input: Tensor,
+    pub dim0: usize,
+    pub dim1: usize,
+    pub edges: Vec<Edge>,
+}
+
+impl TransposeBackward {
+    pub fn new(input: Tensor, dim0: usize, dim1: usize, edges: Vec<Edge>) -> Self {
+        TransposeBackward { input, dim0, dim1, edges }
+    }
+}
+
+impl Node for TransposeBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
+        vec![Some(grad.transpose(self.dim0, self.dim1))]
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 1 }
+    fn name(&self) -> &str { "TransposeBackward" }
+    fn inputs(&self) -> &[Tensor] { std::slice::from_ref(&self.input) }
+}
+
+pub struct PermuteBackward {
+    pub input: Tensor,
+    pub dims: Vec<i64>,
+    pub edges: Vec<Edge>,
+}
+
+impl PermuteBackward {
+    pub fn new(input: Tensor, dims: Vec<i64>, edges: Vec<Edge>) -> Self {
+        PermuteBackward { input, dims, edges }
+    }
+}
+
+impl Node for PermuteBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
+        let ndim = self.dims.len();
+        let mut inverse = vec![0i64; ndim];
+        for (i, &d) in self.dims.iter().enumerate() {
+            inverse[d as usize] = i as i64;
+        }
+        vec![Some(grad.permute(inverse))]
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 1 }
+    fn name(&self) -> &str { "PermuteBackward" }
+    fn inputs(&self) -> &[Tensor] { std::slice::from_ref(&self.input) }
+}
+
+pub struct ExpandBackward {
+    pub input: Tensor,
+    pub edges: Vec<Edge>,
+}
+
+impl ExpandBackward {
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        ExpandBackward { input, edges }
+    }
+}
+
+impl Node for ExpandBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
+        vec![Some(crate::autograd::sum_to_shape(grad, self.input.shape_ref()))]
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 1 }
+    fn name(&self) -> &str { "ExpandBackward" }
+    fn inputs(&self) -> &[Tensor] { std::slice::from_ref(&self.input) }
+}
+
+pub struct CatBackward {
+    pub inputs: Vec<Tensor>,
+    pub dim: usize,
+    pub split_sizes: Vec<usize>,
+    pub edges: Vec<Edge>,
+}
+
+impl CatBackward {
+    pub fn new(inputs: Vec<Tensor>, dim: usize, split_sizes: Vec<usize>, edges: Vec<Edge>) -> Self {
+        CatBackward { inputs, dim, split_sizes, edges }
+    }
+}
+
+impl Node for CatBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None; self.inputs.len()];
+        };
+        let mut result = Vec::with_capacity(self.inputs.len());
+        let mut offset = 0i64;
+        for (i, input) in self.inputs.iter().enumerate() {
+            let size = self.split_sizes[i] as i64;
+            if input.requires_grad() {
+                let chunk = grad.slice(self.dim, offset, offset + size, 1);
+                result.push(Some(chunk));
+            } else {
+                result.push(None);
+            }
+            offset += size;
+        }
+        result
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { self.inputs.len() }
+    fn name(&self) -> &str { "CatBackward" }
+    fn inputs(&self) -> &[Tensor] { &self.inputs }
+}
+
+pub struct RepeatBackward {
+    pub input: Tensor,
+    pub repeats: Vec<i64>,
+    pub edges: Vec<Edge>,
+}
+
+impl RepeatBackward {
+    pub fn new(input: Tensor, repeats: Vec<i64>, edges: Vec<Edge>) -> Self {
+        RepeatBackward { input, repeats, edges }
+    }
+}
+
+impl Node for RepeatBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
+        let input_shape = self.input.shape_ref().to_vec();
+        let ndim = self.input.ndim();
+        let offset = self.repeats.len() - ndim;
+        let mut grad = grad;
+        for j in (0..self.repeats.len()).rev() {
+            let r = self.repeats[j];
+            if r > 1 {
+                let orig_size = if j < offset { 1i64 } else { input_shape[j - offset] };
+                let grad_shape = grad.shape();
+                let mut new_shape: Vec<i64> = Vec::with_capacity(grad_shape.len() + 1);
+                for (k, &s) in grad_shape.iter().enumerate() {
+                    if k == j {
+                        new_shape.push(orig_size);
+                        new_shape.push(r);
+                    } else {
+                        new_shape.push(s);
+                    }
+                }
+                grad = grad.reshape(new_shape);
+                grad = grad.sum((j + 1) as i32, false);
+            }
+        }
+        if offset > 0 {
+            for d in (0..offset).rev() {
+                grad = grad.squeeze(Some(d));
+            }
+        }
+        vec![Some(grad)]
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 1 }
+    fn name(&self) -> &str { "RepeatBackward" }
+    fn inputs(&self) -> &[Tensor] { std::slice::from_ref(&self.input) }
+}
+
+pub struct WhereBackward {
+    pub inputs: Vec<Tensor>,
+    pub condition: Tensor,
+    pub edges: Vec<Edge>,
+}
+
+impl WhereBackward {
+    pub fn new(inputs: Vec<Tensor>, condition: Tensor, edges: Vec<Edge>) -> Self {
+        WhereBackward { inputs, condition, edges }
+    }
+}
+
+impl Node for WhereBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
+        let mask = self.condition.gt_scalar(0.0);
+        let mask_not = mask.logical_not();
+        let grad_self = grad.mul(&mask);
+        let grad_other = grad.mul(&mask_not);
+        vec![Some(grad_self), Some(grad_other)]
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 2 }
+    fn name(&self) -> &str { "WhereBackward" }
+    fn inputs(&self) -> &[Tensor] { &self.inputs }
+}
+
 /// Checkpoint function that enables gradient checkpointing
 /// This stores the function and inputs to recompute during backward pass
 pub fn checkpoint<F>(f: F, inputs: &[Tensor]) -> Vec<Tensor>

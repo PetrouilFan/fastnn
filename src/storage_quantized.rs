@@ -105,8 +105,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
         let inv_global = 1.0 / global_scale;
 
         // Pass 2: write directly to pre-allocated packed buffer
-        let mut packed = Vec::with_capacity(packed_len);
-        unsafe { packed.set_len(packed_len); }
+        let mut packed = vec![T::default(); packed_len];
 
         for block_idx in 0..self.scale_zp.len() {
             let (block_scale, _zero) = self.scale_zp[block_idx];
