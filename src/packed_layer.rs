@@ -36,6 +36,12 @@ pub struct PackedLinear<T: PackedWord> {
     pub bias: Option<Vec<f32>>,
     /// Master weights in f32 for optimizer updates (training only)
     pub master_weight: Option<Vec<f32>>,
+    /// Cached input from the last forward pass (for backward computation)
+    pub cached_input: Mutex<Option<Vec<f32>>>,
+    /// Gradient accumulator for master weights
+    pub master_grad: Mutex<Vec<f32>>,
+    /// Training state (train/eval)
+    pub training: std::sync::atomic::AtomicBool,
     pub in_features: usize,
     pub out_features: usize,
     /// Cached GPU buffer for weights — None until first GPU forward call
@@ -73,10 +79,14 @@ impl<T: PackedWord> PackedLinear<T> {
             None
         };
 
+        let master_grad_size = in_features * out_features;
         PackedLinear {
             weight,
             bias,
             master_weight: Some(master),
+            cached_input: Mutex::new(None),
+            master_grad: Mutex::new(vec![0.0; master_grad_size]),
+            training: std::sync::atomic::AtomicBool::new(true),
             in_features,
             out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
@@ -98,6 +108,9 @@ impl<T: PackedWord> PackedLinear<T> {
             weight,
             bias,
             master_weight: None,
+            cached_input: Mutex::new(None),
+            master_grad: Mutex::new(vec![0.0; in_features * out_features]),
+            training: std::sync::atomic::AtomicBool::new(true),
             in_features,
             out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
@@ -110,6 +123,10 @@ impl<T: PackedWord> PackedLinear<T> {
 
     /// Forward pass with caller-provided output buffer (avoids allocation).
     pub fn forward_into(&self, input: &[f32], output: &mut [f32]) {
+        // Cache input for backward pass (only in training mode)
+        if self.training.load(std::sync::atomic::Ordering::Relaxed) {
+            *self.cached_input.lock().unwrap() = Some(input.to_vec());
+        }
         assert_eq!(input.len(), self.in_features,
             "PackedLinear::forward_into: input length {} != in_features {}",
             input.len(), self.in_features);
@@ -167,6 +184,50 @@ impl<T: PackedWord> PackedLinear<T> {
         } else {
             self.forward_cpu(input)
         }
+    }
+
+    /// Compute backward pass for input gradient.
+    /// grad_output: [out_features] gradient flowing back from loss
+    /// Returns: [in_features] gradient for input
+    pub fn backward(&self, grad_output: &[f32]) -> Vec<f32> {
+        let out_f = self.out_features;
+        let in_f = self.in_features;
+        let cached = self.cached_input.lock().unwrap();
+        let input = cached.as_ref().expect("backward called without forward pass");
+
+        // Compute input gradient: W^T @ grad_output
+        let grad_input = cpu::packed_linear_backward_input_cpu(
+            &self.weight, grad_output, input, out_f, in_f
+        );
+
+        // Accumulate weight gradient: dL/dW = dL/dout ⊗ input
+        // grad_output[j] * input[i] → master_grad[j * in_f + i] += ...
+        let mut mg = self.master_grad.lock().unwrap();
+        cpu::packed_linear_backward_weight_cpu(
+            &self.weight, grad_output, input, &mut mg, out_f, in_f
+        );
+
+        grad_input
+    }
+
+    /// Zero the master gradient
+    pub fn zero_grad(&self) {
+        self.master_grad.lock().unwrap().fill(0.0);
+    }
+
+    /// Set training mode
+    pub fn train_mode(&self) {
+        self.training.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set evaluation mode
+    pub fn eval_mode(&self) {
+        self.training.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Check if in training mode
+    pub fn is_training(&self) -> bool {
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Ensure GPU buffers are created and cached.
@@ -298,6 +359,11 @@ impl<T: PackedWord> Clone for PackedLinear<T> {
             weight: self.weight.clone(),
             bias: self.bias.clone(),
             master_weight: self.master_weight.clone(),
+            cached_input: Mutex::new(None),
+            master_grad: Mutex::new(self.master_grad.lock().unwrap().clone()),
+            training: std::sync::atomic::AtomicBool::new(
+                self.training.load(std::sync::atomic::Ordering::Relaxed)
+            ),
             in_features: self.in_features,
             out_features: self.out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
