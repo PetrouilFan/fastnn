@@ -86,7 +86,7 @@ impl Module for LeakyReLU {
 }
 
 pub struct PReLU {
-    weight: Tensor,
+    pub weight: Tensor,
 }
 
 impl PReLU {
@@ -116,6 +116,46 @@ impl Module for PReLU {
 
     fn named_parameters(&self) -> Vec<(String, Tensor)> {
         vec![("weight".to_string(), self.weight.clone())]
+    }
+
+    fn zero_grad(&self) {}
+
+    fn train_mode(&self) {}
+
+    fn eval_mode(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
+    }
+}
+
+pub struct Softmax {
+    dim: i64,
+}
+
+impl Softmax {
+    pub fn new(dim: i64) -> Self {
+        Softmax { dim }
+    }
+}
+
+impl Default for Softmax {
+    fn default() -> Self {
+        Self::new(-1)
+    }
+}
+
+impl Module for Softmax {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        x.softmax(self.dim as i32)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![]
     }
 
     fn zero_grad(&self) {}

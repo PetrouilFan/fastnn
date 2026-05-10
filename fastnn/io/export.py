@@ -381,6 +381,27 @@ def get_param_setter(layer, param_name):
 def load_fnn_model(path: str) -> Any:
     """
     Load a .fnn model file and return a fastnn model ready for inference.
+
+    This function deserializes a model saved in the native .fnn format.
+    The .fnn file contains a JSON header with layer topology and
+    binary parameter tensors.
+
+    Args:
+        path: Path to the .fnn file to load.
+
+    Returns:
+        A fastnn Sequential model with all layers reconstructed and
+        parameters loaded.
+
+    Raises:
+        SerializationError: If the file is invalid or missing magic bytes.
+        ValueError: If an unsupported layer type is encountered in the
+            model header.
+        FileNotFoundError: If the specified path does not exist.
+
+    Example:
+        >>> model = load_fnn_model("model.fnn")
+        >>> output = model(input_tensor)
     """
     with open(path, "rb") as f:
         # Read file header
