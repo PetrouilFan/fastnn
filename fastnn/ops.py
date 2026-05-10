@@ -7,6 +7,10 @@ gelu = _core.gelu
 sigmoid = _core.sigmoid
 tanh = _core.tanh
 silu = _core.silu
+leaky_relu = _core.leaky_relu
+elu = _core.elu
+softplus = _core.softplus
+hardswish = _core.hardswish
 softmax = _core.softmax
 log_softmax = _core.log_softmax
 fused_add_relu = _core.fused_add_relu
@@ -35,6 +39,13 @@ max = _core.max
 min = _core.min
 maximum = _core.maximum
 minimum = _core.minimum
+where = _core.where_
+repeat = _core.repeat
+expand = _core.expand
+fnn_slice = _core.slice
+topk = _core.topk
+gather = _core.gather
+
 einsum = _core.einsum
 flash_attention = _core.flash_attention
 
@@ -42,6 +53,9 @@ mse_loss = _core.mse_loss
 cross_entropy_loss = _core.cross_entropy_loss
 bce_with_logits = _core.bce_with_logits
 huber_loss = _core.huber_loss
+gather = _core.gather
+where_ = _core.where_
+repeat = _core.repeat
 
 __all__ = [
     "relu",
@@ -49,6 +63,10 @@ __all__ = [
     "sigmoid",
     "tanh",
     "silu",
+    "leaky_relu",
+    "elu",
+    "softplus",
+    "hardswish",
     "softmax",
     "log_softmax",
     "fused_add_relu",
@@ -76,10 +94,19 @@ __all__ = [
     "min",
     "maximum",
     "minimum",
+    "where",
+    "repeat",
+    "expand",
+    "fnn_slice",
+    "topk",
+    "gather",
     "einsum",
     "flash_attention",
     "mse_loss",
     "cross_entropy_loss",
     "bce_with_logits",
     "huber_loss",
+    "gather",
+    "where_",
+    "repeat",
 ]
