@@ -737,6 +737,69 @@ def _infer_xorop(input_shapes, attrs, num_outputs):
     return [input_shapes[0]]
 
 
+# ---- Custom/extension ops (shape-preserving unless noted) ----
+
+def _infer_biasgelu(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_fastgelu(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_gathernd(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_scatternd(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_rotaryembedding(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_skiplayernormalization(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_embedlayernormalization(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_attention(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_multiheadattention(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_groupqueryattention(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_quantizelinear(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_dequantizelinear(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_rmsnormalization(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_swish(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+def _infer_gru(input_shapes, attrs, num_outputs):
+    return [input_shapes[0], None]
+
+def _infer_lstm(input_shapes, attrs, num_outputs):
+    return [input_shapes[0], None, None]
+
+def _infer_loopop(input_shapes, attrs, num_outputs):
+    return _infer_loop(input_shapes, attrs, num_outputs)
+
+def _infer_ifop(input_shapes, attrs, num_outputs):
+    return _infer_if(input_shapes, attrs, num_outputs)
+
+def _infer_logsoftmaxop(input_shapes, attrs, num_outputs):
+    return _infer_logsoftmax(input_shapes, attrs, num_outputs)
+
+def _infer_seluop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
 # ---- Utilities ----
 
 def _broadcast_shapes(a: List[int], b: List[int]) -> List[int]:

@@ -102,6 +102,19 @@ class DAGModel:
                         self.initializer_to_param[input_name] = param_name
                         break
 
+        # Pass 3: Map Constant node output names to their .value params
+        for node in self.nodes:
+            op_type = node.get("op_type", "")
+            if op_type not in ("Constant", "constantop"):
+                continue
+            node_name = node.get("name", "")
+            value_key = f"{node_name}.value"
+            if value_key not in self.params:
+                continue
+            for output_name in node.get("outputs", []):
+                if output_name not in self.initializer_to_param:
+                    self.initializer_to_param[output_name] = value_key
+
     def _resolve_input(self, in_name: str, buffer: Dict) -> Optional[Any]:
         """Resolve an input tensor by name.
 
@@ -162,7 +175,7 @@ class DAGModel:
                     tensors = None
                     break
 
-            if tensors is None or not tensors:
+            if tensors is None:
                 continue
 
             outputs = self._dispatch_op(op_type, tensors, node)
@@ -375,7 +388,13 @@ class DAGModel:
                     return [x.reshape(shape)]
                 return [tensors[0]]
             elif op_type in ("Constant", "constantop"):
-                return [tensors[0]] if tensors else None
+                if tensors:
+                    return [tensors[0]]
+                node_name = node.get("name", "")
+                value_key = f"{node_name}.value"
+                if value_key in self.params:
+                    return [self.params[value_key]]
+                return None
             elif op_type in ("Loop", "loopop", "If", "ifop"):
                 logger.warning("Control flow op %s not yet supported, passing through", op_type)
                 return [tensors[0]] if tensors else None

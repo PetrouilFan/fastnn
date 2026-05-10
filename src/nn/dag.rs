@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
-use crate::storage::DType;
+use crate::storage::{Device, DType};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 
@@ -63,11 +63,10 @@ impl DAGExecutor {
                     args.push(p.clone());
                 }
             }
-            if args.is_empty() {
+            let op_lower = node.op_type.to_lowercase();
+            if args.is_empty() && op_lower != "constantop" {
                 continue;
             }
-
-            let op_lower = node.op_type.to_lowercase();
             let result = match op_lower.as_str() {
                 "relu" => self.dispatch_unary("relu", &args),
                 "sigmoid" => self.dispatch_unary("sigmoid", &args),
@@ -430,7 +429,11 @@ impl DAGExecutor {
                 }
 
                 "constantop" => {
-                    if let Some(t) = self.params.get(&node.outputs[0]) {
+                    let key = node.outputs[0].clone();
+                    let value_key = format!("{}.value", node.name);
+                    if let Some(t) = self.params.get(&key) {
+                        Some(vec![t.clone()])
+                    } else if let Some(t) = self.params.get(&value_key) {
                         Some(vec![t.clone()])
                     } else {
                         Some(vec![Tensor::from_scalar(0.0f32)])
@@ -521,6 +524,378 @@ impl DAGExecutor {
                     Some(vec![result])
                 }
 
+                "ceil" | "ceilop" => {
+                    let x = &args[0];
+                    let data = x.as_f32_slice();
+                    let result: Vec<f32> = data.iter().map(|&v| v.ceil()).collect();
+                    Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
+                }
+                "floor" | "floorop" => {
+                    let x = &args[0];
+                    let data = x.as_f32_slice();
+                    let result: Vec<f32> = data.iter().map(|&v| v.floor()).collect();
+                    Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
+                }
+                "round" | "roundop" => {
+                    let x = &args[0];
+                    let data = x.as_f32_slice();
+                    let result: Vec<f32> = data.iter().map(|&v| v.round()).collect();
+                    Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
+                }
+                "sign" | "signop" => {
+                    self.dispatch_unary("sign", &args)
+                }
+                "reciprocal" | "reciprocalop" => {
+                    let x = &args[0];
+                    let data = x.as_f32_slice();
+                    let result: Vec<f32> = data.iter().map(|&v| if v == 0.0 { 0.0 } else { 1.0 / v }).collect();
+                    Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
+                }
+                "isnan" | "isnanop" => {
+                    let x = &args[0];
+                    let data = x.as_f32_slice();
+                    let result: Vec<f32> = data.iter().map(|&v| if v.is_nan() { 1.0 } else { 0.0 }).collect();
+                    Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
+                }
+                "isinf" | "isinfop" => {
+                    let x = &args[0];
+                    let data = x.as_f32_slice();
+                    let result: Vec<f32> = data.iter().map(|&v| if v.is_infinite() { 1.0 } else { 0.0 }).collect();
+                    Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
+                }
+
+                "not" | "notop" => {
+                    dispatch("logical_not", DispatchKey::Cpu, &[&args[0]]).ok()
+                }
+
+                "and" | "andop" => {
+                    let a = args[0].as_f32_slice();
+                    let b = args[1].as_f32_slice();
+
+                    let shape = args[0].shape_ref().to_vec();
+                    let result: Vec<f32> = a.iter().zip(b.iter()).map(|(&x, &y)| if x != 0.0 && y != 0.0 { 1.0 } else { 0.0 }).collect();
+                    Some(vec![Tensor::from_vec(result, shape)])
+                }
+
+                "or" | "orop" => {
+                    let a = args[0].as_f32_slice();
+                    let b = args[1].as_f32_slice();
+
+                    let shape = args[0].shape_ref().to_vec();
+                    let result: Vec<f32> = a.iter().zip(b.iter()).map(|(&x, &y)| if x != 0.0 || y != 0.0 { 1.0 } else { 0.0 }).collect();
+                    Some(vec![Tensor::from_vec(result, shape)])
+                }
+
+                "xor" | "xorop" => {
+                    let a = args[0].as_f32_slice();
+                    let b = args[1].as_f32_slice();
+
+                    let shape = args[0].shape_ref().to_vec();
+                    let result: Vec<f32> = a.iter().zip(b.iter()).map(|(&x, &y)| if (x != 0.0) != (y != 0.0) { 1.0 } else { 0.0 }).collect();
+                    Some(vec![Tensor::from_vec(result, shape)])
+                }
+
+                "less" | "lessop" => {
+                    let a = args[0].as_f32_slice();
+                    let b = args[1].as_f32_slice();
+
+                    let shape = args[0].shape_ref().to_vec();
+                    let result: Vec<f32> = a.iter().zip(b.iter()).map(|(&x, &y)| if x < y { 1.0 } else { 0.0 }).collect();
+                    Some(vec![Tensor::from_vec(result, shape)])
+                }
+
+                "greater" | "greaterop" => {
+                    let a = args[0].as_f32_slice();
+                    let b = args[1].as_f32_slice();
+
+                    let shape = args[0].shape_ref().to_vec();
+                    let result: Vec<f32> = a.iter().zip(b.iter()).map(|(&x, &y)| if x > y { 1.0 } else { 0.0 }).collect();
+                    Some(vec![Tensor::from_vec(result, shape)])
+                }
+
+                "equal" | "equalop" => {
+                    let a = args[0].as_f32_slice();
+                    let b = args[1].as_f32_slice();
+
+                    let shape = args[0].shape_ref().to_vec();
+                    let result: Vec<f32> = a.iter().zip(b.iter()).map(|(&x, &y)| if x == y { 1.0 } else { 0.0 }).collect();
+                    Some(vec![Tensor::from_vec(result, shape)])
+                }
+
+                "cumsum" => {
+                    let dim = node.attrs.get("axis")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let exclusive = node.attrs.get("exclusive")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(0) != 0;
+                    let reverse = node.attrs.get("reverse")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(0) != 0;
+                    Some(vec![args[0].cumsum(dim, exclusive, reverse)])
+                }
+
+                "onehot" | "onehotop" => {
+                    let indices = &args[0];
+                    let depth = if let Some(d) = node.attrs.get("depth") {
+                        d.parse::<i64>().unwrap_or(1)
+                    } else if args.len() >= 2 {
+                        args[1].as_f32_slice()[0] as i64
+                    } else {
+                        1
+                    };
+                    let indices_shape = indices.shape_ref().to_vec();
+                    let mut out_shape = indices_shape.clone();
+                    out_shape.push(depth);
+                    let out_size = out_shape.iter().product::<i64>() as usize;
+                    let indices_data = indices.as_f32_slice();
+                    let mut out_data = vec![0.0f32; out_size];
+                    for i in 0..indices_data.len() {
+                        let idx = indices_data[i] as i64;
+                        if idx >= 0 && idx < depth {
+                            out_data[i * depth as usize + idx as usize] = 1.0;
+                        }
+                    }
+                    Some(vec![Tensor::from_vec(out_data, out_shape)])
+                }
+
+                "gathernd" | "gatherndop" => {
+                    if args.len() >= 2 {
+                        let indices = &args[1];
+                        let indices_shape = indices.shape_ref().to_vec();
+                        if indices_shape.len() == 1 {
+                            Some(vec![args[0].gather(0, &args[1])])
+                        } else {
+                            Some(vec![args[0].gather(0, &args[1])])
+                        }
+                    } else {
+                        Some(vec![args[0].clone()])
+                    }
+                }
+
+                // scatternd: pass-through for now
+                "scatternd" | "scatterndop" => {
+                    Some(vec![args[0].clone()])
+                }
+
+                // compress: pass-through for now
+                "compress" => {
+                    Some(vec![args[0].clone()])
+                }
+
+                "depthtospace" | "depth_to_space" => {
+                    let x = &args[0];
+                    let blocksize = node.attrs.get("blocksize")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(2);
+                    let _mode = node.attrs.get("mode")
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "DCR".to_string());
+                    let shape = x.shape_ref().to_vec();
+                    if shape.len() == 4 {
+                        let n = shape[0];
+                        let c = shape[1];
+                        let h = shape[2];
+                        let w = shape[3];
+                        let bs = blocksize;
+                        let out_c = c / (bs * bs);
+                        // Reshape: [N, C, H, W] -> [N, bs, bs, out_c, H, W]
+                        let reshaped = x.reshape(vec![n, bs, bs, out_c, h, w]);
+                        // Permute: [N, out_c, H, bs, W, bs]
+                        let permuted = reshaped.permute(vec![0, 3, 4, 1, 5, 2]);
+                        // Reshape: [N, out_c, H*bs, W*bs]
+                        let result = permuted.reshape(vec![n, out_c, h * bs, w * bs]);
+                        Some(vec![result])
+                    } else {
+                        Some(vec![x.clone()])
+                    }
+                }
+
+                "spacetodepth" | "space_to_depth" => {
+                    let x = &args[0];
+                    let blocksize = node.attrs.get("blocksize")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(2);
+                    let shape = x.shape_ref().to_vec();
+                    if shape.len() == 4 {
+                        let n = shape[0];
+                        let c = shape[1];
+                        let h = shape[2];
+                        let w = shape[3];
+                        let bs = blocksize;
+                        let out_h = h / bs;
+                        let out_w = w / bs;
+                        // Reshape: [N, C, H/bs, bs, W/bs, bs]
+                        let reshaped = x.reshape(vec![n, c, out_h, bs, out_w, bs]);
+                        // Permute: [N, bs, bs, C, H/bs, W/bs]
+                        let permuted = reshaped.permute(vec![0, 3, 5, 1, 2, 4]);
+                        // Reshape: [N, C*bs^2, H/bs, W/bs]
+                        let result = permuted.reshape(vec![n, c * bs * bs, out_h, out_w]);
+                        Some(vec![result])
+                    } else {
+                        Some(vec![x.clone()])
+                    }
+                }
+
+                "eyelike" | "eyelikeop" => {
+                    let x = &args[0];
+                    let shape = x.shape_ref().to_vec();
+                    let k = node.attrs.get("k")
+                        .and_then(|a| a.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let n = shape.get(0).copied().unwrap_or(1);
+                    let m = shape.get(1).copied().unwrap_or(n);
+                    let mut data = vec![0.0f32; (n * m) as usize];
+                    let offset = k.abs() as usize;
+                    for i in 0..n as usize {
+                        let j = if k >= 0 { i + offset } else { i };
+                        let idx = if k >= 0 {
+                            if j < m as usize { i * m as usize + j } else { continue; }
+                        } else {
+                            if i < m as usize { (i + offset) * m as usize + i } else { continue; }
+                        };
+                        data[idx] = 1.0;
+                    }
+                    Some(vec![Tensor::from_vec(data, vec![n, m])])
+                }
+
+                "convtranspose" | "conv_transpose" => self.dispatch_conv_transpose(node, &args),
+
+                "instancenormalization" | "instance_norm" => {
+                    let x = &args[0];
+                    let shape = x.shape_ref().to_vec();
+                    let eps = node.attrs.get("epsilon")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(1e-5);
+                    let weight = if let Some(w) = self.params.get(&format!("{}.weight", node.name)) {
+                        w.clone()
+                    } else if args.len() > 1 { args[1].clone() } else { Tensor::from_scalar(1.0) };
+                    let bias = if let Some(b) = self.params.get(&format!("{}.bias", node.name)) {
+                        b.clone()
+                    } else if args.len() > 2 { args[2].clone() } else { Tensor::from_scalar(0.0) };
+
+                    if shape.len() == 4 {
+                        let n = shape[0] as usize;
+                        let c = shape[1] as usize;
+                        let h = shape[2] as usize;
+                        let w = shape[3] as usize;
+                        let data = x.as_f32_slice();
+                        let weight_data = weight.as_f32_slice();
+                        let bias_data = bias.as_f32_slice();
+                        let mut out_data = vec![0.0f32; n * c * h * w];
+                        for ni in 0..n {
+                            for ci in 0..c {
+                                let start = (ni * c + ci) * h * w;
+                                let mut sum = 0.0f32;
+                                for i in start..start + h * w {
+                                    sum += data[i];
+                                }
+                                let mean = sum / (h * w) as f32;
+                                let mut var_sum = 0.0f32;
+                                for i in start..start + h * w {
+                                    let diff = data[i] - mean;
+                                    var_sum += diff * diff;
+                                }
+                                let variance = var_sum / (h * w) as f32;
+                                let inv_std = 1.0 / (variance + eps).sqrt();
+                                let g = weight_data[ci.min(weight_data.len() - 1)];
+                                let b = bias_data[ci.min(bias_data.len() - 1)];
+                                for i in start..start + h * w {
+                                    out_data[i] = (data[i] - mean) * inv_std * g + b;
+                                }
+                            }
+                        }
+                        Some(vec![Tensor::from_vec(out_data, shape)])
+                    } else {
+                        Some(vec![x.clone()])
+                    }
+                }
+
+                "logsoftmax" => {
+                    let axis = node.attrs.get("axis")
+                        .and_then(|a| a.parse::<i32>().ok())
+                        .unwrap_or(1);
+                    Some(vec![args[0].log_softmax(axis)])
+                }
+
+                "selu" => {
+                    let x = &args[0];
+                    let alpha = node.attrs.get("alpha")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(1.6732632423543772);
+                    let gamma = node.attrs.get("gamma")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(1.0507009873554805);
+                    let data = x.as_f32_slice();
+                    let result: Vec<f32> = data.iter().map(|&v| {
+                        if v > 0.0 { gamma * v } else { gamma * alpha * (v.exp() - 1.0) }
+                    }).collect();
+                    Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
+                }
+
+                "rmsnormalization" | "rms_norm" => {
+                    let eps = node.attrs.get("epsilon")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(1e-5);
+                    let eps_t = Tensor::from_scalar(eps);
+                    let mut dispatch_args = vec![&args[0], &eps_t];
+                    if args.len() > 1 { dispatch_args.push(&args[1]); }
+                    dispatch("rms_norm", DispatchKey::Cpu, &dispatch_args).ok()
+                }
+
+                "range" | "rangeop" => {
+                    let start = if args.len() >= 1 { args[0].as_f32_slice()[0] } else { 0.0f32 };
+                    let limit = if args.len() >= 2 { args[1].as_f32_slice()[0] } else { 1.0f32 };
+                    let step = if args.len() >= 3 { args[2].as_f32_slice()[0] } else { 1.0f32 };
+                    let mut data = Vec::new();
+                    let mut v = start;
+                    if step > 0.0 {
+                        while v < limit {
+                            data.push(v);
+                            v += step;
+                        }
+                    } else if step < 0.0 {
+                        while v > limit {
+                            data.push(v);
+                            v += step;
+                        }
+                    }
+                    let n = data.len() as i64;
+                    Some(vec![Tensor::from_vec(data, vec![n])])
+                }
+
+                "randomnormal" => {
+                    let shape_str = node.attrs.get("shape");
+                    let shape: Vec<i64> = if let Some(s) = shape_str {
+                        s.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .filter_map(|x| x.trim().parse::<i64>().ok())
+                            .collect()
+                    } else {
+                        args[0].shape_ref().to_vec()
+                    };
+                    let _mean = node.attrs.get("mean").and_then(|a| a.parse::<f32>().ok()).unwrap_or(0.0);
+                    let _scale = node.attrs.get("scale").and_then(|a| a.parse::<f32>().ok()).unwrap_or(1.0);
+                    let shape_t = Tensor::empty(shape, DType::F32, Device::Cpu);
+                    dispatch("randn", DispatchKey::Cpu, &[&shape_t]).ok()
+                }
+
+                "randomuniform" => {
+                    let shape_str = node.attrs.get("shape");
+                    let shape: Vec<i64> = if let Some(s) = shape_str {
+                        s.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .filter_map(|x| x.trim().parse::<i64>().ok())
+                            .collect()
+                    } else {
+                        args[0].shape_ref().to_vec()
+                    };
+                    let _low = node.attrs.get("low").and_then(|a| a.parse::<f32>().ok()).unwrap_or(0.0);
+                    let _high = node.attrs.get("high").and_then(|a| a.parse::<f32>().ok()).unwrap_or(1.0);
+                    let shape_t = Tensor::empty(shape, DType::F32, Device::Cpu);
+                    dispatch("rand", DispatchKey::Cpu, &[&shape_t]).ok()
+                }
+
                 _ => {
                     args.first().cloned().map(|t| vec![t])
                 }
@@ -581,6 +956,34 @@ impl DAGExecutor {
         } else {
             let zero_bias = Tensor::from_scalar(0.0f32);
             dispatch("conv2d", DispatchKey::Cpu, &[x, weight, &zero_bias, &stride_t, &pad_t, &dilation_t, &groups_t]).ok()
+        }
+    }
+
+    fn dispatch_conv_transpose(&self, node: &DAGNode, args: &[Tensor]) -> Option<Vec<Tensor>> {
+        let x = &args[0];
+        let weight_name = format!("{}.weight", node.name);
+        let weight = self.params.get(&weight_name)?;
+        let has_bias = self.params.contains_key(&format!("{}.bias", node.name));
+
+        let stride = node.attrs.get("stride").and_then(|s| s.parse::<i64>().ok()).unwrap_or(1);
+        let padding = node.attrs.get("padding").and_then(|p| p.parse::<i64>().ok()).unwrap_or(0);
+        let dilation = node.attrs.get("dilation").and_then(|d| d.parse::<i64>().ok()).unwrap_or(1);
+        let groups = node.attrs.get("groups").and_then(|g| g.parse::<i64>().ok()).unwrap_or(1);
+        let output_padding = node.attrs.get("output_padding").and_then(|o| o.parse::<i64>().ok()).unwrap_or(0);
+
+        let stride_t = Tensor::from_scalar(stride as f32);
+        let pad_t = Tensor::from_scalar(padding as f32);
+        let dilation_t = Tensor::from_scalar(dilation as f32);
+        let groups_t = Tensor::from_scalar(groups as f32);
+        let op_t = Tensor::from_scalar(output_padding as f32);
+
+        if has_bias {
+            let bias_name = format!("{}.bias", node.name);
+            let bias = self.params.get(&bias_name)?;
+            dispatch("conv_transpose2d", DispatchKey::Cpu, &[x, weight, bias, &stride_t, &pad_t, &dilation_t, &groups_t, &op_t]).ok()
+        } else {
+            let zero_bias = Tensor::from_scalar(0.0f32);
+            dispatch("conv_transpose2d", DispatchKey::Cpu, &[x, weight, &zero_bias, &stride_t, &pad_t, &dilation_t, &groups_t, &op_t]).ok()
         }
     }
 
