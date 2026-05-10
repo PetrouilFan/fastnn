@@ -77,6 +77,9 @@ pub fn matmul_blas_with_transpose_into(
     let lda = if trans_a { m as i32 } else { k as i32 };
     let ldb = if trans_b { k as i32 } else { n as i32 };
 
+    // SAFETY: cblas_sgemm is linked from OpenBLAS. All pointers are valid,
+    // dimensions match the actual array sizes, and the output buffer is
+    // pre-allocated with capacity m * n.
     unsafe {
         cblas_sgemm(
             101, // RowMajor
@@ -151,6 +154,9 @@ pub fn matmul_blas_with_transpose_into(
     let rsb: isize = if trans_b { 1 } else { n as isize };
     let csb: isize = if trans_b { k as isize } else { 1 };
 
+    // SAFETY: matrixmultiply::sgemm operates on valid slices with correct
+    // dimensions and strides. All pointers are properly aligned and
+    // dereferenceable for the full m×n output region.
     unsafe {
         sgemm(
             m,

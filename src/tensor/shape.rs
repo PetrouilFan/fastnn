@@ -50,6 +50,9 @@ impl TensorImpl {
         let numel = self.numel() as usize;
         let ndim = self.ndim();
         let mut data = vec![0.0f32; numel];
+        // SAFETY: We verified the storage is `Storage::Cpu`. The pointer is derived
+        // from the backing `Vec<u8>` allocation, which is valid for the duration of
+        // this function. The length `len` is within the bounds of the allocation.
         let src = unsafe {
             let crate::storage::Storage::Cpu(cpu) = &self.storage.as_ref() else {
                 panic!("contiguous(): only supported for CPU tensors");

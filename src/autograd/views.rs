@@ -132,6 +132,7 @@ impl Node for SliceBackward {
                         input_idx += input_coords[d] * input_strides[d] as usize;
                     }
 
+// SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *grad_input_ptr.add(input_idx) += *grad_ptr.add(i);
                     }

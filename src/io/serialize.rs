@@ -126,6 +126,9 @@ pub fn save_state_dict(state_dict: Vec<(String, Tensor)>, path: &str) -> FastnnR
             write_length_prefixed(&mut writer, bytes)?;
         } else {
             let data = tensor.to_numpy();
+            // SAFETY: `data` is a `Vec<f32>` whose pointer and length are valid
+            // for the entire slice. Reinterpreting as `*const u8` is safe because
+            // `f32` has no padding and the length is multiplied by 4 (size of f32).
             let bytes =
                 unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
             write_length_prefixed(&mut writer, bytes)?;
@@ -203,6 +206,9 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
                 )));
             }
 
+            // SAFETY: `data_bytes` length was verified to match `data_len * 4`,
+            // and `data_len` was validated against the tensor shape. The pointer
+            // and length are valid for a `&[f32]` of `data_len` elements.
             let data = unsafe {
                 std::slice::from_raw_parts(data_bytes.as_ptr() as *const f32, data_len).to_vec()
             };

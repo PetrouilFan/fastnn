@@ -87,6 +87,8 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                             if h >= 0 && h < in_h as i64 && w >= 0 && w < in_w as i64 {
                                 let idx = ((b * channels_usize + c) * in_h + h as usize) * in_w
                                     + w as usize;
+                                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                                // The pointer is valid for this element access.
                                 let val = unsafe { *x_p.add(idx) };
                                 if val > max_val {
                                     max_val = val;
@@ -95,6 +97,8 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         }
                     }
                     let out_idx = ((b * channels_usize + c) * out_h + oh) * out_w + ow;
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     unsafe {
                         *o_p.add(out_idx) = max_val;
                     }
@@ -123,6 +127,8 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                                         + h as usize)
                                         * in_width as usize
                                         + w as usize;
+                                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                                    // The pointer is valid for this element access.
                                     let val = unsafe { *x_ptr.add(idx) };
                                     if val > max_val {
                                         max_val = val;
@@ -134,6 +140,8 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         let out_idx = ((b * channels as usize + c) * out_height as usize + oh)
                             * out_width as usize
                             + ow;
+                        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                        // The pointer is valid for this element access.
                         unsafe { *out_ptr.add(out_idx) = max_val };
                     }
                 }
@@ -211,6 +219,8 @@ pub unsafe fn avg_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                             if h >= 0 && h < in_h as i64 && w >= 0 && w < in_w as i64 {
                                 let idx = ((b * channels_usize + c) * in_h + h as usize) * in_w
                                     + w as usize;
+                                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                                // The pointer is valid for this element access.
                                 unsafe {
                                     sum += *x_p.add(idx);
                                 }
@@ -219,6 +229,8 @@ pub unsafe fn avg_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         }
                     }
                     let out_idx = ((b * channels_usize + c) * out_h + oh) * out_w + ow;
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     unsafe {
                         *o_p.add(out_idx) = if count > 0 { sum / count as f32 } else { 0.0 };
                     }
@@ -246,6 +258,8 @@ pub unsafe fn avg_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                                         + h as usize)
                                         * in_width as usize
                                         + w as usize;
+                                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                                    // The pointer is valid for this element access.
                                     sum += unsafe { *x_ptr.add(idx) };
                                     count += 1;
                                 }
@@ -255,6 +269,8 @@ pub unsafe fn avg_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         let out_idx = ((b * channels as usize + c) * out_height as usize + oh)
                             * out_width as usize
                             + ow;
+                        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                        // The pointer is valid for this element access.
                         unsafe {
                             *out_ptr.add(out_idx) =
                                 if count > 0 { sum / count as f32 } else { 0.0 };

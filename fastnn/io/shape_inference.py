@@ -818,3 +818,67 @@ def _broadcast_shapes(a: List[int], b: List[int]) -> List[int]:
             # Incompatible: fall back to a
             out.append(da)
     return out
+
+
+def _infer_and(input_shapes, attrs, num_outputs):
+    return _infer_andop(input_shapes, attrs, num_outputs)
+
+
+def _infer_ceil(input_shapes, attrs, num_outputs):
+    return _infer_ceilop(input_shapes, attrs, num_outputs)
+
+
+def _infer_equal(input_shapes, attrs, num_outputs):
+    return _infer_equalop(input_shapes, attrs, num_outputs)
+
+
+def _infer_floor(input_shapes, attrs, num_outputs):
+    return _infer_floorop(input_shapes, attrs, num_outputs)
+
+
+def _infer_greater(input_shapes, attrs, num_outputs):
+    return _infer_greaterop(input_shapes, attrs, num_outputs)
+
+
+def _infer_isinf(input_shapes, attrs, num_outputs):
+    return _infer_isinfop(input_shapes, attrs, num_outputs)
+
+
+def _infer_isnan(input_shapes, attrs, num_outputs):
+    return _infer_isnanop(input_shapes, attrs, num_outputs)
+
+
+def _infer_less(input_shapes, attrs, num_outputs):
+    return _infer_lessop(input_shapes, attrs, num_outputs)
+
+
+def _infer_not(input_shapes, attrs, num_outputs):
+    return _infer_notop(input_shapes, attrs, num_outputs)
+
+
+def _infer_or(input_shapes, attrs, num_outputs):
+    return _infer_orop(input_shapes, attrs, num_outputs)
+
+
+def _infer_range(input_shapes, attrs, num_outputs):
+    return _infer_rangeop(input_shapes, attrs, num_outputs)
+
+
+def _infer_reciprocal(input_shapes, attrs, num_outputs):
+    return _infer_reciprocalop(input_shapes, attrs, num_outputs)
+
+
+def _infer_round(input_shapes, attrs, num_outputs):
+    return _infer_roundop(input_shapes, attrs, num_outputs)
+
+
+def _infer_sign(input_shapes, attrs, num_outputs):
+    return _infer_signop(input_shapes, attrs, num_outputs)
+
+
+def _infer_xor(input_shapes, attrs, num_outputs):
+    return _infer_xorop(input_shapes, attrs, num_outputs)
+
+
+def _infer_layernormalization(input_shapes, attrs, num_outputs):
+    return _infer_layernorm(input_shapes, attrs, num_outputs)

@@ -64,7 +64,7 @@ impl DAGExecutor {
                 }
             }
             let op_lower = node.op_type.to_lowercase();
-            if args.is_empty() && op_lower != "constantop" {
+            if args.is_empty() && op_lower != "constant" && op_lower != "constantop" {
                 continue;
             }
             let result = match op_lower.as_str() {
@@ -208,7 +208,7 @@ impl DAGExecutor {
 
                 "identity" | "identityop" | "dropout" => Some(vec![args[0].clone()]),
 
-                "shapeop" => {
+                "shape" | "shapeop" => {
                     let x = &args[0];
                     let shape = x.shape_ref();
                     let shape_f32: Vec<f32> = shape.iter().map(|&d| d as f32).collect();
@@ -216,7 +216,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(shape_f32, dims)])
                 }
 
-                "castop" => {
+                "cast" | "castop" => {
                     let to_dtype_val = node.attrs.get("to")
                         .and_then(|a| a.parse::<i32>().ok())
                         .unwrap_or(1);
@@ -230,7 +230,7 @@ impl DAGExecutor {
                     Some(vec![args[0].to_dtype(target_dtype)])
                 }
 
-                "topkop" => {
+                "topk" | "topkop" => {
                     let k_val = node.attrs.get("k")
                         .and_then(|a| a.parse::<i64>().ok())
                         .unwrap_or(1);
@@ -428,7 +428,7 @@ impl DAGExecutor {
                     Some(results)
                 }
 
-                "constantop" => {
+                "constant" | "constantop" => {
                     let key = node.outputs[0].clone();
                     let value_key = format!("{}.value", node.name);
                     if let Some(t) = self.params.get(&key) {

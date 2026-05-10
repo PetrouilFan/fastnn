@@ -63,6 +63,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx512 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             add_parallel_avx512(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -72,6 +73,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx2 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             add_parallel_avx2(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -90,6 +92,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             {
                 (0..num_chunks)
                     .into_par_iter()
+                    // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                     .for_each(|chunk_idx| unsafe {
                         add_parallel_neon(
                             chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -110,6 +113,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                // SAFETY: Pointers `a_ptr`, `b_ptr`, `out_ptr` are valid for `numel` elements; loop bounds prevent out-of-bounds SIMD accesses.
                 SimdLevel::Avx512 => unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -131,6 +135,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         i += 1;
                     }
                 },
+                // SAFETY: Pointers are valid for `numel` elements; loop bounds prevent out-of-bounds SIMD accesses.
                 SimdLevel::Avx2 => unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -158,6 +163,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 },
                 SimdLevel::Scalar => {
                     for idx in 0..numel {
+                        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                         unsafe {
                             *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
                         }
@@ -166,6 +172,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
+                // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                 unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -210,6 +217,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             )))]
             {
                 for idx in 0..numel {
+                    // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                     unsafe {
                         *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
                     }
@@ -233,6 +241,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_ptr = out_data.as_mut_ptr();
 
     let out_usize = out_ptr as usize;
+    // SAFETY: `input_ptrs` are valid per-iteration pointers from TensorIterator; `out_ptr` is valid for the output tensor.
     iter.for_each_with_index(|idx, input_ptrs| unsafe {
         let a_val = match dtype {
             DType::F32 => *(input_ptrs[0].as_ptr() as *const f32),
@@ -306,6 +315,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx512 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             sub_parallel_avx512(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -315,6 +325,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx2 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             sub_parallel_avx2(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -340,6 +351,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                // SAFETY: Pointers `a_ptr`, `b_ptr`, `out_ptr` are valid for `numel` elements; loop bounds prevent out-of-bounds SIMD accesses.
                 SimdLevel::Avx512 => unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -361,6 +373,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         i += 1;
                     }
                 },
+                // SAFETY: Pointers are valid for `numel` elements; loop bounds prevent out-of-bounds SIMD accesses.
                 SimdLevel::Avx2 => unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -388,6 +401,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 },
                 SimdLevel::Scalar => {
                     for idx in 0..numel {
+                        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                         unsafe {
                             *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
                         }
@@ -396,6 +410,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
+                // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                 unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -440,6 +455,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             )))]
             {
                 for idx in 0..numel {
+                    // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                     unsafe {
                         *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
                     }
@@ -462,6 +478,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
     let out_usize = out_ptr as usize;
+    // SAFETY: `input_ptrs` are valid per-iteration pointers from TensorIterator; `out_ptr` is valid for the output tensor.
     iter.for_each_with_index(|idx, input_ptrs| unsafe {
         let a_val = *(input_ptrs[0].as_ptr() as *const f32);
         let b_val = *(input_ptrs[1].as_ptr() as *const f32);
@@ -513,6 +530,7 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx512 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             mul_parallel_avx512(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -522,6 +540,7 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx2 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             mul_parallel_avx2(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -540,6 +559,7 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             {
                 (0..num_chunks)
                     .into_par_iter()
+                    // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                     .for_each(|chunk_idx| unsafe {
                         mul_parallel_neon(
                             chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,

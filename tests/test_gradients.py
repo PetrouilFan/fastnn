@@ -22,7 +22,7 @@ def test_unary_gradient_ops(op_name):
     check_unary_gradient(op_name, x_data)
 
 
-@pytest.mark.parametrize("op_name", ["add", "mul", "matmul"])
+@pytest.mark.parametrize("op_name", ["add", "sub", "mul", "div", "matmul"])
 def test_binary_gradient_ops(op_name):
     """Test gradient for binary operations."""
     if op_name == "matmul":
