@@ -97,7 +97,13 @@ impl PyTensor {
     /// Returns a PyCapsule wrapping a DLManagedTensor.
     fn __dlpack__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use crate::io::dlpack::to_dlpack;
+        use pyo3::exceptions::PyValueError;
         let ptr = to_dlpack(&self.inner);
+        if ptr.is_null() {
+            return Err(PyValueError::new_err(
+                "DLPack conversion failed: unsupported dtype or device"
+            ));
+        }
         // Create PyCapsule with the DLPack tensor
         // The capsule name must be "dltensor" per DLPack spec
         let capsule = unsafe {
@@ -122,6 +128,34 @@ impl PyTensor {
         match self.inner.device() {
             crate::storage::Device::Cpu => (1, 0),
             crate::storage::Device::Wgpu(_) => (1, 0), // Report as CPU for DLPack compatibility
+        }
+    }
+
+    /// Import a tensor via the DLPack protocol.
+    /// Accepts any Python object that supports `__dlpack__`.
+    #[staticmethod]
+    fn from_dlpack(source: &Bound<'_, PyAny>) -> PyResult<Self> {
+        use pyo3::exceptions::PyValueError;
+
+        let capsule = source
+            .call_method0("__dlpack__")
+            .map_err(|_| PyValueError::new_err("object does not support the DLPack protocol"))?;
+
+        unsafe {
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule.as_ptr() as *mut pyo3::ffi::PyObject,
+                c"dltensor".as_ptr(),
+            );
+            if ptr.is_null() {
+                return Err(PyValueError::new_err("failed to get DLPack capsule pointer"));
+            }
+            let tensor =
+                crate::io::dlpack::from_dlpack(ptr as *mut crate::io::dlpack::DLManagedTensor)?;
+            pyo3::ffi::PyCapsule_SetName(
+                capsule.as_ptr() as *mut pyo3::ffi::PyObject,
+                c"used_dltensor".as_ptr(),
+            );
+            Ok(PyTensor::from_tensor(tensor))
         }
     }
 

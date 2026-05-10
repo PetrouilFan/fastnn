@@ -410,7 +410,7 @@ pub fn gemv_wgpu_persistent<T: PackedWord>(
         }
 
         // Copy output to staging in the same encoder
-        encoder.copy_buffer_to_buffer(&output_buf, 0, &staging, 0, output_size as u64);
+        encoder.copy_buffer_to_buffer(&output_buf, 0, staging, 0, output_size as u64);
 
         // Single submission for both compute + copy
         wctx.queue.submit(std::iter::once(encoder.finish()));

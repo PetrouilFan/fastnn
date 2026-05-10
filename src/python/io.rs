@@ -1,6 +1,22 @@
 #[pyfunction]
-fn save_model(model: &PyTransformerEncoder, path: String) -> PyResult<()> {
-    crate::io::serialize::save_model(&model.inner, &path)
+fn save_model(model: &Bound<'_, PyAny>, path: String) -> PyResult<()> {
+    let np = model
+        .call_method0("named_parameters")
+        .map_err(|e| {
+            IoError::new_err(format!(
+                "save_model: model does not expose named_parameters(): {}",
+                e
+            ))
+        })?;
+    let params: Vec<(String, PyTensor)> = np.extract().map_err(|e| {
+        IoError::new_err(format!(
+            "save_model: failed to extract named_parameters: {}",
+            e
+        ))
+    })?;
+    let state_dict: Vec<(String, Tensor)> =
+        params.into_iter().map(|(name, pt)| (name, pt.inner)).collect();
+    crate::io::serialize::save_state_dict(state_dict, &path)
         .map_err(|e| IoError::new_err(e.to_string()))
 }
 

@@ -38,25 +38,20 @@ pub fn no_grad_exit() {
 /// // All tensor operations here won't build computation graph
 /// let output = model.forward(&input);
 /// ```
-pub struct NoGradGuard {
-    prev_state: bool,
-}
+pub struct NoGradGuard;
 
 impl NoGradGuard {
     /// Create a new NoGradGuard that disables gradient computation.
-    /// The previous state is saved and will be restored when the guard is dropped.
+    /// The previous state is restored when the guard is dropped.
     pub fn new() -> Self {
-        let prev_state = is_grad_enabled();
         no_grad_enter();
-        NoGradGuard { prev_state }
+        NoGradGuard
     }
 }
 
 impl Drop for NoGradGuard {
     fn drop(&mut self) {
-        if self.prev_state {
-            no_grad_exit();
-        }
+        no_grad_exit();
     }
 }
 
