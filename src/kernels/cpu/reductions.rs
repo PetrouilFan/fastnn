@@ -255,7 +255,13 @@ pub unsafe fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
         dim_normalized as usize
     } else {
-        0
+        // When no dim provided, reduce all dims (flatten then mean)
+        let flat = a.reshape(vec![-1]);
+        let flat_args: Vec<&Tensor> = vec![&flat];
+        let sum_result = sum_kernel(&flat_args);
+        let total_elements = a.shape_ref().iter().product::<i64>() as f32;
+        let scale = Tensor::full(vec![], 1.0 / total_elements, DType::F32, Device::Cpu);
+        return vec![sum_result[0].clone() * scale];
     };
     let keepdim = if args.len() > 2 {
         args[2].item() != 0.0

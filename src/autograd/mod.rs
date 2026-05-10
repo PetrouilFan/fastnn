@@ -123,8 +123,7 @@ pub struct Edge(pub Arc<dyn Node>, pub usize);
 pub fn make_edge(tensor: &Tensor) -> Vec<Edge> {
     tensor
         .grad_fn()
-        .map(|node| Edge(node, 0))
-        .map(|e| vec![e])
+        .map(|node| vec![Edge(node, 0)])
         .unwrap_or_default()
 }
 
