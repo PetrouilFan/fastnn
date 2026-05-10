@@ -160,7 +160,7 @@ class YOLO:
         bottom, right = dh - top, dw - left
 
         if img.ndim == 3:
-            padded = np.pad(resized, ((top, bottom), (left, right), (0, 0)), mode=114/255.0)
+            padded = np.pad(resized, ((top, bottom), (left, right), (0, 0)), mode='constant', constant_values=114/255.0)
         else:
             padded = np.pad(resized, ((top, bottom), (left, right)), mode='constant', constant_values=114/255.0)
 
