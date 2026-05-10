@@ -8,7 +8,7 @@ rustflags = ["-C", "target-cpu=native", "-Clink-arg=-L/c/msys64/mingw64/lib", "-
 rustflags = []
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-feature=+avx2,+fma"]
+rustflags = ["-C", "target-cpu=native"]
 
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=native"]

@@ -47,24 +47,40 @@ impl PackedWord for U4x8 {
     fn wgsl_unpack_body() -> &'static str {
         concat!(
             "var out: mat2x4<f32>;\n",
-            "for (var i: u32 = 0u; i < 4u; i = i + 1u) {\n",
-            "  let nib0 = (packed >> (i * 4u)) & 0xFu;\n",
-            "  let s0 = i32(nib0) - (i32(nib0 >> 3u) * 16);\n",
-            "  out[0][i] = f32(s0);\n",
-            "  let nib1 = (packed >> ((i + 4u) * 4u)) & 0xFu;\n",
-            "  let s1 = i32(nib1) - (i32(nib1 >> 3u) * 16);\n",
-            "  out[1][i] = f32(s1);\n",
-            "}\n",
+            // i = 0
+            "  let nib0_0 = packed & 0xFu;\n",
+            "  let s0_0 = i32(nib0_0) - (i32(nib0_0 >> 3u) * 16);\n",
+            "  out[0][0] = f32(s0_0);\n",
+            "  let nib1_0 = (packed >> 16u) & 0xFu;\n",
+            "  let s1_0 = i32(nib1_0) - (i32(nib1_0 >> 3u) * 16);\n",
+            "  out[1][0] = f32(s1_0);\n",
+            // i = 1
+            "  let nib0_1 = (packed >> 4u) & 0xFu;\n",
+            "  let s0_1 = i32(nib0_1) - (i32(nib0_1 >> 3u) * 16);\n",
+            "  out[0][1] = f32(s0_1);\n",
+            "  let nib1_1 = (packed >> 20u) & 0xFu;\n",
+            "  let s1_1 = i32(nib1_1) - (i32(nib1_1 >> 3u) * 16);\n",
+            "  out[1][1] = f32(s1_1);\n",
+            // i = 2
+            "  let nib0_2 = (packed >> 8u) & 0xFu;\n",
+            "  let s0_2 = i32(nib0_2) - (i32(nib0_2 >> 3u) * 16);\n",
+            "  out[0][2] = f32(s0_2);\n",
+            "  let nib1_2 = (packed >> 24u) & 0xFu;\n",
+            "  let s1_2 = i32(nib1_2) - (i32(nib1_2 >> 3u) * 16);\n",
+            "  out[1][2] = f32(s1_2);\n",
+            // i = 3
+            "  let nib0_3 = (packed >> 12u) & 0xFu;\n",
+            "  let s0_3 = i32(nib0_3) - (i32(nib0_3 >> 3u) * 16);\n",
+            "  out[0][3] = f32(s0_3);\n",
+            "  let nib1_3 = (packed >> 28u) & 0xFu;\n",
+            "  let s1_3 = i32(nib1_3) - (i32(nib1_3 >> 3u) * 16);\n",
+            "  out[1][3] = f32(s1_3);\n",
             "return out;\n",
         )
     }
 
     fn wgsl_return_type() -> &'static str {
         "mat2x4<f32>"
-    }
-
-    fn wgsl_dot_logic() -> &'static str {
-        "acc += dot(unpacked[0], act0) + dot(unpacked[1], act1);"
     }
 }
 
