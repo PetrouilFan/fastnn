@@ -341,6 +341,36 @@ impl_nn_module!(AvgPool2d {
 });
 
 #[pyclass]
+struct AvgPool1d {
+    inner: core_nn::pooling::AvgPool1d,
+}
+
+impl_nn_module!(AvgPool1d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride = 2, padding = 0))]
+    fn new(kernel_size: i64, stride: i64, padding: i64) -> Self {
+        AvgPool1d {
+            inner: core_nn::pooling::AvgPool1d::new(kernel_size, stride, padding),
+        }
+    }
+});
+
+#[pyclass]
+struct MaxPool1d {
+    inner: core_nn::pooling::MaxPool1d,
+}
+
+impl_nn_module!(MaxPool1d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride = 2, padding = 0, dilation = 1))]
+    fn new(kernel_size: i64, stride: i64, padding: i64, dilation: i64) -> Self {
+        MaxPool1d {
+            inner: core_nn::pooling::MaxPool1d::new(kernel_size, stride, padding, dilation),
+        }
+    }
+});
+
+#[pyclass]
 struct ConvTranspose2d {
     inner: core_nn::conv::ConvTranspose2d,
 }
