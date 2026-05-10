@@ -211,7 +211,8 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
                 &self.groups_scalar,
                 &self.eps_scalar,
             ],
-        );
+        )
+        .expect("FusedConvBn::forward: dispatch failed");
 
         let mut output = result[0].clone();
 

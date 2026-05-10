@@ -472,7 +472,7 @@ where
     let output_ids = outputs.iter().map(|t| t.id()).collect();
 
     // Create edges from input tensors
-    let mut edges = Vec::new();
+    let mut edges = Vec::with_capacity(inputs.len());
     for input in inputs {
         if let Some(node) = input.grad_fn() {
             edges.push(Edge(node, 0));

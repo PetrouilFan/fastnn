@@ -325,7 +325,6 @@ fn find_contiguous_inner_dim(shape: &[i64]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smallvec::smallvec;
 
     #[test]
     fn test_broadcast_shapes_same() {

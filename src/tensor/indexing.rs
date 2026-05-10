@@ -66,7 +66,8 @@ impl Tensor {
 
     pub fn maximum(&self, other: &Tensor) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("maximum", dispatch_key, &[self, other]);
+        let result = dispatch("maximum", dispatch_key, &[self, other])
+            .expect("Tensor::maximum: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
@@ -86,13 +87,15 @@ impl Tensor {
             "gt_scalar",
             dispatch_key,
             &[self, &Tensor::from_scalar(threshold)],
-        );
+        )
+        .expect("Tensor::gt_scalar: dispatch failed");
         result[0].clone()
     }
 
     pub fn sign(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("sign", dispatch_key, &[self]);
+        let result = dispatch("sign", dispatch_key, &[self])
+            .expect("Tensor::sign: dispatch failed");
         result[0].clone()
     }
 
@@ -102,7 +105,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("minimum", dispatch_key, &[self, other]);
+        let result = dispatch("minimum", dispatch_key, &[self, other])
+            .expect("Tensor::minimum: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
@@ -172,7 +176,8 @@ impl Tensor {
             "lt_scalar",
             dispatch_key,
             &[self, &Tensor::from_scalar(threshold)],
-        );
+        )
+        .expect("Tensor::lt_scalar: dispatch failed");
         result[0].clone()
     }
 
@@ -182,7 +187,8 @@ impl Tensor {
             "add_scalar",
             dispatch_key,
             &[self, &Tensor::from_scalar(scalar)],
-        );
+        )
+        .expect("Tensor::add_scalar: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -199,7 +205,8 @@ impl Tensor {
             "div_scalar",
             dispatch_key,
             &[self, &Tensor::from_scalar(scalar)],
-        );
+        )
+        .expect("Tensor::div_scalar: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -212,7 +219,8 @@ impl Tensor {
 
     pub fn logical_not(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("logical_not", dispatch_key, &[self]);
+        let result = dispatch("logical_not", dispatch_key, &[self])
+            .expect("Tensor::logical_not: dispatch failed");
         result[0].clone()
     }
 

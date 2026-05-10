@@ -5,7 +5,7 @@ fn convert_params(params: Vec<PyTensor>) -> Vec<core_tensor::Tensor> {
 }
 
 fn tensor_vec_to_pylist<'a>(py: Python<'a>, tensors: &[core_tensor::Tensor]) -> PyResult<pyo3::Bound<'a, PyList>> {
-    let items: Vec<PyTensor> = tensors.iter().map(|t| PyTensor::from_tensor(t.clone())).collect();
+    let items: Vec<PyTensor> = tensors.iter().cloned().map(PyTensor::from_tensor).collect();
     PyList::new(py, items)
 }
 

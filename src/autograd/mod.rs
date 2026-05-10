@@ -3,6 +3,7 @@ mod engine;
 pub use engine::backward;
 
 use crate::dispatcher::dispatch;
+use crate::storage::Storage;
 use crate::tensor::Tensor;
 use std::cell::Cell;
 use std::sync::Arc;
@@ -105,14 +106,26 @@ impl AutogradMeta {
 
     /// Zero the gradient.
     /// If set_to_none is true, drop the grad buffer (old behavior).
-    /// If false, zero-fill the existing grad tensor's data (TODO: implement).
+    /// If false, zero-fill the existing grad tensor's data in-place.
     pub fn zero_grad(&mut self, set_to_none: bool) {
         if set_to_none {
             self.grad = None;
-        } else {
-            // TODO: zero-fill grad tensor's data to avoid reallocation
-            // For now, just drop it (same as set_to_none=true)
-            self.grad = None;
+        } else if let Some(ref mut grad_tensor) = self.grad {
+            let inner = Arc::make_mut(&mut grad_tensor.inner);
+            let numel = inner.numel() as usize;
+            let elem_size = inner.dtype.size();
+            let offset = inner.storage_offset as usize;
+            let storage = Arc::make_mut(&mut inner.storage);
+            match storage {
+                Storage::Cpu(cpu) => {
+                    let data = Arc::make_mut(&mut cpu.data);
+                    let start = offset * elem_size;
+                    data[start..start + numel * elem_size].fill(0);
+                }
+                Storage::Wgpu(_) => {
+                    self.grad = None;
+                }
+            }
         }
     }
 }
@@ -128,7 +141,7 @@ pub fn make_edge(tensor: &Tensor) -> Vec<Edge> {
 }
 
 pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
-    let mut edges = Vec::new();
+    let mut edges = Vec::with_capacity(2);
     if let Some(node) = tensor_a.grad_fn() {
         edges.push(Edge(node, 0));
     }
@@ -171,7 +184,7 @@ pub fn sum_to_shape(mut grad: Tensor, target_shape: &[i64]) -> Tensor {
     let diff = grad_ndim as i32 - target_ndim as i32;
 
     // Collect dims to sum
-    let mut dims_to_sum: Vec<i32> = Vec::new();
+    let mut dims_to_sum: Vec<i32> = Vec::with_capacity(grad_ndim);
     for i in 0..grad_ndim {
         let target_dim = if i as i32 >= diff {
             target_shape[(i as i32 - diff) as usize]

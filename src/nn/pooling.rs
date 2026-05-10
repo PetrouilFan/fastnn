@@ -45,7 +45,8 @@ impl Module for MaxPool2d {
                 &self.padding_scalar,
                 &self.dilation_scalar,
             ],
-        );
+        )
+        .expect("MaxPool2d::forward: dispatch failed");
         result[0].clone()
     }
 

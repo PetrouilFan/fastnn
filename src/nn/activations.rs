@@ -22,7 +22,8 @@ macro_rules! impl_stateless_activation {
 
         impl Module for $name {
             fn forward(&self, x: &Tensor) -> Tensor {
-                let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x]);
+                let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x])
+                    .expect(concat!("Activation::forward: ", $dispatch_name, " dispatch failed"));
                 result[0].clone()
             }
 
@@ -76,7 +77,8 @@ impl LeakyReLU {
 impl Module for LeakyReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
         let slope_tensor = Tensor::from_scalar(self.negative_slope as f32);
-        let result = dispatch("leaky_relu", DispatchKey::Cpu, &[x, &slope_tensor]);
+        let result = dispatch("leaky_relu", DispatchKey::Cpu, &[x, &slope_tensor])
+            .expect("LeakyReLU::forward: dispatch failed");
         result[0].clone()
     }
 
@@ -103,7 +105,8 @@ impl PReLU {
 
 impl Module for PReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("prelu", DispatchKey::Cpu, &[x, &self.weight]);
+        let result = dispatch("prelu", DispatchKey::Cpu, &[x, &self.weight])
+            .expect("PReLU::forward: dispatch failed");
         result[0].clone()
     }
 
@@ -141,7 +144,8 @@ impl Module for Softplus {
     fn forward(&self, x: &Tensor) -> Tensor {
         let beta_t = Tensor::from_scalar(self.beta as f32);
         let threshold_t = Tensor::from_scalar(self.threshold as f32);
-        let result = dispatch("softplus", DispatchKey::Cpu, &[x, &beta_t, &threshold_t]);
+        let result = dispatch("softplus", DispatchKey::Cpu, &[x, &beta_t, &threshold_t])
+            .expect("Softplus::forward: dispatch failed");
         result[0].clone()
     }
 
@@ -161,7 +165,8 @@ impl Elu {
 impl Module for Elu {
     fn forward(&self, x: &Tensor) -> Tensor {
         let alpha_tensor = Tensor::from_scalar(self.alpha as f32);
-        let result = dispatch("elu", DispatchKey::Cpu, &[x, &alpha_tensor]);
+        let result = dispatch("elu", DispatchKey::Cpu, &[x, &alpha_tensor])
+            .expect("Elu::forward: dispatch failed");
         result[0].clone()
     }
 

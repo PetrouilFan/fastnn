@@ -34,11 +34,11 @@ fn dispatch_op(op: &str, args: &[&Tensor]) -> PyResult<Tensor> {
 /// Helper to wrap loss function output with autograd support
 fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
     if autograd::is_grad_enabled() && input.requires_grad() {
-        let edges = autograd::make_edge(input);
+        let _edges = autograd::make_edge(input);
         let backward = backward_fn();
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
-        let mut output = output.clone();
+        let mut output = output;
         Arc::make_mut(&mut output.inner).autograd_meta =
             Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
         PyTensor::from_tensor(output)
@@ -333,21 +333,18 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
     }
 
     let num_inputs = inputs_inner.len();
-    let stored_inputs: Vec<Tensor> = inputs_inner.clone();
-
     let forward_fn = fn_name.to_string();
 
-    let output = PyTensor::from_tensor(dispatch_op(&forward_fn, &inputs_inner.iter().collect::<Vec<_>>().as_slice())?);
+    let output = PyTensor::from_tensor(dispatch_op(&forward_fn, &inputs_inner.iter().collect::<Vec<_>>())?);
 
     let output_inner = output.inner.clone();
-    let stored_inputs_clone: Vec<Tensor> = stored_inputs.into_iter().map(|t| t.clone()).collect();
 
     if output_inner.requires_grad() {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         let edges = autograd::make_edge(&inputs[0].inner);
         meta.grad_fn = Some(std::sync::Arc::new(checkpoint_impl::CheckpointNode::new(
             forward_fn,
-            stored_inputs_clone,
+            inputs_inner,
             edges,
         )));
         let mut out = output_inner.clone();
