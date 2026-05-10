@@ -1071,7 +1071,6 @@ impl Tensor {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::SoftmaxBackward::new(
                 self.clone(),
-                output.clone(),
                 dim as usize,
                 edges,
             ));
@@ -1126,13 +1125,27 @@ impl Tensor {
                 &Tensor::from_scalar(max_val),
             ],
         );
-        result[0].clone()
+        let result = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::ClampBackward::new(self.clone(), min_val, max_val, edges));
+            Self::attach_grad_fn(result, backward)
+        } else {
+            result
+        }
     }
 
     pub fn pow(&self, exponent: f32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("pow", dispatch_key, &[self, &Tensor::from_scalar(exponent)]);
-        result[0].clone()
+        let result = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::PowBackward::new(self.clone(), exponent, edges));
+            Self::attach_grad_fn(result, backward)
+        } else {
+            result
+        }
     }
 
     pub fn abs(&self) -> Tensor {
@@ -1155,11 +1168,27 @@ impl Tensor {
             dispatch_key,
             &[self, &Tensor::from_scalar(dim as f32)],
         );
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::LogSoftmaxBackward::new(
+                output.clone(),
+                dim as usize,
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn as_i64_slice(&self) -> Vec<i64> {
         let src = self.to_cpu();
+        let src = if !src.is_contiguous() {
+            src.contiguous()
+        } else {
+            src
+        };
         let data = src.as_f32_slice();
         data.iter().map(|&v| v as i64).collect()
     }

@@ -1,3 +1,5 @@
+use pyo3::exceptions::PyValueError;
+
 // Helper to resolve device from optional string parameter
 fn resolve_device(device: Option<String>) -> Device {
     device
@@ -109,25 +111,29 @@ fn linspace(start: f32, end: f32, steps: usize, device: Option<String>) -> PyTen
 
 #[pyfunction]
 #[pyo3(signature = (n, m=None, device=None))]
-fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyTensor {
+fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyResult<PyTensor> {
     let m = m.unwrap_or(n);
+    if n <= 0 || m <= 0 {
+        return Err(PyValueError::new_err(format!(
+            "eye(): n and m must be positive, got n={}, m={}", n, m
+        )));
+    }
     let mut values = vec![0.0f32; (n * m) as usize];
     for i in 0..n.min(m) {
         values[(i * m + i) as usize] = 1.0;
     }
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::from_vec_with_device(values, vec![n, m], device))
+    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(values, vec![n, m], device)))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, device = None))]
 fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     let numel: i64 = shape.iter().product();
-    let mut rng = rand::thread_rng();
     let values: Vec<f32> = (0..numel as usize)
         .map(|_| {
-            let u1 = rng.gen::<f32>();
-            let u2 = rng.gen::<f32>();
+            let u1 = crate::random_f32();
+            let u2 = crate::random_f32();
             (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
         })
         .collect();
@@ -139,28 +145,30 @@ fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
 #[pyo3(signature = (shape, device = None))]
 fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
     let numel: i64 = shape.iter().product();
-    let values: Vec<f32> = (0..numel as usize).map(|_| rand::random()).collect();
+    let values: Vec<f32> = (0..numel as usize).map(|_| crate::random_f32()).collect();
     let device = resolve_device(device);
     PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, low, high, device = None))]
-fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyTensor {
+fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyResult<PyTensor> {
+    if high <= low {
+        return Err(PyValueError::new_err(format!(
+            "randint(): high must be greater than low, got low={}, high={}", low, high
+        )));
+    }
     let numel: i64 = shape.iter().product();
     let range = (high - low) as u32;
     let values: Vec<f32> = if range == 0 {
         vec![low as f32; numel as usize]
     } else {
-        use rand::distributions::{Distribution, Uniform};
-        let uniform = Uniform::new(0u32, range);
-        let mut rng = rand::thread_rng();
         (0..numel as usize)
-            .map(|_| (uniform.sample(&mut rng) as i32 + low) as f32)
+            .map(|_| ((crate::random_f32() * range as f32) as i32 + low) as f32)
             .collect()
     };
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
+    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device)))
 }
 
 #[pyfunction]

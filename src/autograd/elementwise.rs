@@ -561,6 +561,90 @@ impl Node for EluBackward {
     }
 }
 
+pub struct ClampBackward {
+    pub inputs: Vec<Tensor>,
+    pub min_val: f32,
+    pub max_val: f32,
+    pub edges: Vec<Edge>,
+}
+
+impl ClampBackward {
+    pub fn new(input: Tensor, min_val: f32, max_val: f32, edges: Vec<Edge>) -> Self {
+        ClampBackward {
+            inputs: vec![input],
+            min_val,
+            max_val,
+            edges,
+        }
+    }
+}
+
+impl Node for ClampBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let grad = match crate::autograd::extract_first_grad(grad_outputs) {
+            Some(g) => g,
+            None => return vec![None],
+        };
+        let input = &self.inputs[0];
+        let input_data = input.to_cpu().as_f32_slice().to_vec();
+        let grad_data = grad.to_cpu().as_f32_slice().to_vec();
+        let mut result_data = Vec::with_capacity(input_data.len());
+        for i in 0..input_data.len() {
+            if input_data[i] <= self.min_val || input_data[i] >= self.max_val {
+                result_data.push(0.0);
+            } else {
+                result_data.push(grad_data[i]);
+            }
+        }
+        vec![Some(Tensor::from_vec(result_data, input.shape_ref().to_vec()))]
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 1 }
+    fn name(&self) -> &str { "ClampBackward" }
+    fn inputs(&self) -> &[Tensor] { &self.inputs }
+}
+
+pub struct PowBackward {
+    pub inputs: Vec<Tensor>,
+    pub exponent: f32,
+    pub edges: Vec<Edge>,
+}
+
+impl PowBackward {
+    pub fn new(input: Tensor, exponent: f32, edges: Vec<Edge>) -> Self {
+        PowBackward {
+            inputs: vec![input],
+            exponent,
+            edges,
+        }
+    }
+}
+
+impl Node for PowBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let grad = match crate::autograd::extract_first_grad(grad_outputs) {
+            Some(g) => g,
+            None => return vec![None],
+        };
+        let input = &self.inputs[0];
+        let grad_clone = grad.to_cpu();
+        let grad_data = grad_clone.as_f32_slice();
+        let input_cpu = input.to_cpu();
+        let input_data = input_cpu.as_f32_slice();
+        let mut result = Vec::with_capacity(input_data.len());
+        for i in 0..input_data.len() {
+            result.push(grad_data[i] * self.exponent * input_data[i].powf(self.exponent - 1.0));
+        }
+        vec![Some(Tensor::from_vec(result, input.shape_ref().to_vec()))]
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 1 }
+    fn name(&self) -> &str { "PowBackward" }
+    fn inputs(&self) -> &[Tensor] { &self.inputs }
+}
+
 // Minimum/Maximum backward nodes
 #[allow(dead_code)]
 pub struct MinimumBackward {
@@ -656,4 +740,65 @@ impl Node for MaximumBackward {
     fn inputs(&self) -> &[Tensor] {
         &self.inputs
     }
+}
+
+// ---- AddScalar backward ----
+
+pub struct AddScalarBackward {
+    pub inputs: Vec<Tensor>,
+    pub edges: Vec<Edge>,
+}
+
+impl AddScalarBackward {
+    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+        AddScalarBackward {
+            inputs: vec![input],
+            edges,
+        }
+    }
+}
+
+impl Node for AddScalarBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        vec![crate::autograd::extract_first_grad(grad_outputs)]
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 1 }
+    fn name(&self) -> &str { "AddScalarBackward" }
+    fn inputs(&self) -> &[Tensor] { &self.inputs }
+}
+
+// ---- DivScalar backward ----
+
+pub struct DivScalarBackward {
+    pub inputs: Vec<Tensor>,
+    pub scalar: f32,
+    pub edges: Vec<Edge>,
+}
+
+impl DivScalarBackward {
+    pub fn new(input: Tensor, scalar: f32, edges: Vec<Edge>) -> Self {
+        DivScalarBackward {
+            inputs: vec![input],
+            scalar,
+            edges,
+        }
+    }
+}
+
+impl Node for DivScalarBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let grad = crate::autograd::extract_first_grad(grad_outputs);
+        if let Some(g) = grad {
+            vec![Some(g.mul_scalar(1.0 / self.scalar))]
+        } else {
+            vec![None]
+        }
+    }
+
+    fn next_edges(&self) -> &[Edge] { &self.edges }
+    fn num_inputs(&self) -> usize { 1 }
+    fn name(&self) -> &str { "DivScalarBackward" }
+    fn inputs(&self) -> &[Tensor] { &self.inputs }
 }

@@ -553,8 +553,16 @@ impl_nn_module!(BatchNorm1d {
         self.inner.bias = bias.map(|t| t.inner);
     }
 
+    fn get_running_mean(&self) -> PyTensor {
+        PyTensor::from_tensor(self.inner.running_mean.read().clone())
+    }
+
     fn set_running_mean(&mut self, running_mean: PyTensor) {
         self.inner.running_mean = Arc::new(RwLock::new(running_mean.inner));
+    }
+
+    fn get_running_var(&self) -> PyTensor {
+        PyTensor::from_tensor(self.inner.running_var.read().clone())
     }
 
     fn set_running_var(&mut self, running_var: PyTensor) {
