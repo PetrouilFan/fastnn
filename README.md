@@ -116,17 +116,82 @@ fastnn/
 ├── pyproject.toml              # Python package configuration (maturin)
 ├── src/
 │   ├── lib.rs                  # Crate root, module declarations, public re-exports
-│   ├── python/                 # PyO3 bindings and _core module registration
-│   ├── tensor/                 # Tensor struct, shape, factories, ops, reductions
+│   ├── error.rs                # Error types (ShapeError, DtypeError, etc.)
+│   ├── iterator.rs             # TensorIterator — unified broadcast/bounds-free iteration
+│   ├── residual.rs             # Residual connection helper
 │   ├── storage.rs              # Memory backend, device allocation (CPU/GPU)
 │   ├── storage_pool.rs         # Storage pooling for output tensor reuse
+│   ├── storage_quantized.rs    # Quantized tensor storage backend
 │   ├── dispatcher.rs           # Dynamic kernel dispatch (CPU vs GPU)
+│   ├── python/                 # PyO3 bindings and _core module registration
+│   │   ├── mod.rs              # Module registration
+│   │   ├── tensor.rs           # PyTensor bindings
+│   │   ├── factories.rs        # Tensor creation bindings
+│   │   ├── ops.rs              # Tensor op bindings
+│   │   ├── nn.rs               # Neural network class bindings
+│   │   ├── optim.rs            # Optimizer class bindings
+│   │   ├── io.rs               # Save/load bindings
+│   │   ├── packed_tensor.rs    # Packed tensor Python bindings
+│   │   ├── packed_linear.rs    # Packed linear layer Python bindings
+│   │   ├── packed_optim.rs     # Packed optimizer Python bindings
+│   │   └── packed_quantized.rs # Quantized tensor Python bindings
+│   ├── tensor/                 # Tensor struct, shape, factories, ops, reductions
+│   │   ├── mod.rs              # Tensor and TensorImpl
+│   │   ├── shape.rs            # View/reshape/transpose/permute/squeeze
+│   │   ├── factories.rs        # zeros/ones/full/from_vec
+│   │   ├── ops.rs              # Elementwise, matmul, activations
+│   │   ├── reductions.rs       # sum/mean/max/min/softmax
+│   │   ├── device.rs           # CPU/GPU movement and dtype conversion
+│   │   └── indexing.rs         # Slice/cat/stack/repeat/where/einsum
 │   ├── autograd/               # Backward engine and per-family gradient nodes
+│   │   ├── mod.rs              # Node trait, metadata, no_grad
+│   │   ├── engine.rs           # Autograd engine
+│   │   ├── elementwise.rs      # Elementwise gradient nodes
+│   │   ├── reductions.rs       # Reduction gradient nodes
+│   │   ├── matmul.rs           # Matmul gradient nodes
+│   │   ├── conv.rs             # Conv gradient nodes
+│   │   ├── losses.rs           # Loss gradient nodes
+│   │   └── views.rs            # View gradient nodes
 │   ├── kernels/                # CPU/GPU backend kernels and registration
-│   │   ├── cpu/                # Elementwise, reductions, matmul, conv, norm, losses
-│   │   ├── gpu/                # WGPU kernels, buffers, sync policy, fusion, optimizers
-│   │   └── blas.rs             # BLAS-accelerated matrix multiplication (optional)
+│   │   ├── mod.rs              # Module declarations
+│   │   ├── constants.rs        # Kernel constants and tuning params
+│   │   ├── blas.rs             # BLAS-accelerated matrix multiplication (optional)
+│   │   ├── cpu/                # CPU kernels
+│   │   │   ├── mod.rs          # register_cpu_kernels
+│   │   │   ├── simd.rs         # SIMD primitives
+│   │   │   ├── elementwise.rs  # Elementwise ops
+│   │   │   ├── reductions.rs   # Reductions
+│   │   │   ├── matmul.rs       # Matrix multiplication
+│   │   │   ├── conv.rs         # Convolutions (im2col, direct 3×3)
+│   │   │   ├── norm.rs         # Normalization kernels
+│   │   │   ├── pooling.rs      # Pooling kernels
+│   │   │   ├── losses.rs       # Loss function kernels
+│   │   │   └── factories.rs    # Tensor factory kernels
+│   │   └── gpu/                # WGPU GPU kernels
+│   │       ├── mod.rs          # Module declarations
+│   │       └── ops.rs          # GPU elementwise, matmul, fusion, optimizer ops
+│   ├── backends/               # Backend implementations
+│   │   ├── mod.rs              # Module declarations
+│   │   ├── cpu.rs              # CPU backend registration
+│   │   ├── packed_simd.rs      # SIMD-accelerated packed GEMV kernels
+│   │   ├── packed_blas.rs      # BLIS-style tiled packed micro-kernel
+│   │   └── wgpu/               # WGPU backend
+│   │       ├── mod.rs          # WGPU backend entry point
+│   │       └── mod_impl.rs     # WGPU implementation
+│   ├── dtypes/                 # Packed precision type implementations
+│   │   ├── mod.rs              # PackedWord trait
+│   │   ├── u4x8.rs             # 4-bit (8 values per u32)
+│   │   ├── u8x4.rs             # 8-bit (4 values per u32)
+│   │   ├── f16x2.rs            # 16-bit float (2 values per u32)
+│   │   └── f32x1.rs            # 32-bit float (1 value per u32)
+│   ├── swar/                   # SWAR operations on packed u32 words
+│   │   ├── mod.rs              # Module declarations
+│   │   ├── ops_4bit.rs         # 4-bit SWAR ops
+│   │   ├── ops_8bit.rs         # 8-bit SWAR ops
+│   │   ├── ops_16bit.rs        # 16-bit SWAR ops
+│   │   └── ops_32bit.rs        # 32-bit SWAR ops
 │   ├── nn/                     # Neural network layers
+│   │   ├── mod.rs              # Module declarations, Module trait
 │   │   ├── linear.rs           # Linear (fully connected)
 │   │   ├── conv.rs             # Conv1d, Conv2d, Conv3d, ConvTranspose2d
 │   │   ├── activations.rs      # ReLU, GELU, Sigmoid, Tanh, SiLU, LeakyReLU, Softplus, Hardswish
@@ -136,34 +201,88 @@ fastnn/
 │   │   ├── dropout.rs          # Dropout
 │   │   ├── embedding.rs        # Embedding
 │   │   ├── pooling.rs          # MaxPool2d, AvgPool2d
-│   │   └── sequential.rs       # Sequential container
+│   │   ├── fused.rs            # Fused layers (Conv+BN, Conv+BN+Activation)
+│   │   ├── sequential.rs       # Sequential container
+│   │   ├── residual.rs         # ResidualBlock
+│   │   └── upsample.rs         # Upsampling layer
 │   ├── optim/                  # Optimizers
+│   │   ├── mod.rs              # Module declarations
 │   │   ├── sgd.rs              # SGD with momentum
-│   │   ├── adam.rs             # Adam / Adam (AMSGrad variant)
+│   │   ├── adam.rs             # Adam
 │   │   ├── adamw.rs            # AdamW
 │   │   ├── muon.rs             # Muon (orthogonalized momentum)
-│   │   └── lion.rs             # Lion (sign-based momentum)
+│   │   ├── lion.rs             # Lion (sign-based momentum)
+│   │   └── rmsprop.rs          # RMSprop
 │   ├── train/                  # Training utilities
+│   │   ├── mod.rs              # Module declarations
+│   │   ├── trainer.rs          # Trainer
 │   │   ├── loss.rs             # MSELoss, CrossEntropyLoss, BCEWithLogitsLoss, HuberLoss
 │   │   ├── metrics.rs          # Accuracy metric
 │   │   └── callbacks.rs        # EarlyStopping, ModelCheckpoint, LR Scheduler, CSVLogger
 │   ├── io/
-│   │   └── serialize.rs        # Model serialization (save/load)
+│   │   ├── mod.rs              # Module declarations
+│   │   ├── serialize.rs        # Model serialization (save/load)
+│   │   └── dlpack.rs           # DLPack interop (Rust only, not exposed to Python)
 │   ├── packed_tensor.rs        # PackedTensor<T> with scale/zero dequantization
 │   ├── packed_layer.rs         # PackedLinear<T> with auto backend selection
 │   └── packed_train.rs         # MasterWeightOptimizer for f32 master weights
 ├── fastnn/                     # Python package
 │   ├── __init__.py             # Stable top-level public API facade
+│   ├── core.py                 # Context managers, seed, checkpoint
+│   ├── module.py               # Module base class
 │   ├── tensor.py               # Tensor factories and Tensor alias
 │   ├── ops.py                  # Tensor operations and reductions
 │   ├── nn.py                   # Neural network module aliases
 │   ├── losses.py               # Loss functions
-│   ├── parallel.py             # DataParallel / DDP (experimental)
+│   ├── activations.py          # Activation functions
+│   ├── layers.py               # Python-layer implementations (Flatten, PySequential, BasicBlock)
+│   ├── data.py                 # Dataset, TensorDataset, DataLoader, Samplers, auto-tuning
+│   ├── parallel.py             # DataParallel / DDP
+│   ├── callbacks.py            # Training callbacks
+│   ├── schedulers.py           # LR schedulers (StepLR, CosineAnnealing, Exponential, ReduceLROnPlateau)
+│   ├── typing.py               # Type aliases
 │   ├── models/                 # Pre-built models: MLP, Transformer
-│   ├── data.py                 # Dataset, TensorDataset, DataLoader, auto-tuning
-│   └── callbacks.py            # Training callbacks
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── builder.py
+│   │   ├── mlp.py
+│   │   └── transformer.py
+│   ├── io/                     # Serialization and model I/O
+│   │   ├── __init__.py         # Unified API (save, load, convert)
+│   │   ├── serialization.py    # Binary format read/write
+│   │   ├── export.py           # PyTorch model export
+│   │   └── onnx.py             # ONNX model import
+│   └── utils/
+│       └── tensor_utils.py     # Tensor utility functions
 ├── tests/                      # Python test suite
-│   └── conftest.py             # Memory pool isolation fixture
+│   ├── conftest.py             # Memory pool isolation fixture
+│   ├── test_tensor.py
+│   ├── test_gradients.py
+│   ├── test_nn.py
+│   ├── test_trainer.py
+│   ├── test_transformer.py
+│   ├── test_io.py
+│   ├── test_utils.py
+│   ├── test_modular_api.py
+│   ├── test_packed_training.py
+│   └── benchmark_utils.py
+├── benchmarks/                 # Benchmarks
+│   ├── tensor_creation_bench.py
+│   ├── storage_pool_bench.py
+│   ├── hotpath_bench.py
+│   └── ...
+├── docs/                       # Documentation
+│   ├── index.md
+│   ├── getting-started.md
+│   ├── tensors.md
+│   ├── nn-modules.md
+│   ├── optimizers.md
+│   ├── training.md
+│   ├── models.md
+│   ├── io.md
+│   ├── api-reference.md
+│   ├── development.md
+│   └── performance-roadmap.md
 ```
 
 ## Internal Architecture
@@ -296,6 +415,9 @@ The auto-tuner starts at 1 worker and adjusts based on mean wait time:
 # Set CPU thread count (defaults to all cores)
 fnn.set_num_threads(4)
 
+# Set default device (cpu/wgpu)
+fnn.set_default_device("cpu")
+
 print(fnn.allocator_stats())
 print(fnn.list_registered_ops())
 ```
@@ -348,15 +470,20 @@ output = fnn_model(fnn.tensor(data, shape))
 | Layer                                    | Status | Notes                              |
 |------------------------------------------|--------|------------------------------------|
 | `Linear`                                 | ✅     | Weight transpose handled automatically |
-| `Conv2d`                                 | ✅     | Full support                       |
+| `Conv1d`, `Conv2d`, `Conv3d`             | ✅     | Full support                       |
+| `ConvTranspose2d`                        | ✅     |                                    |
 | `BatchNorm1d` / `BatchNorm2d`            | ✅     |                                    |
-| `ReLU`, `GELU`, `SiLU`                  | ✅     |                                    |
+| `LayerNorm`, `RMSNorm`, `GroupNorm`      | ✅     |                                    |
+| `ReLU`, `GELU`, `SiLU`, `LeakyReLU`      | ✅     |                                    |
+| `Softplus`, `Hardswish`, `ELU`, `Mish`  | ✅     |                                    |
 | `LayerNorm`, `Embedding`, `Dropout`     | ✅     |                                    |
+| `Dropout2d`                              | ✅     | Channel-wise dropout               |
 | `AdaptiveAvgPool2d`                      | ✅     | Output size must be (1,1)          |
 | `MaxPool2d`                              | ✅     |                                    |
-| Residual/skip connections (e.g. ResNet BasicBlock) | ❌ | Not yet supported |
-
-> **Note:** Skip connections are not currently supported. Plain sequential models (VGG-style, MLP, basic Transformers) work correctly.
+| `Upsample`                               | ✅     | Nearest and bilinear               |
+| `Flatten`                                | ✅     |                                    |
+| Residual/skip connections (e.g. ResNet BasicBlock) | ✅ | Supported via `ResidualBlock` module |
+| Fused Conv+BN+Activation                 | ✅     | `FusedConvBn`, `FusedConvBnRelu`, `FusedConvBnGelu` |
 
 ---
 
@@ -376,6 +503,10 @@ output = fnn_model(fnn.tensor(data, shape))
 | `fnn.randn(shape)`              | Random normal (Gaussian)         |
 | `fnn.rand(shape)`               | Random uniform `[0, 1)`          |
 | `fnn.randint(low, high, shape)` | Random integers in `[low, high)` |
+| `fnn.zeros_like(x)`             | Tensor of zeros with same shape |
+| `fnn.ones_like(x)`              | Tensor of ones with same shape  |
+| `fnn.full_like(x, value)`       | Tensor filled with value with same shape |
+| `fnn.tensor_from_numpy(arr)`    | Create tensor from numpy array  |
 
 ### Tensor Operations
 
@@ -402,6 +533,14 @@ output = fnn_model(fnn.tensor(data, shape))
 | `x.min(dim, keepdim)`           | Min reduction                    |
 | `x.softmax(dim)`                | Softmax                          |
 | `x.log_softmax(dim)`            | Log softmax                      |
+| `x.abs()` / `x.exp()` / `x.log()` / `x.sqrt()` / `x.pow(n)` / `x.clamp(min, max)` | Elementwise math |
+| `x.neg()`                       | Negation                         |
+| `x.gt_scalar(v)` / `x.lt_scalar(v)` / `x.logical_not()` | Comparison ops       |
+| `fnn.im2col(a, kernel, stride, padding)` | im2col transformation      |
+| `fnn.add(a, b)` / `fnn.sub(a, b)` / `fnn.mul(a, b)` / `fnn.div(a, b)` | Functional arithmetic |
+| `fnn.fused_conv_bn_silu(conv, bn, x)` | Fused Conv+BN+SiLU           |
+| `fnn.relu(x)` / `fnn.gelu(x)` / `fnn.sigmoid(x)` / `fnn.tanh(x)` / `fnn.silu(x)` | Functional activations |
+| `fnn.argmax(x, dim)` / `fnn.argmin(x, dim)` | Argmax/argmin    |
 
 ### Neural Network Modules
 
@@ -426,6 +565,17 @@ output = fnn_model(fnn.tensor(data, shape))
 | `fnn.LeakyReLU(negative_slope)`                     | Leaky ReLU                   |
 | `fnn.Softplus(beta, threshold)`                     | Softplus activation          |
 | `fnn.Hardswish`                                     | Hard swish activation        |
+| `fnn.Elu(alpha)`                                    | ELU activation                |
+| `fnn.Mish()`                                        | Mish activation               |
+| `fnn.MaxPool2d(kernel_size, stride)`                 | Max pooling 2D               |
+| `fnn.AdaptiveAvgPool2d(output_h, output_w)`         | Adaptive average pooling     |
+| `fnn.Dropout2d(p)`                                  | Channel-wise dropout 2D      |
+| `fnn.Upsample(scale_factor, mode)`                  | Upsampling layer             |
+| `fnn.Flatten(start_dim, end_dim)`                   | Flatten layer                |
+| `fnn.ResidualBlock(...)`                            | ResNet BasicBlock            |
+| `fnn.FusedConvBn(conv, bn)`                          | Fused Conv2d+BatchNorm2d     |
+| `fnn.FusedConvBnRelu(conv, bn)`                      | Fused Conv+BN+ReLU           |
+| `fnn.FusedConvBnGelu(conv, bn)`                      | Fused Conv+BN+GELU           |
 | `fnn.Sequential(*layers)`                           | Sequential container         |
 | `fnn.ModuleList(modules)`                           | Indexable module list        |
 
@@ -438,6 +588,7 @@ output = fnn_model(fnn.tensor(data, shape))
 | `fnn.AdamW(params, lr, betas=(0.9, 0.999), weight_decay=0.01)`  | AdamW (decoupled L2)     |
 | `fnn.Muon(params, lr, momentum=0.95)`                            | Muon (orthogonalized momentum) |
 | `fnn.Lion(params, lr, betas=(0.95, 0.98))`                       | Lion (sign-based momentum) |
+| `fnn.RMSprop(params, lr, alpha=0.99, momentum=0)`               | RMSprop                     |
 
 ### Loss Functions
 
@@ -450,10 +601,14 @@ output = fnn_model(fnn.tensor(data, shape))
 
 ### Model I/O
 
-| Function                                 | Description          |
-|------------------------------------------|----------------------|
-| `fnn.io.save(model, path)`               | Save model weights   |
-| `fnn.io.load(path)`                      | Load model weights   |
+| Function                                               | Description                    |
+|--------------------------------------------------------|--------------------------------|
+| `fnn.io.save(model, path)`                             | Save model weights             |
+| `fnn.io.load(path)`                                    | Load model weights             |
+| `fnn.io.convert_from_pytorch(torch_model, path)`       | Convert PyTorch model to .fnn  |
+| `fnn.io.convert_from_onnx(onnx_path, fnn_path)`       | Convert ONNX model to .fnn     |
+| `fnn.import_onnx(onnx_path, fnn_path)`                 | Import ONNX model (legacy)     |
+| `fnn.load_state_dict(model, state_dict)`               | Load state dict into model     |
 
 ### Attention
 
@@ -463,6 +618,20 @@ output = fnn_model(fnn.tensor(data, shape))
 | `fnn.flash_attention(q, k, v, causal=True)` | Causal FlashAttention |
 
 FlashAttention is mathematically equivalent to standard attention (max diff < 1e-7) but uses block-wise tiling with online softmax to avoid materializing the full N×N attention scores matrix.
+
+### Utilities
+
+| Function                                 | Description                    |
+|------------------------------------------|--------------------------------|
+| `fnn.no_grad()`                          | Context manager to disable autograd |
+| `fnn.set_seed(n)`                        | Set random seed                |
+| `fnn.set_num_threads(n)`                 | Set CPU thread count           |
+| `fnn.set_default_device(device)`         | Set default device (cpu/wgpu)  |
+| `fnn.allocator_stats()`                  | Get memory statistics          |
+| `fnn.list_registered_ops()`             | List all registered operations |
+| `fnn.batched_mlp_forward()`              | Batched MLP inference          |
+| `fnn.clip_grad_norm_(params, max_norm)`  | Clip gradients by norm         |
+| `fnn.clip_grad_value_(params, value)`    | Clip gradients by value        |
 
 ---
 
@@ -498,12 +667,12 @@ cargo bench --bench packed_bench
 ## Roadmap
 
 - [ ] Residual/skip connection support in PyTorch export
-- [ ] GPU training (backward pass on GPU storage)
 - [ ] Raspberry Pi benchmark suite (ARM NEON validation)
 - [ ] Multi-GPU training
-- [ ] ONNX model import
 - [ ] FlashAttention SIMD optimization (AVX2/AVX512 block kernels)
 - [ ] True process-based multiprocessing for DataLoader (requires PyTensor pickle support or shared memory)
+- [ ] Full fused GPU optimizer kernels (Muon, Lion, RMSprop, SGD)
+- [ ] GPU N-D reductions (beyond 2D)
 
 ---
 

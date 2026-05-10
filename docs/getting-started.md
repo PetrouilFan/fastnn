@@ -125,12 +125,15 @@ The typical training loop in FastNN:
 ## Development Commands
 
 ```bash
-# Build the library
-make build
+# Build the Rust extension
+uv pip install -e .
 
-# Run tests
-make test
+# Run Rust tests
+cargo test
 
-# Clean build artifacts
-make clean
+# Run Python tests
+uv run pytest tests/ -v
+
+# Run packed precision benchmarks
+cargo bench --bench packed_bench
 ```

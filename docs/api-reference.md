@@ -72,8 +72,6 @@ fnn.silu(x)       # SiLU (Swish)
 fnn.leaky_relu(x, negative_slope)  # Leaky ReLU
 fnn.softplus(x)   # Softplus
 fnn.hardswish(x)   # HardSwish
-fnn.elu(x, alpha)  # ELU
-fnn.mish(x)        # Mish
 ```
 
 ### Reductions
@@ -105,8 +103,6 @@ q_clipped = fnn.minimum(q1, q2)  # Conservative Q estimate
 fnn.einsum('ij,jk->ik', [a, b])  # Einstein summation
 fnn.flash_attention(q, k, v, causal=None)  # Memory-efficient attention
 fnn.fused_add_relu(a, b)  # Fused add + ReLU
-fnn.fused_linear_relu(x, w, bias)  # Fused linear + ReLU
-fnn.fused_linear_gelu(x, w, bias)  # Fused linear + GELU
 fnn.fused_conv_bn_silu(conv, bn, x)  # Fused Conv + BN + SiLU
 ```
 
