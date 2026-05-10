@@ -164,6 +164,9 @@ __all__ = [
     "log_softmax",
     "fused_add_relu",
     "fused_conv_bn_silu",
+    # Packed tensor constructors (numpy interop)
+    "packed_tensor",
+    "packed_tensor_from_f32",
     # Tensor operations
     "add",
     "sub",
@@ -345,28 +348,81 @@ Dropout2d = _core.Dropout2d
 Upsample = _core.Upsample
 RMSprop = _core.PyRMSprop
 Elu = _core.Elu
+Mish = _core.Mish
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
 
 # Packed linear
-Linear4 = _core.Linear4
-Linear8 = _core.Linear8
-Linear16 = _core.Linear16
-Linear32 = _core.Linear32
+Linear4 = _core.PyLinear4
+Linear8 = _core.PyLinear8
+Linear16 = _core.PyLinear16
+Linear32 = _core.PyLinear32
 
 # Packed tensors
-PackedTensor4 = _core.PackedTensor4
-PackedTensor8 = _core.PackedTensor8
-PackedTensor16 = _core.PackedTensor16
-PackedTensor32 = _core.PackedTensor32
+PackedTensor4 = _core.PyPackedTensor4
+PackedTensor8 = _core.PyPackedTensor8
+PackedTensor16 = _core.PyPackedTensor16
+PackedTensor32 = _core.PyPackedTensor32
+
+def packed_tensor(data, shape=None, scale=1.0, zero=0.0, dtype="u4"):
+    """Create a packed tensor from data (list or numpy array).
+
+    Args:
+        data: numpy array or list
+        shape: optional shape (auto-detected from numpy array)
+        scale: quantization scale
+        zero: quantization zero point
+        dtype: one of "u4", "u8", "f16", "f32"
+    """
+    import numpy as np
+    if isinstance(data, np.ndarray):
+        if shape is None:
+            shape = list(data.shape)
+        data = data.flatten().tolist()
+    if dtype == "u4":
+        return PackedTensor4(data, shape, scale, zero)
+    elif dtype == "u8":
+        return PackedTensor8(data, shape, scale, zero)
+    elif dtype == "f16":
+        return PackedTensor16(data, shape, scale, zero)
+    elif dtype == "f32":
+        return PackedTensor32(data, shape, scale, zero)
+    else:
+        raise ValueError(f"Unknown packed dtype: {dtype}")
+
+
+def packed_tensor_from_f32(data, shape=None, dtype="u4"):
+    """Create a packed tensor with auto-computed scale from f32 data.
+
+    Args:
+        data: numpy array or list of f32 values
+        shape: optional shape (auto-detected from numpy array)
+        dtype: one of "u4", "u8", "f16", "f32"
+    """
+    import numpy as np
+    if isinstance(data, np.ndarray):
+        if shape is None:
+            shape = list(data.shape)
+        data = data.flatten().tolist()
+    if dtype == "u4":
+        return PackedTensor4.from_f32_auto(data, shape)
+    elif dtype == "u8":
+        return PackedTensor8.from_f32_auto(data, shape)
+    elif dtype == "f16":
+        return PackedTensor16.from_f32_auto(data, shape)
+    elif dtype == "f32":
+        return PackedTensor32.from_f32_auto(data, shape)
+    else:
+        raise ValueError(f"Unknown packed dtype: {dtype}")
+
 
 # Quantized tensors
-QuantizedTensor = _core.QuantizedTensor
+QuantizedTensor = _core.PyQuantizedTensor
 
 # Master weight optimizers
-MasterWeightOptimizer4 = _core.MasterWeightOptimizer4
-MasterWeightOptimizer8 = _core.MasterWeightOptimizer8
-MasterWeightOptimizer16 = _core.MasterWeightOptimizer16
-MasterWeightOptimizer32 = _core.MasterWeightOptimizer32
+MasterWeightOptimizer4 = _core.PyMasterWeightOptimizer4
+MasterWeightOptimizer8 = _core.PyMasterWeightOptimizer8
+MasterWeightOptimizer16 = _core.PyMasterWeightOptimizer16
+MasterWeightOptimizer32 = _core.PyMasterWeightOptimizer32
 
 # Backend control
 use_wgpu = _core.use_wgpu

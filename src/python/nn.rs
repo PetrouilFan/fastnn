@@ -897,6 +897,20 @@ impl_nn_module!(PyPackedMultiHeadAttention4 {
             )
         }
     }
+
+    fn set_kv_cache(&mut self, k: &PyTensor, v: &PyTensor) {
+        let k_data = k.numpy();
+        let v_data = v.numpy();
+        let k_shape: Vec<usize> = k.shape().iter().map(|&x| x as usize).collect();
+        let v_shape: Vec<usize> = v.shape().iter().map(|&x| x as usize).collect();
+        let k_packed = crate::packed_tensor::PackedTensor::<crate::dtypes::U4x8>::from_f32_auto(&k_data, &k_shape);
+        let v_packed = crate::packed_tensor::PackedTensor::<crate::dtypes::U4x8>::from_f32_auto(&v_data, &v_shape);
+        self.inner.set_kv_cache(k_packed, v_packed);
+    }
+
+    fn clear_kv_cache(&mut self) {
+        self.inner.clear_kv_cache();
+    }
 });
 
 // ---- PackedMultiHeadAttention (8-bit, U8x4) ----
@@ -915,6 +929,20 @@ impl_nn_module!(PyPackedMultiHeadAttention8 {
                 d_model, num_heads, dropout_p as f32, causal
             )
         }
+    }
+
+    fn set_kv_cache(&mut self, k: &PyTensor, v: &PyTensor) {
+        let k_data = k.numpy();
+        let v_data = v.numpy();
+        let k_shape: Vec<usize> = k.shape().iter().map(|&x| x as usize).collect();
+        let v_shape: Vec<usize> = v.shape().iter().map(|&x| x as usize).collect();
+        let k_packed = crate::packed_tensor::PackedTensor::<crate::dtypes::U8x4>::from_f32_auto(&k_data, &k_shape);
+        let v_packed = crate::packed_tensor::PackedTensor::<crate::dtypes::U8x4>::from_f32_auto(&v_data, &v_shape);
+        self.inner.set_kv_cache(k_packed, v_packed);
+    }
+
+    fn clear_kv_cache(&mut self) {
+        self.inner.clear_kv_cache();
     }
 });
 
