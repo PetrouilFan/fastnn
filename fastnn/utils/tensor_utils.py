@@ -9,15 +9,30 @@ import fastnn as fnn
 
 
 def _infer_shape(lst):
-    """Infer the shape of a regular nested list."""
+    """Infer the shape of a regular nested list.
+    
+    Raises:
+        ValueError: If the input is a ragged/irregular list (elements have different lengths).
+    """
     shape = []
     current = lst
     while isinstance(current, list):
-        shape.append(len(current))
-        if current:
-            current = current[0]
-        else:
+        if not current:
+            shape.append(0)
             break
+        shape.append(len(current))
+        first_len = len(current[0])
+        for item in current:
+            if not isinstance(item, list):
+                break
+            if len(item) != first_len:
+                raise ValueError(
+                    f"Irregular/ragged list detected: elements have inconsistent lengths "
+                    f"at depth {len(shape)}. First element has length {first_len}, "
+                    f"but found element with length {len(item)}. "
+                    f"Only regular (rectangular) nested lists are supported."
+                )
+        current = current[0]
     return tuple(shape)
 
 
@@ -42,11 +57,11 @@ def to_numpy(tensor: Any) -> np.ndarray:
     if hasattr(tensor, "numpy"):
         result = tensor.numpy()
         if not isinstance(result, np.ndarray):
-            return np.array(result, dtype=np.float32)
+            return np.array(result)
         return result
     if isinstance(tensor, np.ndarray):
         return tensor
-    return np.array(tensor, dtype=np.float32)
+    return np.array(tensor)
 
 
 def to_tensor(array: Any, device: Any = None) -> Any:

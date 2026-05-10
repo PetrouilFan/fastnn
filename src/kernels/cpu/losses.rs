@@ -136,7 +136,7 @@ pub unsafe fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 unsafe { *((logits_usize + (base + target_class) * 4) as *const f32) };
             let loss = log_sum_exp + max_val - class_logit;
             unsafe {
-                *((losses_usize + b * 4) as *mut f32) = if loss.is_finite() { loss } else { 0.0 };
+                *((losses_usize + b * 4) as *mut f32) = loss;
             }
         });
     }
@@ -159,7 +159,7 @@ pub unsafe fn cross_entropy_loss_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let log_sum_exp = sum_exp.ln();
             let class_logit = logits_data[base + target_class];
             let loss = log_sum_exp + max_val - class_logit;
-            losses[b] = if loss.is_finite() { loss } else { 0.0 };
+            losses[b] = loss;
         }
     }
 

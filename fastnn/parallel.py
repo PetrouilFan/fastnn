@@ -69,15 +69,20 @@ class DataParallel:
 
         # Ensure all replicas have parameters on correct devices
         for i, (replica, d) in enumerate(zip(self.replicas, self.device_ids)):
-            # Move the entire replica to the correct device
             if hasattr(replica, "to_gpu"):
                 replica.to_gpu(d)
             else:
-                # Fallback: iterate through parameters (this might not work if parameters() returns copies)
-                for p in replica.parameters():
-                    if p.device != f"wgpu:{d}":
-                        # This won't work because p is likely a copy
-                        pass
+                device_str = f"cuda:{d}" if isinstance(d, int) else str(d)
+                if hasattr(replica, "_parameters"):
+                    for name, param in replica._parameters.items():
+                        if hasattr(param, "to_device"):
+                            param.to_device(device_str)
+                        elif hasattr(param, "data") and hasattr(param.data, "to_device"):
+                            param.data.to_device(device_str)
+                if hasattr(replica, "_buffers"):
+                    for name, buf in replica._buffers.items():
+                        if hasattr(buf, "to_device"):
+                            buf.to_device(device_str)
 
         self.param_groups = [list(r.parameters()) for r in self.replicas]
 
@@ -99,16 +104,21 @@ class DataParallel:
         import time
 
         batch_size = x.shape[0]
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
 
         losses = [0.0] * len(self.device_ids)
         gpu_times = [0.0] * len(self.device_ids)  # Track time per GPU
 
-        # Precompute split indices to avoid floating point errors and skipped elements
-        split_indices = [0]
-        for i in range(len(self.device_ids)):
-            split_indices.append(split_indices[-1] + int(batch_size * self.weights[i]))
-        # Ensure the last index is exactly batch_size
-        split_indices[-1] = batch_size
+        # Precompute split indices using cumulative boundaries with proper rounding
+        cumulative_weights = []
+        cumsum = 0.0
+        for w in self.weights[:-1]:
+            cumsum += w
+            cumulative_weights.append(round(cumsum * batch_size))
+        cumulative_weights.append(batch_size)
+
+        split_indices = [0] + cumulative_weights
 
         def worker(i):
             # Get split indices from precomputed list
@@ -141,17 +151,13 @@ class DataParallel:
         # Update epoch times with measured GPU times
         self.epoch_times = gpu_times
 
-        # Weighted average based on actual batch sizes per GPU
         batch_sizes = [
             split_indices[i + 1] - split_indices[i] for i in range(len(self.device_ids))
         ]
         total_samples = sum(batch_sizes)
-        if total_samples > 0:
-            avg_loss = (
-                sum(loss * n for loss, n in zip(losses, batch_sizes)) / total_samples
-            )
-        else:
-            avg_loss = sum(losses) / len(losses)
+        avg_loss = (
+            sum(loss * n for loss, n in zip(losses, batch_sizes)) / total_samples
+        )
         return avg_loss
 
     def sync_gradients(self):

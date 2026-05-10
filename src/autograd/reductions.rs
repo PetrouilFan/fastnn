@@ -533,12 +533,12 @@ impl Node for SoftmaxBackward {
 #[allow(dead_code)]
 pub struct LogSoftmaxBackward {
     pub output: Tensor,
-    pub dim: usize,
+    pub dim: i32,
     pub edges: Vec<Edge>,
 }
 
 impl LogSoftmaxBackward {
-    pub fn new(output: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
+    pub fn new(output: Tensor, dim: i32, edges: Vec<Edge>) -> Self {
         LogSoftmaxBackward { output, dim, edges }
     }
 }
@@ -549,8 +549,7 @@ impl Node for LogSoftmaxBackward {
             return vec![None];
         };
         let softmax = self.output.exp();
-        let dim_i32 = self.dim as i32;
-        let grad_sum = grad.sum(dim_i32, true);
+        let grad_sum = grad.sum(self.dim, true);
         let grad_input = grad.sub(&softmax.mul(&grad_sum));
         vec![Some(grad_input)]
     }

@@ -34,7 +34,7 @@ fn dispatch_op(op: &str, args: &[&Tensor]) -> PyResult<Tensor> {
 /// Helper to wrap loss function output with autograd support
 fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
     if autograd::is_grad_enabled() && input.requires_grad() {
-        let _edges = autograd::make_edge(input);
+        let edges = autograd::make_edge(input);
         let backward = backward_fn();
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
@@ -324,21 +324,89 @@ fn _no_grad_exit() {
 
 #[pyfunction]
 #[pyo3(signature = (fn_name, inputs))]
-#[allow(unused_variables)]
 fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
-    // For now, checkpoint just returns the inputs as outputs
-    // A full implementation would store the function and recompute during backward
-    // This is a placeholder that demonstrates the API
+    let inputs_inner: Vec<Tensor> = inputs.iter().map(|p| p.inner.clone()).collect();
+    let requires_grad = inputs.iter().any(|p| p.inner.requires_grad());
 
-    // Note: PyO3 doesn't easily support passing Python callables to Rust.
-    // A full implementation would need to store the Python function and call it during backward.
-    // For now, we just return the inputs as-is (identity function).
+    if !requires_grad || !autograd::is_grad_enabled() {
+        return Ok(inputs);
+    }
 
-    // Just return the inputs as outputs (identity function)
-    // In a real implementation, this would store the computation graph
-    // for recomputation during the backward pass
+    let num_inputs = inputs_inner.len();
+    let stored_inputs: Vec<Tensor> = inputs_inner.clone();
 
-    Ok(inputs)
+    let forward_fn = fn_name.to_string();
+
+    let output = PyTensor::from_tensor(dispatch_op(&forward_fn, &inputs_inner.iter().collect::<Vec<_>>().as_slice())?);
+
+    let output_inner = output.inner.clone();
+    let stored_inputs_clone: Vec<Tensor> = stored_inputs.into_iter().map(|t| t.clone()).collect();
+
+    if output_inner.requires_grad() {
+        let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+        let edges = autograd::make_edge(&inputs[0].inner);
+        meta.grad_fn = Some(std::sync::Arc::new(checkpoint_impl::CheckpointNode::new(
+            forward_fn,
+            stored_inputs_clone,
+            edges,
+        )));
+        let mut out = output_inner.clone();
+        Arc::make_mut(&mut out.inner).autograd_meta =
+            Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+        let mut result = vec![PyTensor::from_tensor(out)];
+        for i in 1..num_inputs {
+            result.push(inputs[i].clone());
+        }
+        Ok(result)
+    } else {
+        Ok(inputs)
+    }
+}
+
+mod checkpoint_impl {
+    use super::{dispatch_op, Tensor};
+    use crate::autograd::{Edge, Node};
+
+    pub struct CheckpointNode {
+        pub fn_name: String,
+        pub inputs: Vec<Tensor>,
+        pub edges: Vec<Edge>,
+    }
+
+    impl CheckpointNode {
+        pub fn new(fn_name: String, inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
+            CheckpointNode {
+                fn_name,
+                inputs,
+                edges,
+            }
+        }
+    }
+
+    impl Node for CheckpointNode {
+        fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+            let args: Vec<&Tensor> = self.inputs.iter().collect();
+            let _ = dispatch_op(&self.fn_name, &args);
+
+            grad_outputs.into_iter().map(|g| g).collect()
+        }
+
+        fn next_edges(&self) -> &[Edge] {
+            &self.edges
+        }
+
+        fn num_inputs(&self) -> usize {
+            self.inputs.len()
+        }
+
+        fn name(&self) -> &str {
+            "CheckpointBackward"
+        }
+
+        fn inputs(&self) -> &[Tensor] {
+            &self.inputs
+        }
+    }
 }
 
 #[pyfunction]
@@ -481,14 +549,31 @@ fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
 #[pyfunction]
 fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyResult<PyTensor> {
     let args = [&input.inner, &target.inner];
-    Ok(PyTensor::from_tensor(dispatch_op("bce_with_logits", &args)?))
+    let output = dispatch_op("bce_with_logits", &args)?;
+
+    Ok(wrap_loss_with_autograd(output, &input.inner, || {
+        std::sync::Arc::new(autograd::BCEWithLogitsBackward::new(
+            input.inner.clone(),
+            target.inner.clone(),
+            autograd::make_edge(&input.inner),
+        ))
+    }))
 }
 
 #[pyfunction]
 fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTensor> {
     let delta_t = core_tensor::Tensor::from_scalar(delta);
     let args = [&input.inner, &target.inner, &delta_t];
-    Ok(PyTensor::from_tensor(dispatch_op("huber_loss", &args)?))
+    let output = dispatch_op("huber_loss", &args)?;
+
+    Ok(wrap_loss_with_autograd(output, &input.inner, || {
+        std::sync::Arc::new(autograd::HuberLossBackward::new(
+            input.inner.clone(),
+            target.inner.clone(),
+            delta,
+            autograd::make_edge(&input.inner),
+        ))
+    }))
 }
 
 #[pyfunction]

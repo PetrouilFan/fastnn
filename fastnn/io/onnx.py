@@ -123,13 +123,15 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             weight = initializer_map.get(node.input[1])
             bias = initializer_map.get(node.input[2]) if len(node.input) > 2 else None
 
-            _get_attr(node, "alpha", 1.0)
-            _get_attr(node, "beta", 1.0)
+            alpha = _get_attr(node, "alpha", 1.0)
+            beta = _get_attr(node, "beta", 1.0)
             _get_attr(node, "transA", 0)
-            trans_b = _get_attr(node, "transB", 1)
+            trans_b = _get_attr(node, "transB", 0)
 
             if trans_b:
                 weight = weight.T
+
+            weight = weight * alpha
 
             in_features = weight.shape[0]
             out_features = weight.shape[1]
@@ -141,7 +143,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
 
             params.append((f"{node.name}.weight", weight))
             if bias is not None:
-                params.append((f"{node.name}.bias", bias))
+                params.append((f"{node.name}.bias", bias * beta))
 
         elif op_type == "Relu":
             pass  # No parameters

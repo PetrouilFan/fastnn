@@ -181,7 +181,12 @@ class RandomSampler(Sampler):
         super().__init__(data_source)
         if replacement:
             raise NotImplementedError("RandomSampler does not support replacement")
-        self.num_samples = num_samples or len(data_source)
+        n = len(data_source)
+        if num_samples is not None and num_samples > n:
+            raise ValueError(
+                f"num_samples ({num_samples}) cannot exceed len(data_source) ({n})"
+            )
+        self.num_samples = num_samples or n
         self.generator = generator or random.Random()
         self._indices_buffer = None
 
@@ -190,7 +195,7 @@ class RandomSampler(Sampler):
         if self._indices_buffer is None or len(self._indices_buffer) != n:
             self._indices_buffer = np.arange(n, dtype=np.int64)
         else:
-            np.arange(n, dtype=np.int64, out=self._indices_buffer)
+            self._indices_buffer = np.arange(n, dtype=np.int64)
         self.generator.shuffle(self._indices_buffer)
         return iter(self._indices_buffer[: self.num_samples].tolist())
 
