@@ -108,37 +108,23 @@ fn read_tensor_v1(reader: &mut impl Read) -> FastnnResult<(String, Vec<u32>, Vec
     Ok((name, shape, data))
 }
 
-#[allow(dead_code)]
-pub fn save_model(model: &dyn Module, path: &str) -> FastnnResult<()> {
-    let params = model.named_parameters();
-
-    // Open file for writing
+pub fn save_state_dict(state_dict: Vec<(String, Tensor)>, path: &str) -> FastnnResult<()> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
-    // Write magic bytes for format identification
     writer.write_all(&MAGIC_BYTES)?;
-
-    // Write format version
     writer.write_all(&FORMAT_VERSION.to_le_bytes())?;
 
-    // Write number of parameters
-    let num_params = params.len() as u64;
+    let num_params = state_dict.len() as u64;
     writer.write_all(&num_params.to_le_bytes())?;
 
-    // Write each parameter
-    for (name, tensor) in &params {
-        // Write name using length-prefixed helper
+    for (name, tensor) in &state_dict {
         write_length_prefixed(&mut writer, name.as_bytes())?;
-
-        // Write shape using i64 slice helper
         write_slice_i64(&mut writer, &tensor.shape())?;
 
-        // Write data using as_byte_slice for efficiency
         if let Some(bytes) = tensor.as_byte_slice() {
             write_length_prefixed(&mut writer, bytes)?;
         } else {
-            // Fallback for non-contiguous or GPU tensors
             let data = tensor.to_numpy();
             let bytes =
                 unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
@@ -148,6 +134,10 @@ pub fn save_model(model: &dyn Module, path: &str) -> FastnnResult<()> {
 
     writer.flush()?;
     Ok(())
+}
+
+pub fn save_model(model: &dyn Module, path: &str) -> FastnnResult<()> {
+    save_state_dict(model.named_parameters(), path)
 }
 
 #[allow(dead_code)]

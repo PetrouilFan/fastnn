@@ -37,7 +37,7 @@ impl PackedWord for U4x8 {
         for i in 0..8 {
             let clamped = vals[i].clamp(-8.0, 7.0);
             let rounded = clamped.round();
-            let as_i32 = rounded as i32;
+            let as_i32 = if rounded.is_nan() { 0 } else { rounded as i32 };
             let nibble = (as_i32 as u32) & 0xF;
             word |= nibble << (i * 4);
         }

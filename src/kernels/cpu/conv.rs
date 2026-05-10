@@ -2263,8 +2263,10 @@ pub unsafe fn conv2d_im2col(
     let in_width = x_shape[3] as usize;
 
     let col_rows = batch_size * out_height * out_width;
-    let col_cols = in_channels * kernel_height * kernel_width;
-    let col_size = col_rows * col_cols;
+    let in_channels_per_group = in_channels / groups;
+    let out_channels_per_group = out_channels / groups;
+    let cols_per_group = in_channels_per_group * kernel_height * kernel_width;
+    let col_size = col_rows * cols_per_group;
 
     let x_ptr = x.data_ptr() as *const f32;
 
@@ -2272,7 +2274,7 @@ pub unsafe fn conv2d_im2col(
     // Threshold: use GEMM when all dimensions >= 1
     const GEMM_MIN_SIZE: usize = 1;
     let use_gemm =
-        col_rows >= GEMM_MIN_SIZE && out_channels >= GEMM_MIN_SIZE && col_cols >= GEMM_MIN_SIZE;
+        col_rows >= GEMM_MIN_SIZE && out_channels_per_group >= GEMM_MIN_SIZE && cols_per_group >= GEMM_MIN_SIZE;
 
     let gemm_size = if use_gemm { col_rows * out_channels } else { 0 };
     let total_scratch = col_size + gemm_size;
@@ -2283,38 +2285,82 @@ pub unsafe fn conv2d_im2col(
         if buf.len() < total_scratch {
             buf.resize(total_scratch);
         }
-        // Zero only the im2col portion. gemm_out is fully overwritten by BLAS.
+
+        // Zero the im2col buffer for this group before splitting
         buf.data[..col_size].fill(0.0);
 
-        let (col_buf, gemm_buf) = buf.split_at_mut(col_size);
-        let col_data: &mut [f32] = col_buf;
+        let (col_buf, _gemm_buf) = buf.split_at_mut(col_size);
 
-        // --- im2col extraction ---
-        // Optimized loop order: process input channels in blocks first for better cache efficiency.
-        // This maintains NCHW->NCHW locality by processing channels contiguously before spatial dims.
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
+        let output_shape = vec![
+            batch_size as i64,
+            out_channels as i64,
+            out_height as i64,
+            out_width as i64,
+        ];
+        let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
 
-            let x_usize = x_ptr as usize;
+        let output_inner = Arc::make_mut(&mut output.inner);
+        let output_storage = Arc::make_mut(&mut output_inner.storage);
+        let Storage::Cpu(cpu_storage) = output_storage else {
+            panic!("Expected CPU storage");
+        };
+        let out_data = Arc::make_mut(&mut cpu_storage.data);
+        let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
-            col_data
-                .par_chunks_mut(col_cols)
-                .with_min_len(128)
-                .enumerate()
-                .for_each(|(row, col_chunk)| {
-                    let n = row / (out_height * out_width);
-                    let rem = row % (out_height * out_width);
-                    let oh = rem / out_width;
-                    let ow = rem % out_width;
+        // Weight data: direct borrow, no copy.
+        let w_data: &[f32] = unsafe {
+            let w_ptr = w.data_ptr() as *const f32;
+            std::slice::from_raw_parts(
+                w_ptr,
+                out_channels * in_channels * kernel_height * kernel_width / groups,
+            )
+        };
 
-                    // Fast path: dilation=1, entire kernel patch in-bounds.
-                    // For fixed (n, oh, ow, kh), the kernel_w elements x[n,ic,ih,ow..ow+kw]
-                    // are contiguous when dilation=1. We can SIMD copy each row.
-                    let fast_path = stride == 1 && dilation == 1;
+        let bias_data: Option<Vec<f32>> = if let Some(b) = bias {
+            if b.numel() == 1 {
+                let bias_val = b.item();
+                Some(vec![bias_val; out_channels])
+            } else {
+                let b_ptr = b.data_ptr() as *const f32;
+                Some(unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() })
+            }
+        } else {
+            None
+        };
 
-                    for ic in 0..in_channels {
-                        let col_base = ic * kernel_height * kernel_width;
+        // --- Process each group independently ---
+        // For each group, im2col extracts the group's input channels, then GEMM or
+        // scalar loop computes the group's output channels.
+        for group in 0..groups {
+            let col_data: &mut [f32] = col_buf;
+            let in_ch_start = group * in_channels_per_group;
+            let in_ch_end = in_ch_start + in_channels_per_group;
+
+            // --- im2col extraction for this group's channels ---
+            // Optimized loop order: process input channels in blocks first for better cache efficiency.
+            // This maintains NCHW->NCHW locality by processing channels contiguously before spatial dims.
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+
+                let x_usize = x_ptr as usize;
+
+                col_data
+                    .par_chunks_mut(cols_per_group)
+                    .with_min_len(128)
+                    .enumerate()
+                    .for_each(|(row, col_chunk)| {
+                        let n = row / (out_height * out_width);
+                        let rem = row % (out_height * out_width);
+                        let oh = rem / out_width;
+                        let ow = rem % out_width;
+
+                        // Fast path: dilation=1, entire kernel patch in-bounds.
+                        let fast_path = stride == 1 && dilation == 1;
+
+                        for ic_idx in in_ch_start..in_ch_end {
+                            let ic = ic_idx;
+                            let col_base = (ic_idx - in_ch_start) * kernel_height * kernel_width;
 
                         if fast_path {
                             // Optimized path: dilation=1
@@ -2391,12 +2437,13 @@ pub unsafe fn conv2d_im2col(
                 for oh in 0..out_height {
                     for ow in 0..out_width {
                         let col_row = (n * out_height + oh) * out_width + ow;
-                        let col_chunk = &mut col_data[col_row * col_cols..(col_row + 1) * col_cols];
+                        let col_chunk = &mut col_data[col_row * cols_per_group..(col_row + 1) * cols_per_group];
 
                         let fast_path = stride == 1 && dilation == 1;
 
-                        for ic in 0..in_channels {
-                            let col_base = ic * kernel_height * kernel_width;
+                        for ic_idx in in_ch_start..in_ch_end {
+                            let ic = ic_idx;
+                            let col_base = (ic_idx - in_ch_start) * kernel_height * kernel_width;
 
                             if fast_path {
                                 for kh in 0..kernel_height {
@@ -2463,64 +2510,30 @@ pub unsafe fn conv2d_im2col(
             }
         }
 
-        // Weight data: direct borrow, no copy. BLAS only reads from it.
-        let w_data: &[f32] = unsafe {
-            let w_ptr = w.data_ptr() as *const f32;
-            std::slice::from_raw_parts(
-                w_ptr,
-                out_channels * in_channels * kernel_height * kernel_width / groups,
-            )
-        };
-
-        let output_shape = vec![
-            batch_size as i64,
-            out_channels as i64,
-            out_height as i64,
-            out_width as i64,
-        ];
-        let mut output = Tensor::empty(output_shape.clone(), x.dtype(), x.device());
-
-        let output_inner = Arc::make_mut(&mut output.inner);
-        let output_storage = Arc::make_mut(&mut output_inner.storage);
-        let Storage::Cpu(cpu_storage) = output_storage else {
-            panic!("Expected CPU storage");
-        };
-        let out_data = Arc::make_mut(&mut cpu_storage.data);
-        let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
         let col_slice: &[f32] = col_data;
+        let oc_start = group * out_channels_per_group;
+        let _oc_end = oc_start + out_channels_per_group;
 
-        let bias_data: Option<Vec<f32>> = if let Some(b) = bias {
-            if b.numel() == 1 {
-                let bias_val = b.item();
-                Some(vec![bias_val; out_channels])
-            } else {
-                let b_ptr = b.data_ptr() as *const f32;
-                Some(unsafe { std::slice::from_raw_parts(b_ptr, out_channels).to_vec() })
-            }
-        } else {
-            None
-        };
+        // Weight slice for this group: rows oc_start..oc_end, each with cols_per_group elements
+        let w_group_start = oc_start * cols_per_group;
 
         if use_gemm {
-            let gemm_out = &mut gemm_buf[..col_rows * out_channels];
+            // Use a temporary buffer for this group's GEMM output (contiguous row-major)
+            let mut group_out = vec![0.0f32; col_rows * out_channels_per_group];
 
             matmul_blas_with_transpose_into(
-                col_slice,
-                w_data,
-                gemm_out,
+                &col_slice[..col_rows * cols_per_group],
+                &w_data[w_group_start..],
+                &mut group_out,
                 col_rows,
-                col_cols,
-                out_channels,
+                cols_per_group,
+                out_channels_per_group,
                 false,
                 true,
             );
 
-            // Optimized NHWC -> NCHW layout conversion + bias addition.
-            // Blocked sequential algorithm with block size 64 rows for better cache locality.
+            // Scatter group_out into the output tensor in NCHW layout with bias
             let spatial = out_height * out_width;
-            let oc_usize = out_channels;
-            let gemm_ptr = gemm_out.as_ptr();
             let block_rows = 64;
 
             if let Some(b) = &bias_data {
@@ -2528,28 +2541,17 @@ pub unsafe fn conv2d_im2col(
                 for n in 0..batch_size {
                     for sp_block in (0..spatial).step_by(block_rows) {
                         let blk = std::cmp::min(block_rows, spatial - sp_block);
-                        // Copy blk rows from gemm_out into block buffer
-                        let mut block: Vec<f32> = vec![0.0; blk * oc_usize];
-
-                        for i in 0..blk {
-                            let src_row = n * spatial + sp_block + i;
-                            let src = unsafe { gemm_ptr.add(src_row * oc_usize) };
-                            let dst = unsafe { block.as_mut_ptr().add(i * oc_usize) };
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(src, dst, oc_usize);
-                            }
-                        }
-                        // Write to output with bias
-                        for oc_idx in 0..oc_usize {
-                            let out_start = (n * oc_usize + oc_idx) * spatial + sp_block;
-                            let mut out_dst = unsafe { out_ptr.add(out_start) };
+                        // Write blk rows from group_out to output with bias
+                        for oc_idx_in_group in 0..out_channels_per_group {
+                            let oc_idx = oc_start + oc_idx_in_group;
                             let bias_val = unsafe { *bias_ptr.add(oc_idx) };
                             for i in 0..blk {
-                                let val = unsafe { *block.get_unchecked(i * oc_usize + oc_idx) };
+                                let row = n * spatial + sp_block + i;
+                                let out_idx = ((n * out_channels + oc_idx) * spatial + sp_block) + i;
+                                let val = group_out[row * out_channels_per_group + oc_idx_in_group];
                                 unsafe {
-                                    *out_dst = val + bias_val;
+                                    *out_ptr.add(out_idx) = val + bias_val;
                                 }
-                                out_dst = unsafe { out_dst.add(1) };
                             }
                         }
                     }
@@ -2558,40 +2560,30 @@ pub unsafe fn conv2d_im2col(
                 for n in 0..batch_size {
                     for sp_block in (0..spatial).step_by(block_rows) {
                         let blk = std::cmp::min(block_rows, spatial - sp_block);
-                        // Copy blk rows from gemm_out into block buffer
-                        let mut block: Vec<f32> = vec![0.0; blk * oc_usize];
-
-                        for i in 0..blk {
-                            let src_row = n * spatial + sp_block + i;
-                            let src = unsafe { gemm_ptr.add(src_row * oc_usize) };
-                            let dst = unsafe { block.as_mut_ptr().add(i * oc_usize) };
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(src, dst, oc_usize);
-                            }
-                        }
-                        // Write to output (no bias)
-                        for oc_idx in 0..oc_usize {
-                            let out_start = (n * oc_usize + oc_idx) * spatial + sp_block;
-                            let mut out_dst = unsafe { out_ptr.add(out_start) };
+                        for oc_idx_in_group in 0..out_channels_per_group {
+                            let oc_idx = oc_start + oc_idx_in_group;
                             for i in 0..blk {
-                                let val = unsafe { *block.get_unchecked(i * oc_usize + oc_idx) };
+                                let row = n * spatial + sp_block + i;
+                                let out_idx = ((n * out_channels + oc_idx) * spatial + sp_block) + i;
+                                let val = group_out[row * out_channels_per_group + oc_idx_in_group];
                                 unsafe {
-                                    *out_dst = val;
+                                    *out_ptr.add(out_idx) = val;
                                 }
-                                out_dst = unsafe { out_dst.add(1) };
                             }
                         }
                     }
                 }
             }
         } else {
-            for oc in 0..out_channels {
-                let w_row = &w_data[oc * col_cols..(oc + 1) * col_cols];
+            for oc_in_group in 0..out_channels_per_group {
+                let oc = oc_start + oc_in_group;
+                let w_row = &w_data[(oc_start + oc_in_group) * cols_per_group
+                    ..(oc_start + oc_in_group + 1) * cols_per_group];
                 let bias_val = bias_data.as_ref().map(|b| b[oc]).unwrap_or(0.0);
 
                 for row in 0..col_rows {
-                    let col_row = &col_slice[row * col_cols..(row + 1) * col_cols];
-                    let sum = unsafe { simd_dot_product(col_row, w_row, col_cols) };
+                    let col_row = &col_slice[row * cols_per_group..(row + 1) * cols_per_group];
+                    let sum = unsafe { simd_dot_product(col_row, w_row, cols_per_group) };
 
                     let n = row / (out_height * out_width);
                     let rem = row % (out_height * out_width);
@@ -2603,6 +2595,7 @@ pub unsafe fn conv2d_im2col(
                 }
             }
         }
+    }
 
         output
     })
