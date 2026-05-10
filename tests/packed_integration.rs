@@ -289,8 +289,8 @@ fn test_loss_decreases_u8x4() {
         }
 
         // Optimizer step
-        let packed1 = opt1.step(&grad_w1, hidden, in_f);
-        let packed2 = opt2.step(&grad_w2, out_f, hidden);
+        let _packed1 = opt1.step(&grad_w1, hidden, in_f);
+        let _packed2 = opt2.step(&grad_w2, out_f, hidden);
 
         w1_master = opt1.master.clone();
         w2_master = opt2.master.clone();

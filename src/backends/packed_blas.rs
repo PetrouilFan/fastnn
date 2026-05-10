@@ -738,8 +738,7 @@ unsafe fn unpack_u4x8_wordpair_simd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::cpu;
-    use crate::dtypes::{F16x2, F32x1, U4x8, U8x4};
+    use crate::dtypes::{F32x1, U4x8, U8x4};
 
     #[test]
     fn test_tiled_gemv_f32x1() {

@@ -388,7 +388,7 @@ impl Tensor {
     pub fn requires_grad_(&self, requires_grad: bool) -> Tensor {
         let mut inner = self.inner.clone();
         Arc::make_mut(&mut inner).set_requires_grad(requires_grad);
-        Tensor::new(inner.as_ref().clone())
+        Tensor { inner }
     }
 
     pub fn grad(&self) -> Option<Tensor> {
@@ -775,7 +775,7 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     }
 
     // Build permutation for a: move contracted dims to the end
-    let mut a_perm: Vec<i64> = Vec::new();
+    let mut a_perm: Vec<i64> = Vec::with_capacity(a_chars.len());
     for &c in &a_chars {
         if !contracted.contains(&c) {
             a_perm.push(a_chars.iter().position(|&x| x == c).unwrap() as i64);
@@ -793,7 +793,7 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     };
 
     // Build permutation for b: move contracted dims to the front
-    let mut b_perm: Vec<i64> = Vec::new();
+    let mut b_perm: Vec<i64> = Vec::with_capacity(b_chars.len());
     for &c in &b_chars {
         if contracted.contains(&c) {
             b_perm.push(b_chars.iter().position(|&x| x == c).unwrap() as i64);
@@ -832,7 +832,7 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     let result_2d = a_2d.matmul(&b_2d);
 
     // Reshape to output shape
-    let mut out_shape: Vec<i64> = Vec::new();
+    let mut out_shape: Vec<i64> = Vec::with_capacity(out_chars.len());
     for &c in &out_chars {
         if let Some(pos) = a_chars.iter().position(|&x| x == c) {
             out_shape.push(a.inner.sizes[pos]);

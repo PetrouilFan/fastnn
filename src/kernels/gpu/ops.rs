@@ -34,6 +34,7 @@ fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("add", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::add_kernel: CPU fallback dispatch failed")
 }
 
 fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -64,6 +65,7 @@ fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("sub", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::sub_kernel: CPU fallback dispatch failed")
 }
 
 fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -94,6 +96,7 @@ fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("mul", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::mul_kernel: CPU fallback dispatch failed")
 }
 
 fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -124,6 +127,7 @@ fn div_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("div", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::div_kernel: CPU fallback dispatch failed")
 }
 
 fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -135,6 +139,7 @@ fn neg_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("neg", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::neg_kernel: CPU fallback dispatch failed")
 }
 
 fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -146,6 +151,7 @@ fn abs_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("abs", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::abs_kernel: CPU fallback dispatch failed")
 }
 
 fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -157,6 +163,7 @@ fn exp_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("exp", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::exp_kernel: CPU fallback dispatch failed")
 }
 
 fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -168,6 +175,7 @@ fn log_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("log", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::log_kernel: CPU fallback dispatch failed")
 }
 
 fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -179,6 +187,7 @@ fn sqrt_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("sqrt", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::sqrt_kernel: CPU fallback dispatch failed")
 }
 
 fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -190,6 +199,7 @@ fn relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("relu", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::relu_kernel: CPU fallback dispatch failed")
 }
 
 fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -231,6 +241,7 @@ fn gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("gelu", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::gelu_kernel: CPU fallback dispatch failed")
 }
 
 fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -242,6 +253,7 @@ fn sigmoid_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("sigmoid", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::sigmoid_kernel: CPU fallback dispatch failed")
 }
 
 fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -253,6 +265,7 @@ fn tanh_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("tanh", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::tanh_kernel: CPU fallback dispatch failed")
 }
 
 fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -264,6 +277,7 @@ fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     // Both are CPU - delegate to optimized CPU kernel
     crate::dispatcher::dispatch("silu", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::silu_kernel: CPU fallback dispatch failed")
 }
 
 fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -509,6 +523,36 @@ fn transpose_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![a.transpose(dim0, dim1)]
 }
 
+fn embedding_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+    let weight = args[0];
+    let indices = args[1];
+
+    // Check if either tensor is on GPU
+    let device_id = match (weight.device(), indices.device()) {
+        (Device::Wgpu(id), _) => Some(id),
+        (_, Device::Wgpu(id)) => Some(id),
+        _ => None,
+    };
+
+    if let Some(device_id) = device_id {
+        let weight_gpu = match weight.device() {
+            Device::Cpu => weight.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => weight.to_gpu(device_id),
+            _ => weight.clone(),
+        };
+        let indices_gpu = match indices.device() {
+            Device::Cpu => indices.to_gpu(device_id),
+            Device::Wgpu(id) if id != device_id => indices.to_gpu(device_id),
+            _ => indices.clone(),
+        };
+        return gpu::gpu_embedding(&weight_gpu, &indices_gpu, device_id);
+    }
+
+    // Both are CPU - delegate to optimized CPU kernel
+    crate::dispatcher::dispatch("embedding", crate::dispatcher::DispatchKey::Cpu, args)
+        .expect("gpu::embedding_kernel: CPU fallback dispatch failed")
+}
+
 #[ctor::ctor]
 fn register_kernels() {
     register("add", DispatchKey::Wgpu, add_kernel as KernelFn);
@@ -563,4 +607,9 @@ fn register_kernels() {
         div_scalar_kernel as KernelFn,
     );
     register("transpose", DispatchKey::Wgpu, transpose_kernel as KernelFn);
+    register(
+        "embedding",
+        DispatchKey::Wgpu,
+        embedding_kernel as KernelFn,
+    );
 }

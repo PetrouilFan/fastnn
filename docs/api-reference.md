@@ -178,7 +178,9 @@ fnn.huber_loss(pred, target, delta=1.0)    # Huber loss (smooth L1)
 | `fnn.AdaptiveAvgPool2d(output_h, output_w)` | Adaptive average pooling |
 | `fnn.Flatten(start_dim, end_dim)` | Flatten layer |
 | `fnn.ResidualBlock(conv1, bn1, relu, conv2, bn2, downsample)` | ResNet BasicBlock |
-| `fnn.FusedConvBnSilu(...)` | Fused Conv+BN+SiLU |
+| `fnn.FusedConvBn(conv, bn)` | Fused Conv2d+BatchNorm2d for inference |
+| `fnn.FusedConvBnRelu(conv, bn)` | Fused Conv+BN+ReLU |
+| `fnn.FusedConvBnGelu(conv, bn)` | Fused Conv+BN+GELU |
 | `fnn.Sequential(layers)` | Sequential container |
 | `fnn.ModuleList(modules)` | Module list container |
 

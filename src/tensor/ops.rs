@@ -20,8 +20,8 @@ use std::arch::x86_64::{
 
 impl Tensor {
     pub fn add(&self, other: &Tensor) -> Tensor {
-        let _ = Self::broadcast_shapes(&self.shape(), &other.shape())
-            .unwrap_or_else(|e| panic!("{}", e));
+        Self::broadcast_shapes(&self.shape(), &other.shape())
+            .expect("Tensor::add: shape broadcast failed");
         // Fast path: CPU contiguous same-shape add, skip dispatch overhead
         if self.device() == Device::Cpu
             && other.device() == Device::Cpu
@@ -99,7 +99,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("add", dispatch_key, &[self, other]);
+        let result = dispatch("add", dispatch_key, &[self, other])
+            .expect("Tensor::add: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -637,7 +638,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("sub", dispatch_key, &[self, other]);
+        let result = dispatch("sub", dispatch_key, &[self, other])
+            .expect("Tensor::sub: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -731,7 +733,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("mul", dispatch_key, &[self, other]);
+        let result = dispatch("mul", dispatch_key, &[self, other])
+            .expect("Tensor::mul: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -755,7 +758,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("div", dispatch_key, &[self, other]);
+        let result = dispatch("div", dispatch_key, &[self, other])
+            .expect("Tensor::div: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -792,7 +796,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("matmul", dispatch_key, &[self, other]);
+        let result = dispatch("matmul", dispatch_key, &[self, other])
+            .expect("Tensor::matmul: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -866,7 +871,8 @@ impl Tensor {
 
     pub fn neg(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("neg", dispatch_key, &[self]);
+        let result = dispatch("neg", dispatch_key, &[self])
+            .expect("Tensor::neg: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -886,7 +892,7 @@ impl Tensor {
                 let inner = Arc::make_mut(&mut output.inner);
                 let storage = Arc::make_mut(&mut inner.storage);
                 let Storage::Cpu(cpu_storage) = storage else {
-                    panic!()
+                    panic!("expected CPU storage for relu fast path")
                 };
                 let out_data = Arc::make_mut(&mut cpu_storage.data);
                 let a_ptr = self.data_ptr_f32();
@@ -909,7 +915,8 @@ impl Tensor {
         }
 
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("relu", dispatch_key, &[self]);
+        let result = dispatch("relu", dispatch_key, &[self])
+            .expect("Tensor::relu: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -922,7 +929,8 @@ impl Tensor {
 
     pub fn exp(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("exp", dispatch_key, &[self]);
+        let result = dispatch("exp", dispatch_key, &[self])
+            .expect("Tensor::exp: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -935,7 +943,8 @@ impl Tensor {
 
     pub fn ln(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("log", dispatch_key, &[self]);
+        let result = dispatch("log", dispatch_key, &[self])
+            .expect("Tensor::log: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -948,7 +957,8 @@ impl Tensor {
 
     pub fn sigmoid(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("sigmoid", dispatch_key, &[self]);
+        let result = dispatch("sigmoid", dispatch_key, &[self])
+            .expect("Tensor::sigmoid: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -961,7 +971,8 @@ impl Tensor {
 
     pub fn tanh(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("tanh", dispatch_key, &[self]);
+        let result = dispatch("tanh", dispatch_key, &[self])
+            .expect("Tensor::tanh: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -974,7 +985,8 @@ impl Tensor {
 
     pub fn silu(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("silu", dispatch_key, &[self]);
+        let result = dispatch("silu", dispatch_key, &[self])
+            .expect("Tensor::silu: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -987,7 +999,8 @@ impl Tensor {
 
     pub fn gelu(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("gelu", dispatch_key, &[self]);
+        let result = dispatch("gelu", dispatch_key, &[self])
+            .expect("Tensor::gelu: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1001,7 +1014,8 @@ impl Tensor {
     pub fn leaky_relu(&self, negative_slope: f32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let slope_tensor = Tensor::from_scalar(negative_slope);
-        let result = dispatch("leaky_relu", dispatch_key, &[self, &slope_tensor]);
+        let result = dispatch("leaky_relu", dispatch_key, &[self, &slope_tensor])
+            .expect("Tensor::leaky_relu: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1020,7 +1034,8 @@ impl Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let beta_t = Tensor::from_scalar(beta);
         let threshold_t = Tensor::from_scalar(threshold);
-        let result = dispatch("softplus", dispatch_key, &[self, &beta_t, &threshold_t]);
+        let result = dispatch("softplus", dispatch_key, &[self, &beta_t, &threshold_t])
+            .expect("Tensor::softplus: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1038,7 +1053,8 @@ impl Tensor {
 
     pub fn hardswish(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("hardswish", dispatch_key, &[self]);
+        let result = dispatch("hardswish", dispatch_key, &[self])
+            .expect("Tensor::hardswish: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1052,7 +1068,8 @@ impl Tensor {
     pub fn elu(&self, alpha: f32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let alpha_tensor = Tensor::from_scalar(alpha);
-        let result = dispatch("elu", dispatch_key, &[self, &alpha_tensor]);
+        let result = dispatch("elu", dispatch_key, &[self, &alpha_tensor])
+            .expect("Tensor::elu: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1065,7 +1082,8 @@ impl Tensor {
 
     pub fn softmax(&self, dim: i32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("softmax", dispatch_key, &[self, &dim_scalar(dim)]);
+        let result = dispatch("softmax", dispatch_key, &[self, &dim_scalar(dim)])
+            .expect("Tensor::softmax: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1082,7 +1100,8 @@ impl Tensor {
 
     pub fn sqrt(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("sqrt", dispatch_key, &[self]);
+        let result = dispatch("sqrt", dispatch_key, &[self])
+            .expect("Tensor::sqrt: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1110,7 +1129,8 @@ impl Tensor {
             Some(b) => vec![self, weight, b],
             None => vec![self, weight],
         };
-        let result = dispatch("fused_linear_gelu", dispatch_key, &args);
+        let result = dispatch("fused_linear_gelu", dispatch_key, &args)
+            .expect("Tensor::fused_linear_gelu: dispatch failed");
         result[0].clone()
     }
 
@@ -1124,7 +1144,8 @@ impl Tensor {
                 &Tensor::from_scalar(min_val),
                 &Tensor::from_scalar(max_val),
             ],
-        );
+        )
+        .expect("Tensor::clamp: dispatch failed");
         let result = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1137,7 +1158,8 @@ impl Tensor {
 
     pub fn pow(&self, exponent: f32) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("pow", dispatch_key, &[self, &Tensor::from_scalar(exponent)]);
+        let result = dispatch("pow", dispatch_key, &[self, &Tensor::from_scalar(exponent)])
+            .expect("Tensor::pow: dispatch failed");
         let result = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1150,7 +1172,8 @@ impl Tensor {
 
     pub fn abs(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("abs", dispatch_key, &[self]);
+        let result = dispatch("abs", dispatch_key, &[self])
+            .expect("Tensor::abs: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1167,7 +1190,8 @@ impl Tensor {
             "log_softmax",
             dispatch_key,
             &[self, &Tensor::from_scalar(dim as f32)],
-        );
+        )
+        .expect("Tensor::log_softmax: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);

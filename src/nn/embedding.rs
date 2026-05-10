@@ -1,4 +1,4 @@
-use crate::dispatcher::{dispatch, DispatchKey};
+use crate::dispatcher::{device_to_dispatch_key, dispatch};
 use crate::tensor::Tensor;
 use crate::{
     impl_training_state,
@@ -34,7 +34,9 @@ impl Embedding {
 
 impl Module for Embedding {
     fn forward(&self, indices: &Tensor) -> Tensor {
-        let result = dispatch("embedding", DispatchKey::Cpu, &[&self.weight, indices]);
+        let key = device_to_dispatch_key(self.weight.device());
+        let result = dispatch("embedding", key, &[&self.weight, indices])
+            .expect("Embedding::forward: dispatch failed");
 
         result[0].clone()
     }

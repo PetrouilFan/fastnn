@@ -325,7 +325,8 @@ impl Node for GeluBackward {
             "gelu_backward",
             dispatch_key,
             &[&grad, x],
-        );
+        )
+        .expect("GeluBackward::apply: dispatch failed");
         vec![Some(result[0].clone())]
     }
 
@@ -458,7 +459,8 @@ impl Node for SiLUBackward {
             "silu_backward",
             dispatch_key,
             &[&self.input, &s, &grad],
-        );
+        )
+        .expect("SiLUBackward::apply: dispatch failed");
         vec![result.first().cloned()]
     }
 
@@ -509,7 +511,8 @@ impl Node for SoftmaxBackward {
             "softmax_backward",
             dispatch_key,
             &[&s, &grad, &dim_tensor],
-        );
+        )
+        .expect("SoftmaxBackward::apply: dispatch failed");
         vec![result.first().cloned()]
     }
 

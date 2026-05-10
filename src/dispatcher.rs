@@ -58,8 +58,8 @@ pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> FastnnResul
     Ok(unsafe { kernel(args) })
 }
 
-pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> Vec<Tensor> {
-    try_dispatch(op, key, args).expect("dispatch failed")
+pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> FastnnResult<Vec<Tensor>> {
+    try_dispatch(op, key, args)
 }
 
 pub fn list_registered_ops() -> Vec<String> {

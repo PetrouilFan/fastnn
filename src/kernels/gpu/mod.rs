@@ -756,6 +756,10 @@ fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
 
     let numel = cpu_tensor.inner.numel() as usize;
     let ptr = cpu_tensor.data_ptr_f32();
+    // SAFETY: ptr comes from a valid f32 tensor allocation, and numel matches the
+    // tensor's element count. from_raw_parts requires the pointer be valid for the
+    // entire length, which is guaranteed by the Tensor API (numel is verified on
+    // construction and ptr points to the underlying storage).
     unsafe { std::slice::from_raw_parts(ptr, numel).to_vec() }
 }
 
@@ -1740,16 +1744,164 @@ fn run_reduction_kernel(
         }
         ctx.queue.submit([encoder.finish()]);
     } else {
-        // For other cases, fall back to CPU implementation
-        // Move input to CPU, compute, then move result back to GPU
-        let input_cpu = input.to_cpu();
-        let result_cpu = match op {
-            "sum" => input_cpu.sum(dim as i32, keepdim),
-            "mean" => input_cpu.mean(dim as i32, keepdim),
-            "max" => input_cpu.max(dim as i32, keepdim),
-            _ => input_cpu.sum(dim as i32, keepdim),
+        // N-dimensional reduction on GPU via flattening to [outer, reduce, inner]
+        let _outer_size: usize = input_shape[..dim].iter().copied().product::<i64>() as usize;
+        let reduce_size: usize = input_shape[dim] as usize;
+        let inner_size: usize = input_shape[dim + 1..].iter().copied().product::<i64>() as usize;
+        let reduce_stride: usize = inner_size;
+
+        let reduce_shader = match op {
+            "sum" => format!(
+                r#"
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let out_idx = global_id.x;
+    if (out_idx >= {output_numel}) {{ return; }}
+
+    let outer_idx = out_idx / {inner_size};
+    let inner_idx = out_idx % {inner_size};
+    let base_idx = outer_idx * {reduce_size} * {reduce_stride} + inner_idx;
+
+    var result = 0.0;
+    for (var i = 0u; i < {reduce_size}; i = i + 1u) {{
+        let idx = base_idx + i * {reduce_stride};
+        result += input[idx];
+    }}
+    output[out_idx] = result;
+}}
+"#,
+                output_numel = output_numel,
+                reduce_size = reduce_size,
+                reduce_stride = reduce_stride,
+                inner_size = inner_size,
+            ),
+            "mean" => format!(
+                r#"
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let out_idx = global_id.x;
+    if (out_idx >= {output_numel}) {{ return; }}
+
+    let outer_idx = out_idx / {inner_size};
+    let inner_idx = out_idx % {inner_size};
+    let base_idx = outer_idx * {reduce_size} * {reduce_stride} + inner_idx;
+
+    var result = 0.0;
+    for (var i = 0u; i < {reduce_size}; i = i + 1u) {{
+        let idx = base_idx + i * {reduce_stride};
+        result += input[idx];
+    }}
+    output[out_idx] = result / {reduce_size_f};
+}}
+"#,
+                output_numel = output_numel,
+                reduce_size = reduce_size,
+                reduce_stride = reduce_stride,
+                inner_size = inner_size,
+                reduce_size_f = reduce_size as f32,
+            ),
+            "max" => format!(
+                r#"
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let out_idx = global_id.x;
+    if (out_idx >= {output_numel}) {{ return; }}
+
+    let outer_idx = out_idx / {inner_size};
+    let inner_idx = out_idx % {inner_size};
+    let base_idx = outer_idx * {reduce_size} * {reduce_stride} + inner_idx;
+
+    var result = -3.4028235e38;
+    for (var i = 0u; i < {reduce_size}; i = i + 1u) {{
+        let idx = base_idx + i * {reduce_stride};
+        let val = input[idx];
+        if (val > result) {{
+            result = val;
+        }}
+    }}
+    output[out_idx] = result;
+}}
+"#,
+                output_numel = output_numel,
+                reduce_size = reduce_size,
+                reduce_stride = reduce_stride,
+                inner_size = inner_size,
+            ),
+            "min" => format!(
+                r#"
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
+    let out_idx = global_id.x;
+    if (out_idx >= {output_numel}) {{ return; }}
+
+    let outer_idx = out_idx / {inner_size};
+    let inner_idx = out_idx % {inner_size};
+    let base_idx = outer_idx * {reduce_size} * {reduce_stride} + inner_idx;
+
+    var result = 3.4028235e38;
+    for (var i = 0u; i < {reduce_size}; i = i + 1u) {{
+        let idx = base_idx + i * {reduce_stride};
+        let val = input[idx];
+        if (val < result) {{
+            result = val;
+        }}
+    }}
+    output[out_idx] = result;
+}}
+"#,
+                output_numel = output_numel,
+                reduce_size = reduce_size,
+                reduce_stride = reduce_stride,
+                inner_size = inner_size,
+            ),
+            _ => panic!("Unknown reduction op: {}", op),
         };
-        return result_cpu.to_gpu(device_id);
+
+        let pipeline = ctx.create_pipeline(name, &reduce_shader, input.dtype());
+
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(name),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(name) });
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(name),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            let num_workgroups = (output_numel as u64).div_ceil(256) as u32;
+            let x_groups = num_workgroups.min(65535);
+            let y_groups = (num_workgroups as u64).div_ceil(65536) as u32;
+            compute_pass.dispatch_workgroups(x_groups, y_groups.max(1), 1);
+        }
+        ctx.queue.submit([encoder.finish()]);
     }
 
     // Create tensor with GPU storage
@@ -2241,4 +2393,140 @@ pub fn gpu_div_scalar(input: &Tensor, scalar: f32, device_id: usize) -> Vec<Tens
         "div_scalar",
         device_id,
     )]
+}
+
+const EMBEDDING_SHADER: &str = r#"
+struct Params {
+    numel: u32,
+    embedding_dim: u32,
+    num_embeddings: u32,
+    pad0: u32,
+}
+
+@group(0) @binding(0) var<storage, read> indices: array<f32>;
+@group(0) @binding(1) var<storage, read> weight: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let flat_idx = global_id.x;
+    if (flat_idx >= params.numel) { return; }
+
+    let embedding_dim = params.embedding_dim;
+    let num_embeddings = params.num_embeddings;
+    let col = flat_idx % embedding_dim;
+    let row = flat_idx / embedding_dim;
+    let idx = u32(indices[row]);
+    if (idx < num_embeddings) {
+        output[flat_idx] = weight[idx * embedding_dim + col];
+    } else {
+        output[flat_idx] = 0.0;
+    }
+}
+"#;
+
+pub fn gpu_embedding(weight: &Tensor, indices: &Tensor, device_id: usize) -> Vec<Tensor> {
+    let ctx = get_context(device_id);
+    let weight_shape = weight.shape_ref();
+    let num_embeddings = weight_shape[0] as u32;
+    let embedding_dim = weight_shape[1] as u32;
+
+    let indices_shape = indices.shape_ref();
+    let num_indices = indices_shape.iter().product::<i64>() as usize;
+    let numel = num_indices * embedding_dim as usize;
+
+    // Output shape: indices_shape + [embedding_dim]
+    let mut output_shape: Vec<i64> = indices_shape.to_vec();
+    output_shape.push(embedding_dim as i64);
+
+    // Get or create weight GPU buffer
+    let weight_buffer = if let Some(buffer) = weight.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
+        let weight_data = get_tensor_data(weight);
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&weight_data, "embedding_weight");
+        weight
+            .inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
+
+    // Get or create indices GPU buffer
+    let indices_buffer = if let Some(buffer) = indices.inner.get_or_create_gpu_buffer(device_id) {
+        buffer
+    } else {
+        let indices_data = get_tensor_data(indices);
+        let gpu_buffer = ctx.create_gpu_buffer_from_data(&indices_data, "embedding_indices");
+        indices
+            .inner
+            .cache_gpu_buffer(device_id, gpu_buffer.buffer.clone());
+        gpu_buffer.buffer
+    };
+
+    // Create output buffer
+    let output_buffer = ctx.create_buffer(numel * 4, "embedding_output");
+
+    // Create params uniform buffer
+    let params_data: Vec<u32> = vec![numel as u32, embedding_dim, num_embeddings, 0];
+    let params_buffer = ctx.create_uniform_buffer_u32(&params_data, "embedding_params");
+
+    // Create pipeline
+    let pipeline = ctx.create_pipeline("embedding", EMBEDDING_SHADER, DType::F32);
+
+    // Create bind group
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("embedding"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: indices_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: weight_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: output_buffer.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params_buffer.buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    // Dispatch
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("embedding"),
+        });
+    {
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("embedding"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(&pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        let num_workgroups = (numel as u64).div_ceil(64) as u32;
+        let x_groups = num_workgroups.min(65535);
+        compute_pass.dispatch_workgroups(x_groups, 1, 1);
+    }
+    ctx.queue.submit([encoder.finish()]);
+
+    // Create output tensor with GPU storage
+    let storage = Arc::new(Storage::Wgpu(GpuStorage {
+        buffer: output_buffer.buffer,
+        nbytes: numel * 4,
+        device_id,
+        staging: RwLock::new(None),
+    }));
+    vec![Tensor::new(crate::tensor::TensorImpl::new(
+        storage,
+        output_shape.iter().copied().collect(),
+        DType::F32,
+    ))]
 }

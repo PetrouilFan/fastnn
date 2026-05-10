@@ -116,7 +116,7 @@ pub struct UnsqueezeBackward {
 
 impl UnsqueezeBackward {
     pub fn new(input: Tensor, dim: usize) -> Self {
-        let mut next_edges = Vec::new();
+        let mut next_edges = Vec::with_capacity(1);
         if let Some(grad_fn) = input.grad_fn() {
             next_edges.push(Edge(grad_fn, 0));
         }

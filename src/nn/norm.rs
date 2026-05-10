@@ -10,8 +10,8 @@ use std::sync::Arc;
 pub struct LayerNorm {
     #[allow(dead_code)]
     pub normalized_shape: i64,
-    pub weight: Option<Tensor>,
-    pub bias: Option<Tensor>,
+    pub weight: Tensor,
+    pub bias: Tensor,
     pub eps: f64,
     training: TrainingState,
     eps_scalar: Tensor,
@@ -26,8 +26,8 @@ impl LayerNorm {
         let bias = Tensor::from_vec(bias_data, vec![normalized_shape]).requires_grad_(true);
 
         LayerNorm {
-            weight: Some(weight),
-            bias: Some(bias),
+            weight,
+            bias,
             normalized_shape,
             eps,
             training: TrainingState::new(),
@@ -42,20 +42,15 @@ impl Module for LayerNorm {
         let _ndim = shape.len();
 
         // Use references to avoid cloning weight/bias on every forward pass
-        let weight = self
-            .weight
-            .as_ref()
-            .unwrap_or_else(|| panic!("LayerNorm weight is required but was None"));
-        let bias = self
-            .bias
-            .as_ref()
-            .unwrap_or_else(|| panic!("LayerNorm bias is required but was None"));
+        let weight = &self.weight;
+        let bias = &self.bias;
 
         let result = dispatch(
             "layer_norm",
             DispatchKey::Cpu,
             &[x, x, weight, bias, &self.eps_scalar],
-        );
+        )
+        .expect("LayerNorm::forward: dispatch failed");
 
         let output = result[0].clone();
         let mean = result[1].clone();
@@ -92,34 +87,19 @@ impl Module for LayerNorm {
     }
 
     fn parameters(&self) -> Vec<Tensor> {
-        let mut params = vec![];
-        if let Some(w) = &self.weight {
-            params.push(w.clone());
-        }
-        if let Some(b) = &self.bias {
-            params.push(b.clone());
-        }
-        params
+        vec![self.weight.clone(), self.bias.clone()]
     }
 
     fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        let mut params = vec![];
-        if let Some(w) = &self.weight {
-            params.push(("weight".to_string(), w.clone()));
-        }
-        if let Some(b) = &self.bias {
-            params.push(("bias".to_string(), b.clone()));
-        }
-        params
+        vec![
+            ("weight".to_string(), self.weight.clone()),
+            ("bias".to_string(), self.bias.clone()),
+        ]
     }
 
     fn zero_grad(&self) {
-        if let Some(w) = &self.weight {
-            clear_grad(w);
-        }
-        if let Some(b) = &self.bias {
-            clear_grad(b);
-        }
+        clear_grad(&self.weight);
+        clear_grad(&self.bias);
     }
 
     impl_training_state!(self, self.training);
@@ -220,7 +200,8 @@ impl Module for BatchNorm1d {
                 training_flag,
                 &self.eps_scalar,
             ],
-        );
+        )
+        .expect("BatchNorm1d::forward: dispatch failed");
 
         let output = result[0].clone();
 
@@ -339,7 +320,8 @@ impl Module for RMSNorm {
             "rms_norm",
             dispatch_key,
             &[x, &self.weight, &self.eps_scalar],
-        );
+        )
+        .expect("RMSNorm::forward: dispatch failed");
         result[0].clone()
     }
 
@@ -544,7 +526,8 @@ impl Module for BatchNorm2d {
                 training_flag,
                 &self.eps_scalar,
             ],
-        );
+        )
+        .expect("BatchNorm2d::forward: dispatch failed");
 
         let output = result[0].clone();
 

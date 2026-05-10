@@ -672,7 +672,8 @@ cargo bench --bench packed_bench
 - [ ] FlashAttention SIMD optimization (AVX2/AVX512 block kernels)
 - [ ] True process-based multiprocessing for DataLoader (requires PyTensor pickle support or shared memory)
 - [ ] Full fused GPU optimizer kernels (Muon, Lion, RMSprop, SGD)
-- [ ] GPU N-D reductions (beyond 2D)
+- [x] GPU N-D reductions (beyond 2D)
+- [x] GPU embedding/gather kernel
 
 ---
 
