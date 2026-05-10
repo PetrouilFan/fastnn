@@ -317,7 +317,7 @@ struct MaxPool2d {
 
 impl_nn_module!(MaxPool2d {
     #[new]
-    #[pyo3(signature = (kernel_size, stride=2, padding=1, dilation=1))]
+    #[pyo3(signature = (kernel_size, stride=2, padding=0, dilation=1))]
     fn new(kernel_size: i64, stride: i64, padding: i64, dilation: i64) -> Self {
         MaxPool2d {
             inner: core_nn::pooling::MaxPool2d::new(kernel_size, stride, padding, dilation),
