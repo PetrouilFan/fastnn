@@ -347,6 +347,32 @@ RMSprop = _core.PyRMSprop
 Elu = _core.Elu
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
 
+# Packed linear
+Linear4 = _core.Linear4
+Linear8 = _core.Linear8
+Linear16 = _core.Linear16
+Linear32 = _core.Linear32
+
+# Packed tensors
+PackedTensor4 = _core.PackedTensor4
+PackedTensor8 = _core.PackedTensor8
+PackedTensor16 = _core.PackedTensor16
+PackedTensor32 = _core.PackedTensor32
+
+# Quantized tensors
+QuantizedTensor = _core.QuantizedTensor
+
+# Master weight optimizers
+MasterWeightOptimizer4 = _core.MasterWeightOptimizer4
+MasterWeightOptimizer8 = _core.MasterWeightOptimizer8
+MasterWeightOptimizer16 = _core.MasterWeightOptimizer16
+MasterWeightOptimizer32 = _core.MasterWeightOptimizer32
+
+# Backend control
+use_wgpu = _core.use_wgpu
+use_cpu = _core.use_cpu
+is_wgpu = _core.is_wgpu
+
 
 def import_onnx(onnx_path: str, fnn_path: str):
     """Import an ONNX model and save it in fastnn format.

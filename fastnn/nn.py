@@ -38,6 +38,12 @@ FusedConvBnGelu = _core.FusedConvBnGelu
 # Python layers
 from fastnn.layers import Flatten, PySequential, BasicBlock
 
+from fastnn._core import (
+    Linear4, Linear8, Linear16, Linear32,
+    PackedMultiHeadAttention4, PackedMultiHeadAttention8,
+    PackedTransformerEncoder4, PackedTransformerEncoder8,
+)
+
 
 # Model classes
 def MLP(*args, **kwargs):

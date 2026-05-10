@@ -880,3 +880,95 @@ impl_nn_module!(PyTransformerEncoder {
     }
 });
 
+// ---- PackedMultiHeadAttention (4-bit, U4x8) ----
+
+#[pyclass]
+pub struct PyPackedMultiHeadAttention4 {
+    inner: crate::nn::attention::PackedMultiHeadAttention<crate::dtypes::U4x8>,
+}
+
+impl_nn_module!(PyPackedMultiHeadAttention4 {
+    #[new]
+    #[pyo3(signature = (d_model, num_heads, dropout_p = 0.0, causal = false))]
+    fn new(d_model: i64, num_heads: i64, dropout_p: f64, causal: bool) -> Self {
+        PyPackedMultiHeadAttention4 {
+            inner: crate::nn::attention::PackedMultiHeadAttention::new(
+                d_model, num_heads, dropout_p as f32, causal
+            )
+        }
+    }
+});
+
+// ---- PackedMultiHeadAttention (8-bit, U8x4) ----
+
+#[pyclass]
+pub struct PyPackedMultiHeadAttention8 {
+    inner: crate::nn::attention::PackedMultiHeadAttention<crate::dtypes::U8x4>,
+}
+
+impl_nn_module!(PyPackedMultiHeadAttention8 {
+    #[new]
+    #[pyo3(signature = (d_model, num_heads, dropout_p = 0.0, causal = false))]
+    fn new(d_model: i64, num_heads: i64, dropout_p: f64, causal: bool) -> Self {
+        PyPackedMultiHeadAttention8 {
+            inner: crate::nn::attention::PackedMultiHeadAttention::new(
+                d_model, num_heads, dropout_p as f32, causal
+            )
+        }
+    }
+});
+
+// ---- PackedTransformerEncoder (4-bit, U4x8) ----
+
+#[pyclass]
+pub struct PyPackedTransformerEncoder4 {
+    inner: crate::nn::transformer::PackedTransformerEncoder<crate::dtypes::U4x8>,
+}
+
+impl_nn_module!(PyPackedTransformerEncoder4 {
+    #[new]
+    #[pyo3(signature = (vocab_size, max_seq_len, d_model, num_heads, num_layers, ff_dim, num_classes, dropout_p = 0.0))]
+    fn new(vocab_size: i64, max_seq_len: i64, d_model: i64, num_heads: i64,
+           num_layers: i64, ff_dim: i64, num_classes: i64, dropout_p: f64) -> Self {
+        PyPackedTransformerEncoder4 {
+            inner: crate::nn::transformer::PackedTransformerEncoder::new(
+                vocab_size,
+                max_seq_len,
+                d_model,
+                num_heads,
+                num_layers,
+                ff_dim,
+                num_classes,
+                dropout_p as f32,
+            )
+        }
+    }
+});
+
+// ---- PackedTransformerEncoder (8-bit, U8x4) ----
+
+#[pyclass]
+pub struct PyPackedTransformerEncoder8 {
+    inner: crate::nn::transformer::PackedTransformerEncoder<crate::dtypes::U8x4>,
+}
+
+impl_nn_module!(PyPackedTransformerEncoder8 {
+    #[new]
+    #[pyo3(signature = (vocab_size, max_seq_len, d_model, num_heads, num_layers, ff_dim, num_classes, dropout_p = 0.0))]
+    fn new(vocab_size: i64, max_seq_len: i64, d_model: i64, num_heads: i64,
+           num_layers: i64, ff_dim: i64, num_classes: i64, dropout_p: f64) -> Self {
+        PyPackedTransformerEncoder8 {
+            inner: crate::nn::transformer::PackedTransformerEncoder::new(
+                vocab_size,
+                max_seq_len,
+                d_model,
+                num_heads,
+                num_layers,
+                ff_dim,
+                num_classes,
+                dropout_p as f32,
+            )
+        }
+    }
+});
+
