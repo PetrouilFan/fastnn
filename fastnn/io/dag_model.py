@@ -274,6 +274,25 @@ class DAGModel:
             elif op_type in ("Identity", "identityop", "Dropout", "dropout"):
                 return [tensors[0]]
             elif op_type == "Resize":
+                x = tensors[0]
+                mode = node.get("mode", "nearest").lower()
+                scales = node.get("scales", None)
+                if scales is not None and hasattr(x, "numpy"):
+                    x_np = x.numpy()
+                    if len(scales) >= 4:
+                        scale_h, scale_w = scales[2], scales[3]
+                        import math
+                        new_h = int(x_np.shape[2] * scale_h)
+                        new_w = int(x_np.shape[3] * scale_w)
+                        result_np = np.zeros((x_np.shape[0], x_np.shape[1], new_h, new_w), dtype=x_np.dtype)
+                        for b in range(x_np.shape[0]):
+                            for c in range(x_np.shape[1]):
+                                for h in range(new_h):
+                                    for w in range(new_w):
+                                        src_h = min(int(h / scale_h), x_np.shape[2] - 1)
+                                        src_w = min(int(w / scale_w), x_np.shape[3] - 1)
+                                        result_np[b, c, h, w] = x_np[b, c, src_h, src_w]
+                        return [fnn.tensor(result_np, list(result_np.shape))]
                 return [tensors[0]]
             elif op_type in ("ReduceMean",):
                 axes = node.get("axes", None)
@@ -399,6 +418,16 @@ class DAGModel:
                 logger.warning("Control flow op %s not yet supported, passing through", op_type)
                 return [tensors[0]] if tensors else None
             elif op_type in ("Erf", "erfop"):
+                x = tensors[0]
+                if hasattr(x, "numpy"):
+                    x_np = x.numpy()
+                    signs = np.where(x_np >= 0, 1.0, -1.0)
+                    x_abs = np.abs(x_np)
+                    t = 1.0 / (1.0 + 0.3275911 * x_abs)
+                    y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * np.exp(-x_abs * x_abs)
+                    result_np = signs * y
+                    result = fnn.tensor(result_np, list(x.shape))
+                    return [result]
                 return [tensors[0]]
             elif op_type in ("Pow", "elementwisepow"):
                 return [fnn.pow(tensors[0], tensors[1])] if len(tensors) > 1 else [tensors[0]]
@@ -415,6 +444,232 @@ class DAGModel:
                 if max_val is not None:
                     result = fnn.clamp(result, max=max_val)
                 return [result]
+            elif op_type in ("Abs",):
+                return [fnn.abs(tensors[0])]
+            elif op_type in ("Elu",):
+                alpha = node.get("alpha", 1.0)
+                return [fnn.elu(tensors[0], alpha)]
+            elif op_type in ("Ceil",):
+                return [fnn.tensor(np.ceil(tensors[0].numpy()).astype(tensors[0].numpy().dtype), list(tensors[0].shape))]
+            elif op_type in ("Floor",):
+                return [fnn.tensor(np.floor(tensors[0].numpy()).astype(tensors[0].numpy().dtype), list(tensors[0].shape))]
+            elif op_type in ("Round",):
+                return [fnn.tensor(np.round(tensors[0].numpy()).astype(tensors[0].numpy().dtype), list(tensors[0].shape))]
+            elif op_type in ("Sign",):
+                return [fnn.tensor(np.sign(tensors[0].numpy()), list(tensors[0].shape))]
+            elif op_type in ("Reciprocal",):
+                return [fnn.div(fnn.tensor(np.array(1.0, dtype=np.float32), []), tensors[0])]
+            elif op_type in ("And",):
+                return [fnn.tensor(np.logical_and(tensors[0].numpy(), tensors[1].numpy()).astype(np.bool_), list(tensors[0].shape))]
+            elif op_type in ("Or",):
+                return [fnn.tensor(np.logical_or(tensors[0].numpy(), tensors[1].numpy()).astype(np.bool_), list(tensors[0].shape))]
+            elif op_type in ("Xor",):
+                return [fnn.tensor(np.logical_xor(tensors[0].numpy(), tensors[1].numpy()).astype(np.bool_), list(tensors[0].shape))]
+            elif op_type in ("Not",):
+                return [fnn.tensor(np.logical_not(tensors[0].numpy()).astype(np.bool_), list(tensors[0].shape))]
+            elif op_type in ("Equal",):
+                return [fnn.tensor(np.equal(tensors[0].numpy(), tensors[1].numpy()), list(tensors[0].shape))]
+            elif op_type in ("Greater",):
+                return [fnn.tensor(np.greater(tensors[0].numpy(), tensors[1].numpy()), list(tensors[0].shape))]
+            elif op_type in ("Less",):
+                return [fnn.tensor(np.less(tensors[0].numpy(), tensors[1].numpy()), list(tensors[0].shape))]
+            elif op_type in ("IsNaN",):
+                return [fnn.tensor(np.isnan(tensors[0].numpy()), list(tensors[0].shape))]
+            elif op_type in ("IsInf",):
+                return [fnn.tensor(np.isinf(tensors[0].numpy()), list(tensors[0].shape))]
+            elif op_type in ("Expand",):
+                shape = tensors[1].numpy().astype(int).tolist() if len(tensors) > 1 else node.get("shape", list(tensors[0].shape))
+                result_np = np.broadcast_to(tensors[0].numpy(), shape)
+                return [fnn.tensor(result_np, list(result_np.shape))]
+            elif op_type in ("CumSum",):
+                axis = node.get("axis", 0)
+                return [fnn.tensor(np.cumsum(tensors[0].numpy(), axis=axis), list(tensors[0].shape))]
+            elif op_type in ("Compress",):
+                axis = node.get("axis", None)
+                condition = tensors[1].numpy().astype(bool) if len(tensors) > 1 else np.array([True])
+                result = np.compress(condition, tensors[0].numpy(), axis=axis)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("DepthToSpace",):
+                blocksize = node.get("blocksize", 1)
+                mode = node.get("mode", "DCR")
+                x = tensors[0].numpy()
+                b, c, h, w = x.shape
+                if mode == "DCR":
+                    x = x.reshape(b, blocksize, blocksize, c // (blocksize**2), h, w).transpose(0, 3, 4, 1, 5, 2)
+                else:
+                    x = x.reshape(b, c // (blocksize**2), blocksize, blocksize, h, w).transpose(0, 1, 4, 2, 5, 3)
+                result = x.reshape(b, c // (blocksize**2), h * blocksize, w * blocksize)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("SpaceToDepth",):
+                blocksize = node.get("blocksize", 1)
+                x = tensors[0].numpy()
+                b, c, h, w = x.shape
+                x = x.reshape(b, c, h // blocksize, blocksize, w // blocksize, blocksize)
+                x = x.transpose(0, 3, 5, 1, 2, 4).reshape(b, c * blocksize * blocksize, h // blocksize, w // blocksize)
+                return [fnn.tensor(x, list(x.shape))]
+            elif op_type in ("EyeLike",):
+                shape = tensors[0].shape
+                k = node.get("k", 0)
+                result = np.eye(shape[0], shape[1] if len(shape) > 1 else shape[0], k=k, dtype=tensors[0].numpy().dtype)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("OneHot",):
+                axis = node.get("axis", -1)
+                indices = tensors[0].numpy().astype(int)
+                depth = int(tensors[1].numpy().flatten()[0]) if len(tensors) > 1 else 1
+                values = tensors[2].numpy() if len(tensors) > 2 else np.array([0.0, 1.0])
+                off_val, on_val = values[0], values[1] if len(values) > 1 else 1.0
+                shape = list(indices.shape)
+                if axis < 0:
+                    axis = len(shape) + 1 + axis
+                shape.insert(axis, depth)
+                result = np.full(shape, off_val, dtype=np.float32)
+                idx_tuple = [np.arange(s) for s in indices.shape]
+                idx_tuple.insert(axis, indices)
+                result[tuple(idx_tuple)] = on_val
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("Range",):
+                start = float(tensors[0].numpy().flatten()[0])
+                limit = float(tensors[1].numpy().flatten()[0])
+                delta = float(tensors[2].numpy().flatten()[0]) if len(tensors) > 2 else 1.0
+                result = np.arange(start, limit, delta, dtype=np.float32)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("Reverse",):
+                axes = node.get("axes", None)
+                x = tensors[0].numpy()
+                if axes is not None:
+                    slices = [slice(None)] * x.ndim
+                    for ax in axes:
+                        slices[ax] = slice(None, None, -1)
+                    result = x[tuple(slices)]
+                else:
+                    result = x[::-1]
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("RandomNormal",):
+                shape = node.get("shape", [1])
+                mean = node.get("mean", 0.0)
+                scale = node.get("scale", 1.0)
+                seed = node.get("seed", None)
+                if seed is not None:
+                    np.random.seed(int(seed))
+                result = np.random.normal(mean, scale, size=shape).astype(np.float32)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("RandomUniform",):
+                shape = node.get("shape", [1])
+                low = node.get("low", 0.0)
+                high = node.get("high", 1.0)
+                seed = node.get("seed", None)
+                if seed is not None:
+                    np.random.seed(int(seed))
+                result = np.random.uniform(low, high, size=shape).astype(np.float32)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("ConstantOfShape",):
+                shape = tensors[0].numpy().astype(int).tolist() if tensors else node.get("shape", [1])
+                value = node.get("value", 0.0)
+                result = np.full(shape, value, dtype=np.float32)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("HardSigmoid",):
+                alpha = node.get("alpha", 0.2)
+                beta = node.get("beta", 0.5)
+                x = tensors[0].numpy()
+                result = np.maximum(0, np.minimum(1, alpha * x + beta)).astype(x.dtype)
+                return [fnn.tensor(result, list(tensors[0].shape))]
+            elif op_type in ("HardSwish",):
+                return [fnn.hardswish(tensors[0])]
+            elif op_type in ("Selu",):
+                alpha = node.get("alpha", 1.67326)
+                gamma = node.get("gamma", 1.0507)
+                x = tensors[0].numpy()
+                result = gamma * np.where(x >= 0, x, alpha * (np.exp(x) - 1))
+                return [fnn.tensor(result, list(tensors[0].shape))]
+            elif op_type in ("SoftPlus",):
+                return [fnn.softplus(tensors[0])]
+            elif op_type in ("LogSoftmax",):
+                axis = node.get("axis", 1)
+                return [fnn.log_softmax(tensors[0], axis)]
+            elif op_type in ("Swish",):
+                return [fnn.silu(tensors[0])]
+            elif op_type in ("ArgMax",):
+                axis = node.get("axis", None)
+                keepdims = node.get("keepdims", 1)
+                x = tensors[0].numpy()
+                if axis is None:
+                    result = np.array([np.argmax(x)])
+                else:
+                    result = np.argmax(x, axis=axis)
+                    if keepdims:
+                        result = np.expand_dims(result, axis)
+                return [fnn.tensor(result.astype(np.int64), list(result.shape))]
+            elif op_type in ("ArgMin",):
+                axis = node.get("axis", None)
+                keepdims = node.get("keepdims", 1)
+                x = tensors[0].numpy()
+                if axis is None:
+                    result = np.array([np.argmin(x)])
+                else:
+                    result = np.argmin(x, axis=axis)
+                    if keepdims:
+                        result = np.expand_dims(result, axis)
+                return [fnn.tensor(result.astype(np.int64), list(result.shape))]
+            elif op_type in ("Min", "min"):
+                result = tensors[0].numpy()
+                for t in tensors[1:]:
+                    result = np.minimum(result, t.numpy())
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("Max", "max"):
+                result = tensors[0].numpy()
+                for t in tensors[1:]:
+                    result = np.maximum(result, t.numpy())
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("PRelu",):
+                slope = tensors[1].numpy() if len(tensors) > 1 else 0.01
+                x = tensors[0].numpy()
+                result = np.where(x > 0, x, slope * x)
+                return [fnn.tensor(result, list(tensors[0].shape))]
+            elif op_type in ("GatherND",):
+                logger.warning("GatherND not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("ScatterND",):
+                logger.warning("ScatterND not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("ConvTranspose",):
+                logger.warning("ConvTranspose not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("InstanceNormalization",):
+                logger.warning("InstanceNormalization not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("LayerNormalization",):
+                logger.warning("LayerNormalization not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("RMSNormalization",):
+                logger.warning("RMSNormalization not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("SkipLayerNormalization",):
+                logger.warning("SkipLayerNormalization not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("Attention", "MultiHeadAttention", "GroupQueryAttention"):
+                logger.warning("Attention op %s not fully implemented, passing through", op_type)
+                return [tensors[0]]
+            elif op_type in ("GRU", "LSTM"):
+                logger.warning("RNN op %s not fully implemented, passing through", op_type)
+                return [tensors[0]]
+            elif op_type in ("BiasGelu", "FastGelu"):
+                logger.warning("Fused op %s not fully implemented, passing through", op_type)
+                return [tensors[0]]
+            elif op_type in ("DequantizeLinear", "QuantizeLinear"):
+                logger.warning("Quantization op %s not fully implemented, passing through", op_type)
+                return [tensors[0]]
+            elif op_type in ("RotaryEmbedding",):
+                logger.warning("RotaryEmbedding not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("EmbedLayerNormalization",):
+                logger.warning("EmbedLayerNormalization not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("Einsum",):
+                logger.warning("Einsum not fully implemented, passing through")
+                return [tensors[0]]
+            elif op_type in ("LRN",):
+                logger.warning("LRN not fully implemented, passing through")
+                return [tensors[0]]
             else:
                 logger.warning("DAGModel: unsupported op '%s', passing through", op_type)
                 return [tensors[0]] if tensors else None

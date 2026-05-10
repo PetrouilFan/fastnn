@@ -170,7 +170,10 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
             },
             ndim,
             dtype,
+            // SAFETY: `ctx_ptr` was created by `Box::into_raw` from a valid
+            // `Box<DLPackContext>` and is still alive.
             shape: unsafe { (*ctx_ptr).shape.as_mut_ptr() },
+            // SAFETY: Same as above.
             strides: unsafe { (*ctx_ptr).strides.as_mut_ptr() },
             byte_offset: 0,
         },
@@ -187,6 +190,10 @@ extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
     if managed.is_null() {
         return;
     }
+    // SAFETY: `managed` was produced by `Box::into_raw` in `to_dlpack` and is
+    // only called once via the DLPack deleter callback, so this is a unique
+    // reclamation of the original `Box`. `manager_ctx` was likewise created
+    // from `Box::into_raw` and is still live.
     unsafe {
         let managed = Box::from_raw(managed);
 
@@ -212,6 +219,10 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor>
         ));
     }
 
+    // SAFETY: The caller guarantees (via the `unsafe fn` contract) that
+    // `capsule` is a valid, non-null pointer to a `DLManagedTensor` that
+    // complies with the DLPack specification. All pointer fields (shape,
+    // strides, data) are valid for their declared sizes.
     unsafe {
         let managed = &*capsule;
         let dl_tensor = &managed.dl_tensor;

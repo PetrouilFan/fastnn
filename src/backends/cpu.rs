@@ -41,6 +41,8 @@ pub fn gemm_cpu<T: PackedWord>(
 #[inline(always)]
 pub fn relu_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>) {
     let packed = tensor.as_packed_mut();
+    // SAFETY: The packed tensor data is valid for `packed.len()` elements of type T,
+    // and T and u32 have compatible sizes/alignment for reinterpretation.
     let raw =
         unsafe { std::slice::from_raw_parts_mut(packed.as_mut_ptr() as *mut u32, packed.len()) };
 
@@ -68,6 +70,7 @@ pub fn relu_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>) {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") && raw.len() >= 8 {
+                    // SAFETY: AVX2 is available (checked above) and raw has at least 8 elements.
                     unsafe {
                         relu_swar_simd_u8x4(raw);
                     }
@@ -109,6 +112,7 @@ pub fn relu_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>) {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") && raw.len() >= 8 {
+                    // SAFETY: AVX2 is available and raw has at least 8 f32 elements.
                     unsafe {
                         relu_swar_simd_f32(raw);
                     }
@@ -151,9 +155,13 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
     let grad_packed = grad.as_packed_mut();
     let pre_packed = pre_relu.as_packed();
 
+    // SAFETY: Both grad_packed and pre_packed are valid packed tensor allocations.
+    // Reinterpreting as u32 slices is safe because the packed types have the same
+    // alignment and size representation as u32.
     let grad_raw = unsafe {
         std::slice::from_raw_parts_mut(grad_packed.as_mut_ptr() as *mut u32, grad_packed.len())
     };
+    // SAFETY: Same as above but read-only for the pre-activation tensor.
     let pre_raw =
         unsafe { std::slice::from_raw_parts(pre_packed.as_ptr() as *const u32, pre_packed.len()) };
 
@@ -177,6 +185,7 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") && grad_raw.len() >= 8 {
+                    // SAFETY: AVX2 is available and both slices have at least 8 elements.
                     unsafe {
                         relu_backward_swar_simd_u8x4(grad_raw, pre_raw);
                     }
@@ -216,6 +225,7 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") && grad_raw.len() >= 8 {
+                    // SAFETY: AVX2 is available and both slices have at least 8 f32 elements.
                     unsafe {
                         relu_backward_swar_simd_f32(grad_raw, pre_raw);
                     }
@@ -315,9 +325,12 @@ pub fn relu_fused_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>, grad: &mut Pa
     assert_eq!(tensor.packed_len(), grad.packed_len());
     let tensor_packed = tensor.as_packed_mut();
     let grad_packed = grad.as_packed_mut();
+    // SAFETY: Both tensor and grad are valid packed tensor allocations with matching
+    // lengths. Reinterpretation as u32 is valid since all packed types share u32 layout.
     let data_raw = unsafe {
         std::slice::from_raw_parts_mut(tensor_packed.as_mut_ptr() as *mut u32, tensor_packed.len())
     };
+    // SAFETY: Same reinterpretation for the gradient tensor.
     let grad_raw = unsafe {
         std::slice::from_raw_parts_mut(grad_packed.as_mut_ptr() as *mut u32, grad_packed.len())
     };
@@ -482,6 +495,9 @@ pub fn min_cpu<T: PackedWord>(a: &PackedTensor<T>, b: &PackedTensor<T>) -> Packe
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn relu_swar_simd_u8x4(raw: &mut [u32]) {
+    // SAFETY: The caller guarantees AVX2 is available and raw has sufficient
+    // length. The AVX2 load/store operations are aligned to the underlying
+    // slice layout; unaligned loads handle any misalignment.
     let len = raw.len();
     let mut i = 0;
     let zero = _mm256_setzero_si256();
@@ -509,6 +525,9 @@ unsafe fn relu_swar_simd_u8x4(raw: &mut [u32]) {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn relu_swar_simd_f32(raw: &mut [u32]) {
+    // SAFETY: Caller guarantees AVX2 is available. The raw pointer is
+    // reinterpreted as f32 which has the same size (4 bytes). Bounds are
+    // checked by the slice iteration.
     let len = raw.len();
     let mut i = 0;
     let zero = _mm256_setzero_ps();
@@ -534,6 +553,8 @@ unsafe fn relu_swar_simd_f32(raw: &mut [u32]) {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn relu_backward_swar_simd_u8x4(grad_raw: &mut [u32], pre_raw: &[u32]) {
+    // SAFETY: Caller ensures AVX2 is available, both slices have the same length
+    // (or grad is the shorter one), and both point to valid tensor allocations.
     let len = grad_raw.len().min(pre_raw.len());
     let mut i = 0;
     let zero = _mm256_setzero_si256();
@@ -560,6 +581,9 @@ unsafe fn relu_backward_swar_simd_u8x4(grad_raw: &mut [u32], pre_raw: &[u32]) {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn relu_backward_swar_simd_f32(grad_raw: &mut [u32], pre_raw: &[u32]) {
+    // SAFETY: Caller ensures AVX2 is available. The u32 slices are reinterpreted
+    // as f32 for SIMD operations (same size, compatible alignment). Both slices
+    // share the same length (bounded by the shorter one via min).
     let len = grad_raw.len().min(pre_raw.len());
     let mut i = 0;
     let zero = _mm256_setzero_ps();
