@@ -23,7 +23,7 @@ fn unpack_word(packed: u32) -> {{UNPACK_RETURN}} {
     {{UNPACK_BODY}}
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let row = gid.x;
     if (row >= params.m) { return; }

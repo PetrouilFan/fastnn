@@ -32,10 +32,6 @@ impl PackedWord for F32x1 {
     fn wgsl_return_type() -> &'static str {
         "f32"
     }
-
-    fn wgsl_dot_logic() -> &'static str {
-        "acc += unpacked * act0;"
-    }
 }
 
 #[cfg(test)]
