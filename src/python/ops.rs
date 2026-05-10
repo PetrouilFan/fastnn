@@ -736,6 +736,7 @@ fn erf(tensor: &PyTensor) -> PyTensor {
     PyTensor::from_tensor(tensor.inner.erf())
 }
 
+#[allow(dead_code)]
 #[pyfunction]
 fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
     tensor.inner.nonzero()
