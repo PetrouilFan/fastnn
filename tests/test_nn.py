@@ -73,7 +73,7 @@ def test_muon_optimizer():
     linear = fnn.Linear(10, 5)
     # Use non-zero input to avoid numerical issues with very small gradients
     x = make_tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]], [1, 10])
-    y = make_tensor([[1.0]], [1, 5])
+    y = make_tensor([[1.0, 1.0, 1.0, 1.0, 1.0]], [1, 5])
 
     # Get initial parameters
     initial_params = [p.numpy().copy() for p in linear.parameters()]

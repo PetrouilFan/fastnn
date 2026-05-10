@@ -175,6 +175,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             layer_info["type"] = "AvgPool"
             layer_info["kernel_size"] = config["kernel_size"]
             layer_info["stride"] = config["stride"]
+            layer_info["padding"] = config["padding"]
 
         elif op_type == "GlobalAveragePool":
             layer_info["type"] = "GlobalAvgPool"
@@ -245,15 +246,170 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             params.append((f"{node.name}.weight", scale))
             params.append((f"{node.name}.bias", bias))
 
+        elif op_type == "Split":
+            split = _get_attr(node, "split", None)
+            axis = _get_attr(node, "axis", 0)
+            layer_info["axis"] = axis
+            if split is not None:
+                layer_info["split"] = list(split)
+
+        elif op_type == "Shape":
+            layer_info["type"] = "ShapeOp"
+
+        elif op_type == "Cast":
+            to = _get_attr(node, "to", 1)
+            layer_info["to"] = to
+            layer_info["type"] = "CastOp"
+
+        elif op_type == "Gather":
+            axis = _get_attr(node, "axis", 0)
+            layer_info["axis"] = axis
+            layer_info["type"] = "GatherOp"
+
+        elif op_type == "Sub":
+            bias = initializer_map.get(node.input[1])
+            if bias is not None:
+                layer_info["type"] = "BiasSub"
+                params.append((f"{node.name}.bias", -bias))
+            else:
+                layer_info["type"] = "ElementwiseSub"
+
+        elif op_type == "Div":
+            layer_info["type"] = "ElementwiseDiv"
+
+        elif op_type == "Pow":
+            exponent = initializer_map.get(node.input[1])
+            if exponent is not None:
+                layer_info["exponent"] = float(exponent.flatten()[0])
+            layer_info["type"] = "ElementwisePow"
+
+        elif op_type == "Exp":
+            layer_info["type"] = "ExpOp"
+
+        elif op_type == "Sqrt":
+            layer_info["type"] = "SqrtOp"
+
+        elif op_type == "Neg":
+            layer_info["type"] = "NegOp"
+
+        elif op_type == "Resize":
+            mode = _get_attr(node, "mode", "nearest")
+            coord_mode = _get_attr(node, "coordinate_transformation_mode", "half_pixel")
+            layer_info["type"] = "Resize"
+            layer_info["mode"] = mode
+            layer_info["coordinate_transformation_mode"] = coord_mode
+
+        elif op_type == "ReduceMean":
+            axes = _get_attr(node, "axes", None)
+            keepdims = _get_attr(node, "keepdims", 1)
+            layer_info["type"] = "ReduceMean"
+            if axes is not None:
+                layer_info["axes"] = list(axes)
+            layer_info["keepdims"] = bool(keepdims)
+
+        elif op_type == "ReduceSum":
+            axes = _get_attr(node, "axes", None)
+            keepdims = _get_attr(node, "keepdims", 1)
+            layer_info["type"] = "ReduceSum"
+            if axes is not None:
+                layer_info["axes"] = list(axes)
+            layer_info["keepdims"] = bool(keepdims)
+
+        elif op_type == "Tile":
+            layer_info["type"] = "TileOp"
+
+        elif op_type == "Pad":
+            mode = _get_attr(node, "mode", "constant")
+            layer_info["type"] = "Pad"
+            layer_info["mode"] = mode
+
+        elif op_type == "Slice":
+            layer_info["type"] = "SliceOp"
+
+        elif op_type == "Where":
+            layer_info["type"] = "WhereOp"
+
+        elif op_type == "NonMaxSuppression":
+            layer_info["type"] = "NonMaxSuppression"
+            center_point_box = _get_attr(node, "center_point_box", 0)
+            layer_info["center_point_box"] = center_point_box
+
+        elif op_type == "TopK":
+            axis = _get_attr(node, "axis", -1)
+            layer_info["axis"] = axis
+            layer_info["type"] = "TopKOp"
+
+        elif op_type == "Softmax":
+            axis = _get_attr(node, "axis", 1)
+            layer_info["axis"] = axis
+
+        elif op_type == "Log":
+            layer_info["type"] = "LogOp"
+
+        elif op_type == "Erf":
+            layer_info["type"] = "ErfOp"
+
+        elif op_type == "Constant":
+            value = _get_attr(node, "value", None)
+            if value is not None:
+                layer_info["type"] = "ConstantOp"
+                try:
+                    import onnx.numpy_helper
+                    const_tensor = onnx.numpy_helper.to_array(value)
+                    layer_info["dims"] = list(const_tensor.shape)
+                    params.append((f"{node.name}.value", const_tensor))
+                except Exception:
+                    pass
+
+        elif op_type == "Unsqueeze":
+            axes = _get_attr(node, "axes", None)
+            if axes is not None:
+                layer_info["axes"] = list(axes)
+            layer_info["type"] = "UnsqueezeOp"
+
+        elif op_type == "Squeeze":
+            axes = _get_attr(node, "axes", None)
+            if axes is not None:
+                layer_info["axes"] = list(axes)
+            layer_info["type"] = "SqueezeOp"
+
+        elif op_type == "Identity":
+            layer_info["type"] = "IdentityOp"
+
+        elif op_type == "Loop":
+            layer_info["type"] = "LoopOp"
+
+        elif op_type == "If":
+            layer_info["type"] = "IfOp"
+
         else:
             logger.warning(f"Unsupported operator: {op_type}")
             layer_info["type"] = f"Unsupported_{op_type}"
 
         layers.append(layer_info)
 
+    # Store full graph topology for DAG reconstruction
+    graph = {
+        "nodes": [{
+            "name": node.name or f"{node.op_type}_{i}",
+            "op_type": node.op_type,
+            "inputs": list(node.input),
+            "outputs": list(node.output),
+        } for i, node in enumerate(model.graph.node)],
+        "inputs": [{
+            "name": inp.name,
+            "shape": [d.dim_value for d in inp.type.tensor_type.shape.dim] if inp.type.tensor_type.HasField("shape") else None
+        } for inp in model.graph.input],
+        "outputs": [{
+            "name": out.name,
+            "shape": [d.dim_value for d in out.type.tensor_type.shape.dim] if out.type.tensor_type.HasField("shape") else None
+        } for out in model.graph.output],
+    }
+
     # Write to file with unified format
     header = {
         "layers": layers,
+        "graph": graph,
         "total_parameters": len(params),
     }
     with open(fnn_path, "wb") as f:

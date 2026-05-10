@@ -11,6 +11,7 @@ pub mod pooling;
 pub mod sequential;
 pub mod transformer;
 pub mod upsample;
+pub mod dag;
 
 use std::sync::atomic::Ordering;
 

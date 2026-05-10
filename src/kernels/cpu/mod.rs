@@ -1006,6 +1006,11 @@ fn register_kernels() {
         DispatchKey::Cpu,
         max_pool2d_kernel as KernelFn,
     );
+    register(
+        "avg_pool2d",
+        DispatchKey::Cpu,
+        avg_pool2d_kernel as KernelFn,
+    );
     register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
     register("lt_scalar", DispatchKey::Cpu, lt_scalar_kernel as KernelFn);
     register(
