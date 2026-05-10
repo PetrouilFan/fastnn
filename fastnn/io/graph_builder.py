@@ -111,6 +111,21 @@ def build_dag_model(header: dict, path: str) -> Any:
                     initializer_to_param[input_name] = param_name
                     break
 
+    # Pass 3: Map Constant node output names to their .value params
+    for node in onnx_nodes:
+        op_type = node.get("op_type", "")
+        if op_type not in ("Constant",):
+            continue
+        node_name = node.get("name", "")
+        if not node_name:
+            continue
+        value_key = f"{node_name}.value"
+        if value_key not in params:
+            continue
+        for output_name in node.get("outputs", []):
+            if output_name not in initializer_to_param:
+                initializer_to_param[output_name] = value_key
+
     # Convert ONNX nodes to DAGExecutor's node format
     dag_nodes = []
     for node in onnx_nodes:
