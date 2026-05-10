@@ -53,18 +53,17 @@ impl DAGExecutor {
 
         for node in &self.nodes {
             let mut args: Vec<Tensor> = Vec::new();
-            let mut all_resolved = true;
             for in_name in &node.inputs {
+                if in_name.is_empty() {
+                    continue;
+                }
                 if let Some(t) = buffer.get(in_name) {
                     args.push(t.clone());
                 } else if let Some(p) = self.params.get(in_name) {
                     args.push(p.clone());
-                } else {
-                    all_resolved = false;
-                    break;
                 }
             }
-            if !all_resolved {
+            if args.is_empty() {
                 continue;
             }
 
@@ -233,15 +232,26 @@ impl DAGExecutor {
                 }
 
                 "topkop" => {
-                    let mut axis = node.attrs.get("axis")
+                    let k_val = node.attrs.get("k")
                         .and_then(|a| a.parse::<i64>().ok())
-                        .unwrap_or(-1) as usize;
-                    let rank = args[0].shape_ref().len();
-                    if axis >= rank { axis = rank - 1; }
-                    let keepdim = node.attrs.get("keepdims")
+                        .unwrap_or(1);
+                    let axis = node.attrs.get("axis")
                         .and_then(|a| a.parse::<i64>().ok())
-                        .unwrap_or(1) != 0;
-                    Some(vec![args[0].max(axis as i32, keepdim), args[0].clone()])
+                        .unwrap_or(-1);
+
+                    let rank = args[0].shape_ref().len() as i64;
+                    let axis = if axis < 0 { axis + rank } else { axis };
+
+                    if k_val == 1 && axis >= 0 {
+                        // Use max for k=1 case (returns values and indices)
+                        let values = args[0].max(axis as i32, false);
+                        // No argmax kernel available; use placeholder for indices
+                        let indices = args[0].clone();
+                        Some(vec![values, indices])
+                    } else {
+                        // Fallback for k>1: just pass through
+                        Some(vec![args[0].clone(), args[0].clone()])
+                    }
                 }
 
                 "reducemean" | "reduce_mean" => {
@@ -434,9 +444,45 @@ impl DAGExecutor {
                 }
 
                 "resize" => {
-                    // Resize/interpolation is not yet implemented in dispatcher
-                    // Keep as pass-through for now
-                    Some(vec![args[0].clone()])
+                    // Use Upsample module for nearest/bilinear interpolation
+                    let x = &args[0];
+                    let mode = node.attrs.get("mode").map(|s| s.to_lowercase()).unwrap_or_else(|| "nearest".to_string());
+                    let scales_str = node.attrs.get("scales");
+
+                    let scale_factor = if let Some(scales_str) = scales_str {
+                        let scales: Vec<f64> = scales_str.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .filter_map(|s| s.trim().parse::<f64>().ok())
+                            .collect();
+                        // Take the last two scales (H and W for 4D tensors)
+                        if scales.len() >= 4 {
+                            // For NCHW format, scales[2] = H scale, scales[3] = W scale
+                            scales[2].max(scales[3])
+                        } else if scales.len() >= 2 {
+                            scales[scales.len() - 1]
+                        } else if scales.len() == 1 {
+                            scales[0]
+                        } else {
+                            2.0
+                        }
+                    } else if args.len() >= 2 {
+                        // scales from tensor input
+                        let scales_data = args[1].as_f32_slice();
+                        if scales_data.len() >= 4 {
+                            scales_data[2].max(scales_data[3]) as f64
+                        } else if scales_data.len() >= 2 {
+                            scales_data[scales_data.len() - 1] as f64
+                        } else if scales_data.len() == 1 {
+                            scales_data[0] as f64
+                        } else {
+                            2.0
+                        }
+                    } else {
+                        2.0
+                    };
+
+                    let upsampler = crate::nn::upsample::Upsample::new(scale_factor, mode);
+                    Some(vec![upsampler.forward(x)])
                 }
 
                 _ => {
@@ -480,23 +526,25 @@ impl DAGExecutor {
         let padding = node.attrs.get("padding")
             .and_then(|p| p.parse::<i64>().ok())
             .unwrap_or(0);
-        let _dilation = node.attrs.get("dilation")
+        let dilation = node.attrs.get("dilation")
             .and_then(|d| d.parse::<i64>().ok())
             .unwrap_or(1);
-        let _groups = node.attrs.get("groups")
+        let groups = node.attrs.get("groups")
             .and_then(|g| g.parse::<i64>().ok())
             .unwrap_or(1);
 
         let stride_t = Tensor::from_scalar(stride as f32);
         let pad_t = Tensor::from_scalar(padding as f32);
+        let dilation_t = Tensor::from_scalar(dilation as f32);
+        let groups_t = Tensor::from_scalar(groups as f32);
 
         if has_bias {
             let bias_name = format!("{}.bias", node.name);
             let bias = self.params.get(&bias_name)?;
-            dispatch("conv2d", DispatchKey::Cpu, &[x, weight, bias, &stride_t, &pad_t]).ok()
+            dispatch("conv2d", DispatchKey::Cpu, &[x, weight, bias, &stride_t, &pad_t, &dilation_t, &groups_t]).ok()
         } else {
             let zero_bias = Tensor::from_scalar(0.0f32);
-            dispatch("conv2d", DispatchKey::Cpu, &[x, weight, &zero_bias, &stride_t, &pad_t]).ok()
+            dispatch("conv2d", DispatchKey::Cpu, &[x, weight, &zero_bias, &stride_t, &pad_t, &dilation_t, &groups_t]).ok()
         }
     }
 

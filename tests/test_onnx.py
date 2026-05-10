@@ -356,7 +356,6 @@ class TestDAGModel:
             import shutil
             shutil.rmtree(tmpdir)
 
-    @pytest.mark.xfail(reason="DAGModel prototype does not resolve ONNX initializer tensor names to parameter names", strict=False)
     def test_dag_model_conv(self, simple_conv_model):
         """Test DAGModel execution with a convolution."""
         path, tmpdir = simple_conv_model
