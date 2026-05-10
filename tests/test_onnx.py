@@ -606,3 +606,536 @@ class TestYoloOps:
         finally:
             import shutil
             shutil.rmtree(tmpdir)
+
+
+class TestNewOps:
+    """Test newly added ONNX op handlers."""
+
+    # ------------------------------------------------------------------ #
+    # 1. Simple Math ops
+    # ------------------------------------------------------------------ #
+
+    def test_ceil_handler(self):
+        """Test Ceil op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        node = helper.make_node("Ceil", inputs=["X"], outputs=["Y"], name="ceil1")
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "ceil.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "CeilOp" in types, f"CeilOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_floor_handler(self):
+        """Test Floor op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        node = helper.make_node("Floor", inputs=["X"], outputs=["Y"], name="floor1")
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "floor.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "FloorOp" in types, f"FloorOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_round_handler(self):
+        """Test Round op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        node = helper.make_node("Round", inputs=["X"], outputs=["Y"], name="round1")
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "round.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "RoundOp" in types, f"RoundOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_sign_handler(self):
+        """Test Sign op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        node = helper.make_node("Sign", inputs=["X"], outputs=["Y"], name="sign1")
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "sign.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "SignOp" in types, f"SignOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_reciprocal_handler(self):
+        """Test Reciprocal op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        node = helper.make_node("Reciprocal", inputs=["X"], outputs=["Y"], name="recip1")
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "recip.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "ReciprocalOp" in types, f"ReciprocalOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_isnan_handler(self):
+        """Test IsNaN op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("IsNaN", inputs=["X"], outputs=["Y"], name="isnan1")
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "isnan.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "IsNaNOp" in types, f"IsNaNOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_isinf_handler(self):
+        """Test IsInf op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("IsInf", inputs=["X"], outputs=["Y"], name="isinf1",
+                                detect_positive=1, detect_negative=1)
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "isinf.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "IsInfOp" in types, f"IsInfOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------ #
+    # 2. Logical / Comparison ops
+    # ------------------------------------------------------------------ #
+
+    def test_not_handler(self):
+        """Test Not op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.BOOL, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("Not", inputs=["X"], outputs=["Y"], name="not1")
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "not.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "NotOp" in types, f"NotOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_and_handler(self):
+        """Test And op handler (binary logical op)."""
+        X = helper.make_tensor_value_info("X", TensorProto.BOOL, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.BOOL, [1, 3, 4, 4])
+        Z = helper.make_tensor_value_info("Z", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("And", inputs=["X", "Y"], outputs=["Z"], name="and1")
+        graph = helper.make_graph([node], "test", [X, Y], [Z])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "and.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "AndOp" in types, f"AndOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_or_handler(self):
+        """Test Or op handler (binary logical op)."""
+        X = helper.make_tensor_value_info("X", TensorProto.BOOL, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.BOOL, [1, 3, 4, 4])
+        Z = helper.make_tensor_value_info("Z", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("Or", inputs=["X", "Y"], outputs=["Z"], name="or1")
+        graph = helper.make_graph([node], "test", [X, Y], [Z])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "or.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "OrOp" in types, f"OrOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_xor_handler(self):
+        """Test Xor op handler (binary logical op)."""
+        X = helper.make_tensor_value_info("X", TensorProto.BOOL, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.BOOL, [1, 3, 4, 4])
+        Z = helper.make_tensor_value_info("Z", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("Xor", inputs=["X", "Y"], outputs=["Z"], name="xor1")
+        graph = helper.make_graph([node], "test", [X, Y], [Z])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "xor.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "XorOp" in types, f"XorOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_less_handler(self):
+        """Test Less op handler (binary comparison)."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        Z = helper.make_tensor_value_info("Z", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("Less", inputs=["X", "Y"], outputs=["Z"], name="less1")
+        graph = helper.make_graph([node], "test", [X, Y], [Z])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "less.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "LessOp" in types, f"LessOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_greater_handler(self):
+        """Test Greater op handler (binary comparison)."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        Z = helper.make_tensor_value_info("Z", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("Greater", inputs=["X", "Y"], outputs=["Z"], name="greater1")
+        graph = helper.make_graph([node], "test", [X, Y], [Z])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "greater.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "GreaterOp" in types, f"GreaterOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_equal_handler(self):
+        """Test Equal op handler (binary comparison)."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        Z = helper.make_tensor_value_info("Z", TensorProto.BOOL, [1, 3, 4, 4])
+        node = helper.make_node("Equal", inputs=["X", "Y"], outputs=["Z"], name="equal1")
+        graph = helper.make_graph([node], "test", [X, Y], [Z])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "equal.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "EqualOp" in types, f"EqualOp not in {types}"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------ #
+    # 3. Tensor Manipulation ops
+    # ------------------------------------------------------------------ #
+
+    def test_cumsum_handler(self):
+        """Test CumSum op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        node = helper.make_node("CumSum", inputs=["X"], outputs=["Y"],
+                                name="cumsum1", axis=1)
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "cumsum.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "CumSum" in types, f"CumSum not in {types}"
+            cumsum_layer = result["layers"][types.index("CumSum")]
+            assert cumsum_layer["axis"] == 1
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_onehot_handler(self):
+        """Test OneHot op handler."""
+        indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [1, 5])
+        depth = helper.make_tensor("depth", TensorProto.INT64, [1], [10])
+        values = helper.make_tensor("values", TensorProto.FLOAT, [2], [0.0, 1.0])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 5, 10])
+        node = helper.make_node("OneHot", inputs=["indices", "depth", "values"],
+                                outputs=["Y"], name="onehot1", axis=-1)
+        graph = helper.make_graph([node], "test", [indices], [Y], [depth, values])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "onehot.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "OneHot" in types, f"OneHot not in {types}"
+            onehot_layer = result["layers"][types.index("OneHot")]
+            assert onehot_layer["axis"] == -1
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_gathernd_handler(self):
+        """Test GatherND op handler (import only)."""
+        data = helper.make_tensor_value_info("data", TensorProto.FLOAT, [2, 3, 4])
+        indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [2, 2])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])
+        node = helper.make_node("GatherND", inputs=["data", "indices"],
+                                outputs=["Y"], name="gathernd1", batch_dims=0)
+        graph = helper.make_graph([node], "test", [data, indices], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "gathernd.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "GatherND" in types, f"GatherND not in {types}"
+            gnd = result["layers"][types.index("GatherND")]
+            assert gnd["batch_dims"] == 0
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_depthtospace_handler(self):
+        """Test DepthToSpace op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 12, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 8, 8])
+        node = helper.make_node("DepthToSpace", inputs=["X"], outputs=["Y"],
+                                name="d2s1", blocksize=2, mode="DCR")
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "depthtospace.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "DepthToSpace" in types, f"DepthToSpace not in {types}"
+            d2s = result["layers"][types.index("DepthToSpace")]
+            assert d2s["blocksize"] == 2
+            assert d2s["mode"] == "DCR"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_spacetodepth_handler(self):
+        """Test SpaceToDepth op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 8, 8])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 12, 4, 4])
+        node = helper.make_node("SpaceToDepth", inputs=["X"], outputs=["Y"],
+                                name="s2d1", blocksize=2)
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "spacetodepth.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "SpaceToDepth" in types, f"SpaceToDepth not in {types}"
+            s2d = result["layers"][types.index("SpaceToDepth")]
+            assert s2d["blocksize"] == 2
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_eyelike_handler(self):
+        """Test EyeLike op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [5, 5])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [5, 5])
+        node = helper.make_node("EyeLike", inputs=["X"], outputs=["Y"],
+                                name="eyelike1", dtype=1, k=0)
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "eyelike.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "EyeLike" in types, f"EyeLike not in {types}"
+            el = result["layers"][types.index("EyeLike")]
+            assert el["k"] == 0
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    # ------------------------------------------------------------------ #
+    # 4. NN ops
+    # ------------------------------------------------------------------ #
+
+    def test_convtranspose_handler(self):
+        """Test ConvTranspose op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 8, 8])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 6, 16, 16])
+
+        W = helper.make_tensor("W", TensorProto.FLOAT, [6, 3, 3, 3],
+                               np.random.randn(6, 3, 3, 3).flatten().tolist())
+        B = helper.make_tensor("B", TensorProto.FLOAT, [6],
+                               np.zeros(6, dtype=np.float32).tolist())
+
+        node = helper.make_node("ConvTranspose", inputs=["X", "W", "B"],
+                                outputs=["Y"], name="convtrans1",
+                                kernel_shape=[3, 3], strides=[2, 2],
+                                pads=[1, 1, 1, 1], output_padding=[1, 1])
+        graph = helper.make_graph([node], "test", [X], [Y], [W, B])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "convtrans.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "ConvTranspose" in types, f"ConvTranspose not in {types}"
+            ct = result["layers"][types.index("ConvTranspose")]
+            assert ct["in_channels"] == 3
+            assert ct["out_channels"] == 6
+            assert ct["kernel_size"] == 3
+            assert ct["bias"] is True
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_instancenorm_handler(self):
+        """Test InstanceNormalization op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 4, 8, 8])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 4, 8, 8])
+
+        scale = helper.make_tensor("scale", TensorProto.FLOAT, [4],
+                                   np.ones(4, dtype=np.float32).tolist())
+        bias = helper.make_tensor("bias", TensorProto.FLOAT, [4],
+                                  np.zeros(4, dtype=np.float32).tolist())
+
+        node = helper.make_node("InstanceNormalization", inputs=["X", "scale", "bias"],
+                                outputs=["Y"], name="in1", epsilon=1e-5)
+        graph = helper.make_graph([node], "test", [X], [Y], [scale, bias])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "instancenorm.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "InstanceNorm" in types, f"InstanceNorm not in {types}"
+            ins = result["layers"][types.index("InstanceNorm")]
+            assert ins["num_features"] == 4
+            assert ins["eps"] == pytest.approx(1e-5, rel=1e-6)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_logsoftmax_handler(self):
+        """Test LogSoftmax op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 8, 8])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 8, 8])
+        node = helper.make_node("LogSoftmax", inputs=["X"], outputs=["Y"],
+                                name="logsoftmax1", axis=1)
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "logsoftmax.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "LogSoftmax" in types, f"LogSoftmax not in {types}"
+            lsm = result["layers"][types.index("LogSoftmax")]
+            assert lsm["axis"] == 1
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_selu_handler(self):
+        """Test Selu op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        node = helper.make_node("Selu", inputs=["X"], outputs=["Y"],
+                                name="selu1", alpha=1.67326, gamma=1.0507)
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "selu.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "Selu" in types, f"Selu not in {types}"
+            selu = result["layers"][types.index("Selu")]
+            assert selu["alpha"] == pytest.approx(1.67326, rel=1e-5)
+            assert selu["gamma"] == pytest.approx(1.0507, rel=1e-5)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_rmsnorm_handler(self):
+        """Test RMSNormalization op handler."""
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        node = helper.make_node("RMSNormalization", inputs=["X"], outputs=["Y"],
+                                name="rmsnorm1", epsilon=1e-5)
+        graph = helper.make_graph([node], "test", [X], [Y])
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "rmsnorm.onnx")
+        onnx.save(helper.make_model(graph), path)
+        try:
+            from fastnn.io.onnx import import_onnx
+            result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
+            types = [l["type"] for l in result["layers"]]
+            assert "RMSNorm" in types, f"RMSNorm not in {types}"
+            rn = result["layers"][types.index("RMSNorm")]
+            assert rn["eps"] == pytest.approx(1e-5, rel=1e-6)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)

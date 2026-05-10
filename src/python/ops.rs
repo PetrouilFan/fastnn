@@ -623,7 +623,7 @@ fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTe
 }
 
 #[pyfunction]
-fn topk(tensor: &PyTensor, k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
+fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
     let values = tensor.inner.max(dim as i32, false);
     let args = [&tensor.inner, &dim_to_tensor(dim as i32), &Tensor::from_scalar(1.0)];
     let indices = dispatch_op("max", &args)?;
