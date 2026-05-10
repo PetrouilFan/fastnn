@@ -2,6 +2,7 @@
 //!
 //! This module provides common benchmark functions to eliminate code duplication
 //! across benchmark files (packed_bench.rs, wgpu_bench.rs, quantized_vs_pytorch.rs).
+#![allow(dead_code)]
 
 use fastnn::backends::cpu;
 use fastnn::dtypes::PackedWord;

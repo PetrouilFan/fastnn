@@ -1,4 +1,4 @@
-use crate::autograd;
+use crate::autograd::{self, Edge};
 use crate::dispatcher::{device_to_dispatch_key, dispatch};
 use crate::storage::Device;
 use smallvec::SmallVec;
@@ -67,7 +67,17 @@ impl Tensor {
     pub fn maximum(&self, other: &Tensor) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
         let result = dispatch("maximum", dispatch_key, &[self, other]);
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = autograd::make_edges(self, other);
+            let backward = Arc::new(autograd::MaximumBackward::new(
+                vec![self.clone(), other.clone()],
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn gt_scalar(&self, threshold: f32) -> Tensor {
@@ -93,13 +103,33 @@ impl Tensor {
             _ => device_to_dispatch_key(Device::Cpu),
         };
         let result = dispatch("minimum", dispatch_key, &[self, other]);
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = autograd::make_edges(self, other);
+            let backward = Arc::new(autograd::MinimumBackward::new(
+                vec![self.clone(), other.clone()],
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
         let numel = self.numel() as usize;
-        let self_data = self.as_f32_slice();
-        let other_data = other.as_f32_slice();
+        let self_contig = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let other_contig = if !other.is_contiguous() {
+            other.contiguous()
+        } else {
+            other.clone()
+        };
+        let self_data = self_contig.as_f32_slice();
+        let other_data = other_contig.as_f32_slice();
         let mut output_data = vec![0.0f32; numel];
         for i in 0..numel {
             output_data[i] = if self_data[i] >= other_data[i] {
@@ -113,8 +143,18 @@ impl Tensor {
 
     pub fn le_tensor(&self, other: &Tensor) -> Tensor {
         let numel = self.numel() as usize;
-        let self_data = self.as_f32_slice();
-        let other_data = other.as_f32_slice();
+        let self_contig = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let other_contig = if !other.is_contiguous() {
+            other.contiguous()
+        } else {
+            other.clone()
+        };
+        let self_data = self_contig.as_f32_slice();
+        let other_data = other_contig.as_f32_slice();
         let mut output_data = vec![0.0f32; numel];
         for i in 0..numel {
             output_data[i] = if self_data[i] <= other_data[i] {
@@ -143,7 +183,14 @@ impl Tensor {
             dispatch_key,
             &[self, &Tensor::from_scalar(scalar)],
         );
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::AddScalarBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn div_scalar(&self, scalar: f32) -> Tensor {
@@ -153,7 +200,14 @@ impl Tensor {
             dispatch_key,
             &[self, &Tensor::from_scalar(scalar)],
         );
-        result[0].clone()
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::DivScalarBackward::new(self.clone(), scalar, edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn logical_not(&self) -> Tensor {
@@ -219,7 +273,26 @@ impl Tensor {
             }
             out_offset += dim_size * out_strides[dim];
         }
-        Tensor::from_vec(output_data, output_shape.into_vec())
+        let output = Tensor::from_vec(output_data, output_shape.into_vec());
+
+        if autograd::is_grad_enabled() && tensors.iter().any(|t| t.requires_grad()) {
+            let split_sizes: Vec<usize> = tensors.iter().map(|t| t.inner.sizes[dim] as usize).collect();
+            let mut edges = Vec::new();
+            for (i, t) in tensors.iter().enumerate() {
+                if let Some(node) = t.grad_fn() {
+                    edges.push(Edge(node, i));
+                }
+            }
+            let backward = Arc::new(autograd::CatBackward::new(
+                tensors.to_vec(),
+                dim,
+                split_sizes,
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn stack(tensors: &[Tensor], dim: i32) -> Tensor {
@@ -266,11 +339,14 @@ impl Tensor {
             total *= orig * r;
         }
         let mut output_data = vec![0.0f32; total as usize];
-        let src = self.to_cpu();
+        let mut src = self.to_cpu();
+        if !src.is_contiguous() {
+            src = src.contiguous();
+        }
         let src_data = src.as_f32_slice();
-        let src_strides = &self.inner.strides;
-        let src_sizes = &self.inner.sizes;
-        let ndim = self.ndim();
+        let src_strides = &src.inner.strides;
+        let src_sizes = &src.inner.sizes;
+        let ndim = src.ndim();
         let offset = repeats.len() - ndim;
         let mut src_indices = vec![0i64; ndim];
         for out_idx in 0..total as usize {
@@ -285,20 +361,47 @@ impl Tensor {
             for d in 0..ndim {
                 src_indices[d] = rep_indices[d + offset] % src_sizes[d];
             }
-            let mut src_lin = self.inner.storage_offset;
+            let mut src_lin = 0i64;
             for d in 0..ndim {
                 src_lin += src_indices[d] * src_strides[d];
             }
             output_data[out_idx] = src_data[src_lin as usize];
         }
-        Tensor::from_vec(output_data, new_shape.into_vec())
+        let output = Tensor::from_vec(output_data, new_shape.into_vec());
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::RepeatBackward::new(
+                self.clone(),
+                repeats.to_vec(),
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn where_tensor(&self, condition: &Tensor, other: &Tensor) -> Tensor {
         let numel = self.numel() as usize;
-        let self_data = self.as_f32_slice();
-        let cond_data = condition.as_f32_slice();
-        let other_data = other.as_f32_slice();
+        let self_contig = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let cond_contig = if !condition.is_contiguous() {
+            condition.contiguous()
+        } else {
+            condition.clone()
+        };
+        let other_contig = if !other.is_contiguous() {
+            other.contiguous()
+        } else {
+            other.clone()
+        };
+        let self_data = self_contig.as_f32_slice();
+        let cond_data = cond_contig.as_f32_slice();
+        let other_data = other_contig.as_f32_slice();
         let mut output_data = vec![0.0f32; numel];
         for i in 0..numel {
             output_data[i] = if cond_data[i] != 0.0 {
@@ -307,6 +410,18 @@ impl Tensor {
                 other_data[i]
             };
         }
-        Tensor::from_vec(output_data, self.shape())
+        let output = Tensor::from_vec(output_data, self.shape());
+
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = autograd::make_edges(self, other);
+            let backward = Arc::new(autograd::WhereBackward::new(
+                vec![self.clone(), other.clone()],
+                condition.clone(),
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 }

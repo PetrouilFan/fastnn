@@ -1,22 +1,34 @@
 /// Helper to dispatch a unary operation
-fn dispatch_unary(op: &str, tensor: &Tensor) -> Tensor {
+fn dispatch_unary(op: &str, tensor: &Tensor) -> PyResult<Tensor> {
     let dispatch_key = dispatcher::device_to_dispatch_key(tensor.device());
-    let result = dispatcher::dispatch(op, dispatch_key, &[tensor]);
-    result.into_iter().next().unwrap()
+    let result = dispatcher::try_dispatch(op, dispatch_key, &[tensor])?;
+    result.into_iter().next().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "dispatch returned empty result for unary op '{}'", op
+        ))
+    })
 }
 
 /// Helper to dispatch a binary operation
-fn dispatch_binary(op: &str, a: &Tensor, b: &Tensor) -> Tensor {
+fn dispatch_binary(op: &str, a: &Tensor, b: &Tensor) -> PyResult<Tensor> {
     let dispatch_key = dispatcher::device_to_dispatch_key(a.device());
-    let result = dispatcher::dispatch(op, dispatch_key, &[a, b]);
-    result.into_iter().next().unwrap()
+    let result = dispatcher::try_dispatch(op, dispatch_key, &[a, b])?;
+    result.into_iter().next().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "dispatch returned empty result for binary op '{}'", op
+        ))
+    })
 }
 
 /// Helper to dispatch an operation with variable number of arguments
-fn dispatch_op(op: &str, args: &[&Tensor]) -> Tensor {
+fn dispatch_op(op: &str, args: &[&Tensor]) -> PyResult<Tensor> {
     let dispatch_key = dispatcher::device_to_dispatch_key(args[0].device());
-    let result = dispatcher::dispatch(op, dispatch_key, args);
-    result.into_iter().next().unwrap()
+    let result = dispatcher::try_dispatch(op, dispatch_key, args)?;
+    result.into_iter().next().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "dispatch returned empty result for op '{}'", op
+        ))
+    })
 }
 
 /// Helper to wrap loss function output with autograd support
@@ -51,12 +63,14 @@ macro_rules! unary_op {
     };
 }
 
-/// Macro for binary operations: fn op(a, b) -> PyTensor { PyTensor::from_tensor(a.inner.op(&b.inner)) }
+/// Macro for binary operations: fn op(py, a, b) -> PyTensor { PyTensor::from_tensor(a.inner.op(&b.inner)) }
 macro_rules! binary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
-        fn $name(a: &PyTensor, b: &PyTensor) -> PyTensor {
-            PyTensor::from_tensor(a.inner.$method(&b.inner))
+        fn $name(py: Python<'_>, a: &PyTensor, b: &PyTensor) -> PyTensor {
+            let a_inner = a.inner.clone();
+            let b_inner = b.inner.clone();
+            py.detach(move || PyTensor::from_tensor(a_inner.$method(&b_inner)))
         }
     };
 }
@@ -66,10 +80,10 @@ macro_rules! arg_op {
     ($name:ident, $dispatch_name:ident) => {
         #[pyfunction]
         #[pyo3(signature = (a, dim = None))]
-        fn $name(a: &PyTensor, dim: Option<i32>) -> PyTensor {
+        fn $name(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
             let dim = dim.unwrap_or(0);
             let args = [&a.inner, &dim_to_tensor(dim), &Tensor::from_scalar(1.0)];
-            PyTensor::from_tensor(dispatch_op(stringify!($dispatch_name), &args))
+            Ok(PyTensor::from_tensor(dispatch_op(stringify!($dispatch_name), &args)?))
         }
     };
 }
@@ -79,7 +93,7 @@ macro_rules! loss_fn {
     ($name:ident, $backward_type:ident) => {
         #[pyfunction]
         #[pyo3(signature = (pred, target, reduction = None))]
-        fn $name(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyTensor {
+        fn $name(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyResult<PyTensor> {
             let reduction = reduction.unwrap_or_else(|| "mean".to_string());
             let reduction_code = match reduction.as_str() {
                 "none" => 0.0,
@@ -88,16 +102,16 @@ macro_rules! loss_fn {
                 _ => 1.0,
             };
             let args = [&pred.inner, &target.inner, &Tensor::from_scalar(reduction_code)];
-            let output = dispatch_op(stringify!($name), &args);
+            let output = dispatch_op(stringify!($name), &args)?;
 
-            wrap_loss_with_autograd(output, &pred.inner, || {
+            Ok(wrap_loss_with_autograd(output, &pred.inner, || {
                 std::sync::Arc::new(autograd::$backward_type::new(
                     pred.inner.clone(),
                     target.inner.clone(),
                     reduction,
                     autograd::make_edge(&pred.inner),
                 ))
-            })
+            }))
         }
     };
 }
@@ -119,26 +133,26 @@ binary_op!(mul, mul);
 binary_op!(div, div);
 
 #[pyfunction]
-fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(dispatch_binary("fused_add_relu", &a.inner, &b.inner))
+fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(dispatch_binary("fused_add_relu", &a.inner, &b.inner)?))
 }
 
 #[pyfunction]
-fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
+fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
     let args: Vec<_> = match bias {
         Some(b) => vec![&x.inner, &w.inner, &b.inner],
         None => vec![&x.inner, &w.inner],
     };
-    PyTensor::from_tensor(dispatch_op("fused_linear_relu", &args))
+    Ok(PyTensor::from_tensor(dispatch_op("fused_linear_relu", &args)?))
 }
 
 #[pyfunction]
-fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
+fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
     let args: Vec<_> = match bias {
         Some(b) => vec![&x.inner, &w.inner, &b.inner],
         None => vec![&x.inner, &w.inner],
     };
-    PyTensor::from_tensor(dispatch_op("fused_linear_gelu", &args))
+    Ok(PyTensor::from_tensor(dispatch_op("fused_linear_gelu", &args)?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -156,7 +170,7 @@ fn fused_conv_bn_silu(
     dilation: &PyTensor,
     groups: &PyTensor,
     eps: &PyTensor,
-) -> PyTensor {
+) -> PyResult<PyTensor> {
     let mut args: Vec<&Tensor> = Vec::new();
     args.push(&x.inner);
     args.push(&w.inner);
@@ -172,12 +186,14 @@ fn fused_conv_bn_silu(
     args.push(&dilation.inner);
     args.push(&groups.inner);
     args.push(&eps.inner);
-    PyTensor::from_tensor(dispatch_op("fused_conv_bn_silu", &args))
+    Ok(PyTensor::from_tensor(dispatch_op("fused_conv_bn_silu", &args)?))
 }
 
 #[pyfunction]
-fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.matmul(&b.inner))
+fn matmul(py: Python<'_>, a: &PyTensor, b: &PyTensor) -> PyTensor {
+    let a_inner = a.inner.clone();
+    let b_inner = b.inner.clone();
+    py.detach(move || PyTensor::from_tensor(a_inner.matmul(&b_inner)))
 }
 
 #[pyfunction]
@@ -186,7 +202,7 @@ fn batched_mlp_forward(
     weights: Vec<PyTensor>,
     biases: Vec<PyTensor>,
     activations: Vec<String>,
-) -> PyTensor {
+) -> PyResult<PyTensor> {
     let mut x = input.inner.clone();
 
     for i in 0..weights.len() {
@@ -203,20 +219,20 @@ fn batched_mlp_forward(
             let act = &activations[i];
             match act.as_str() {
                 "relu" => {
-                    x = dispatch_unary("relu", &x);
+                    x = dispatch_unary("relu", &x)?;
                 }
                 "sigmoid" => {
-                    x = dispatch_unary("sigmoid", &x);
+                    x = dispatch_unary("sigmoid", &x)?;
                 }
                 "tanh" => {
-                    x = dispatch_unary("tanh", &x);
+                    x = dispatch_unary("tanh", &x)?;
                 }
                 _ => {}
             }
         }
     }
 
-    PyTensor::from_tensor(x)
+    Ok(PyTensor::from_tensor(x))
 }
 
 // Unary operations using macro
@@ -238,9 +254,9 @@ fn softmax(py: Python<'_>, a: &PyTensor, dim: i32) -> PyTensor {
 }
 
 #[pyfunction]
-fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
+fn log_softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
     let args = [&a.inner, &dim_to_tensor(dim)];
-    PyTensor::from_tensor(dispatch_op("log_softmax", &args))
+    Ok(PyTensor::from_tensor(dispatch_op("log_softmax", &args)?))
 }
 
 #[pyfunction]
@@ -278,14 +294,14 @@ fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
+fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
     let dim = dim.unwrap_or(0);
     let args = [
         &a.inner,
         &dim_to_tensor(dim),
         &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
     ];
-    PyTensor::from_tensor(dispatch_op("min", &args))
+    Ok(PyTensor::from_tensor(dispatch_op("min", &args)?))
 }
 
 // Argmax and argmin using macro
@@ -463,16 +479,16 @@ fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
 }
 
 #[pyfunction]
-fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyTensor {
+fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyResult<PyTensor> {
     let args = [&input.inner, &target.inner];
-    PyTensor::from_tensor(dispatch_op("bce_with_logits", &args))
+    Ok(PyTensor::from_tensor(dispatch_op("bce_with_logits", &args)?))
 }
 
 #[pyfunction]
-fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyTensor {
+fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTensor> {
     let delta_t = core_tensor::Tensor::from_scalar(delta);
     let args = [&input.inner, &target.inner, &delta_t];
-    PyTensor::from_tensor(dispatch_op("huber_loss", &args))
+    Ok(PyTensor::from_tensor(dispatch_op("huber_loss", &args)?))
 }
 
 #[pyfunction]
@@ -537,7 +553,7 @@ fn flash_attention(
     v: &PyTensor,
     scale: Option<f32>,
     causal: Option<bool>,
-) -> PyTensor {
+) -> PyResult<PyTensor> {
     let scale = scale.unwrap_or((q.inner.shape()[3] as f32).sqrt().recip());
     let causal = if causal.unwrap_or(false) { 1.0 } else { 0.0 };
     let args = [
@@ -547,7 +563,7 @@ fn flash_attention(
         &core_tensor::Tensor::from_scalar(scale),
         &core_tensor::Tensor::from_scalar(causal),
     ];
-    PyTensor::from_tensor(dispatch_op("flash_attention", &args))
+    Ok(PyTensor::from_tensor(dispatch_op("flash_attention", &args)?))
 }
 
 #[pyfunction]

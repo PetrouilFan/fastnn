@@ -48,8 +48,7 @@ impl<T: PackedWord> PackedTensor<T> {
         );
 
         let packed_len = numel.div_ceil(T::ITEMS);
-        let mut packed = Vec::with_capacity(packed_len);
-        unsafe { packed.set_len(packed_len); }
+        let mut packed = vec![T::default(); packed_len];
 
         if scale != 1.0 || zero != 0.0 {
             let inv_scale = 1.0 / scale;
@@ -314,8 +313,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let inner_stride = if shape.len() >= 2 { shape[1..].iter().product() } else { numel };
 
         let packed_len = numel.div_ceil(T::ITEMS);
-        let mut packed = Vec::with_capacity(packed_len);
-        unsafe { packed.set_len(packed_len); }
+        let mut packed = vec![T::default(); packed_len];
 
         for chunk_idx in 0..packed_len {
             let mut arr = T::Array::default();

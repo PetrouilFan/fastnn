@@ -115,7 +115,47 @@ impl EmbeddingBackward {
 
 impl Node for EmbeddingBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
-        vec![crate::autograd::extract_first_grad(grad_outputs)]
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None];
+        };
+
+        let weight_shape = self.weight.shape_ref().to_vec();
+        let num_embeddings = weight_shape[0] as usize;
+        let embedding_dim = weight_shape[1] as usize;
+
+        let mut grad_weight_data = vec![0.0f32; num_embeddings * embedding_dim];
+
+        let grad_data = grad.to_cpu().as_f32_slice().to_vec();
+        let indices_data = self.indices.to_cpu().as_i64_slice();
+        let grad_shape = grad.shape_ref().to_vec();
+
+        if grad_shape.len() == 2 {
+            for i in 0..indices_data.len() {
+                let idx = indices_data[i] as usize;
+                if idx < num_embeddings {
+                    for j in 0..embedding_dim {
+                        grad_weight_data[idx * embedding_dim + j] += grad_data[i * embedding_dim + j];
+                    }
+                }
+            }
+        } else if grad_shape.len() == 3 {
+            let batch_size = grad_shape[0] as usize;
+            let seq_len = grad_shape[1] as usize;
+            for i in 0..batch_size {
+                for k in 0..seq_len {
+                    let idx = indices_data[i * seq_len + k] as usize;
+                    if idx < num_embeddings {
+                        for j in 0..embedding_dim {
+                            grad_weight_data[idx * embedding_dim + j] +=
+                                grad_data[(i * seq_len + k) * embedding_dim + j];
+                        }
+                    }
+                }
+            }
+        }
+
+        let grad_weight = Tensor::from_vec(grad_weight_data, weight_shape);
+        vec![Some(grad_weight)]
     }
 
     fn next_edges(&self) -> &[Edge] {

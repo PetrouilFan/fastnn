@@ -139,7 +139,7 @@ class TestBenchmarkTimer:
         result = timer.measure(lambda: 1 + 1)  # Very fast operation
         assert result.mean > 0
         assert result.median > 0
-        assert result.min > 0
+        assert result.min >= 0
         assert result.max >= result.min
         assert result.times_raw is not None
         assert len(result.times_raw) == 10

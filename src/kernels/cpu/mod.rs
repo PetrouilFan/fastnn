@@ -414,7 +414,7 @@ fn broadcast_index_decomposition(
 
 /// Fast contiguous last-dim sum with SIMD
 pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> Tensor {
-    let a_ptr = a.data_ptr() as *const f32;
+    let a_ptr = a.data_ptr_f32();
 
     // Direct allocation without Arc::make_mut overhead
     let mut result_data = vec![0.0f32; num_rows];
@@ -1117,7 +1117,7 @@ mod tests {
                 .collect();
 
             let x = Tensor::from_vec(x_data, vec![batch as i64, in_feat as i64]);
-            let w = Tensor::from_vec(w_data, vec![out_feat as i64, in_feat as i64]);
+            let w = Tensor::from_vec(w_data, vec![in_feat as i64, out_feat as i64]);
 
             // Warmup
             for _ in 0..3 {

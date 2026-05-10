@@ -255,11 +255,7 @@ impl TensorImpl {
                 // Unsafe: caller must ensure exclusive ownership of storage
                 // This is guaranteed by &mut self if Arc is not shared
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                let elem_size = match self.dtype {
-                    DType::F32 | DType::I32 | DType::Bool => 4,
-                    DType::F64 | DType::I64 => 8,
-                    DType::F16 | DType::BF16 => 2,
-                };
+                let elem_size = self.dtype.size();
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
             Storage::Wgpu(_) => {
@@ -637,18 +633,8 @@ impl Tensor {
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        let inner = &self.inner;
-        match inner.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                // Unsafe: caller must ensure exclusive ownership of storage
-                // This is guaranteed by &mut self if Arc is not shared
-                let ptr = cpu.data.as_ref().as_ptr() as *mut f32;
-                unsafe { ptr.add(inner.storage_offset as usize) }
-            }
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
-        }
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.data_ptr_f32_mut()
     }
 
     /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
@@ -660,11 +646,7 @@ impl Tensor {
                 // Unsafe: caller must ensure exclusive ownership of storage
                 // This is guaranteed by &mut self if Arc is not shared
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                let elem_size = match inner.dtype {
-                    DType::F32 | DType::I32 | DType::Bool => 4,
-                    DType::F64 | DType::I64 => 8,
-                    DType::F16 | DType::BF16 => 2,
-                };
+                let elem_size = inner.dtype.size();
                 unsafe { ptr.add(inner.storage_offset as usize * elem_size) }
             }
             Storage::Wgpu(_) => {

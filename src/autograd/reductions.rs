@@ -88,19 +88,16 @@ impl Node for MeanBackward {
         let result = if grad_shape.is_empty() {
             // Scalar gradient: create ones and multiply
             let ones = Tensor::ones(shape.to_vec(), grad.dtype(), grad.device());
-            let mut scaled = grad;
-            scaled.mul_scalar_(scale);
+            let scaled = grad.mul_scalar(scale);
             scaled.mul(&ones)
         } else if self.keepdim {
-            let mut scaled = grad;
-            scaled.mul_scalar_(scale);
+            let scaled = grad.mul_scalar(scale);
             scaled.expand(shape.to_vec())
         } else {
             let mut new_shape = shape.to_vec();
             new_shape[self.dim] = 1;
             let reshaped = grad.reshape(new_shape.to_vec());
-            let mut scaled = reshaped;
-            scaled.mul_scalar_(scale);
+            let scaled = reshaped.mul_scalar(scale);
             scaled.expand(shape.to_vec())
         };
 
@@ -482,17 +479,15 @@ impl Node for SiLUBackward {
     }
 }
 
-#[allow(dead_code)]
 pub struct SoftmaxBackward {
     pub input: Tensor,
-    pub output: Tensor,
     pub dim: usize,
     pub edges: Vec<Edge>,
 }
 
 impl SoftmaxBackward {
-    pub fn new(input: Tensor, output: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
-        SoftmaxBackward { input, output, dim, edges }
+    pub fn new(input: Tensor, dim: usize, edges: Vec<Edge>) -> Self {
+        SoftmaxBackward { input, dim, edges }
     }
 }
 
@@ -501,13 +496,19 @@ impl Node for SoftmaxBackward {
         let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
             return vec![None];
         };
-        let s = &self.output;
+        // Recompute softmax from stored input to avoid storing output (which creates a ref cycle)
+        let x = &self.input;
+        let max_val = x.max(-1, true);
+        let shifted = x.sub(&max_val);
+        let exp_vals = shifted.exp();
+        let sum_exp = exp_vals.sum(-1, true);
+        let s = exp_vals.div(&sum_exp);
         let dim_tensor = Tensor::from_scalar(self.dim as f32);
-        let dispatch_key = crate::dispatcher::device_to_dispatch_key(s.device());
+        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(
             "softmax_backward",
             dispatch_key,
-            &[s, &grad, &dim_tensor],
+            &[&s, &grad, &dim_tensor],
         );
         vec![result.first().cloned()]
     }

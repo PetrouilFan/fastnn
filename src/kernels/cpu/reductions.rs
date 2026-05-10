@@ -51,8 +51,7 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::empty(output_shape.clone(), a.dtype(), a.device());
 
-    let a_ptr = a.data_ptr() as *const f32;
-    let a_storage_offset = a.inner.storage_offset as usize;
+    let a_ptr = a.data_ptr_f32();
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -95,9 +94,8 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     for d in 0..dim_size {
                         let linear_idx =
                             (block_before * dim_size + d) * strides_after as usize + block_after;
-                        let idx = a_storage_offset + linear_idx;
-                        if idx < a_numel {
-                            sum_val += a_slice[idx];
+                        if linear_idx < a_numel {
+                            sum_val += a_slice[linear_idx];
                         }
                     }
                     sum_val
@@ -120,10 +118,9 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let mut sum_val = 0.0f32;
         for d in 0..dim_size {
             let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
-            let idx = a_storage_offset + linear_idx;
-            if idx < a_numel {
+            if linear_idx < a_numel {
                 unsafe {
-                    sum_val += *a_ptr.add(idx);
+                    sum_val += *a_ptr.add(linear_idx);
                 }
             }
         }
@@ -171,8 +168,7 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
 
-    let a_ptr = a.data_ptr() as *const f32;
-    let a_storage_offset = a.inner.storage_offset as usize;
+    let a_ptr = a.data_ptr_f32();
     let a_numel = a.numel() as usize;
 
     let output_inner = Arc::make_mut(&mut output.inner);
@@ -210,9 +206,8 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     for d in 0..dim_size {
                         let linear_idx =
                             (block_before * dim_size + d) * strides_after as usize + block_after;
-                        let idx = a_storage_offset + linear_idx;
-                        if idx < a_numel {
-                            min_val = min_val.min(a_slice[idx]);
+                        if linear_idx < a_numel {
+                            min_val = min_val.min(a_slice[linear_idx]);
                         }
                     }
                     min_val
@@ -235,10 +230,9 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let mut min_val = f32::MAX;
         for d in 0..dim_size {
             let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
-            let idx = a_storage_offset + linear_idx;
-            if idx < a_numel {
+            if linear_idx < a_numel {
                 unsafe {
-                    min_val = min_val.min(*a_ptr.add(idx));
+                    min_val = min_val.min(*a_ptr.add(linear_idx));
                 }
             }
         }
@@ -335,8 +329,7 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     let mut output = Tensor::zeros(output_shape.clone(), a.dtype(), a.device());
 
-    let a_ptr = a.data_ptr() as *const f32;
-    let a_storage_offset = a.inner.storage_offset as usize;
+    let a_ptr = a.data_ptr_f32();
 
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
@@ -360,7 +353,6 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let total_blocks = strides_before as usize * strides_after as usize;
     let a_usize = a_ptr as usize;
     let out_usize = out_ptr as usize;
-    let a_off = a_storage_offset;
 
     #[cfg(feature = "parallel")]
     {
@@ -374,7 +366,7 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 for i in 0..ds {
                     let a_idx = (block / sa) * ds * sa + i * sa + block % sa;
                     unsafe {
-                        let val = *a_p.add(a_idx + a_off);
+                        let val = *a_p.add(a_idx);
                         if val > max_val {
                             max_val = val;
                         }
@@ -395,7 +387,7 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 + i * (strides_after as usize)
                 + block % (strides_after as usize);
             unsafe {
-                let val = *a_ptr.add(a_idx + a_storage_offset);
+                let val = *a_ptr.add(a_idx);
                 if val > max_val {
                     max_val = val;
                 }

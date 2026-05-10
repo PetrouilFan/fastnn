@@ -1,4 +1,4 @@
-use crate::autograd::Node;
+use crate::autograd::{is_grad_enabled, no_grad_enter, no_grad_exit, Node};
 use crate::tensor::Tensor;
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
@@ -75,6 +75,11 @@ fn check_gradient_validity(_tensor: &Tensor, _context: &str) {
 pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     if !root.requires_grad() {
         return;
+    }
+
+    let prev_grad_enabled = is_grad_enabled();
+    if prev_grad_enabled {
+        no_grad_enter();
     }
 
     let grad_output =
@@ -190,6 +195,11 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 }
             }
         }
+    }
+
+    // Restore gradient tracking
+    if prev_grad_enabled {
+        no_grad_exit();
     }
 
     // Return workspace to thread-local storage

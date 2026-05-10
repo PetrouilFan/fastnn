@@ -272,6 +272,7 @@ pub struct Conv1d {
     stride_scalar: Tensor,
     padding_scalar: Tensor,
     dilation_scalar: Tensor,
+    default_bias: Tensor,
 }
 
 impl Conv1d {
@@ -316,41 +317,70 @@ impl Conv1d {
             stride_scalar: Tensor::from_scalar(stride as f32),
             padding_scalar: Tensor::from_scalar(padding as f32),
             dilation_scalar: Tensor::from_scalar(dilation as f32),
+            default_bias: Tensor::from_scalar(0.0),
         }
     }
 }
 
 impl Module for Conv1d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        // Conv1d = Conv2d with height=1, so reshape [B, C, L] -> [B, C, 1, L]
+        // Route through conv2d for autograd support.
+        //
+        // Conv1d = Conv2d with height=1. We reshape [B, C, L] -> [B, C, 1, L] and
+        // the weight [out_C, in_C, kL] -> [out_C, in_C, 1, kL].
+        //
+        // Since conv2d applies the same padding to both H and W, but Conv1d only
+        // pads along L (width), we pre-pad the input along L and use padding=0 for conv2d.
         let x_shape = x.shape_ref();
         let batch = x_shape[0];
         let channels = x_shape[1];
         let length = x_shape[2];
-        let x_4d = x.reshape(vec![batch, channels, 1, length]);
+        let pad = self.padding;
 
-        // Use Conv2d forward which has autograd support
+        // Pad input along the length dimension
+        let x_padded = if pad > 0 {
+            let padded_len = length + 2 * pad;
+            let mut padded_data = vec![0.0f32; (batch * channels * padded_len) as usize];
+            let x_slice = x.as_f32_slice();
+            for b in 0..batch {
+                for c in 0..channels {
+                    let src_off = (b * channels + c) * length;
+                    let dst_off = (b * channels + c) * padded_len + pad;
+                    let src = &x_slice[src_off as usize..(src_off + length) as usize];
+                    let dst = &mut padded_data[dst_off as usize..(dst_off + length) as usize];
+                    dst.copy_from_slice(src);
+                }
+            }
+            Tensor::from_vec(padded_data, vec![batch, channels, padded_len])
+        } else {
+            x.clone()
+        };
+
+        let x_4d = x_padded.reshape(vec![batch, channels, 1, length + 2 * pad]);
+
+        // Reshape weight from 3D to 4D
+        let w_shape = self.weight.shape_ref();
+        let w_4d = self.weight.reshape(vec![w_shape[0], w_shape[1], 1, w_shape[2]]);
+
+        // Use conv2d with padding=0 (since we pre-padded) and the user's stride/dilation
+        let zero_pad = Tensor::from_scalar(0.0);
+        let bias_ref = self.bias.as_ref().unwrap_or(&self.default_bias);
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(
             "conv2d",
             dispatch_key,
             &[
                 &x_4d,
-                &self.weight,
+                &w_4d,
+                bias_ref,
                 &self.stride_scalar,
-                &self.padding_scalar,
+                &zero_pad,   // padding=0 (already pre-padded)
                 &self.dilation_scalar,
                 &Tensor::from_scalar(1.0), // groups
             ],
         );
-        let mut output = result[0].clone();
 
-        // Add bias
-        if let Some(ref bias) = self.bias {
-            let bias_shape = vec![1, self.out_channels, 1, 1];
-            let bias_reshaped = bias.reshape(bias_shape);
-            output = output.add(&bias_reshaped);
-        }
+        let output = result.into_iter().next().unwrap();
 
         // Reshape back to 3D: [B, C_out, 1, L_out] -> [B, C_out, L_out]
         let out_shape = output.shape_ref();
@@ -439,46 +469,29 @@ impl Conv3d {
 
 impl Module for Conv3d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        // Conv3d = Conv2d with depth as batch, so reshape [B, C, D, H, W] -> [B*D, C, H, W]
-        let x_shape = x.shape_ref();
-        let batch = x_shape[0];
-        let channels = x_shape[1];
-        let depth = x_shape[2];
-        let height = x_shape[3];
-        let width = x_shape[4];
-
-        // Reshape to treat depth as batch: [B*D, C, H, W]
-        let x_4d = x.reshape(vec![batch * depth, channels, height, width]);
-
-        // Use Conv2d forward which has autograd support
+        // Dispatch to dedicated conv3d kernel
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(
-            "conv2d",
+            "conv3d",
             dispatch_key,
             &[
-                &x_4d,
+                x,
                 &self.weight,
                 &self.stride_scalar,
                 &self.padding_scalar,
                 &self.dilation_scalar,
-                &Tensor::from_scalar(1.0), // groups
             ],
         );
-        let mut output = result[0].clone();
+        let mut output = result.into_iter().next().unwrap();
 
         // Add bias
         if let Some(ref bias) = self.bias {
-            let bias_shape = vec![1, self.out_channels, 1, 1];
+            let bias_shape = vec![1, self.out_channels, 1, 1, 1];
             let bias_reshaped = bias.reshape(bias_shape);
             output = output.add(&bias_reshaped);
         }
 
-        // Reshape back to 5D: [B*D, C_out, H_out, W_out] -> [B, C_out, D, H_out, W_out]
-        let out_shape = output.shape_ref();
-        let out_channels = out_shape[1];
-        let out_height = out_shape[2];
-        let out_width = out_shape[3];
-        output.reshape(vec![batch, out_channels, depth, out_height, out_width])
+        output
     }
 
     impl_nn_params!(weight, bias);

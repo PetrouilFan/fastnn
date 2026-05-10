@@ -244,21 +244,29 @@ impl Module for BatchNorm1d {
             let centered = x_reshaped.sub(&batch_mean.reshape(vec![1, num_features, 1]));
             let batch_var = centered.mul(&centered).mean(2, false).mean(0, false);
 
-            // Update running stats: running = momentum * running + (1 - momentum) * batch
+            // PyTorch uses unbiased variance (Bessel correction) for running_var update
+            let n = (batch_size * spatial_size) as f32;
+            let unbiased_var = if n > 1.0 {
+                batch_var.mul_scalar(n / (n - 1.0))
+            } else {
+                batch_var
+            };
+
+            // Update running stats: running = (1 - momentum) * running + momentum * batch (PyTorch convention)
             let mom = self.momentum as f32;
             let inv_mom = 1.0 - mom;
 
             // Get mutable references and update
             let mut running_mean_lock = self.running_mean.write();
             let new_mean = running_mean_lock
-                .mul_scalar(mom)
-                .add(&batch_mean.mul_scalar(inv_mom));
+                .mul_scalar(inv_mom)
+                .add(&batch_mean.mul_scalar(mom));
             *running_mean_lock = new_mean;
 
             let mut running_var_lock = self.running_var.write();
             let new_var = running_var_lock
-                .mul_scalar(mom)
-                .add(&batch_var.mul_scalar(inv_mom));
+                .mul_scalar(inv_mom)
+                .add(&unbiased_var.mul_scalar(mom));
             *running_var_lock = new_var;
         }
 
@@ -553,14 +561,14 @@ impl Module for BatchNorm2d {
             let centered = x_reshaped.sub(&batch_mean.reshape(vec![1, channels, 1]));
             let batch_var = centered.mul(&centered).mean(2, false).mean(0, false);
 
-            // Update running stats: running = momentum * running + (1 - momentum) * batch
+            // Update running stats: running = (1 - momentum) * running + momentum * batch (PyTorch convention)
             let mom = self.momentum;
             let inv_mom = 1.0 - mom;
 
             let mut running_mean_lock = self.running_mean.write();
             let new_mean = running_mean_lock
-                .mul_scalar(mom)
-                .add(&batch_mean.mul_scalar(inv_mom));
+                .mul_scalar(inv_mom)
+                .add(&batch_mean.mul_scalar(mom));
             *running_mean_lock = new_mean;
 
             let mut running_var_lock = self.running_var.write();
@@ -573,8 +581,8 @@ impl Module for BatchNorm2d {
                 batch_var
             };
             let new_var = running_var_lock
-                .mul_scalar(mom)
-                .add(&unbiased_var.mul_scalar(inv_mom));
+                .mul_scalar(inv_mom)
+                .add(&unbiased_var.mul_scalar(mom));
             *running_var_lock = new_var;
         }
 
