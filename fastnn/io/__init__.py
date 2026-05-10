@@ -156,6 +156,8 @@ def read_fnn_parameters(f, num_params):
 from fastnn.io.serialization import _save_model as save_model, _load_model as load_model
 from fastnn.io.export import save_fnn_model
 from fastnn.io.onnx import import_onnx
+from fastnn.io.graph_builder import build_model_from_fnn
+from fastnn.io.dag_model import DAGModel
 
 
 def save(model, path: str, format: str = "fnn-v2") -> None:
@@ -208,9 +210,30 @@ def convert_from_onnx(onnx_path: str, fnn_path: str) -> dict:
     return import_onnx(str(Path(onnx_path)), str(Path(fnn_path)))
 
 
+def load_onnx_model(onnx_path: str, fnn_path: str) -> dict:
+    """
+    Import an ONNX model and save it in fastnn format.
+
+    This is an alias for convert_from_onnx that follows the
+    load_fnn_model naming convention.
+
+    Args:
+        onnx_path: Path to the .onnx file.
+        fnn_path: Path where the .fnn output will be saved.
+
+    Returns:
+        Dictionary with model info including layers, parameter count,
+        and input/output shapes.
+    """
+    return import_onnx(str(Path(onnx_path)), str(Path(fnn_path)))
+
+
 __all__ = [
     "save",
     "load",
     "convert_from_pytorch",
     "convert_from_onnx",
+    "load_onnx_model",
+    "build_model_from_fnn",
+    "DAGModel",
 ]

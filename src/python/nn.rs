@@ -326,6 +326,21 @@ impl_nn_module!(MaxPool2d {
 });
 
 #[pyclass]
+struct AvgPool2d {
+    inner: core_nn::pooling::AvgPool2d,
+}
+
+impl_nn_module!(AvgPool2d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride = 2, padding = 0))]
+    fn new(kernel_size: i64, stride: i64, padding: i64) -> Self {
+        AvgPool2d {
+            inner: core_nn::pooling::AvgPool2d::new(kernel_size, stride, padding),
+        }
+    }
+});
+
+#[pyclass]
 struct ConvTranspose2d {
     inner: core_nn::conv::ConvTranspose2d,
 }
@@ -751,6 +766,38 @@ impl_activation!(Softplus, softplus, beta: f64 = 1.0, threshold: f64 = 20.0);
 impl_activation!(Elu, elu, alpha: f64 = 1.0);
 
 #[pyclass]
+struct PReLU {
+    inner: core_nn::activations::PReLU,
+}
+
+impl_nn_module!(PReLU {
+    #[new]
+    fn new(num_parameters: i64) -> Self {
+        PReLU {
+            inner: core_nn::activations::PReLU::new(num_parameters),
+        }
+    }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = weight.inner;
+    }
+});
+
+#[pyclass]
+struct Softmax {
+    inner: core_nn::activations::Softmax,
+}
+
+impl_nn_module!(Softmax {
+    #[new]
+    fn new(dim: i64) -> Self {
+        Softmax {
+            inner: core_nn::activations::Softmax::new(dim),
+        }
+    }
+});
+
+#[pyclass]
 struct Mish;
 
 #[pymethods]
@@ -887,6 +934,115 @@ impl_nn_module!(PyTransformerEncoder {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
     }
 });
+
+// ---- DAGExecutor (ONNX graph execution) ----
+
+#[pyclass]
+pub struct DAGExecutor {
+    inner: core_nn::dag::DAGExecutor,
+}
+
+#[pymethods]
+impl DAGExecutor {
+    #[new]
+    #[pyo3(signature = (nodes, params, input_names, output_names))]
+    fn new(
+        nodes: Vec<HashMap<String, String>>,
+        params: HashMap<String, PyTensor>,
+        input_names: Vec<String>,
+        output_names: Vec<String>,
+    ) -> Self {
+        let dag_nodes: Vec<core_nn::dag::DAGNode> = nodes
+            .into_iter()
+            .map(|m| {
+                let name = m.get("name").cloned().unwrap_or_default();
+                let op_type = m.get("op_type").cloned().unwrap_or_default();
+                let inputs: Vec<String> = m
+                    .get("inputs")
+                    .map(|s| {
+                        s.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let outputs: Vec<String> = m
+                    .get("outputs")
+                    .map(|s| {
+                        s.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let attrs: HashMap<String, String> = m
+                    .into_iter()
+                    .filter(|(k, _)| *k != "name" && *k != "op_type" && *k != "inputs" && *k != "outputs")
+                    .collect();
+                core_nn::dag::DAGNode {
+                    name,
+                    op_type,
+                    inputs,
+                    outputs,
+                    attrs,
+                }
+            })
+            .collect();
+        let rust_params: HashMap<String, Tensor> = params
+            .into_iter()
+            .map(|(k, v)| (k, v.inner))
+            .collect();
+        DAGExecutor {
+            inner: core_nn::dag::DAGExecutor::new(dag_nodes, rust_params, input_names, output_names),
+        }
+    }
+
+    fn forward(&self, inputs: HashMap<String, PyTensor>) -> HashMap<String, PyTensor> {
+        let rust_inputs: HashMap<String, Tensor> = inputs
+            .into_iter()
+            .map(|(k, v)| (k, v.inner))
+            .collect();
+        let outputs = self.inner.forward(&rust_inputs);
+        outputs
+            .into_iter()
+            .map(|(k, v)| (k, PyTensor::from_tensor(v)))
+            .collect()
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner
+            .parameters()
+            .into_iter()
+            .map(PyTensor::from_tensor)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner
+            .named_parameters()
+            .into_iter()
+            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
+            .collect()
+    }
+
+    fn zero_grad(&self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&self) {
+        self.inner.eval_mode();
+    }
+
+    fn is_training(&self) -> bool {
+        self.inner.is_training()
+    }
+}
 
 // ---- PackedMultiHeadAttention (4-bit, U4x8) ----
 

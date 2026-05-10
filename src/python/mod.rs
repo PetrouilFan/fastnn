@@ -154,6 +154,10 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sigmoid, py)?)?;
     m.add_function(wrap_pyfunction!(tanh, py)?)?;
     m.add_function(wrap_pyfunction!(silu, py)?)?;
+    m.add_function(wrap_pyfunction!(leaky_relu, py)?)?;
+    m.add_function(wrap_pyfunction!(elu, py)?)?;
+    m.add_function(wrap_pyfunction!(softplus, py)?)?;
+    m.add_function(wrap_pyfunction!(hardswish, py)?)?;
     m.add_function(wrap_pyfunction!(softmax, py)?)?;
     m.add_function(wrap_pyfunction!(log_softmax, py)?)?;
     m.add_function(wrap_pyfunction!(sum, py)?)?;
@@ -182,6 +186,7 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Linear>()?;
     m.add_class::<Conv2d>()?;
     m.add_class::<MaxPool2d>()?;
+    m.add_class::<AvgPool2d>()?;
     m.add_class::<ConvTranspose2d>()?;
     m.add_class::<Conv1d>()?;
     m.add_class::<Conv3d>()?;
@@ -207,6 +212,8 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Softplus>()?;
     m.add_class::<Hardswish>()?;
     m.add_class::<Elu>()?;
+    m.add_class::<Softmax>()?;
+    m.add_class::<PReLU>()?;
     m.add_class::<Mish>()?;
     m.add_class::<AdaptiveAvgPool2d>()?;
     m.add_class::<Sequential>()?;
@@ -218,6 +225,7 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLion>()?;
     m.add_class::<PyRMSprop>()?;
     m.add_class::<PyTransformerEncoder>()?;
+    m.add_class::<DAGExecutor>()?;
 
     m.add_class::<PyTensor>()?;
     m.add_class::<PyPackedTensor4>()?;
@@ -254,6 +262,12 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
     m.add_function(wrap_pyfunction!(cat, py)?)?;
     m.add_function(wrap_pyfunction!(stack, py)?)?;
+    m.add_function(wrap_pyfunction!(where_, py)?)?;
+    m.add_function(wrap_pyfunction!(repeat, py)?)?;
+    m.add_function(wrap_pyfunction!(expand, py)?)?;
+    m.add_function(wrap_pyfunction!(slice, py)?)?;
+    m.add_function(wrap_pyfunction!(topk, py)?)?;
+    m.add_function(wrap_pyfunction!(gather, py)?)?;
     m.add_function(wrap_pyfunction!(einsum, py)?)?;
     m.add_function(wrap_pyfunction!(im2col, py)?)?;
 
@@ -262,6 +276,5 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flash_attention, py)?)?;
     m.add_function(wrap_pyfunction!(clip_grad_norm_, py)?)?;
     m.add_function(wrap_pyfunction!(clip_grad_value_, py)?)?;
-
     Ok(())
 }

@@ -1,4 +1,4 @@
-from fastnn import ReLU, GELU, SiLU, Tanh, Sigmoid, LeakyReLU
+from fastnn import ReLU, GELU, SiLU, Tanh, Sigmoid, LeakyReLU, Softmax
 
 activation_registry = {
     "relu": ReLU,
@@ -7,6 +7,7 @@ activation_registry = {
     "tanh": Tanh,
     "sigmoid": Sigmoid,
     "leaky_relu": LeakyReLU,
+    "softmax": Softmax,
 }
 
 __all__ = ["activation_registry", "register_activation", "get_activation"]
