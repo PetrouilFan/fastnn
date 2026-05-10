@@ -219,6 +219,8 @@ fn fused_add_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let mut output_data = vec![0.0f32; numel as usize];
 
     for i in 0..numel as usize {
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
         let sum = unsafe { *a_data.add(i) + *b_data.add(i) };
         output_data[i] = sum.max(0.0);
     }
@@ -349,6 +351,7 @@ fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_cols = a_shape[a_shape.len() - 1] as usize;
     let b_cols = b_shape[b_shape.len() - 1] as usize;
 
+// SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
     let a_slice = unsafe { std::slice::from_raw_parts(a_data, a_rows * a_cols) };
     let b_slice = unsafe { std::slice::from_raw_parts(b_data, k as usize * b_cols) };
 

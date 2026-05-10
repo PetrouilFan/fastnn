@@ -208,7 +208,16 @@ class MaxPool2dPy(Module):
     
     def parameters(self):
         return []
-    
+
+    def named_parameters(self):
+        return []
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
     def __call__(self, x):
         return self._rust_maxpool(x)
 
@@ -252,9 +261,9 @@ class Flatten(Module):
         start = self.start_dim if self.start_dim >= 0 else ndim + self.start_dim
         end = self.end_dim if self.end_dim >= 0 else ndim + self.end_dim
         new_shape = list(shape[:start])
-        flattened_size = math.prod(shape[start:end])
+        flattened_size = math.prod(shape[start:end + 1])
         new_shape.append(flattened_size)
-        new_shape.extend(shape[end:])
+        new_shape.extend(shape[end + 1:])
         return x.view(new_shape)
 
 
