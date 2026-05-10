@@ -45,7 +45,7 @@ class Module(ABC):
         """Zero out gradients for all parameters."""
         pass
     
-    def to_gpu(self, device: str) -> None:
+    def to_gpu(self, device_id: int) -> None:
         """Move module to GPU."""
         pass
     

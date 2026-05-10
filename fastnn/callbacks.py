@@ -221,7 +221,8 @@ class EarlyStopping(MonitorCallback):
     def on_train_end(self, logs: Optional[Dict[str, Any]] = None) -> None:
         if self.restore_best_weights and self.best_weights is not None and self.model is not None:
             print("Restoring best model weights...")
-            self.model.load_state_dict(self.best_weights)
+            weights_on_device = {k: v.to(self.model.device) for k, v in self.best_weights.items()}
+            self.model.load_state_dict(weights_on_device)
             self.best_weights = None
 
 

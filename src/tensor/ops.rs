@@ -1173,7 +1173,7 @@ impl Tensor {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::LogSoftmaxBackward::new(
                 output.clone(),
-                dim as usize,
+                dim as i32,
                 edges,
             ));
             Self::attach_grad_fn(output, backward)
