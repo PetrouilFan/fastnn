@@ -185,7 +185,6 @@ for epoch in range(50):
     # Save checkpoint
     if epoch % 10 == 0:
         fnn.io.save(model, f'checkpoint_epoch_{epoch}.fnn')
-        fnn.io.save(optimizer, f'optimizer_epoch_{epoch}.fno')
 ```
 
 ## Model I/O
@@ -208,26 +207,11 @@ import torch
 torch_model = torch.nn.Linear(784, 10)
 torch.onnx.export(torch_model, torch.randn(1, 784), 'model.onnx')
 
-# Import to fastnn (legacy)
+# Import to fastnn
 info = fnn.import_onnx('model.onnx', 'model.fnn')
 print(f"Imported {info['parameters']} parameters")
 
 # Or use the unified API
-from fnn.io import convert_from_onnx
+from fastnn.io import convert_from_onnx
 info = convert_from_onnx('model.onnx', 'model.fnn')
-```
-
-## ONNX Import
-
-Import models from PyTorch via ONNX:
-
-```python
-# Export from PyTorch
-import torch
-torch_model = torch.nn.Linear(784, 10)
-torch.onnx.export(torch_model, torch.randn(1, 784), 'model.onnx')
-
-# Import to fastnn
-info = fnn.import_onnx('model.onnx', 'model.fnn')
-print(f"Imported {info['parameters']} parameters")
 ```

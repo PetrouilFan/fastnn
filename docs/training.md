@@ -345,7 +345,6 @@ for epoch in range(50):
     # Save checkpoint
     if epoch % 10 == 0:
         fnn.io.save(model, f'checkpoint_epoch_{epoch}.fnn')
-        fnn.io.save(optimizer, f'optimizer_epoch_{epoch}.fno')
 ```
 
 ## Distributed Data Parallel

@@ -101,7 +101,6 @@ y = x.tanh()          # Tanh
 y = x.gelu()          # GELU
 y = x.silu()          # SiLU (Swish): x * sigmoid(x)
 y = x.leaky_relu(0.01)  # Leaky ReLU
-y = x.elu(1.0)        # ELU
 y = x.softplus()      # Softplus
 y = x.hardswish()     # Hard swish
 y = x.softmax(dim=-1) # Softmax

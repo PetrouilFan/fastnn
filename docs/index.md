@@ -9,7 +9,7 @@ FastNN provides:
 - **Neural network modules**: Linear, Conv2d, BatchNorm, LayerNorm, Dropout, Embedding, activations
 - **Optimizers**: SGD, Adam, AdamW, Muon, Lion, RMSprop
 - **Training infrastructure**: DataLoader with callbacks, metrics, checkpoints
-- **IO**: Custom binary format (.fnn), DLPack interop (Rust only)
+- **IO**: Custom binary format (.fnn), PyTorch model export, ONNX model import
 
 ## Sections
 
