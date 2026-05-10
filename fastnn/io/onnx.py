@@ -559,6 +559,96 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
         elif op_type == "Range":
             layer_info["type"] = "RangeOp"
 
+        elif op_type == "Attention":
+            num_heads = _get_attr(node, "num_heads", 12)
+            layer_info["type"] = "Attention"
+            layer_info["num_heads"] = num_heads
+
+        elif op_type == "BiasGelu":
+            layer_info["type"] = "BiasGelu"
+
+        elif op_type == "ConstantOfShape":
+            value = _get_attr(node, "value", None)
+            layer_info["type"] = "ConstantOfShape"
+            if value is not None:
+                import onnx.numpy_helper
+                const_tensor = onnx.numpy_helper.to_array(value)
+                layer_info["value"] = const_tensor.flatten()[0].item() if hasattr(const_tensor, 'flatten') else float(const_tensor)
+                layer_info["dims"] = list(const_tensor.shape)
+
+        elif op_type == "DequantizeLinear":
+            axis = _get_attr(node, "axis", 1)
+            layer_info["type"] = "DequantizeLinear"
+            layer_info["axis"] = axis
+
+        elif op_type == "EmbedLayerNormalization":
+            layer_info["type"] = "EmbedLayerNormalization"
+
+        elif op_type == "FastGelu":
+            layer_info["type"] = "FastGelu"
+
+        elif op_type == "GatherND":
+            batch_dims = _get_attr(node, "batch_dims", 0)
+            layer_info["type"] = "GatherND"
+            layer_info["batch_dims"] = batch_dims
+
+        elif op_type == "Gelu":
+            layer_info["type"] = "Gelu"
+
+        elif op_type == "GRU":
+            hidden_size = _get_attr(node, "hidden_size", None)
+            direction = _get_attr(node, "direction", "forward")
+            layer_info["type"] = "GRU"
+            if hidden_size is not None:
+                layer_info["hidden_size"] = hidden_size
+            layer_info["direction"] = direction
+
+        elif op_type == "GroupQueryAttention":
+            num_heads = _get_attr(node, "num_heads", 32)
+            kv_num_heads = _get_attr(node, "kv_num_heads", 8)
+            layer_info["type"] = "GroupQueryAttention"
+            layer_info["num_heads"] = num_heads
+            layer_info["kv_num_heads"] = kv_num_heads
+
+        elif op_type == "LSTM":
+            hidden_size = _get_attr(node, "hidden_size", None)
+            direction = _get_attr(node, "direction", "forward")
+            layer_info["type"] = "LSTM"
+            if hidden_size is not None:
+                layer_info["hidden_size"] = hidden_size
+            layer_info["direction"] = direction
+
+        elif op_type == "MultiHeadAttention":
+            num_heads = _get_attr(node, "num_heads", 12)
+            layer_info["type"] = "MultiHeadAttention"
+            layer_info["num_heads"] = num_heads
+
+        elif op_type == "QuantizeLinear":
+            axis = _get_attr(node, "axis", 1)
+            layer_info["type"] = "QuantizeLinear"
+            layer_info["axis"] = axis
+
+        elif op_type == "RMSNormalization":
+            epsilon = _get_attr(node, "epsilon", 1e-5)
+            layer_info["type"] = "RMSNorm"
+            layer_info["eps"] = epsilon
+
+        elif op_type == "RotaryEmbedding":
+            layer_info["type"] = "RotaryEmbedding"
+
+        elif op_type == "ScatterND":
+            reduction = _get_attr(node, "reduction", "none")
+            layer_info["type"] = "ScatterND"
+            layer_info["reduction"] = reduction
+
+        elif op_type == "SkipLayerNormalization":
+            epsilon = _get_attr(node, "epsilon", 1e-5)
+            layer_info["type"] = "SkipLayerNorm"
+            layer_info["eps"] = epsilon
+
+        elif op_type == "Swish":
+            layer_info["type"] = "Swish"
+
         else:
             logger.warning(f"Unsupported operator: {op_type}")
             layer_info["type"] = f"Unsupported_{op_type}"
@@ -606,6 +696,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
 
     result = {
         "layers": layers,
+        "graph": graph,
         "parameters": len(params),
         "input_shape": input_shape,
         "output_shape": output_shape,
