@@ -251,6 +251,63 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
     }
 }
 
+/// Compute input gradient for packed linear backward pass.
+///
+/// grad_input[i] = sum_j grad_output[j] * W[j][i]
+/// Where W has shape [out_features, in_features], row-major.
+pub fn packed_linear_backward_input_cpu<T: PackedWord>(
+    weight: &PackedTensor<T>,
+    grad_output: &[f32],
+    _cached_input: &[f32],
+    out_f: usize,
+    in_f: usize,
+) -> Vec<f32> {
+    assert_eq!(grad_output.len(), out_f);
+    let mut grad_input = vec![0.0; in_f];
+
+    for j in 0..out_f {
+        let go = grad_output[j];
+        if go == 0.0 {
+            continue;
+        }
+        let row_start = j * in_f;
+        for i in 0..in_f {
+            grad_input[i] += weight.get(row_start + i) * go;
+        }
+    }
+
+    grad_input
+}
+
+/// Accumulate weight gradient for packed linear backward pass.
+///
+/// master_grad[j * in_f + i] += grad_output[j] * cached_input[i]
+/// Accumulates into existing master_grad values.
+pub fn packed_linear_backward_weight_cpu<T: PackedWord>(
+    _weight: &PackedTensor<T>,
+    grad_output: &[f32],
+    cached_input: &[f32],
+    master_grad: &mut [f32],
+    out_f: usize,
+    in_f: usize,
+) {
+    assert_eq!(grad_output.len(), out_f);
+    assert_eq!(cached_input.len(), in_f);
+    assert_eq!(master_grad.len(), out_f * in_f);
+
+    for j in 0..out_f {
+        let go = grad_output[j];
+        if go == 0.0 {
+            continue;
+        }
+        let row_start = j * in_f;
+        // Vectorize this inner loop with SIMD if available
+        for i in 0..in_f {
+            master_grad[row_start + i] += go * cached_input[i];
+        }
+    }
+}
+
 /// Fused ReLU forward + backward on CPU — computes both in a single pass
 /// sharing sign-bit computation for integer SWAR types.
 #[inline(always)]

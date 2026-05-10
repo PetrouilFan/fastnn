@@ -16,9 +16,9 @@ pub struct QuantizedTensor<T: PackedWord> {
     /// Raw packed data
     data: Vec<T>,
     /// Shape of the tensor
-    shape: Vec<usize>,
+    pub shape: Vec<usize>,
     /// Block size (in elements) used for quantization
-    block_size: usize,
+    pub block_size: usize,
     _marker: PhantomData<T>,
 }
 
