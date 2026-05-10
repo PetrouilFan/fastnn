@@ -236,7 +236,16 @@ class Flatten(Module):
     
     def parameters(self):
         return []
-    
+
+    def named_parameters(self):
+        return []
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
     def __call__(self, x):
         shape = x.shape
         ndim = len(shape)
