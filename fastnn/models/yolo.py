@@ -69,7 +69,6 @@ class YOLO:
 
     def _load_model(self):
         """Load the ONNX model and prepare for inference."""
-        # Import ONNX model to .fnn format
         import tempfile
         tmpdir = tempfile.mkdtemp()
         fnn_path = Path(tmpdir) / "model.fnn"
@@ -77,6 +76,12 @@ class YOLO:
         try:
             # Import the ONNX model
             info = fnn.convert_from_onnx(self.onnx_path, str(fnn_path))
+
+            # Extract actual input name from model info
+            if info.get("graph") and info["graph"].get("inputs"):
+                actual_input_name = info["graph"]["inputs"][0].get("name", "images")
+                self.input_name = actual_input_name
+                logger.info("Model input name: %s", self.input_name)
 
             # Store model info
             self.input_shape = info.get("input_shape")
@@ -100,6 +105,9 @@ class YOLO:
         except Exception as e:
             logger.error("Failed to load model: %s", e)
             raise
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
 
     def preprocess(self, image: Union[str, np.ndarray, "PIL.Image.Image"]) -> Tuple[np.ndarray, Tuple]:
         """Preprocess an image for model input.
@@ -262,14 +270,18 @@ class YOLO:
         if self.model is None:
             raise RuntimeError("Model not loaded")
 
+        input_name = self.input_name or "images"
+
         if hasattr(self.model, "forward"):
-            # DAGModel
-            outputs = self.model.forward({self.input_name or "images": input_tensor})
-        else:
+            # DAGModel or DAGExecutor (both have forward)
+            outputs = self.model.forward({input_name: input_tensor})
+        elif hasattr(self.model, "__call__"):
             # Sequential model
             outputs = self.model(input_tensor)
             if not isinstance(outputs, dict):
                 outputs = {"output": outputs}
+        else:
+            raise RuntimeError("Model has neither forward() nor __call__()")
 
         return outputs
 
