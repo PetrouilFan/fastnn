@@ -592,6 +592,151 @@ def _infer_resizeop(input_shapes, attrs, num_outputs):
     return _infer_resize(input_shapes, attrs, num_outputs)
 
 
+def _infer_andop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_ceilop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_compress(input_shapes, attrs, num_outputs):
+    shape = list(input_shapes[0])
+    axis = int(attrs.get("axis", 0))
+    if axis < 0:
+        axis += len(shape)
+    if 0 <= axis < len(shape):
+        shape[axis] = None
+    return [shape]
+
+
+def _infer_convtranspose(input_shapes, attrs, num_outputs):
+    in_shape = list(input_shapes[0])
+    out_c = int(attrs.get("out_channels", in_shape[1]))
+    k = int(attrs.get("kernel_size", 3))
+    s = int(attrs.get("stride", 1))
+    p = int(attrs.get("padding", 0))
+    op = int(attrs.get("output_padding", 0))
+    d = int(attrs.get("dilation", 1))
+    h_in = in_shape[2]
+    w_in = in_shape[3]
+    h_out = (h_in - 1) * s + d * (k - 1) + 1 + op - 2 * p
+    w_out = (w_in - 1) * s + d * (k - 1) + 1 + op - 2 * p
+    return [[in_shape[0], out_c, h_out, w_out]]
+
+
+def _infer_cumsum(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_depthtospace(input_shapes, attrs, num_outputs):
+    in_shape = list(input_shapes[0])
+    b = int(attrs.get("blocksize", 2))
+    if len(in_shape) == 4:
+        c = in_shape[1] // (b * b) if in_shape[1] is not None else None
+        h = in_shape[2] * b if in_shape[2] is not None else None
+        w = in_shape[3] * b if in_shape[3] is not None else None
+        return [[in_shape[0], c, h, w]]
+    return [input_shapes[0]]
+
+
+def _infer_einsum(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_equalop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_eyelike(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_floorop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_greaterop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_hardsigmoid(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_isinfop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_isnanop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_layernorm(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_lessop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_logsoftmax(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_notop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_onehot(input_shapes, attrs, num_outputs):
+    axis = int(attrs.get("axis", -1))
+    indices_shape = list(input_shapes[0])
+    depth = input_shapes[1][0] if len(input_shapes) > 1 and input_shapes[1] else None
+    if axis < 0:
+        axis += len(indices_shape) + 1
+    indices_shape.insert(axis, depth)
+    return [indices_shape]
+
+
+def _infer_orop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_rangeop(input_shapes, attrs, num_outputs):
+    return [[None]]
+
+
+def _infer_reciprocalop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_roundop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_selu(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_signop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
+def _infer_spacetodepth(input_shapes, attrs, num_outputs):
+    in_shape = list(input_shapes[0])
+    b = int(attrs.get("blocksize", 2))
+    if len(in_shape) == 4:
+        c = in_shape[1] * b * b if in_shape[1] is not None else None
+        h = in_shape[2] // b if in_shape[2] is not None else None
+        w = in_shape[3] // b if in_shape[3] is not None else None
+        return [[in_shape[0], c, h, w]]
+    return [input_shapes[0]]
+
+
+def _infer_xorop(input_shapes, attrs, num_outputs):
+    return [input_shapes[0]]
+
+
 # ---- Utilities ----
 
 def _broadcast_shapes(a: List[int], b: List[int]) -> List[int]:

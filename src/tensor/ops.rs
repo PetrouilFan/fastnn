@@ -1216,6 +1216,18 @@ impl Tensor {
         let data = src.as_f32_slice();
         data.iter().map(|&v| v as i64).collect()
     }
+
+    pub fn erf(&self) -> Tensor {
+        let data = self.as_f32_slice();
+        let result_data: Vec<f32> = data.iter().map(|&v| {
+            let sign = if v >= 0.0 { 1.0f32 } else { -1.0f32 };
+            let x = v.abs();
+            let t = 1.0 / (1.0 + 0.3275911 * x);
+            let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
+            sign * y
+        }).collect();
+        Tensor::from_vec(result_data, self.shape_ref().to_vec())
+    }
 }
 
 impl Add for &Tensor {

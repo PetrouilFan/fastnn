@@ -187,6 +187,8 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Conv2d>()?;
     m.add_class::<MaxPool2d>()?;
     m.add_class::<AvgPool2d>()?;
+    m.add_class::<AvgPool1d>()?;
+    m.add_class::<MaxPool1d>()?;
     m.add_class::<ConvTranspose2d>()?;
     m.add_class::<Conv1d>()?;
     m.add_class::<Conv3d>()?;
@@ -276,5 +278,7 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flash_attention, py)?)?;
     m.add_function(wrap_pyfunction!(clip_grad_norm_, py)?)?;
     m.add_function(wrap_pyfunction!(clip_grad_value_, py)?)?;
+    m.add_function(wrap_pyfunction!(cumsum, py)?)?;
+    m.add_function(wrap_pyfunction!(erf, py)?)?;
     Ok(())
 }

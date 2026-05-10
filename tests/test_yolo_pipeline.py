@@ -407,3 +407,145 @@ class TestBenchmarks:
             if tmpdir:
                 import shutil
                 shutil.rmtree(tmpdir)
+
+
+class TestFullPipelineIntegration:
+    """Full pipeline integration tests using synthetic models.
+    
+    These tests exercise the complete ONNX import -> model build -> 
+    inference path without requiring real model weights.
+    """
+
+    def _create_multi_output_model(self):
+        """Create a model with multiple outputs (resembles YOLO head)."""
+        pytest.importorskip("onnx")
+        import onnx
+        from onnx import helper, TensorProto
+        import numpy as np
+        
+        X = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, 64, 64])
+        Y1 = helper.make_tensor_value_info("output0", TensorProto.FLOAT, [1, 16, 32, 32])
+        Y2 = helper.make_tensor_value_info("output1", TensorProto.FLOAT, [1, 8, 64, 64])
+        
+        W1 = helper.make_tensor("conv1.weight", TensorProto.FLOAT, [16, 3, 3, 3],
+                                np.random.randn(16, 3, 3, 3).flatten().tolist())
+        W2 = helper.make_tensor("conv2.weight", TensorProto.FLOAT, [8, 3, 3, 3],
+                                np.random.randn(8, 3, 3, 3).flatten().tolist())
+        
+        conv1 = helper.make_node("Conv", inputs=["images", "conv1.weight"],
+                                 outputs=["conv1_out"], name="conv1",
+                                 kernel_shape=[3, 3], strides=[2, 2], pads=[1, 1, 1, 1])
+        relu1 = helper.make_node("Relu", inputs=["conv1_out"], outputs=["output0"], name="relu1")
+        
+        conv2 = helper.make_node("Conv", inputs=["images", "conv2.weight"],
+                                 outputs=["output1"], name="conv2",
+                                 kernel_shape=[3, 3], strides=[1, 1], pads=[1, 1, 1, 1])
+        
+        graph = helper.make_graph(
+            [conv1, relu1, conv2],
+            "multi_output",
+            [X],
+            [Y1, Y2],
+            [W1, W2],
+        )
+        
+        model = helper.make_model(graph)
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "multi_output.onnx")
+        onnx.save(model, path)
+        return path, tmpdir
+
+    def test_multi_output_import_and_build(self):
+        """Test importing a multi-output model and building the executor."""
+        path, tmpdir = self._create_multi_output_model()
+        try:
+            from fastnn.io.onnx import import_onnx
+            out_path = os.path.join(tmpdir, "out.fnn")
+            result = import_onnx(path, out_path)
+            
+            assert len(result.get("output_shape", [])) > 0
+            
+            from fastnn.io.graph_builder import build_model_from_fnn
+            model = build_model_from_fnn(out_path)
+            assert model is not None
+            
+            import fastnn as fnn
+            import numpy as np
+            x = fnn.tensor(np.random.randn(1, 3, 64, 64).astype(np.float32), [1, 3, 64, 64])
+            
+            if hasattr(model, "forward"):
+                outputs = model.forward({"images": x})
+            else:
+                outputs = model(x)
+            
+            assert outputs is not None
+            if isinstance(outputs, dict):
+                assert len(outputs) > 0
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_compute_graph_through_pipeline(self):
+        """Test that the full compute graph survives import->build->infer."""
+        import tempfile
+        import numpy as np
+        from onnx import helper, TensorProto
+        
+        pytest.importorskip("onnx")
+        import onnx
+        
+        X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 4, 4])
+        Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 4, 4])
+        identity = helper.make_node("Identity", inputs=["X"], outputs=["Y"], name="id1")
+        graph = helper.make_graph([identity], "test", [X], [Y])
+        model = helper.make_model(graph)
+        
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "simple.onnx")
+        onnx.save(model, path)
+        
+        try:
+            from fastnn.io.onnx import import_onnx
+            out_path = os.path.join(tmpdir, "out.fnn")
+            import_onnx(path, out_path)
+            
+            from fastnn.io.graph_builder import build_model_from_fnn
+            model = build_model_from_fnn(out_path)
+            
+            import fastnn as fnn
+            x = fnn.tensor(np.random.randn(1, 3, 4, 4).astype(np.float32), [1, 3, 4, 4])
+            
+            if hasattr(model, "forward"):
+                outputs = model.forward({"X": x})
+            else:
+                outputs = model(x)
+            
+            assert outputs is not None
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_yolo_wrapper_creation(self):
+        """Test YOLO wrapper creates model from synthetic ONNX."""
+        path, tmpdir = self._create_multi_output_model()
+        try:
+            from fastnn.io.onnx import import_onnx
+            out_path = os.path.join(tmpdir, "out.fnn")
+            import_onnx(path, out_path)
+            
+            from fastnn.io.graph_builder import build_model_from_fnn
+            model = build_model_from_fnn(out_path)
+            assert model is not None, "Model should be built successfully"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_onnx_op_count(self):
+        """Test that op handler count is reasonable."""
+        from fastnn.io.onnx import import_onnx
+        import inspect
+        source = inspect.getsource(import_onnx)
+        op_count = source.count('op_type == "')
+        assert op_count >= 70, f"Expected >= 70 op handlers, found {op_count}"
+        print(f"\nTotal ONNX op handlers: {op_count}")

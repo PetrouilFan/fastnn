@@ -485,6 +485,42 @@ impl DAGExecutor {
                     Some(vec![upsampler.forward(x)])
                 }
 
+                "fusedconvbn" | "fused_conv_bn" => {
+                    if args.len() >= 2 {
+                        dispatch("fused_conv_bn", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
+                    } else {
+                        Some(vec![args[0].clone()])
+                    }
+                }
+                "fusedconvbnrelu" | "fused_conv_bn_relu" => {
+                    if args.len() >= 2 {
+                        dispatch("fused_conv_bn_relu", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
+                    } else {
+                        Some(vec![args[0].clone()])
+                    }
+                }
+                "fusedconvbngelu" | "fused_conv_bn_gelu" => {
+                    if args.len() >= 2 {
+                        dispatch("fused_conv_bn_gelu", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
+                    } else {
+                        Some(vec![args[0].clone()])
+                    }
+                }
+                "clip" => {
+                    let x = &args[0];
+                    let min_val = node.attrs.get("min")
+                        .and_then(|a| a.parse::<f32>().ok());
+                    let max_val = node.attrs.get("max")
+                        .and_then(|a| a.parse::<f32>().ok());
+                    let result = match (min_val, max_val) {
+                        (Some(min), Some(max)) => x.clamp(min, max),
+                        (Some(min), None) => x.clamp(min, f32::MAX),
+                        (None, Some(max)) => x.clamp(f32::MIN, max),
+                        (None, None) => x.clone(),
+                    };
+                    Some(vec![result])
+                }
+
                 _ => {
                     args.first().cloned().map(|t| vec![t])
                 }

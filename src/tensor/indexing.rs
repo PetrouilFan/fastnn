@@ -474,4 +474,30 @@ impl Tensor {
 
         Tensor::from_vec(out_data, out_shape)
     }
+
+    pub fn nonzero(&self) -> Vec<Vec<i64>> {
+        let data = self.as_f32_slice();
+        let shape = self.shape_ref();
+        let mut result = Vec::new();
+        
+        if shape.is_empty() {
+            return result;
+        }
+        
+        let total = data.len();
+        for i in 0..total {
+            if data[i] != 0.0 {
+                // Convert flat index to multi-dimensional index
+                let mut idx = i;
+                let mut coords = Vec::with_capacity(shape.len());
+                for &dim in shape.iter().rev() {
+                    coords.push((idx % dim as usize) as i64);
+                    idx /= dim as usize;
+                }
+                coords.reverse();
+                result.push(coords);
+            }
+        }
+        result
+    }
 }

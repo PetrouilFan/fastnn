@@ -723,4 +723,19 @@ fn clip_grad_value_(tensors: Vec<PyTensor>, clip_value: f32) {
     core_tensor::clip_grad_value_(&tensors, clip_value);
 }
 
+#[pyfunction]
+fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyTensor {
+    PyTensor::from_tensor(tensor.inner.cumsum(dim, exclusive, reverse))
+}
+
+#[pyfunction]
+fn erf(tensor: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(tensor.inner.erf())
+}
+
+#[pyfunction]
+fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
+    tensor.inner.nonzero()
+}
+
 

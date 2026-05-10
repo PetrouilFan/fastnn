@@ -59,6 +59,8 @@ from fastnn.tensor import (  # noqa: E402
 )
 from fastnn.layers import Flatten, PySequential, BasicBlock  # noqa: F401, E402
 MaxPool2d = _core.MaxPool2d
+AvgPool1d = _core.AvgPool1d
+MaxPool1d = _core.MaxPool1d
 from fastnn.io import (  # noqa: E402
     save as io_save,
     load as io_load,
@@ -135,6 +137,8 @@ __all__ = [
     "Embedding",
     "Upsample",
     "MaxPool2d",
+    "AvgPool1d",
+    "MaxPool1d",
     "AdaptiveAvgPool2d",
     "ReLU",
     "GELU",
@@ -195,6 +199,8 @@ __all__ = [
     "minimum",
     "einsum",
     "flash_attention",
+    "cumsum",
+    "erf",
     # Loss functions
     "mse_loss",
     "cross_entropy_loss",
@@ -548,6 +554,8 @@ leaky_relu = _core.leaky_relu
 elu = _core.elu
 softplus = _core.softplus
 hardswish = _core.hardswish
+cumsum = _core.cumsum
+erf = _core.erf
 
 import sys
 
