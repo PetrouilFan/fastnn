@@ -342,7 +342,8 @@ pub unsafe fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     };
 
-
+    // Optional 8th arg: pre-transposed weight for 1x1 or WT_TRANS_BUF-layout for 3x3
+    let w_pre_t = if args.len() > 7 { Some(args[7]) } else { None };
 
     let x_shape = x.shape_ref();
 
@@ -416,6 +417,8 @@ pub unsafe fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
             w,
 
+            w_pre_t,
+
             bias,
 
             batch_size,
@@ -455,6 +458,8 @@ pub unsafe fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             &x,
 
             w,
+
+            w_pre_t,
 
             bias,
 
@@ -519,6 +524,8 @@ pub unsafe fn conv2d_1x1(
     x: &Tensor,
 
     w: &Tensor,
+
+    w_pre_t: Option<&Tensor>,
 
     bias: Option<&Tensor>,
 
@@ -618,13 +625,33 @@ pub unsafe fn conv2d_1x1(
 
 
 
-        // Transpose weights: [out_ch, in_ch] -> [in_ch, out_ch]
+        // Use pre-transposed weight if available and size matches, otherwise transpose inline
 
-        for i in 0..k {
+        let use_pre_t = w_pre_t.map_or(false, |wt| wt.numel() as usize == k * m);
 
-            for j in 0..m {
+        if use_pre_t {
 
-                w_t_buf[i * m + j] = w_data[j * k + i];
+            let wt = w_pre_t.unwrap();
+
+            let wt_ptr = wt.data_ptr() as *const f32;
+
+            // SAFETY: wt has shape [k, m] and k*m elements (verified above).
+
+            let wt_data = unsafe { std::slice::from_raw_parts(wt_ptr, k * m) };
+
+            w_t_buf.copy_from_slice(wt_data);
+
+        } else {
+
+            // Transpose weights: [out_ch, in_ch] -> [in_ch, out_ch]
+
+            for i in 0..k {
+
+                for j in 0..m {
+
+                    w_t_buf[i * m + j] = w_data[j * k + i];
+
+                }
 
             }
 
@@ -706,6 +733,8 @@ pub unsafe fn conv2d_3x3_direct(
     x: &Tensor,
 
     w: &Tensor,
+
+    w_pre_t: Option<&Tensor>,
 
     bias: Option<&Tensor>,
 
@@ -793,50 +822,87 @@ pub unsafe fn conv2d_3x3_direct(
 
     let needed = k * oc_count;
 
-    let wt_trans_ptr: *const f32 = WT_TRANS_BUF.with(|buf| {
+    let use_pre_t = w_pre_t.map_or(false, |wt| wt.numel() as usize == needed);
 
-        let mut b = buf.borrow_mut();
+    let wt_trans_ptr: *const f32 = if use_pre_t {
 
-        let v = if let Some(ref mut vec) = &mut *b {
+        // Use pre-transposed weight from DAG executor
 
-            vec
+        let wt_ptr = w_pre_t.unwrap().data_ptr() as *const f32;
 
-        } else {
+        // SAFETY: wt has shape [k, oc_count] and needed elements (verified above).
 
-            let new_vec = vec![0.0f32; needed];
+        let wt_data = unsafe { std::slice::from_raw_parts(wt_ptr, needed) };
 
-            *b = Some(new_vec);
+        WT_TRANS_BUF.with(|buf| {
 
-            b.as_mut().unwrap()
+            let mut b = buf.borrow_mut();
 
-        };
+            let v = if let Some(ref mut vec) = &mut *b {
 
-        if v.len() < needed {
+                vec
+
+            } else {
+
+                let new_vec = vec![0.0f32; needed];
+
+                *b = Some(new_vec);
+
+                b.as_mut().unwrap()
+
+            };
 
             v.resize(needed, 0.0);
 
-        }
+            v.copy_from_slice(wt_data);
 
-        // Fill transposed weights (overwrite in case weight changed)
+            v.as_ptr()
 
-        for ic in 0..in_channels {
+        })
 
-            for kh in 0..3 {
+    } else {
 
-                for kw in 0..3 {
+        // Fill WT_TRANS_BUF from original weight (fallback for grouped convs or missing pre-transposed weight)
 
-                    let k_idx = ic * 9 + kh * 3 + kw;
+        WT_TRANS_BUF.with(|buf| {
 
-                    for oc in 0..out_channels {
+            let mut b = buf.borrow_mut();
 
-                        let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
+            let v = if let Some(ref mut vec) = &mut *b {
 
-                        // SAFETY: k_idx < k, oc < out_channels = oc_count, v.len() >= needed = k*oc_count.
+                vec
 
-                        // w_idx is bounded by the weight tensor dimensions.
+            } else {
 
-                        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
-                        unsafe { *v.get_unchecked_mut(k_idx * oc_count + oc) = *w_ptr.add(w_idx) };
+                let new_vec = vec![0.0f32; needed];
+
+                *b = Some(new_vec);
+
+                b.as_mut().unwrap()
+
+            };
+
+            v.resize(needed, 0.0);
+
+            for ic in 0..in_channels {
+
+                for kh in 0..3 {
+
+                    for kw in 0..3 {
+
+                        let k_idx = ic * 9 + kh * 3 + kw;
+
+                        for oc in 0..out_channels {
+
+                            let w_idx = ((oc * in_channels + ic) * 3 + kh) * 3 + kw;
+
+                            // SAFETY: k_idx < k, oc < out_channels = oc_count, v.len() >= needed = k*oc_count.
+
+                            // w_idx is bounded by the weight tensor dimensions.
+
+                            unsafe { *v.get_unchecked_mut(k_idx * oc_count + oc) = *w_ptr.add(w_idx) };
+
+                        }
 
                     }
 
@@ -844,16 +910,14 @@ pub unsafe fn conv2d_3x3_direct(
 
             }
 
-        }
+            v.as_ptr()
 
-        v.as_ptr()
+        })
 
-    });
+    };
 
     // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
     let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, needed) };
-
-
 
     // --- Step 2: Main kernel (parallel over output spatial+batch positions)
 
