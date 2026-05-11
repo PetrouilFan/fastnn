@@ -161,9 +161,6 @@ class TestConstantFolding:
             {"name": "b", "op_type": "Constant", "inputs": [], "outputs": ["b_out"]},
             {"name": "add1", "op_type": "Add", "inputs": ["a_out", "b_out"], "outputs": ["y"]},
         ]
-        params = {"a": np.array([1.0, 2.0], dtype=np.float32),
-                   "b": np.array([3.0, 4.0], dtype=np.float32),
-                   "add1.value": np.array([0.0], dtype=np.float32)}
         # Seed constant_values from params
         params2 = {"a": np.array([1.0, 2.0], dtype=np.float32),
                     "b": np.array([3.0, 4.0], dtype=np.float32),
