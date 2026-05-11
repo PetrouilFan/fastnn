@@ -1,10 +1,10 @@
 #![allow(clippy::too_many_arguments)]
 use crate::autograd::{no_grad_enter, no_grad_exit};
 use crate::dispatcher::list_registered_ops as dispatcher_list_ops;
+use crate::dtypes::{F16x2, F32x1, U4x8, U8x4};
 use crate::nn::{self as core_nn, Module};
 use crate::optim::{self as core_optim, Optimizer};
 use crate::storage::allocator_stats as storage_allocator_stats;
-use crate::dtypes::{U4x8, U8x4, F16x2, F32x1};
 use crate::storage::{DType, Device};
 use crate::tensor::{self as core_tensor, Tensor};
 use crate::{autograd, dispatcher, residual, set_seeded_rng};
@@ -92,6 +92,7 @@ include!("packed_linear.rs");
 include!("optim.rs");
 include!("io.rs");
 include!("packed_tensor.rs");
+include!("packed_conv.rs");
 include!("packed_quantized.rs");
 include!("packed_optim.rs");
 #[pymodule]
@@ -236,26 +237,44 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPackedTensor32>()?;
     m.add_class::<PyQuantizedTensor>()?;
 
+    // Packed conv2d layers
+    m.add_class::<PyPackedConv2d4>()?;
+    m.add_class::<PyPackedConv2d8>()?;
+    m.add_class::<PyPackedConv2d16>()?;
+    m.add_class::<PyPackedConv2d32>()?;
+
+    // Packed fused conv+relu layers
+    m.add_class::<PyPackedConvRelu4>()?;
+    m.add_class::<PyPackedConvRelu8>()?;
+    m.add_class::<PyPackedConvRelu16>()?;
+    m.add_class::<PyPackedConvRelu32>()?;
+
     // Packed linear layers
     m.add_class::<PyLinear4>()?;
     m.add_class::<PyLinear8>()?;
     m.add_class::<PyLinear16>()?;
     m.add_class::<PyLinear32>()?;
-    
+
+    // Packed fused linear+gelu layers
+    m.add_class::<PyPackedLinearGelu4>()?;
+    m.add_class::<PyPackedLinearGelu8>()?;
+    m.add_class::<PyPackedLinearGelu16>()?;
+    m.add_class::<PyPackedLinearGelu32>()?;
+
     // Master weight optimizers
     m.add_class::<PyMasterWeightOptimizer4>()?;
     m.add_class::<PyMasterWeightOptimizer8>()?;
     m.add_class::<PyMasterWeightOptimizer16>()?;
     m.add_class::<PyMasterWeightOptimizer32>()?;
-    
+
     // Packed attention/transformer (4-bit)
     m.add_class::<PyPackedMultiHeadAttention4>()?;
     m.add_class::<PyPackedTransformerEncoder4>()?;
-    
+
     // Packed attention/transformer (8-bit)
     m.add_class::<PyPackedMultiHeadAttention8>()?;
     m.add_class::<PyPackedTransformerEncoder8>()?;
-    
+
     // Packed backend control
     m.add_function(wrap_pyfunction!(use_wgpu, py)?)?;
     m.add_function(wrap_pyfunction!(use_cpu, py)?)?;

@@ -61,7 +61,7 @@ def main():
         graph = header.get("graph", {})
         nodes = graph.get("nodes", [])
         print(f"   Total nodes: {len(nodes)}")
-        print(f"\n   Node types:")
+        print("\n   Node types:")
         type_counts = {}
         for node in nodes:
             op = node.get("op_type", "Unknown")
@@ -69,13 +69,13 @@ def main():
         for op, count in sorted(type_counts.items(), key=lambda x: -x[1]):
             print(f"     {op}: {count}")
 
-        print(f"\n   Model inputs:")
+        print("\n   Model inputs:")
         for inp in graph.get("inputs", []):
             name = inp.get("name", "")
             shape = inp.get("shape")
             print(f"     {name}: {shape}")
 
-        print(f"\n   Model outputs:")
+        print("\n   Model outputs:")
         for out in graph.get("outputs", []):
             name = out.get("name", "")
             shape = out.get("shape")

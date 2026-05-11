@@ -94,8 +94,8 @@ impl Tensor {
 
     pub fn sign(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("sign", dispatch_key, &[self])
-            .expect("Tensor::sign: dispatch failed");
+        let result =
+            dispatch("sign", dispatch_key, &[self]).expect("Tensor::sign: dispatch failed");
         result[0].clone()
     }
 
@@ -210,7 +210,11 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::DivScalarBackward::new(self.clone(), scalar, edges));
+            let backward = Arc::new(autograd::DivScalarBackward::new(
+                self.clone(),
+                scalar,
+                edges,
+            ));
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -284,7 +288,10 @@ impl Tensor {
         let output = Tensor::from_vec(output_data, output_shape.into_vec());
 
         if autograd::is_grad_enabled() && tensors.iter().any(|t| t.requires_grad()) {
-            let split_sizes: Vec<usize> = tensors.iter().map(|t| t.inner.sizes[dim] as usize).collect();
+            let split_sizes: Vec<usize> = tensors
+                .iter()
+                .map(|t| t.inner.sizes[dim] as usize)
+                .collect();
             let mut edges = Vec::new();
             for (i, t) in tensors.iter().enumerate() {
                 if let Some(node) = t.grad_fn() {
@@ -442,7 +449,11 @@ impl Tensor {
         };
         let x_data = self_contig.as_f32_slice();
         let shape = self.shape_ref();
-        let axis = if axis < 0 { shape.len() as i64 + axis } else { axis } as usize;
+        let axis = if axis < 0 {
+            shape.len() as i64 + axis
+        } else {
+            axis
+        } as usize;
 
         // ONNX Gather semantics:
         // - If indices is 0-D (scalar), the gathered dim is *removed*
@@ -485,26 +496,30 @@ impl Tensor {
         if scalar_idx {
             let idx = indices_data[0] as usize;
             if idx >= shape[axis] as usize {
-                panic!("gather: index {} is out of bounds for dimension {} (size {})", idx, axis, shape[axis]);
+                panic!(
+                    "gather: index {} is out of bounds for dimension {} (size {})",
+                    idx, axis, shape[axis]
+                );
             }
             for o in 0..outer {
                 let src_off = (o * shape[axis] as usize + idx) * inner;
                 let dst_off = o * inner;
-                for k in 0..inner {
-                    out_data[dst_off + k] = x_data[src_off + k];
-                }
+                out_data[dst_off..dst_off + inner]
+                    .copy_from_slice(&x_data[src_off..src_off + inner]);
             }
         } else {
             for o in 0..outer {
                 for (i, &idx) in indices_data.iter().enumerate() {
                     if idx as usize >= shape[axis] as usize {
-                        panic!("gather: index {} is out of bounds for dimension {} (size {})", idx, axis, shape[axis]);
+                        panic!(
+                            "gather: index {} is out of bounds for dimension {} (size {})",
+                            idx, axis, shape[axis]
+                        );
                     }
                     let src_off = (o * shape[axis] as usize + idx as usize) * inner;
                     let dst_off = (o * out_shape[axis] as usize + i) * inner;
-                    for k in 0..inner {
-                        out_data[dst_off + k] = x_data[src_off + k];
-                    }
+                    out_data[dst_off..dst_off + inner]
+                        .copy_from_slice(&x_data[src_off..src_off + inner]);
                 }
             }
         }
@@ -516,11 +531,11 @@ impl Tensor {
         let data = self.as_f32_slice();
         let shape = self.shape_ref();
         let mut result = Vec::new();
-        
+
         if shape.is_empty() {
             return result;
         }
-        
+
         let total = data.len();
         for i in 0..total {
             if data[i] != 0.0 {

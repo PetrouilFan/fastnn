@@ -1,4 +1,5 @@
 #![allow(unused_imports)]
+pub mod arm_neon;
 mod conv;
 mod elementwise;
 mod factories;
@@ -1088,7 +1089,6 @@ mod tests {
     use super::*;
     use crate::tensor::Tensor;
 
-
     #[test]
     fn test_embedding_bulk_copy() {
         // Test that embedding forward produces correct results
@@ -1160,14 +1160,16 @@ mod tests {
 
             // Warmup
             for _ in 0..3 {
-                let _ = dispatch("fused_linear_relu", DispatchKey::Cpu, &[&x, &w]).expect("bench fused_linear_relu warmup failed");
+                let _ = dispatch("fused_linear_relu", DispatchKey::Cpu, &[&x, &w])
+                    .expect("bench fused_linear_relu warmup failed");
             }
 
             // Benchmark fused_linear_relu
             let iters = 20;
             let start = Instant::now();
             for _ in 0..iters {
-                let _ = dispatch("fused_linear_relu", DispatchKey::Cpu, &[&x, &w]).expect("bench fused_linear_relu failed");
+                let _ = dispatch("fused_linear_relu", DispatchKey::Cpu, &[&x, &w])
+                    .expect("bench fused_linear_relu failed");
             }
             let fused_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
@@ -1175,7 +1177,8 @@ mod tests {
             let start = Instant::now();
             for _ in 0..iters {
                 let linear_out = x.matmul(&w);
-                let _ = dispatch("relu", DispatchKey::Cpu, &[&linear_out]).expect("bench relu failed");
+                let _ =
+                    dispatch("relu", DispatchKey::Cpu, &[&linear_out]).expect("bench relu failed");
             }
             let blas_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 

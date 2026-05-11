@@ -2469,8 +2469,11 @@ pub unsafe fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let end = std::cmp::min(start + chunk_size, numel);
                 let len = end - start;
 
-                let a_slice = unsafe { std::slice::from_raw_parts((a_usize + start * 4) as *const f32, len) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len) };
+                let a_slice =
+                    unsafe { std::slice::from_raw_parts((a_usize + start * 4) as *const f32, len) };
+                let out_slice = unsafe {
+                    std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len)
+                };
 
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 if len >= 8 && is_x86_feature_detected!("avx2") {
@@ -3096,7 +3099,10 @@ pub unsafe fn prelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             };
             // SAFETY: w_idx is computed as `indices[1] as usize % w_numel` (or 0 when w_numel==1),
             // which is always < w_data.len(). The debug_assert confirms this at runtime.
-            debug_assert!(w_idx < w_data.len(), "leaky_relu weight index out of bounds");
+            debug_assert!(
+                w_idx < w_data.len(),
+                "leaky_relu weight index out of bounds"
+            );
             let w = *w_data.get_unchecked(w_idx);
             *ptr.add(i) = if v > 0.0 { v } else { v * w };
         }
@@ -3530,9 +3536,14 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let end = std::cmp::min(start + chunk_size, numel);
                 let len = end - start;
 
-                let x_slice = unsafe { std::slice::from_raw_parts((x_usize + start * 4) as *const f32, len) };
-                let g_slice = unsafe { std::slice::from_raw_parts((grad_usize + start * 4) as *const f32, len) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len) };
+                let x_slice =
+                    unsafe { std::slice::from_raw_parts((x_usize + start * 4) as *const f32, len) };
+                let g_slice = unsafe {
+                    std::slice::from_raw_parts((grad_usize + start * 4) as *const f32, len)
+                };
+                let out_slice = unsafe {
+                    std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len)
+                };
 
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 if len >= 8 && is_x86_feature_detected!("avx2") {
@@ -3679,10 +3690,15 @@ pub unsafe fn silu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let end = std::cmp::min(start + chunk_size, numel);
                 let len = end - start;
 
-                let x_slice = unsafe { std::slice::from_raw_parts((x_usize + start * 4) as *const f32, len) };
-                let s_slice = unsafe { std::slice::from_raw_parts((s_usize + start * 4) as *const f32, len) };
-                let g_slice = unsafe { std::slice::from_raw_parts((g_usize + start * 4) as *const f32, len) };
-                let out_slice = unsafe { std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len) };
+                let x_slice =
+                    unsafe { std::slice::from_raw_parts((x_usize + start * 4) as *const f32, len) };
+                let s_slice =
+                    unsafe { std::slice::from_raw_parts((s_usize + start * 4) as *const f32, len) };
+                let g_slice =
+                    unsafe { std::slice::from_raw_parts((g_usize + start * 4) as *const f32, len) };
+                let out_slice = unsafe {
+                    std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len)
+                };
 
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 if len >= 8 && is_x86_feature_detected!("avx2") {
