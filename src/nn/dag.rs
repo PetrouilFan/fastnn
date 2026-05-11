@@ -1624,14 +1624,24 @@ impl DAGExecutor {
         let axes_str = node.attrs.get("axes");
         let shape = x.shape_ref();
         if let Some(axes_str) = axes_str {
-            let mut axes: Vec<usize> = axes_str.trim_matches(|c| c == '[' || c == ']')
+            // Parse as i64 to handle negative axes (e.g., axes=[-1] means "add at end")
+            let mut axes: Vec<i64> = axes_str.trim_matches(|c| c == '[' || c == ']')
                 .split(',')
-                .filter_map(|s| s.trim().parse::<usize>().ok())
+                .filter_map(|s| s.trim().parse::<i64>().ok())
                 .collect();
+            // Normalize negative axes: convert to positive indices
+            // Output rank = input rank + number of axes to insert
+            let ndim = shape.len() as i64;
+            let num_axes = axes.len() as i64;
+            for axis in axes.iter_mut() {
+                if *axis < 0 {
+                    *axis += ndim + num_axes;
+                }
+            }
             axes.sort();
             let mut new_shape: Vec<i64> = shape.to_vec();
             for (offset, &axis) in axes.iter().enumerate() {
-                new_shape.insert(axis + offset, 1);
+                new_shape.insert(axis as usize + offset, 1);
             }
             Some(vec![x.reshape(new_shape)])
         } else {
