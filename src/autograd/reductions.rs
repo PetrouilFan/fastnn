@@ -25,10 +25,7 @@ impl Node for SumBackward {
         let grad_shape = grad.shape_ref();
 
         if grad_shape.is_empty() {
-            // Scalar gradient: multiply by ones to broadcast to input shape
-            // (expand creates non-contiguous views that many kernels can't handle)
-            let ones = Tensor::ones(shape.to_vec(), grad.dtype(), grad.device());
-            vec![Some(grad.mul(&ones))]
+            vec![Some(grad.expand(shape.to_vec()))]
         } else if self.keepdim {
             vec![Some(grad.expand(shape.to_vec()))]
         } else {
@@ -86,10 +83,9 @@ impl Node for MeanBackward {
         let grad_shape = grad.shape_ref();
 
         let result = if grad_shape.is_empty() {
-            // Scalar gradient: create ones and multiply
-            let ones = Tensor::ones(shape.to_vec(), grad.dtype(), grad.device());
+            // Scalar gradient: just multiply scalar and expand
             let scaled = grad.mul_scalar(scale);
-            scaled.mul(&ones)
+            scaled.expand(shape.to_vec())
         } else if self.keepdim {
             let scaled = grad.mul_scalar(scale);
             scaled.expand(shape.to_vec())
@@ -349,14 +345,16 @@ impl Node for GeluBackward {
 
 pub struct SigmoidBackward {
     pub input: Tensor,
+    pub sigmoid_output: Tensor,
     pub edges: Vec<Edge>,
     one: Tensor,
 }
 
 impl SigmoidBackward {
-    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+    pub fn new(input: Tensor, sigmoid_output: Tensor, edges: Vec<Edge>) -> Self {
         SigmoidBackward {
             input,
+            sigmoid_output,
             edges,
             one: Tensor::from_scalar(1.0),
         }
@@ -368,8 +366,10 @@ impl Node for SigmoidBackward {
         let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
             return vec![None];
         };
-        let sigmoid_x = self.input.sigmoid();
-        let derivative = sigmoid_x.mul(&sigmoid_x.neg().add(&self.one));
+        // derivative = sigmoid(x) * (1 - sigmoid(x))
+        let derivative = self.sigmoid_output.mul(
+            &self.sigmoid_output.neg().add(&self.one)
+        );
         vec![Some(grad.mul(&derivative))]
     }
 
@@ -392,18 +392,18 @@ impl Node for SigmoidBackward {
 
 pub struct TanhBackward {
     pub input: Tensor,
+    pub tanh_output: Tensor,
     pub edges: Vec<Edge>,
     one: Tensor,
-    neg_one: Tensor,
 }
 
 impl TanhBackward {
-    pub fn new(input: Tensor, edges: Vec<Edge>) -> Self {
+    pub fn new(input: Tensor, tanh_output: Tensor, edges: Vec<Edge>) -> Self {
         TanhBackward {
             input,
+            tanh_output,
             edges,
             one: Tensor::from_scalar(1.0),
-            neg_one: Tensor::from_scalar(-1.0),
         }
     }
 }
@@ -413,9 +413,9 @@ impl Node for TanhBackward {
         let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
             return vec![None];
         };
-        let tanh_x = self.input.tanh();
-        let tanh_sq = tanh_x.pow(2.0);
-        let one_minus_tanh_sq = tanh_sq.mul(&self.neg_one).add(&self.one);
+        // derivative = 1 - tanh(x)^2
+        let tanh_sq = self.tanh_output.pow(2.0);
+        let one_minus_tanh_sq = self.one.sub(&tanh_sq);
         vec![Some(grad.mul(&one_minus_tanh_sq))]
     }
 

@@ -53,8 +53,15 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         x.device(),
     );
 
+    let argmax = Tensor::empty(
+        vec![batch_size, channels, out_height, out_width],
+        DType::F32,
+        x.device(),
+    );
+
     let x_ptr = x.data_ptr() as *const f32;
     let out_ptr = output.data_ptr() as *mut f32;
+    let argmax_ptr = argmax.data_ptr() as *mut f32;
 
     let total_bc = batch_size as usize * channels as usize;
     let stride_usize = stride as usize;
@@ -72,14 +79,17 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         use rayon::prelude::*;
         let x_usize = x_ptr as usize;
         let out_usize = out_ptr as usize;
+        let argmax_usize = argmax_ptr as usize;
         (0..total_bc).into_par_iter().for_each(|bc| {
             let b = bc / channels_usize;
             let c = bc % channels_usize;
             let x_p = x_usize as *const f32;
             let o_p = out_usize as *mut f32;
+            let a_p = argmax_usize as *mut f32;
             for oh in 0..out_h {
                 for ow in 0..out_w {
                     let mut max_val = f32::NEG_INFINITY;
+                    let mut max_idx = 0i64;
                     for kh in 0..kernel_size_usize {
                         for kw in 0..kernel_size_usize {
                             let h = (oh * stride_usize + kh * dilation_usize) as i64 - pad;
@@ -92,6 +102,7 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                                 let val = unsafe { *x_p.add(idx) };
                                 if val > max_val {
                                     max_val = val;
+                                    max_idx = idx as i64;
                                 }
                             }
                         }
@@ -101,6 +112,7 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     // The pointer is valid for this element access.
                     unsafe {
                         *o_p.add(out_idx) = max_val;
+                        *a_p.add(out_idx) = max_idx as f32;
                     }
                 }
             }
@@ -114,6 +126,7 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 for oh in 0..out_height as usize {
                     for ow in 0..out_width as usize {
                         let mut max_val = f32::NEG_INFINITY;
+                        let mut max_idx = 0i64;
 
                         for kh in 0..kernel_size as usize {
                             for kw in 0..kernel_size as usize {
@@ -132,6 +145,7 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                                     let val = unsafe { *x_ptr.add(idx) };
                                     if val > max_val {
                                         max_val = val;
+                                        max_idx = idx as i64;
                                     }
                                 }
                             }
@@ -142,14 +156,17 @@ pub unsafe fn max_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                             + ow;
                         // SAFETY: The offset stays within the bounds of the allocated tensor storage.
                         // The pointer is valid for this element access.
-                        unsafe { *out_ptr.add(out_idx) = max_val };
+                        unsafe {
+                            *out_ptr.add(out_idx) = max_val;
+                            *argmax_ptr.add(out_idx) = max_idx as f32;
+                        }
                     }
                 }
             }
         }
     }
 
-    vec![output]
+    vec![output, argmax]
 }
 
 pub unsafe fn avg_pool2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
