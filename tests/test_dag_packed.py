@@ -85,9 +85,8 @@ def test_quantize_dequantize_linear():
     result = executor.forward(params)
 
     output = result["output"]
-    expected = q_input * 0.1
     assert output.shape == [4], f"Expected [4] got {output.shape}"
-    print(f"test_quantize_dequantize_linear: OK")
+    print("test_quantize_dequantize_linear: OK")
 
 
 def test_embedding_packed_dispatch():
@@ -122,7 +121,7 @@ def test_embedding_packed_dispatch():
     result = executor.forward({"input": indices})
     output = result["output"]
     assert output.shape == [3, embedding_dim], f"Expected [3,8] got {output.shape}"
-    print(f"test_embedding_packed_dispatch: OK")
+    print("test_embedding_packed_dispatch: OK")
 
 
 if __name__ == "__main__":
