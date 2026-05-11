@@ -166,18 +166,20 @@ class DAGModel:
             output_names = node.get("outputs", [])
 
             tensors = []
+            any_missing = False
             for in_name in input_names:
                 tensor = self._resolve_input(in_name, buffer)
                 if tensor is not None:
                     tensors.append(tensor)
                 else:
                     logger.warning("Node %s: input '%s' not found, skipping", node_name, in_name)
-                    tensors = None
+                    any_missing = True
                     break
 
-            if tensors is None:
+            if any_missing:
                 continue
 
+            # Dispatch even with empty tensors (e.g. Constant op with no inputs)
             outputs = self._dispatch_op(op_type, tensors, node)
 
             if outputs is not None:
@@ -270,6 +272,45 @@ class DAGModel:
             elif op_type == "Cast" or op_type == "castop":
                 return [tensors[0]]
             elif op_type == "Gather" or op_type == "gatherop":
+                # ONNX Gather: data[tensor], axis, indices from tensors[1]
+                data = tensors[0]
+                if len(tensors) >= 2:
+                    axis = int(node.get("axis", 0))
+                    indices = tensors[1]
+                    data_np = data.numpy()
+                    indices_np = indices.numpy().astype(int)
+                    result_np = np.take(data_np, indices_np, axis=axis)
+                    # np.take may return scalar; ensure it's an array for fnn.tensor
+                    if np.isscalar(result_np):
+                        result_np = np.array(result_np)
+                    return [fnn.tensor(result_np, list(result_np.shape))]
+                return [tensors[0]]
+            elif op_type == "RangeOp":
+                # ONNX Range: output = np.arange(start, limit, delta)
+                if len(tensors) >= 3:
+                    start = float(tensors[0].numpy().flatten()[0])
+                    limit = float(tensors[1].numpy().flatten()[0])
+                    delta = float(tensors[2].numpy().flatten()[0])
+                    result_np = np.arange(start, limit, delta, dtype=np.float32)
+                    return [fnn.tensor(result_np, list(result_np.shape))]
+                return [tensors[0]] if tensors else None
+            elif op_type == "ConstantOfShape":
+                # ONNX ConstantOfShape: fill tensor with constant value
+                if tensors:
+                    shape_np = tensors[0].numpy().astype(int)
+                    shape = list(shape_np.flatten())
+                    value = node.get("value", 0.0)
+                    result_np = np.full(shape, value, dtype=np.float32)
+                    return [fnn.tensor(result_np, list(result_np.shape))]
+                return None
+            elif op_type == "Expand":
+                # ONNX Expand: broadcast tensor to given shape
+                if len(tensors) >= 2:
+                    x_np = tensors[0].numpy()
+                    shape_np = tensors[1].numpy().astype(int)
+                    shape = list(shape_np.flatten())
+                    result_np = np.broadcast_to(x_np, shape)
+                    return [fnn.tensor(result_np, list(result_np.shape))]
                 return [tensors[0]]
             elif op_type in ("Identity", "identityop", "Dropout", "dropout"):
                 return [tensors[0]]
@@ -305,14 +346,17 @@ class DAGModel:
                         axes = list(range(len(starts)))
                     if steps is None:
                         steps = [1] * len(starts)
-                    result = x
+                    # Use numpy since fastnn tensor doesn't support
+                    # multi-dimensional __getitem__ with tuple of slices
+                    x_np = x.numpy()
                     for i, ax in enumerate(axes):
                         st = int(starts[i])
                         en = int(ends[i])
                         step = int(steps[i]) if i < len(steps) else 1
-                        slices = [slice(None)] * len(result.shape)
+                        slices = [slice(None)] * len(x_np.shape)
                         slices[ax] = slice(st, en, step)
-                        result = result[tuple(slices)]
+                        x_np = x_np[tuple(slices)]
+                    result = fnn.tensor(x_np, list(x_np.shape))
                     return [result]
                 else:
                     return [tensors[0]]
@@ -361,10 +405,14 @@ class DAGModel:
                     sizes = [size] * num_outputs
                 results = []
                 start = 0
+                # Use numpy indexing since fastnn tensor doesn't support
+                # multi-dimensional __getitem__ with tuple of slices
+                x_np = x.numpy()
                 for sz in sizes:
                     slices = [slice(None)] * len(shape)
                     slices[axis] = slice(start, start + sz)
-                    result = x[tuple(slices)]
+                    result_np = x_np[tuple(slices)]
+                    result = fnn.tensor(result_np, list(result_np.shape))
                     results.append(result)
                     start += sz
                 return results
@@ -388,12 +436,14 @@ class DAGModel:
                     return [x.reshape(shape)]
                 return [tensors[0]]
             elif op_type in ("Constant", "constantop"):
+                # Constant has no inputs — produce the stored parameter as output
                 if tensors:
                     return [tensors[0]]
                 node_name = node.get("name", "")
                 value_key = f"{node_name}.value"
                 if value_key in self.params:
                     return [self.params[value_key]]
+                logger.warning("Constant %s: no value found", node_name)
                 return None
             elif op_type in ("Loop", "loopop", "If", "ifop"):
                 logger.warning("Control flow op %s not yet supported, passing through", op_type)
@@ -467,18 +517,22 @@ class DAGModel:
         weight_name = f"{node_name}.weight"
         bias_name = f"{node_name}.bias"
 
-        weight = self.params.get(weight_name)
-        if weight is None:
-            logger.warning("Gemm %s: weight not found", node_name)
-            return [x]
+        # If second tensor is available from the forward buffer, use it directly
+        # (handles dynamic MatMul where weight is a computed tensor, not stored param)
+        if len(tensors) >= 2:
+            w = tensors[1]
+        else:
+            weight = self.params.get(weight_name)
+            if weight is None:
+                logger.warning("Gemm %s: weight not found", node_name)
+                return [x]
+            w = weight
 
         bias = self.params.get(bias_name, None)
         trans_b = node.get("transB", node.get("trans_b", 0))
 
         if trans_b:
-            w = weight.transpose(0, 1)
-        else:
-            w = weight
+            w = w.transpose(0, 1)
 
         result = fnn.matmul(x, w)
         if bias is not None:

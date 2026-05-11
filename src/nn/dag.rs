@@ -147,17 +147,41 @@ impl DAGExecutor {
                 "unsqueeze" | "unsqueezeop" => self.dispatch_unsqueeze(node, &args),
                 "slice" | "sliceop" => {
                     let x = &args[0];
+
+                    // Try string attributes first (older format)
                     let starts_str = node.attrs.get("starts");
                     let ends_str = node.attrs.get("ends");
-                    let axes_str = node.attrs.get("axes");
-                    let steps_str = node.attrs.get("steps");
 
+                    let slice_res: Option<Vec<Tensor>> =
                     if let (Some(starts_str), Some(ends_str)) = (starts_str, ends_str) {
                         let starts: Vec<i64> = parse_int_list(starts_str);
                         let ends: Vec<i64> = parse_int_list(ends_str);
-                        let axes: Vec<i64> = axes_str.map(|s| parse_int_list(s)).unwrap_or_else(|| (0..starts.len() as i64).collect());
-                        let steps: Vec<i64> = steps_str.map(|s| parse_int_list(s)).unwrap_or_else(|| vec![1; starts.len()]);
-
+                        let axes: Vec<i64> = node.attrs.get("axes")
+                            .map(|s| parse_int_list(s))
+                            .unwrap_or_else(|| (0..starts.len() as i64).collect());
+                        let steps: Vec<i64> = node.attrs.get("steps")
+                            .map(|s| parse_int_list(s))
+                            .unwrap_or_else(|| vec![1; starts.len()]);
+                        let mut result = x.clone();
+                        for (i, ((&ax, &st), &en)) in axes.iter().zip(starts.iter()).zip(ends.iter()).enumerate() {
+                            let step = *steps.get(i).unwrap_or(&1);
+                            result = result.slice(ax as usize, st, en, step);
+                        }
+                        Some(vec![result])
+                    } else if args.len() >= 3 {
+                        // Tensor-based slice (ONNX opset 10+): args[1]=starts, args[2]=ends
+                        let starts: Vec<i64> = args[1].as_f32_slice().iter().map(|&v| v as i64).collect();
+                        let ends: Vec<i64> = args[2].as_f32_slice().iter().map(|&v| v as i64).collect();
+                        let axes: Vec<i64> = if args.len() >= 4 {
+                            args[3].as_f32_slice().iter().map(|&v| v as i64).collect()
+                        } else {
+                            (0..starts.len() as i64).collect()
+                        };
+                        let steps: Vec<i64> = if args.len() >= 5 {
+                            args[4].as_f32_slice().iter().map(|&v| v as i64).collect()
+                        } else {
+                            vec![1; starts.len()]
+                        };
                         let mut result = x.clone();
                         for (i, ((&ax, &st), &en)) in axes.iter().zip(starts.iter()).zip(ends.iter()).enumerate() {
                             let step = *steps.get(i).unwrap_or(&1);
@@ -165,8 +189,10 @@ impl DAGExecutor {
                         }
                         Some(vec![result])
                     } else {
-                        Some(vec![args[0].clone()])
-                    }
+                        // No slice info available
+                        Some(vec![x.clone()])
+                    };
+                    slice_res
                 }
 
                 "pad" => {
@@ -208,7 +234,7 @@ impl DAGExecutor {
 
                 "identity" | "identityop" | "dropout" => Some(vec![args[0].clone()]),
 
-                "shapeop" => {
+                "shape" | "shapeop" => {
                     let x = &args[0];
                     let shape = x.shape_ref();
                     let shape_f32: Vec<f32> = shape.iter().map(|&d| d as f32).collect();
@@ -216,7 +242,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(shape_f32, dims)])
                 }
 
-                "castop" => {
+                "cast" | "castop" => {
                     let to_dtype_val = node.attrs.get("to")
                         .and_then(|a| a.parse::<i32>().ok())
                         .unwrap_or(1);
@@ -894,6 +920,19 @@ impl DAGExecutor {
                     let _high = node.attrs.get("high").and_then(|a| a.parse::<f32>().ok()).unwrap_or(1.0);
                     let shape_t = Tensor::empty(shape, DType::F32, Device::Cpu);
                     dispatch("rand", DispatchKey::Cpu, &[&shape_t]).ok()
+                }
+
+                "constantofshape" => {
+                    // ONNX ConstantOfShape: create a tensor of the given shape filled with a constant value.
+                    // args[0] is the shape tensor (int64 values stored as f32).
+                    let shape_data = args[0].as_f32_slice();
+                    let shape: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
+                    let value: f32 = node.attrs.get("value")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(0.0);
+                    let numel = shape.iter().product::<i64>() as usize;
+                    let data = vec![value; numel];
+                    Some(vec![Tensor::from_vec(data, shape)])
                 }
 
                 _ => {
