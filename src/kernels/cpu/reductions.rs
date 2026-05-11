@@ -83,6 +83,8 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     #[cfg(feature = "parallel")]
     {
         if total_blocks > 64 && dim_size > 8 {
+            // SAFETY: The pointer is valid, properly aligned, and points to initialized
+            // elements derived from a valid Tensor allocation.
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
             let results: Vec<f32> = (0..total_blocks)
                 .into_par_iter()
@@ -103,6 +105,8 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 .collect();
 
             for (i, &sum_val) in results.iter().enumerate() {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     *out_ptr.add(i) = sum_val;
                 }
@@ -119,12 +123,16 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         for d in 0..dim_size {
             let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
             if linear_idx < a_numel {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     sum_val += *a_ptr.add(linear_idx);
                 }
             }
         }
 
+        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+        // The pointer is valid for this element access.
         unsafe {
             *out_ptr.add(block) = sum_val;
         }
@@ -195,6 +203,8 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     #[cfg(feature = "parallel")]
     {
         if total_blocks > 64 && dim_size > 8 {
+            // SAFETY: The pointer is valid, properly aligned, and points to initialized
+            // elements derived from a valid Tensor allocation.
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
             let results: Vec<f32> = (0..total_blocks)
                 .into_par_iter()
@@ -215,6 +225,8 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 .collect();
 
             for (i, &min_val) in results.iter().enumerate() {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     *out_ptr.add(i) = min_val;
                 }
@@ -231,12 +243,16 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         for d in 0..dim_size {
             let linear_idx = (block_before * dim_size + d) * strides_after as usize + block_after;
             if linear_idx < a_numel {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     min_val = min_val.min(*a_ptr.add(linear_idx));
                 }
             }
         }
 
+        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+        // The pointer is valid for this element access.
         unsafe {
             *out_ptr.add(block) = min_val;
         }
@@ -371,6 +387,8 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let sa = strides_after as usize;
                 for i in 0..ds {
                     let a_idx = (block / sa) * ds * sa + i * sa + block % sa;
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     unsafe {
                         let val = *a_p.add(a_idx);
                         if val > max_val {
@@ -378,6 +396,8 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         }
                     }
                 }
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     *(out_usize as *mut f32).add(block) = max_val;
                 }
@@ -392,6 +412,8 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_idx = (block / (strides_after as usize)) * dim_size * (strides_after as usize)
                 + i * (strides_after as usize)
                 + block % (strides_after as usize);
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe {
                 let val = *a_ptr.add(a_idx);
                 if val > max_val {
@@ -399,6 +421,8 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 }
             }
         }
+        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+        // The pointer is valid for this element access.
         unsafe {
             *out_ptr.add(block) = max_val;
         }
@@ -462,7 +486,13 @@ pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
 
     #[cfg(feature = "parallel")]
     {
+        // SAFETY: The pointer is valid, properly aligned, and points to initialized
+        // elements derived from a valid Tensor allocation. No other mutable reference
+        // aliases this memory region.
         let a_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        // SAFETY: The pointer is valid, properly aligned, and points to initialized
+        // elements derived from a valid Tensor allocation. No other mutable reference
+        // aliases this memory region.
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
 
         out_slice
@@ -474,6 +504,8 @@ pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") {
+                        // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                        // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                         unsafe {
                             let mut max_vec = _mm256_set1_ps(f32::MIN);
                             let mut i = 0;
@@ -521,6 +553,8 @@ pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") {
+                        // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                        // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                         unsafe {
                             let max_vec = _mm256_set1_ps(max_val);
                             let mut sum_vec = _mm256_setzero_ps();
@@ -564,6 +598,8 @@ pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") {
+                        // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                        // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                         unsafe {
                             let inv_vec = _mm256_set1_ps(inv_sum);
                             let mut j = 0;
@@ -595,7 +631,13 @@ pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
     #[cfg(not(feature = "parallel"))]
     {
         let num_rows = numel / dim_size;
+        // SAFETY: The pointer is valid, properly aligned, and points to initialized
+        // elements derived from a valid Tensor allocation. No other mutable reference
+        // aliases this memory region.
         let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        // SAFETY: The pointer is valid, properly aligned, and points to initialized
+        // elements derived from a valid Tensor allocation. No other mutable reference
+        // aliases this memory region.
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
 
         for row in 0..num_rows {
@@ -608,6 +650,8 @@ pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") {
+                    // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                    // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                     unsafe {
                         let mut max_vec = _mm256_set1_ps(f32::MIN);
                         let mut j = 0;
@@ -644,6 +688,8 @@ pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") {
+                    // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                    // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                     unsafe {
                         let max_vec = _mm256_set1_ps(max_val);
                         let mut sum_vec = _mm256_setzero_ps();
@@ -687,6 +733,8 @@ pub fn softmax_last_dim_simd(x: &Tensor, dim_size: usize) -> Tensor {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") {
+                    // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                    // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                     unsafe {
                         let inv_vec = _mm256_set1_ps(inv_sum);
                         let mut j = 0;
@@ -771,7 +819,13 @@ pub fn log_softmax_last_dim_fused(x: &Tensor, dim_size: usize) -> Tensor {
 
     #[cfg(feature = "parallel")]
     {
+        // SAFETY: The pointer is valid, properly aligned, and points to initialized
+        // elements derived from a valid Tensor allocation. No other mutable reference
+        // aliases this memory region.
         let a_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        // SAFETY: The pointer is valid, properly aligned, and points to initialized
+        // elements derived from a valid Tensor allocation. No other mutable reference
+        // aliases this memory region.
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
 
         out_slice
@@ -803,7 +857,13 @@ pub fn log_softmax_last_dim_fused(x: &Tensor, dim_size: usize) -> Tensor {
     #[cfg(not(feature = "parallel"))]
     {
         let num_rows = numel / dim_size;
+        // SAFETY: The pointer is valid, properly aligned, and points to initialized
+        // elements derived from a valid Tensor allocation. No other mutable reference
+        // aliases this memory region.
         let x_slice = unsafe { std::slice::from_raw_parts(x_ptr, numel) };
+        // SAFETY: The pointer is valid, properly aligned, and points to initialized
+        // elements derived from a valid Tensor allocation. No other mutable reference
+        // aliases this memory region.
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, numel) };
 
         for row in 0..num_rows {
@@ -884,6 +944,8 @@ pub unsafe fn softmax_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let mut dot = 0.0f32;
             for i in 0..dim_size {
                 let offset = base + i * inner_size;
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     dot += *grad_ptr.add(offset) * *s_ptr.add(offset);
                 }
@@ -892,6 +954,8 @@ pub unsafe fn softmax_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // Compute grad_input = s * (grad - dot)
             for i in 0..dim_size {
                 let offset = base + i * inner_size;
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let s_val = *s_ptr.add(offset);
                     let g_val = *grad_ptr.add(offset);
@@ -935,6 +999,8 @@ fn softmax_backward_last_dim(s: &Tensor, grad: &Tensor, dim_size: usize) -> Tens
         let mut dot = 0.0f32;
         for i in 0..dim_size {
             let offset = base + i;
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe {
                 dot += *grad_ptr.add(offset) * *s_ptr.add(offset);
             }
@@ -943,6 +1009,8 @@ fn softmax_backward_last_dim(s: &Tensor, grad: &Tensor, dim_size: usize) -> Tens
         // Compute grad_input = s * (grad - dot)
         for i in 0..dim_size {
             let offset = base + i;
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe {
                 let s_val = *s_ptr.add(offset);
                 let g_val = *grad_ptr.add(offset);

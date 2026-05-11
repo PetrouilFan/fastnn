@@ -106,6 +106,10 @@ impl PyTensor {
         }
         // Create PyCapsule with the DLPack tensor
         // The capsule name must be "dltensor" per DLPack spec
+        // SAFETY: The GIL is held (we have `py: Python<'_>`). `ptr` points to
+        // a valid DLManagedTensor created by `to_dlpack`. `PyCapsule_New`
+        // takes ownership of the pointer and manages its lifetime via the
+        // provided destructor.
         let capsule = unsafe {
             pyo3::ffi::PyCapsule_New(
                 ptr as *mut std::ffi::c_void,
@@ -118,6 +122,10 @@ impl PyTensor {
                 "Failed to create DLPack capsule",
             ));
         }
+        // SAFETY: `capsule` is a non-null PyObject pointer returned by
+        // `PyCapsule_New` above. `from_owned_ptr` takes ownership, which is
+        // correct since the capsule was just created and not yet owned by
+        // any Python object.
         Ok(unsafe { pyo3::Bound::from_owned_ptr(py, capsule).unbind() })
     }
 
@@ -141,6 +149,9 @@ impl PyTensor {
             .call_method0("__dlpack__")
             .map_err(|_| PyValueError::new_err("object does not support the DLPack protocol"))?;
 
+        // SAFETY: The GIL is held. The capsule object is a valid DLPack capsule
+        // returned by `source.__dlpack__()`. `PyCapsule_GetPointer` extracts the
+        // managed tensor pointer, which is valid per the DLPack protocol.
         unsafe {
             let ptr = pyo3::ffi::PyCapsule_GetPointer(
                 capsule.as_ptr() as *mut pyo3::ffi::PyObject,

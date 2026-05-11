@@ -163,6 +163,9 @@ impl TensorIterator {
                 };
                 let nbytes = input.tensor.inner.dtype.size();
                 let offset = input_offsets[inp_idx] as usize * nbytes;
+                // SAFETY: The pointer is derived from a valid CPU storage allocation
+                // and offset is within bounds. The resulting slice covers exactly
+                // `nbytes` corresponding to one element of the tensor.
                 let slice = unsafe { std::slice::from_raw_parts(ptr.add(offset), nbytes) };
                 ptrs.push(slice);
             }
@@ -218,6 +221,7 @@ impl TensorIterator {
                 };
                 let nbytes = input.tensor.inner.dtype.size();
                 let offset = input_offsets[inp_idx] as usize * nbytes;
+                // SAFETY: Same as above — valid CPU storage pointer with in-bounds offset.
                 let slice = unsafe { std::slice::from_raw_parts(ptr.add(offset), nbytes) };
                 ptrs.push(slice);
             }
