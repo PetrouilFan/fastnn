@@ -154,6 +154,8 @@ The entire core — tensor operations, autograd, convolutions, optimizers — is
 - **GPU acceleration** *(experimental)* — Cross-platform compute via [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12); WGPU packed convolution compute shader
 - **ONNX model import** — Load and run models from PyTorch, YOLO, and other frameworks (50 ops supported); Q/DQ folding, NonZero, Unique, Tril, Triu, Pad v2
 - **Calibration & profiling** — `ActivationCalibrator` for activation statistics with KL-divergence scale refinement; `PrecisionProfiler` for per-layer sensitivity analysis and automatic mixed-precision configuration
+- **Fused linear+activation** — `fused_linear_relu` and `fused_linear_gelu` single-pass operations for matmul + activation fusion; used internally by `TransformerBlock`
+- **Packed attention & transformer** — `PackedMultiHeadAttention` and `PackedTransformerEncoder` in U4/U8 precision (via Python bindings)
 
 ---
 
@@ -242,9 +244,16 @@ The full API reference is maintained in [`docs/api-reference.md`](docs/api-refer
 - **Learning rate schedulers** — `StepLR`, `CosineAnnealingLR`, `ExponentialLR`, `ReduceLROnPlateau`
 - **Data** — `Dataset`, `TensorDataset`, `DataLoader` (with multi-threaded auto-tuning)
 - **Model I/O** — `save`, `load`, `convert_from_pytorch`, `convert_from_onnx`, `load_state_dict`
-- **Packed precision Python API** — `Linear4/8/16/32`, `PackedConvRelu`, `PackedLinearGelu`, `PackedTensor4/8/16/32`, `MasterWeightOptimizer4/8/16/32`
+- **Packed precision Python API** — `Linear4/8/16/32`, `PackedConvRelu4/8/16/32`, `PackedLinearGelu4/8/16/32`, `PackedTensor4/8/16/32`, `MasterWeightOptimizer4/8/16/32`, `packed_tensor`, `packed_tensor_from_f32`
 - **Calibration & profiling** — `ActivationCalibrator` (KL-divergence scale refinement), `PrecisionProfiler` (per-layer sensitivity analysis, automatic mixed-precision config)
-- **Utilities** — `no_grad`, `set_seed`, `set_num_threads`, `set_default_device`, `clip_grad_norm_`, `clip_grad_value_`, `flash_attention`
+- **Packed attention & transformer** — `PackedMultiHeadAttention4/8`, `PackedTransformerEncoder4/8` (packed U4/U8 quantized transformer)
+- **DAG Executor** — `DAGExecutor` (native Rust topological graph executor for ONNX models)
+- **Fused linear+activation** — `fused_linear_relu`, `fused_linear_gelu` (single-pass matmul + activation)
+- **Weight initialization** — `fastnn.init` module: `kaiming_uniform_`, `kaiming_normal_`, `xavier_uniform_`, `xavier_normal_`, `orthogonal_`, `uniform_`, `normal_`, `constant_`, `eye_`, `dirac_`, `calculate_gain`
+- **Functional API** — `fastnn.functional`: `conv2d`, `conv1d`, `max_pool2d`, `avg_pool2d`, `batch_norm`, `layer_norm`, `linear`, `dropout`, `interpolate` (analogous to `torch.nn.functional`)
+- **Neural network modules** (additional) — `PReLU`, `AvgPool1d`, `MaxPool1d`, `AvgPool2d`, `CachedDataset`
+- **YOLO utilities** — `nms`, `yolo_decode`, `yolo_dfl_decode`, `xywh2xyxy`, `scale_boxes`
+- **Utilities** — `no_grad`, `set_seed`, `set_num_threads`, `set_default_device`, `clip_grad_norm_`, `clip_grad_value_`, `flash_attention`, `allocator_stats`, `list_registered_ops`, `batched_mlp_forward`, `clear_storage_pool`, `use_wgpu`, `use_cpu`, `is_wgpu`, `from_numpy`, `load_state_dict`, `import_onnx`
 
 ---
 
@@ -253,6 +262,7 @@ The full API reference is maintained in [`docs/api-reference.md`](docs/api-refer
 | Feature       | Description                                       | Default |
 |---------------|---------------------------------------------------|---------|
 | `simd`        | SIMD kernels (AVX2, AVX512, NEON, F16C)           | on      |
+| `neon`        | ARM NEON SIMD kernels for packed GEMV (aarch64)   | on      |
 | `parallel`    | Rayon multi-threaded parallelism                  | on      |
 | `simd-avx512` | AVX-512 kernels (requires AVX-512 CPU)            | on      |
 | `openblas`    | Link against OpenBLAS for large matmul            | off     |
@@ -283,12 +293,14 @@ cargo bench --bench packed_bench
 - [x] v1.1 — Packed precision, SWAR ops, GPU backend, modular architecture
 - [x] v1.2 — Fused kernels (Conv+BN+Activation, LayerNorm+GELU), ONNX import, YOLO support
 - [x] v1.3 — Packed precision expansion, quantized ONNX, fused packed layers, batch GEMM, ARM NEON, WGPU packed conv
+- [x] v1.4 — TBA
 - [ ] FlashAttention SIMD optimization (AVX2/AVX512 block kernels)
 - [ ] Raspberry Pi benchmark suite (ARM NEON validation)
 - [ ] Multi-GPU training via wgpu
 - [ ] Process-based multiprocessing for DataLoader
 - [ ] Full fused GPU optimizer kernels
 - [ ] `residual + add + norm` fusion
+- [ ] ONNX training export support
 
 ---
 

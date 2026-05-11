@@ -122,6 +122,40 @@ The typical training loop in FastNN:
 4. Optimizer step: update parameters
 5. Zero gradients
 
+### Packed Precision (Quantized Inference)
+
+FastNN stores weights in packed u32 words for 4×–8× memory savings and up to 7.4× GEMV speedup over PyTorch f32:
+
+```python
+import fastnn as fnn
+
+# Create packed linear layers (4-bit, 8-bit, 16-bit, or 32-bit)
+layer4 = fnn.Linear4(128, 64)   # 4-bit packed weights
+layer8 = fnn.Linear8(128, 64)   # 8-bit packed weights
+
+# Create packed tensors from f32 data
+pt = fnn.packed_tensor_from_f32([0.5, -1.2, 3.7, ...], shape=[64, 128], dtype="u4")
+```
+
+### ONNX Model Import
+
+Load and run models from PyTorch or other frameworks:
+
+```python
+import fastnn as fnn
+
+# Import ONNX model
+info = fnn.convert_from_onnx("model.onnx", "model.fnn")
+
+# Build and run
+model = fnn.build_model_from_fnn("model.fnn")
+output = model(input_tensor)
+
+# Or use the YOLO wrapper directly
+model = fnn.YOLO("yolov8n.onnx")
+detections = model("image.jpg")
+```
+
 ## Development Commands
 
 ```bash

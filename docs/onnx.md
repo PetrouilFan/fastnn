@@ -7,7 +7,7 @@ FastNN can load and execute ONNX models through a multi-stage pipeline:
 ```
 ONNX (.onnx)
     [import_onnx]  — parse ONNX graph, extract weights
-.fnn (JSON header + binary params)
+.fnn (JSON header + binary params, v2 or v3)
     [build_model_from_fnn]  — auto-detect provenance
 DAGExecutor (Rust) or Sequential (Python)
     [forward]  — execute graph topologically
@@ -24,13 +24,42 @@ info = fnn.convert_from_onnx("model.onnx", "model.fnn")
 # info contains: layers, parameters, input_shape, output_shape, graph
 ```
 
-The importer supports 46 ONNX operator types including:
+### Supported Ops (50 operator types)
+
+The importer supports 50 ONNX operator types:
+
 - **NN layers**: Conv, Gemm/Linear, BatchNormalization, MaxPool, AveragePool, GlobalAveragePool
 - **Activations**: Relu, Sigmoid, Tanh, SiLU, LeakyRelu, Elu, Softmax, Clip, etc.
 - **Arithmetic**: Add, Sub, Mul, Div, Pow, Exp, Log, Sqrt, Neg, MatMul
-- **Shape ops**: Reshape, Flatten, Transpose, Concat, Split, Slice, Pad, Tile, Squeeze, Unsqueeze
+- **Shape ops**: Reshape, Flatten, Transpose, Concat, Split, Slice, Pad (v2), Tile, Squeeze, Unsqueeze
 - **Reductions**: ReduceMean, ReduceSum
 - **Data**: Gather, Where, TopK, NonMaxSuppression, Constant, Identity, Resize
+- **Quantized ops**: QuantizeLinear, DequantizeLinear, QLinearConv, MatMulInteger
+- **Advanced**: NonZero, Unique, Tril, Triu
+
+### Quantized ONNX Import (v1.3)
+
+The ONNX importer detects `QuantizeLinear → DequantizeLinear` patterns around `Conv`/`MatMul` nodes and **folds them**, converting weights to packed storage during import for zero-cost quantized inference.
+
+```python
+from fastnn.precision import PrecisionConfig
+
+# Import with automatic Q/DQ folding
+info = fnn.convert_from_onnx("model.onnx", "model.fnn")
+
+# Or specify precision config for custom quantization
+config = PrecisionConfig.uniform("u4")
+info = fnn.convert_from_onnx("model.onnx", "model.fnn")
+```
+
+Key quantized ops supported:
+
+| Op | Description |
+|----|-------------|
+| `QuantizeLinear` | Scale + round + clamp quantization (q = round(v/scale) + zp) |
+| `DequantizeLinear` | Scale-based dequantization (v = (q − zp) × scale) |
+| `QLinearConv` | Dequantizes quantized input + weight, runs f32 conv, requantizes output |
+| `MatMulInteger` | Dequantizes both quantized inputs, runs f32 matmul |
 
 ## Stage 2: Build
 
@@ -49,6 +78,7 @@ The `DAGExecutor` is a native Rust implementation that:
 - Dispatches to optimized CPU kernels via the dispatcher system
 - Supports 30+ operation types natively
 - Passes through unknown ops (returns first input)
+- Includes fused QuantizeLinear / DequantizeLinear support in graph execution
 
 ```python
 # The DAGExecutor takes input names matching the model's input
@@ -114,8 +144,9 @@ boxes_xyxy = xywh2xyxy(boxes_xywh)
 # Scale from model input to original image
 boxes_scaled = scale_boxes((640, 640), boxes_xyxy, (1080, 1920))
 
-# Full YOLO output decoding
+# Full YOLO output decoding (YOLOv5/v8/v10/v11)
 detections = yolo_decode(model_output, conf_threshold=0.25)
+detections = yolo_dfl_decode(model_output, conf_threshold=0.25)  # YOLOv8+ DFL
 ```
 
 ## Architecture
@@ -123,11 +154,15 @@ detections = yolo_decode(model_output, conf_threshold=0.25)
 ```
 fastnn/
 io/
-    onnx.py              # ONNX importer (46 ops)
+    onnx.py              # ONNX importer (50 ops)
     graph_builder.py     # Model building (auto-detect)
     dag_model.py         # Python DAG prototype
-    shape_inference.py   # Shape inference (46 ops)
+    shape_inference.py   # Shape inference (50 ops)
     graph_optimizer.py   # Graph optimization (3 passes)
+    calibrate.py         # Calibration infrastructure
+    act_calibrate.py     # Activation calibration (KL-divergence)
+    profiler.py          # Precision profiling & sensitivity analysis
+    validate.py          # Model validation
 models/
     yolo.py              # YOLO model wrapper
 utils/
@@ -138,11 +173,15 @@ nn/
 kernels/
     cpu/
         pooling.rs       # CPU kernels (max_pool2d, avg_pool2d)
+backends/
+    wgpu/
+        shaders/
+            conv_packed.wgsl  # WGPU packed convolution shader
 ```
 
 ## Current Limitations
 
-- **Conv2d**: CPU-only (WGPU kernels planned)
+- **Conv2d**: CPU-only for general conv; WGPU packed conv shader exists (`conv_packed.wgsl`) but is experimental
 - **Control flow**: Loop, If ops recorded but not executed
 - **Training**: ONNX models are inference-only; autograd preserved but not optimized for ONNX graphs
 - **GPU**: Elementwise ops use WGPU dispatcher; Conv/pooling ops use CPU fallback
