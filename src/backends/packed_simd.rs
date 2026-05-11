@@ -20,15 +20,12 @@ static HAS_F16C: OnceLock<bool> = OnceLock::new();
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn has_avx512() -> bool {
-    *HAS_AVX512.get_or_init(|| {
-        is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")
-    })
+    *HAS_AVX512
+        .get_or_init(|| is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw"))
 }
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn has_avx2() -> bool {
-    *HAS_AVX2.get_or_init(|| {
-        is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
-    })
+    *HAS_AVX2.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
 }
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn has_f16c() -> bool {
@@ -71,26 +68,22 @@ pub fn gemv_packed_simd<T: PackedWord>(
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     match (T::BIT_WIDTH, T::IS_FLOAT) {
         (8, false) => {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
             let w = unsafe { &*(weights as *const _ as *const PackedTensor<crate::dtypes::U8x4>) };
             return gemv_u8x4_dispatch(w, activation, output);
         }
         (4, false) => {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
             let w = unsafe { &*(weights as *const _ as *const PackedTensor<crate::dtypes::U4x8>) };
             return gemv_u4x8_dispatch(w, activation, output);
         }
         (16, true) => {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
             let w = unsafe { &*(weights as *const _ as *const PackedTensor<crate::dtypes::F16x2>) };
             return gemv_f16x2_dispatch(w, activation, output);
         }
         (32, true) => {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
             let w = unsafe { &*(weights as *const _ as *const PackedTensor<crate::dtypes::F32x1>) };
             return gemv_f32x1_dispatch(w, activation, output);
         }
@@ -140,7 +133,7 @@ fn gemv_u8x4_dispatch(
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                        // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                         let dot = unsafe {
                             gemv_row_u8x4_avx512(
                                 weights_u32,
@@ -157,8 +150,7 @@ fn gemv_u8x4_dispatch(
         #[cfg(not(feature = "parallel"))]
         {
             for row in 0..m {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                 let dot = unsafe {
                     gemv_row_u8x4_avx512(weights_u32, activation, row * k_packed, k, k_packed)
                 };
@@ -178,7 +170,7 @@ fn gemv_u8x4_dispatch(
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                        // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                         let dot = unsafe {
                             gemv_row_u8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed)
                         };
@@ -189,8 +181,7 @@ fn gemv_u8x4_dispatch(
         #[cfg(not(feature = "parallel"))]
         {
             for row in 0..m {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                 let dot = unsafe {
                     gemv_row_u8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed)
                 };
@@ -202,8 +193,9 @@ fn gemv_u8x4_dispatch(
         for row in 0..m {
             let row_offset = row * k_packed;
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
-            let dot = unsafe { gemv_row_u8x4_scalar(weights_u32, activation, row_offset, k, k_packed) };
+            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+            let dot =
+                unsafe { gemv_row_u8x4_scalar(weights_u32, activation, row_offset, k, k_packed) };
             output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
         }
     }
@@ -211,7 +203,6 @@ fn gemv_u8x4_dispatch(
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[inline]
-
 // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn gemv_row_u8x4_scalar(
     weights_u32: &[u32],
@@ -237,7 +228,6 @@ unsafe fn gemv_row_u8x4_scalar(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-
 // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn gemv_row_u8x4_avx2(
     weights_u32: &[u32],
@@ -298,7 +288,6 @@ unsafe fn gemv_row_u8x4_avx2(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline]
-
 // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn gemv_row_u8x4_avx512(
     weights_u32: &[u32],
@@ -429,7 +418,7 @@ fn gemv_u4x8_dispatch(
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                        // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                         let dot = unsafe {
                             gemv_row_u4x8_avx512(
                                 weights_u32,
@@ -446,8 +435,7 @@ fn gemv_u4x8_dispatch(
         #[cfg(not(feature = "parallel"))]
         {
             for row in 0..m {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                 let dot = unsafe {
                     gemv_row_u4x8_avx512(weights_u32, activation, row * k_packed, k, k_packed)
                 };
@@ -467,7 +455,7 @@ fn gemv_u4x8_dispatch(
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                        // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                         let dot = unsafe {
                             gemv_row_u4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed)
                         };
@@ -478,8 +466,7 @@ fn gemv_u4x8_dispatch(
         #[cfg(not(feature = "parallel"))]
         {
             for row in 0..m {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                 let dot = unsafe {
                     gemv_row_u4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed)
                 };
@@ -494,7 +481,6 @@ fn gemv_u4x8_dispatch(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-
 // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn gemv_row_u4x8_avx2(
     weights_u32: &[u32],
@@ -575,7 +561,6 @@ unsafe fn gemv_row_u4x8_avx2(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 #[inline]
-
 // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn gemv_row_u4x8_avx512(
     weights_u32: &[u32],
@@ -680,7 +665,7 @@ fn gemv_f16x2_dispatch(
                     for (local_row, out) in out_chunk.iter_mut().enumerate() {
                         let row = start_row + local_row;
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                        // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                         let dot = unsafe {
                             gemv_row_f16x2_f16c(
                                 weights_u32,
@@ -697,8 +682,7 @@ fn gemv_f16x2_dispatch(
         #[cfg(not(feature = "parallel"))]
         {
             for row in 0..m {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                 let dot = unsafe {
                     gemv_row_f16x2_f16c(weights_u32, activation, row * k_packed, k, k_packed)
                 };
@@ -713,7 +697,6 @@ fn gemv_f16x2_dispatch(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma,f16c")]
 #[inline]
-
 // SAFETY: The pointers are valid and properly aligned for SIMD access. Loop bounds prevent out-of-bounds access.
 unsafe fn u32x4_to_f32x8_f16c(w0: u32, w1: u32, w2: u32, w3: u32) -> __m256 {
     // Each u32 has 2 f16: lo_half at bits 0-15, hi_half at bits 16-31
@@ -729,7 +712,6 @@ unsafe fn u32x4_to_f32x8_f16c(w0: u32, w1: u32, w2: u32, w3: u32) -> __m256 {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma,f16c")]
 #[inline]
-
 // SAFETY: The pointers are valid and properly aligned for SIMD access. Loop bounds prevent out-of-bounds access.
 unsafe fn u32x2_to_f32x4_f16c(w0: u32, w1: u32) -> __m128 {
     let half_bits = _mm_set_epi32(0, 0, w1 as i32, w0 as i32);
@@ -739,7 +721,6 @@ unsafe fn u32x2_to_f32x4_f16c(w0: u32, w1: u32) -> __m128 {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma,f16c")]
 #[inline]
-
 // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn gemv_row_f16x2_f16c(
     weights_u32: &[u32],
@@ -842,7 +823,7 @@ fn gemv_f32x1_dispatch(
     let m = shape[0];
     let k = shape[1];
     // F32x1: u32 IS f32, reinterpret directly
-// SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
+    // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
     let weights_f32: &[f32] = unsafe {
         std::slice::from_raw_parts(
             weights.as_u32().as_ptr() as *const f32,
@@ -1028,7 +1009,6 @@ fn gemv_row<T: PackedWord>(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 #[inline]
-
 // SAFETY: The pointers are valid and properly aligned for SIMD access. Loop bounds prevent out-of-bounds access.
 unsafe fn hsum256_ps(v: __m256) -> f32 {
     let hi128 = _mm256_extractf128_ps(v, 1);
@@ -1048,13 +1028,11 @@ fn fma_f32_slice(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         if has_avx512() {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
             return unsafe { fma_f32_avx512(a, b) };
         }
         if has_avx2() {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
             return unsafe { fma_f32_avx2(a, b) };
         }
     }
@@ -1074,7 +1052,6 @@ fn fma_f32_scalar(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-
 // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
 unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len();
@@ -1121,7 +1098,6 @@ unsafe fn fma_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 #[inline]
-
 // SAFETY: The pointers are valid and properly aligned for AVX-512 access. Loop bounds guarantee all accesses stay within allocated storage.
 unsafe fn fma_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len();
@@ -1221,7 +1197,7 @@ pub fn gemm_packed_batched<T: PackedWord>(
                 for (bi, input) in batch_inputs.iter().enumerate() {
                     let acc = fma_f32_slice(unpack_buf, input);
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                    // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                     unsafe {
                         *((out_addrs[bi] as *mut f32).add(row)) = acc * scale + zero;
                     }
@@ -1254,6 +1230,99 @@ pub fn gemm_packed_batched<T: PackedWord>(
                 }
             }
         });
+    }
+}
+
+// ============================================================
+// Batch GEMM — K-tiled for cache reuse across batch rows
+// ============================================================
+
+/// SIMD-accelerated batch GEMM for packed types.
+///
+/// Multiplies packed weight matrix [M, K] by activation matrix [N, K],
+/// producing output [N, M]. Tiles the K dimension so activation data
+/// stays in L2 cache across all M × N output elements.
+///
+/// For each K-tile: unpacks each weight row's tile once, then computes
+/// dot products with all N batch rows. Accumulates partial results
+/// across K-tiles, then applies per-row scale/zero at the end.
+#[inline(always)]
+pub fn gemm_batch_packed_simd<T: PackedWord>(
+    weights: &PackedTensor<T>,
+    activation: &[f32],
+    output: &mut [f32],
+    n: usize,
+    k: usize,
+    m: usize,
+) {
+    let k_packed = k.div_ceil(T::ITEMS);
+
+    // Zero output accumulators
+    for o in output.iter_mut() {
+        *o = 0.0;
+    }
+
+    // Tile K dimension for L2 cache reuse
+    let mut k_start = 0;
+    while k_start < k {
+        let k_end = (k_start + K_BLOCK_SIZE).min(k);
+        let k_len = k_end - k_start;
+        let packed_start = k_start / T::ITEMS;
+        let packed_end = k_end.div_ceil(T::ITEMS);
+
+        with_scratch(k_len, |unpack_buf| {
+            for row in 0..m {
+                let row_offset = row * k_packed;
+
+                // Unpack this weight row's K-tile into contiguous f32 buffer
+                for p in packed_start..packed_end {
+                    let word = weights.as_packed()[row_offset + p];
+                    let unpacked = word.unpack_to_f32();
+                    let base = p * T::ITEMS;
+                    for j in 0..T::ITEMS {
+                        let idx = base + j;
+                        if idx >= k_start && idx < k_end {
+                            unpack_buf[idx - k_start] = unpacked.as_ref()[j];
+                        }
+                    }
+                }
+
+                // Accumulate dot products with all N batch activation rows
+                for bi in 0..n {
+                    let act_slice = &activation[bi * k + k_start..bi * k + k_end];
+                    let acc = fma_f32_slice(unpack_buf, act_slice);
+                    output[bi * m + row] += acc;
+                }
+            }
+        });
+
+        k_start += K_BLOCK_SIZE;
+    }
+
+    // Apply per-row quantization scale/zero to final accumulated output
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        output
+            .par_chunks_mut(m)
+            .enumerate()
+            .for_each(|(_bi, out_row)| {
+                for row in 0..m {
+                    let scale = weights.scale_for_row(row);
+                    let zero = weights.zero_for_row(row);
+                    out_row[row] = out_row[row] * scale + zero;
+                }
+            });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for bi in 0..n {
+            for row in 0..m {
+                let scale = weights.scale_for_row(row);
+                let zero = weights.zero_for_row(row);
+                output[bi * m + row] = output[bi * m + row] * scale + zero;
+            }
+        }
     }
 }
 

@@ -72,7 +72,9 @@ pub fn swar_max_u4x8(a: u32, b: u32) -> u32 {
     let a_even_biased = a_biased & U4_EVEN;
     let b_even_biased = b_biased & U4_EVEN;
     // If (a_biased - b_biased) underflows, borrow propagates into the gap bit above the nibble
-    let diff_even = a_even_biased.wrapping_add(U4_EVEN).wrapping_sub(b_even_biased);
+    let diff_even = a_even_biased
+        .wrapping_add(U4_EVEN)
+        .wrapping_sub(b_even_biased);
     let borrow_even = (diff_even >> 4) & 0x0101_0101u32;
     let mask_even = borrow_even * 0x0F;
     let result_even = ((a & U4_EVEN) & mask_even) | ((b & U4_EVEN) & !mask_even);
@@ -80,7 +82,9 @@ pub fn swar_max_u4x8(a: u32, b: u32) -> u32 {
     // Odd lanes
     let a_odd_biased = (a_biased >> 4) & U4_EVEN;
     let b_odd_biased = (b_biased >> 4) & U4_EVEN;
-    let diff_odd = a_odd_biased.wrapping_add(U4_EVEN).wrapping_sub(b_odd_biased);
+    let diff_odd = a_odd_biased
+        .wrapping_add(U4_EVEN)
+        .wrapping_sub(b_odd_biased);
     let borrow_odd = (diff_odd >> 4) & 0x0101_0101u32;
     let mask_odd = borrow_odd * 0x0F;
     let result_odd = ((((a >> 4) & U4_EVEN) & mask_odd) | (((b >> 4) & U4_EVEN) & !mask_odd)) << 4;
@@ -100,7 +104,9 @@ pub fn swar_min_u4x8(a: u32, b: u32) -> u32 {
     let a_even_biased = a_biased & U4_EVEN;
     let b_even_biased = b_biased & U4_EVEN;
     // If (b_biased - a_biased) underflows, borrow propagates into the gap bit above the nibble
-    let diff_even = b_even_biased.wrapping_add(U4_EVEN).wrapping_sub(a_even_biased);
+    let diff_even = b_even_biased
+        .wrapping_add(U4_EVEN)
+        .wrapping_sub(a_even_biased);
     let borrow_even = (diff_even >> 4) & 0x0101_0101u32;
     let mask_even = borrow_even * 0x0F;
     let result_even = ((a & U4_EVEN) & mask_even) | ((b & U4_EVEN) & !mask_even);
@@ -108,7 +114,9 @@ pub fn swar_min_u4x8(a: u32, b: u32) -> u32 {
     // Odd lanes
     let a_odd_biased = (a_biased >> 4) & U4_EVEN;
     let b_odd_biased = (b_biased >> 4) & U4_EVEN;
-    let diff_odd = b_odd_biased.wrapping_add(U4_EVEN).wrapping_sub(a_odd_biased);
+    let diff_odd = b_odd_biased
+        .wrapping_add(U4_EVEN)
+        .wrapping_sub(a_odd_biased);
     let borrow_odd = (diff_odd >> 4) & 0x0101_0101u32;
     let mask_odd = borrow_odd * 0x0F;
     let result_odd = ((((a >> 4) & U4_EVEN) & mask_odd) | (((b >> 4) & U4_EVEN) & !mask_odd)) << 4;

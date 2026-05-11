@@ -496,7 +496,8 @@ fn generate_dot_logic<T: PackedWord>() -> String {
                 "            activations[act_base + 7u],\n",
                 "        );\n",
                 "        acc += dot(unpacked[0], act0) + dot(unpacked[1], act1);\n",
-            ).to_string()
+            )
+            .to_string()
         }
         8 => {
             // U8x4: vec4<f32>
@@ -509,7 +510,8 @@ fn generate_dot_logic<T: PackedWord>() -> String {
                 "            activations[act_base + 3u],\n",
                 "        );\n",
                 "        acc += dot(unpacked, act0);\n",
-            ).to_string()
+            )
+            .to_string()
         }
         16 => {
             // F16x2: vec2<f32>
@@ -520,13 +522,273 @@ fn generate_dot_logic<T: PackedWord>() -> String {
                 "            activations[act_base + 1u],\n",
                 "        );\n",
                 "        acc += dot(unpacked, act0);\n",
-            ).to_string()
+            )
+            .to_string()
         }
         _ => {
             // F32x1: scalar
             "        acc += unpacked * activations[k];\n".to_string()
         }
     }
+}
+
+/// Uniform buffer parameters for packed convolution kernel.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ConvParams {
+    n: u32,
+    c: u32,
+    h: u32,
+    w: u32,
+    out_c: u32,
+    out_h: u32,
+    out_w: u32,
+    kh: u32,
+    kw: u32,
+    stride: u32,
+    pad: u32,
+    dilation: u32,
+    items_per_word: u32,
+    _pad: u32,
+}
+
+/// GPU packed convolution forward pass.
+///
+/// Dispatches a compute shader that performs im2col + packed GEMM in one kernel.
+/// Works with per-channel quantized packed weights (U4/U8).
+///
+/// TODO: The shader currently hardcodes U4x8 packing. Generalize to U8x4, F16x2, F32x1.
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d_packed_wgpu<T: PackedWord>(
+    packed_weight: &PackedTensor<T>,
+    bias: Option<&[f32]>,
+    input: &[f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    out_c: usize,
+    out_h: usize,
+    out_w: usize,
+    kh: usize,
+    kw: usize,
+    stride: usize,
+    pad: usize,
+    dilation: usize,
+) -> Vec<f32> {
+    let output_size = n * out_c * out_h * out_w;
+    let mut output = vec![0.0f32; output_size];
+
+    with_wgpu_context(|wctx| {
+        // Build a compute pipeline for packed conv
+        let pipeline_key = format!("conv_packed_{}", T::BIT_WIDTH);
+        if !wctx.pipelines.contains_key(&pipeline_key) {
+            let shader_src = include_str!("shaders/conv_packed.wgsl");
+            let shader = wctx
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(&pipeline_key),
+                    source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+                });
+
+            let conv_bind_group_layout =
+                wctx.device
+                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("conv_packed_layout"),
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::COMPUTE,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Uniform,
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::COMPUTE,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 2,
+                                visibility: wgpu::ShaderStages::COMPUTE,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 3,
+                                visibility: wgpu::ShaderStages::COMPUTE,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 4,
+                                visibility: wgpu::ShaderStages::COMPUTE,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 5,
+                                visibility: wgpu::ShaderStages::COMPUTE,
+                                ty: wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                },
+                                count: None,
+                            },
+                        ],
+                    });
+
+            let pipeline_layout =
+                wctx.device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some(&format!("{}_layout", pipeline_key)),
+                        bind_group_layouts: &[&conv_bind_group_layout],
+                        push_constant_ranges: &[],
+                    });
+
+            let pipeline = wctx
+                .device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(&pipeline_key),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
+            wctx.pipelines.insert(pipeline_key.clone(), pipeline);
+        }
+
+        let pipeline = wctx.pipelines.get(&pipeline_key).unwrap();
+
+        // Upload packed weights
+        let weight_buffer = wctx.create_buffer(packed_weight.as_bytes(), "conv_weights");
+
+        // Upload input activations
+        let input_bytes = bytemuck::cast_slice(input);
+        let input_buffer = wctx.create_buffer(input_bytes, "conv_input");
+
+        // Create output buffer
+        let output_size_bytes = output_size * std::mem::size_of::<f32>();
+        let output_buffer = wctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("conv_output"),
+            size: output_size_bytes as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        // Upload per-channel scales
+        let scales = &packed_weight.scales;
+        let scales_bytes = bytemuck::cast_slice(scales.as_slice());
+        let scales_buffer = wctx.create_buffer(scales_bytes, "conv_scales");
+
+        // Upload bias (or zeros)
+        let bias_data: Vec<f32> = bias.map(|b| b.to_vec()).unwrap_or_else(|| vec![0.0; out_c]);
+        let bias_bytes = bytemuck::cast_slice(&bias_data);
+        let bias_buffer = wctx.create_buffer(bias_bytes, "conv_bias");
+
+        // Upload params
+        let params = ConvParams {
+            n: n as u32,
+            c: c as u32,
+            h: h as u32,
+            w: w as u32,
+            out_c: out_c as u32,
+            out_h: out_h as u32,
+            out_w: out_w as u32,
+            kh: kh as u32,
+            kw: kw as u32,
+            stride: stride as u32,
+            pad: pad as u32,
+            dilation: dilation as u32,
+            items_per_word: T::ITEMS as u32,
+            _pad: 0,
+        };
+        let params_buffer = wctx.create_uniform_buffer(&params, "conv_params");
+
+        // Create bind group
+        let bind_group = wctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("conv_bind_group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: weight_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: input_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: scales_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: bias_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Dispatch: 1 thread per (oc, oh, ow)
+        let workgroup_x = out_c.div_ceil(8) as u32;
+        let workgroup_y = out_h.div_ceil(8) as u32;
+        let workgroup_z = out_w as u32;
+
+        let mut encoder = wctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("conv_encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("conv_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroup_x.max(1), workgroup_y.max(1), workgroup_z.max(1));
+        }
+
+        wctx.queue.submit(std::iter::once(encoder.finish()));
+
+        // Read back results
+        let raw = wctx.read_buffer(&output_buffer, output_size_bytes);
+        let f32_data: &[f32] = bytemuck::cast_slice(&raw);
+        output.copy_from_slice(f32_data);
+    });
+
+    output
 }
 
 #[cfg(test)]

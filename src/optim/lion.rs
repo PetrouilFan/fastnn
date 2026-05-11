@@ -1,4 +1,6 @@
-use crate::optim::{zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState, WeightDecayOptimizer};
+use crate::optim::{
+    zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState, WeightDecayOptimizer,
+};
 use crate::tensor::Tensor;
 use crate::{get_grad_or_skip, impl_params_mut};
 use std::collections::HashMap;

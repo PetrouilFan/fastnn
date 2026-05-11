@@ -96,7 +96,10 @@ fn main() {
     for i in 0..batch_size {
         print!("  Batch {}: [", i);
         for j in 0..num_classes.min(5) {
-            print!(" {:.4}", output_data[i as usize * num_classes as usize + j as usize]);
+            print!(
+                " {:.4}",
+                output_data[i as usize * num_classes as usize + j as usize]
+            );
         }
         if num_classes > 5 {
             print!(" ...");

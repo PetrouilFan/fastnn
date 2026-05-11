@@ -13,7 +13,9 @@ fn test_forward_pass<T: PackedWord>() {
     let mut rng = rand::thread_rng();
 
     // Create reference weights and activations
-    let ref_weights: Vec<f32> = (0..in_features * out_features).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let ref_weights: Vec<f32> = (0..in_features * out_features)
+        .map(|_| rng.gen_range(-1.0..1.0))
+        .collect();
     let activations: Vec<f32> = (0..in_features).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
     // Create packed weights
@@ -35,8 +37,14 @@ fn test_forward_pass<T: PackedWord>() {
     for i in 0..out_features {
         let scale = weight.scale_for_row(i);
         let tolerance = scale * (in_features as f32).sqrt() + 0.01;
-        assert!((output[i] - expected[i]).abs() < tolerance,
-            "Mismatch at {}: got {}, expected {}, tolerance {}", i, output[i], expected[i], tolerance);
+        assert!(
+            (output[i] - expected[i]).abs() < tolerance,
+            "Mismatch at {}: got {}, expected {}, tolerance {}",
+            i,
+            output[i],
+            expected[i],
+            tolerance
+        );
     }
 }
 
@@ -46,11 +54,14 @@ fn test_per_channel_forward<T: PackedWord>() {
     let out_features = 16;
     let mut rng = rand::thread_rng();
 
-    let ref_weights: Vec<f32> = (0..in_features * out_features).map(|_| rng.gen_range(-2.0..2.0)).collect();
+    let ref_weights: Vec<f32> = (0..in_features * out_features)
+        .map(|_| rng.gen_range(-2.0..2.0))
+        .collect();
     let activations: Vec<f32> = (0..in_features).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
     // Create per-channel packed weights
-    let weight = PackedTensor::<T>::from_f32_per_channel(&ref_weights, &[out_features, in_features]);
+    let weight =
+        PackedTensor::<T>::from_f32_per_channel(&ref_weights, &[out_features, in_features]);
 
     let mut output = vec![0.0f32; out_features];
     cpu::gemv_cpu(&weight, &activations, &mut output);
@@ -84,14 +95,32 @@ fn test_optimizer_step<T: PackedWord>() {
     assert_eq!(opt.step, 1);
 
     // Verify weights moved in direction of -gradient
-    for (i, ((&new, &orig), &grad)) in opt.master.iter().zip(master.iter()).zip(grad.iter()).enumerate() {
+    for (i, ((&new, &orig), &grad)) in opt
+        .master
+        .iter()
+        .zip(master.iter())
+        .zip(grad.iter())
+        .enumerate()
+    {
         let change = new - orig;
         if grad > 0.0 {
-            assert!(change <= 0.0, "Weight {} increased ({} -> {}) despite positive gradient {}",
-                i, orig, new, grad);
+            assert!(
+                change <= 0.0,
+                "Weight {} increased ({} -> {}) despite positive gradient {}",
+                i,
+                orig,
+                new,
+                grad
+            );
         } else if grad < 0.0 {
-            assert!(change >= 0.0, "Weight {} decreased ({} -> {}) despite negative gradient {}",
-                i, orig, new, grad);
+            assert!(
+                change >= 0.0,
+                "Weight {} decreased ({} -> {}) despite negative gradient {}",
+                i,
+                orig,
+                new,
+                grad
+            );
         }
     }
 
@@ -154,8 +183,12 @@ fn test_relu_correctness<T: PackedWord>() {
     assert!(result[3] == 0.0, "ReLU(-5) should be 0, got {}", result[3]);
     let scale = tensor.scale();
     let tolerance = scale * 2.0 + 0.01;
-    assert!((result[11] - 3.0).abs() < tolerance || result[11] > 0.0,
-        "ReLU(3) should be approx 3.0, got {}, tolerance {}", result[11], tolerance);
+    assert!(
+        (result[11] - 3.0).abs() < tolerance || result[11] > 0.0,
+        "ReLU(3) should be approx 3.0, got {}, tolerance {}",
+        result[11],
+        tolerance
+    );
 }
 
 #[test]
@@ -213,10 +246,8 @@ fn test_loss_decreases_u8x4() {
         .map(|i| (i as f32 * 0.01).cos() * 0.3)
         .collect();
 
-    let mut opt1 =
-        MasterWeightOptimizer::<U8x4>::new(&w1_master, 0.1, (0.9, 0.999), 1e-8, 0.0);
-    let mut opt2 =
-        MasterWeightOptimizer::<U8x4>::new(&w2_master, 0.1, (0.9, 0.999), 1e-8, 0.0);
+    let mut opt1 = MasterWeightOptimizer::<U8x4>::new(&w1_master, 0.1, (0.9, 0.999), 1e-8, 0.0);
+    let mut opt2 = MasterWeightOptimizer::<U8x4>::new(&w2_master, 0.1, (0.9, 0.999), 1e-8, 0.0);
 
     let target: Vec<f32> = vec![1.0, 0.0, -1.0, 0.5];
     let input: Vec<f32> = (0..in_f).map(|i| (i as f32 * 0.5).sin()).collect();
