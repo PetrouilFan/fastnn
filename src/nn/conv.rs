@@ -151,7 +151,7 @@ impl Module for Conv2d {
                 self.groups,
                 edges,
             );
-            let mut meta = AutogradMeta::new(false);
+            let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta =
