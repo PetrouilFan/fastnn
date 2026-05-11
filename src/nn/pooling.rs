@@ -1,4 +1,4 @@
-use crate::autograd::{self, AutogradMeta, MaxPool2dBackward};
+use crate::autograd::{self, AutogradMeta, AvgPool2dBackward, MaxPool2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
@@ -229,7 +229,23 @@ impl Module for AvgPool2d {
             ],
         )
         .expect("AvgPool2d::forward: dispatch failed");
-        result[0].clone()
+        let mut output = result[0].clone();
+
+        if x.requires_grad() {
+            let backward = AvgPool2dBackward::new(
+                x.clone(),
+                self.kernel_size,
+                self.stride,
+                self.padding,
+                autograd::make_edge(x),
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {
