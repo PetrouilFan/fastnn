@@ -29,20 +29,27 @@ impl StoragePool {
         }
     }
 
-    /// Acquire a buffer without zeroing (caller will initialize).
+    /// Acquire a buffer without zeroing (caller MUST write every byte).
     pub fn acquire_uninit(&self, nbytes: usize, device: Device) -> Arc<Storage> {
         match device {
             Device::Cpu => {
-                // For small tensors, try thread-local cache first to avoid DashMap overhead
+                // For small tensors, try thread-local cache first
                 if nbytes < SMALL_TENSOR_THRESHOLD {
                     let cached = SMALL_CACHE.with(|cache| {
                         let mut cache = cache.borrow_mut();
-                        let storages = cache.get_mut(&nbytes)?;
-                        let storage = storages.pop()?;
-                        if storages.is_empty() {
-                            cache.remove(&nbytes);
+                        if let Some(storages) = cache.get_mut(&nbytes) {
+                            if let Some(storage) = storages.pop() {
+                                if storages.is_empty() {
+                                    cache.remove(&nbytes);
+                                }
+                                // Skip zero-fill — caller promises to write all bytes
+                                match Arc::try_unwrap(storage) {
+                                    Ok(s) => return Some(Arc::new(s)),
+                                    Err(_) => return None,
+                                }
+                            }
                         }
-                        Some(storage)
+                        None
                     });
                     if let Some(storage) = cached {
                         return storage;

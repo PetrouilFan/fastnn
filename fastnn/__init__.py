@@ -428,7 +428,6 @@ def packed_tensor(data, shape=None, scale=1.0, zero=0.0, dtype="u4"):
         zero: quantization zero point
         dtype: one of "u4", "u8", "f16", "f32"
     """
-    import numpy as np
     if isinstance(data, np.ndarray):
         if shape is None:
             shape = list(data.shape)
@@ -453,7 +452,6 @@ def packed_tensor_from_f32(data, shape=None, dtype="u4"):
         shape: optional shape (auto-detected from numpy array)
         dtype: one of "u4", "u8", "f16", "f32"
     """
-    import numpy as np
     if isinstance(data, np.ndarray):
         if shape is None:
             shape = list(data.shape)

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import math
 import numpy as np
+import fastnn as fnn
 import fastnn._core as _core
 from fastnn.module import Module
 
@@ -137,8 +138,7 @@ class _BaseModule(Module):
                     src_arr = src.numpy()
                 else:
                     src_arr = np.asarray(src)
-                data = src_arr.flatten().tolist()
-                new_param = _core.PyTensor(data, list(param.shape))
+                new_param = fnn.tensor(src_arr, list(src_arr.shape))
                 setter = f"set_{param_name}"
                 if hasattr(layer, setter):
                     getattr(layer, setter)(new_param)
