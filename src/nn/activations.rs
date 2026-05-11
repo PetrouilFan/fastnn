@@ -98,7 +98,7 @@ impl PReLU {
             crate::storage::Device::Cpu,
         );
         let w = weight.clone();
-        w.requires_grad_(true);
+        let w = w.requires_grad_(true);
         PReLU { weight: w }
     }
 }
