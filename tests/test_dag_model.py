@@ -430,6 +430,122 @@ class TestTensorManipulation:
 
 
 # ================================================================== #
+# Cast and Gather
+# ================================================================== #
+
+class TestCast:
+    """Cast op: dtype conversion."""
+
+    def test_cast_float_to_int64(self):
+        x = np.array([[1.5, 2.7, -0.3]], dtype=np.float32)
+        model = _make_model(
+            nodes=[{
+                "name": "cast1",
+                "op_type": "Cast",
+                "inputs": ["X"],
+                "outputs": ["Y"],
+                "to": 7,  # INT64 (top-level attr)
+            }],
+            params={},
+            input_names=["X"],
+            output_names=["Y"],
+        )
+        feed = {"X": fnn.tensor(x, list(x.shape))}
+        outputs = model.forward(feed)
+        result = _to_numpy(outputs["Y"])
+        # fnn tensors always store as f32, but values should be truncated like int64
+        assert np.allclose(result, [[1.0, 2.0, 0.0]])
+
+    def test_cast_float_to_bool(self):
+        x = np.array([[0.0, 1.0, -1.0]], dtype=np.float32)
+        model = _make_model(
+            nodes=[{
+                "name": "cast1",
+                "op_type": "Cast",
+                "inputs": ["X"],
+                "outputs": ["Y"],
+                "to": 9,  # BOOL (top-level attr)
+            }],
+            params={},
+            input_names=["X"],
+            output_names=["Y"],
+        )
+        feed = {"X": fnn.tensor(x, list(x.shape))}
+        outputs = model.forward(feed)
+        result = _to_numpy(outputs["Y"])
+        # fnn tensors always store as f32, but values should be 0.0/1.0 like bool
+        assert np.allclose(result, [[0.0, 1.0, 1.0]])
+
+    def test_cast_passthrough(self):
+        """Cast to float (default) should leave data unchanged."""
+        x = np.array([[1.5, 2.5]], dtype=np.float32)
+        model = _make_model(
+            nodes=[{
+                "name": "cast1",
+                "op_type": "castop",
+                "inputs": ["X"],
+                "outputs": ["Y"],
+            }],
+            params={},
+            input_names=["X"],
+            output_names=["Y"],
+        )
+        feed = {"X": fnn.tensor(x, list(x.shape))}
+        outputs = model.forward(feed)
+        assert np.allclose(_to_numpy(outputs["Y"]), x)
+
+
+class TestGather:
+    """Gather op: indexing along an axis."""
+
+    def test_gather_axis0(self):
+        data = np.array([[10, 11], [20, 21], [30, 31]], dtype=np.float32)
+        indices = np.array([0, 2], dtype=np.int64)
+        model = _make_model(
+            nodes=[{
+                "name": "gather1",
+                "op_type": "Gather",
+                "inputs": ["X", "I"],
+                "outputs": ["Y"],
+                "axis": 0,  # top-level attr
+            }],
+            params={},
+            input_names=["X", "I"],
+            output_names=["Y"],
+        )
+        feed = {
+            "X": fnn.tensor(data, list(data.shape)),
+            "I": fnn.tensor(indices, list(indices.shape)),
+        }
+        outputs = model.forward(feed)
+        expected = np.take(data, indices, axis=0)
+        assert np.allclose(_to_numpy(outputs["Y"]), expected)
+
+    def test_gather_axis1(self):
+        data = np.array([[10, 11, 12], [20, 21, 22]], dtype=np.float32)
+        indices = np.array([2, 0], dtype=np.int64)
+        model = _make_model(
+            nodes=[{
+                "name": "gather1",
+                "op_type": "Gather",
+                "inputs": ["X", "I"],
+                "outputs": ["Y"],
+                "axis": 1,  # top-level attr
+            }],
+            params={},
+            input_names=["X", "I"],
+            output_names=["Y"],
+        )
+        feed = {
+            "X": fnn.tensor(data, list(data.shape)),
+            "I": fnn.tensor(indices, list(indices.shape)),
+        }
+        outputs = model.forward(feed)
+        expected = np.take(data, indices, axis=1)
+        assert np.allclose(_to_numpy(outputs["Y"]), expected)
+
+
+# ================================================================== #
 # Newly Implemented Ops (DequantizeLinear, QuantizeLinear,
 # RotaryEmbedding, EmbedLayerNormalization, GRU, LSTM)
 # ================================================================== #
