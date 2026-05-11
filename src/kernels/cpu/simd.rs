@@ -1755,13 +1755,17 @@ pub unsafe fn fast_exp_avx2(x: __m256) -> __m256 {
     let n = _mm256_floor_ps(t);
     let x = _mm256_fnmadd_ps(n, ln2_hi, x);
     let x = _mm256_fnmadd_ps(n, ln2_lo, x);
+    let x2 = _mm256_mul_ps(x, x);       // x^2 for Cephes polynomial
     let r = p0;
     let r = _mm256_fmadd_ps(r, x, p1);
     let r = _mm256_fmadd_ps(r, x, p2);
     let r = _mm256_fmadd_ps(r, x, p3);
     let r = _mm256_fmadd_ps(r, x, p4);
     let r = _mm256_fmadd_ps(r, x, p5);
-    let r = _mm256_fmadd_ps(r, x, one);
+    // Cephes: exp(x) ≈ 1 + x + x^2 * P(x) where P is the polynomial above.
+    // Final assembly: r*x^2 + x + 1.0
+    let r = _mm256_fmadd_ps(r, x2, x);  // r*x^2 + x
+    let r = _mm256_add_ps(r, one);      // + 1.0
     let n_int = _mm256_cvtps_epi32(n);
     let bias = _mm256_set1_epi32(127);
     let n_biased = _mm256_add_epi32(n_int, bias);

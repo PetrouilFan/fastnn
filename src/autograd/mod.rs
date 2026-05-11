@@ -227,3 +227,5 @@ include!("reductions.rs");
 include!("conv.rs");
 include!("losses.rs");
 include!("views.rs");
+include!("pooling.rs");
+include!("norm_backward.rs");

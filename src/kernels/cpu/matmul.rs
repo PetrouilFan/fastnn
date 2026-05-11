@@ -18,8 +18,8 @@ use std::sync::Arc;
 pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     // Removed debug file writing that was causing issues on Windows
 
-    let a = args[0];
-    let b = args[1];
+    let a = args[0].contiguous();
+    let b = args[1].contiguous();
 
     let a_shape = a.shape_ref();
     let b_shape = b.shape_ref();
@@ -32,6 +32,27 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let k = a_shape[a_shape.len() - 1] as i32;
     let n = b_shape[b_shape.len() - 1] as i32;
 
+    // Both tensors are now contiguous (ensured above), so no transposed
+    // stride detection is needed. The 3D flattening below also produces
+    // contiguous tensors. This avoids a class of bugs where a 4D batched
+    // tensor with transposed inner dims (e.g. from attention softmax
+    // followed by transpose) is incorrectly detected as "transposed" at
+    // the 4D level, causing the stride-based check to use a batch
+    // dimension as the inner dimension and panic.
+
+    // Both tensors are contiguous (ensured above), so B is never transposed.
+    // Standard dimension compatibility check: B's second-to-last dim must equal A's last dim (k).
+    if b_shape[b_shape.len() - 2] as i32 != k {
+        panic!(
+            "matmul: A[{}, {}] @ B[{}, {}] - B second-to-last dim {} != k {}",
+            m,
+            k,
+            b_shape[b_shape.len() - 2],
+            b_shape[b_shape.len() - 1],
+            b_shape[b_shape.len() - 2],
+            k
+        );
+    }
     // Use custom tiled matmul
     let batch_a = if a_shape.len() > 2 {
         a_shape[..a_shape.len() - 2].iter().product::<i64>() as usize

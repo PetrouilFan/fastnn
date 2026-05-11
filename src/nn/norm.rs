@@ -1,3 +1,4 @@
+use crate::autograd::{self, AutogradMeta, BatchNorm2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::tensor::Tensor;
 use crate::{
@@ -392,8 +393,8 @@ impl Module for GroupNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
         let x_shape = x.shape_ref();
         let batch = x_shape[0];
-        let channels = x_shape[1];
-        let spatial: i64 = x_shape[2..].iter().product();
+            let channels = x_shape[1];
+            let spatial: i64 = x_shape[2..].iter().product();
         let group_size = channels / self.num_groups;
 
         let x_reshaped = x.reshape(vec![batch, self.num_groups, group_size, spatial]);
@@ -513,6 +514,21 @@ impl Module for BatchNorm2d {
         let running_mean = self.running_mean.read().clone();
         let running_var = self.running_var.read().clone();
 
+        // Compute batch stats (used for backward in training mode, or empty tensors as placeholders)
+        let (batch_mean, batch_var) = if is_training && (x.requires_grad() || self.weight.requires_grad()) {
+            let x_shape = x.shape_ref();
+            let batch = x_shape[0];
+            let channels = x_shape[1];
+            let spatial: i64 = x_shape[2..].iter().product();
+            let x_reshaped = x.reshape(vec![batch, channels, spatial]);
+            let b_mean = x_reshaped.mean(2, false).mean(0, false);
+            let centered = x_reshaped.sub(&b_mean.reshape(vec![1, channels, 1]));
+            let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
+            (b_mean, b_var)
+        } else {
+            (running_mean.clone(), running_var.clone())
+        };
+
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(
             "batch_norm",
@@ -529,22 +545,15 @@ impl Module for BatchNorm2d {
         )
         .expect("BatchNorm2d::forward: dispatch failed");
 
-        let output = result[0].clone();
+        let mut output = result[0].clone();
 
         // In training mode, update the running stats
         if is_training {
             let x_shape = x.shape_ref();
             let batch = x_shape[0];
-            let channels = x_shape[1];
+            let _channels = x_shape[1];
             let spatial: i64 = x_shape[2..].iter().product();
 
-            let x_reshaped = x.reshape(vec![batch, channels, spatial]);
-            let batch_mean = x_reshaped.mean(2, false).mean(0, false);
-
-            let centered = x_reshaped.sub(&batch_mean.reshape(vec![1, channels, 1]));
-            let batch_var = centered.mul(&centered).mean(2, false).mean(0, false);
-
-            // Update running stats: running = (1 - momentum) * running + momentum * batch (PyTorch convention)
             let mom = self.momentum;
             let inv_mom = 1.0 - mom;
 
@@ -555,18 +564,39 @@ impl Module for BatchNorm2d {
             *running_mean_lock = new_mean;
 
             let mut running_var_lock = self.running_var.write();
-            // PyTorch uses unbiased variance (Bessel correction) for running_var update
-            // batch_var is averaged over both batch and spatial dimensions
             let n = (batch * spatial) as f32;
             let unbiased_var = if n > 1.0 {
-                batch_var.mul_scalar(n / (n - 1.0))
+                batch_var.clone().mul_scalar(n / (n - 1.0))
             } else {
-                batch_var
+                batch_var.clone()
             };
             let new_var = running_var_lock
                 .mul_scalar(inv_mom)
                 .add(&unbiased_var.mul_scalar(mom));
             *running_var_lock = new_var;
+        }
+
+        // Attach autograd
+        if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
+            let edges = {
+                let mut edges = autograd::make_edge(x);
+                edges.extend(autograd::make_edge(&self.weight));
+                edges.extend(autograd::make_edge(&self.bias));
+                edges
+            };
+            let backward = BatchNorm2dBackward::new(
+                x.clone(),
+                self.weight.clone(),
+                self.bias.clone(),
+                batch_mean,
+                batch_var,
+                self.eps,
+                edges,
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
         }
 
         output
