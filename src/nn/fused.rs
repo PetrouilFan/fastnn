@@ -1,4 +1,4 @@
-use crate::autograd::{AutogradMeta, Edge, Node};
+use crate::autograd::{make_edge, AutogradMeta, BatchNorm2dBackward, Conv2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
@@ -162,76 +162,119 @@ impl<A: Activation> FusedConvBn<A> {
     }
 }
 
-/// Backward node for fused layers (inference-only, panics on gradient request)
-struct FusedConvBnBackward {
-    backward_name: &'static str,
-    msg: &'static str,
-}
-
-impl Node for FusedConvBnBackward {
-    fn apply(&self, _: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
-        panic!(
-            "FusedConvBn with {} does not support autograd; use separate layers for training",
-            self.msg
-        );
-    }
-    fn next_edges(&self) -> &[Edge] {
-        &[]
-    }
-    fn num_inputs(&self) -> usize {
-        0
-    }
-    fn name(&self) -> &str {
-        self.backward_name
-    }
-    fn inputs(&self) -> &[Tensor] {
-        &[]
-    }
-}
-
 impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
     fn forward(&self, x: &Tensor) -> Tensor {
         let default_bias = Tensor::from_scalar(0.0);
         let bias_ref = self.conv_bias.as_ref().unwrap_or(&default_bias);
 
-        let result = dispatch(
-            A::DISPATCH_NAME,
+        // Step 1: Conv2d dispatch + manually attach Conv2dBackward
+        let conv_raw = dispatch(
+            "conv2d",
             DispatchKey::Cpu,
             &[
                 x,
                 &self.conv_weight,
                 bias_ref,
-                &self.bn_weight,
-                &self.bn_bias,
-                &self.bn_running_mean,
-                &self.bn_running_var,
                 &self.stride_scalar,
                 &self.padding_scalar,
                 &self.dilation_scalar,
                 &self.groups_scalar,
+            ],
+        )
+        .expect("FusedConvBn::conv2d: dispatch failed")[0]
+        .clone();
+
+        let conv_out = if x.requires_grad() || self.conv_weight.requires_grad() {
+            let edges = {
+                let mut edges = make_edge(x);
+                edges.extend(make_edge(&self.conv_weight));
+                edges
+            };
+            let backward = Conv2dBackward::new(
+                x.clone(),
+                self.conv_weight.clone(),
+                self.conv_bias.is_some(),
+                self.stride,
+                self.padding,
+                self.dilation,
+                self.groups,
+                edges,
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            let mut output = conv_raw;
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+            output
+        } else {
+            conv_raw
+        };
+
+        // Step 2: BatchNorm2d — compute batch stats, dispatch, attach BatchNorm2dBackward
+        let x_shape = conv_out.shape_ref();
+        let batch = x_shape[0];
+        let channels = x_shape[1];
+        let spatial: i64 = x_shape[2..].iter().product();
+
+        let x_reshaped = conv_out.reshape(vec![batch, channels, spatial]);
+        let b_mean = x_reshaped.mean(2, false).mean(0, false);
+        let centered = x_reshaped.sub(&b_mean.reshape(vec![1, channels, 1]));
+        let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
+
+        let training_false = Tensor::from_scalar(0.0_f32);
+        let bn_raw = dispatch(
+            "batch_norm",
+            DispatchKey::Cpu,
+            &[
+                &conv_out,
+                &self.bn_weight,
+                &self.bn_bias,
+                &self.bn_running_mean,
+                &self.bn_running_var,
+                &training_false,
                 &self.eps_scalar,
             ],
         )
-        .expect("FusedConvBn::forward: dispatch failed");
+        .expect("FusedConvBn::batch_norm: dispatch failed")[0]
+        .clone();
 
-        let mut output = result[0].clone();
-
-        if self.conv_weight.requires_grad()
+        let bn_out = if conv_out.requires_grad()
             || self.bn_weight.requires_grad()
             || self.bn_bias.requires_grad()
-            || self.conv_bias.as_ref().is_some_and(|b| b.requires_grad())
         {
-            let backward = Arc::new(FusedConvBnBackward {
-                backward_name: A::BACKWARD_NAME,
-                msg: A::BACKWARD_MSG,
-            });
-            let mut meta = AutogradMeta::new_non_leaf(false);
-            meta.grad_fn = Some(backward);
+            let edges = {
+                let mut edges = make_edge(&conv_out);
+                edges.extend(make_edge(&self.bn_weight));
+                edges.extend(make_edge(&self.bn_bias));
+                edges
+            };
+            let backward = BatchNorm2dBackward::new(
+                conv_out.clone(),
+                self.bn_weight.clone(),
+                self.bn_bias.clone(),
+                b_mean,
+                b_var,
+                self.eps as f32,
+                edges,
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            let mut output = bn_raw;
             Arc::make_mut(&mut output.inner).autograd_meta =
                 Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
+            output
+        } else {
+            bn_raw
+        };
 
-        output
+        // Step 3: Activation (built-in ops handle their own autograd automatically)
+        match A::DISPATCH_NAME {
+            "fused_conv_bn" => bn_out,
+            "fused_conv_bn_relu" => bn_out.relu(),
+            "fused_conv_bn_gelu" => bn_out.gelu(),
+            "fused_conv_bn_silu" => bn_out.silu(),
+            _ => bn_out,
+        }
     }
 
     fn parameters(&self) -> Vec<Tensor> {

@@ -241,3 +241,5 @@ include!("losses.rs");
 include!("views.rs");
 include!("pooling.rs");
 include!("norm_backward.rs");
+include!("dropout_backward.rs");
+include!("upsample_backward.rs");

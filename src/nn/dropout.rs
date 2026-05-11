@@ -40,15 +40,25 @@ impl Module for Dropout {
 
                 for i in 0..chunk_len {
                     if rand_vals[i] < keep_prob as f32 {
-                        mask_data[chunk_start + i] = x_data[chunk_start + i] * scale;
+                        mask_data[chunk_start + i] = scale;
                     }
                 }
             }
 
             let shape = x.shape_ref();
-            let mut out = Tensor::from_vec(mask_data, shape.to_vec());
+            let mask = Tensor::from_vec(mask_data, shape.to_vec());
+            let mut out = x.mul(&mask);
+
             if x.requires_grad() {
-                out = out.requires_grad_(true);
+                let backward = crate::autograd::DropoutBackward::new(
+                    mask,
+                    crate::autograd::make_edge(x),
+                    vec![x.clone()],
+                );
+                let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
+                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
+                    Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
             }
             out
         } else {
@@ -89,37 +99,35 @@ impl Module for Dropout2d {
             let x_shape = x.shape_ref();
             let batch = x_shape[0] as usize;
             let channels = x_shape[1] as usize;
-            let spatial: usize = x_shape[2..].iter().map(|&x| x as usize).product();
+            let _spatial: usize = x_shape[2..].iter().map(|&x| x as usize).product();
             let scale = 1.0 / (1.0 - self.p) as f32;
             let keep_prob = 1.0 - self.p;
 
-            // Generate one mask value per channel per batch
+            // Generate mask: [N, C, 1, 1] that will broadcast
             let mut rng = rand::thread_rng();
             let num_masks = batch * channels;
-            let mut channel_mask = vec![0.0f32; num_masks];
+            let mut channel_mask_data = vec![0.0f32; num_masks];
             let mut rand_vals = vec![0.0f32; num_masks];
             rng.fill(&mut rand_vals[..]);
             for i in 0..num_masks {
                 if rand_vals[i] < keep_prob as f32 {
-                    channel_mask[i] = scale;
+                    channel_mask_data[i] = scale;
                 }
             }
 
-            // Apply mask: each channel's spatial dimensions get the same mask value
-            let x_data = x.as_f32_slice();
-            let mut out_data = Vec::with_capacity(x_data.len());
-            for b in 0..batch {
-                for c in 0..channels {
-                    let mask_val = channel_mask[b * channels + c];
-                    for s in 0..spatial {
-                        out_data.push(x_data[b * channels * spatial + c * spatial + s] * mask_val);
-                    }
-                }
-            }
+            let channel_mask = Tensor::from_vec(channel_mask_data, vec![batch as i64, channels as i64, 1, 1]);
+            let mut out = x.mul(&channel_mask);
 
-            let mut out = Tensor::from_vec(out_data, x_shape.to_vec());
             if x.requires_grad() {
-                out = out.requires_grad_(true);
+                let backward = crate::autograd::Dropout2dBackward::new(
+                    channel_mask,
+                    crate::autograd::make_edge(x),
+                    vec![x.clone()],
+                );
+                let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
+                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
+                    Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
             }
             out
         } else {

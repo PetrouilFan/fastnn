@@ -1,7 +1,9 @@
 #![allow(dead_code)]
+use crate::autograd::{self, AdaptiveAvgPool2dBackward, AutogradMeta};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use std::sync::Arc;
 
 macro_rules! impl_stateless_activation {
     ($name:ident, $dispatch_name:expr) => {
@@ -266,7 +268,21 @@ impl Module for AdaptiveAvgPool2d {
             }
         }
 
-        Tensor::from_vec(output_data, vec![batch, channels, out_h, out_w])
+        let mut output = Tensor::from_vec(output_data, vec![batch, channels, out_h, out_w]);
+
+        if x.requires_grad() {
+            let backward = AdaptiveAvgPool2dBackward::new(
+                x.clone(),
+                vec![out_h, out_w],
+                autograd::make_edge(x),
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {

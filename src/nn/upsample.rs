@@ -33,8 +33,7 @@ impl Module for Upsample {
             })
             .collect();
 
-        if self.mode == "nearest" {
-            // Nearest neighbor upsampling
+        let mut output = if self.mode == "nearest" {
             let x_data = x.as_f32_slice();
             let in_h = x_shape[ndim - 2] as usize;
             let in_w = x_shape[ndim - 1] as usize;
@@ -58,7 +57,6 @@ impl Module for Upsample {
             }
             Tensor::from_vec(out_data, out_shape)
         } else {
-            // Bilinear upsampling
             let x_data = x.as_f32_slice();
             let in_h = x_shape[ndim - 2] as usize;
             let in_w = x_shape[ndim - 1] as usize;
@@ -95,7 +93,22 @@ impl Module for Upsample {
                 }
             }
             Tensor::from_vec(out_data, out_shape)
+        };
+
+        if x.requires_grad() {
+            let backward = crate::autograd::UpsampleBackward::new(
+                x.clone(),
+                self.scale_factor,
+                self.mode.clone(),
+                crate::autograd::make_edge(x),
+                vec![x.clone()],
+            );
+            let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            std::sync::Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
         }
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {

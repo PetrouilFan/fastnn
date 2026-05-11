@@ -284,6 +284,12 @@ def __getattr__(name):
     if name == "load_onnx_model":
         from fastnn.io import load_onnx_model
         return load_onnx_model
+    if name == "init":
+        import fastnn.init
+        return fastnn.init
+    if name == "functional":
+        import fastnn.functional
+        return fastnn.functional
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
