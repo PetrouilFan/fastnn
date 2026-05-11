@@ -18,8 +18,8 @@ use std::sync::Arc;
 pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     // Removed debug file writing that was causing issues on Windows
 
-    let a = args[0].contiguous();
-    let b = args[1].contiguous();
+    let a = if args[0].is_contiguous() { args[0].clone() } else { args[0].contiguous() };
+    let b = if args[1].is_contiguous() { args[1].clone() } else { args[1].contiguous() };
 
     let a_shape = a.shape_ref();
     let b_shape = b.shape_ref();

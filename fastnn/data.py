@@ -192,10 +192,7 @@ class RandomSampler(Sampler):
 
     def __iter__(self) -> Iterator[int]:
         n = len(self.data_source)
-        if self._indices_buffer is None or len(self._indices_buffer) != n:
-            self._indices_buffer = np.arange(n, dtype=np.int64)
-        else:
-            self._indices_buffer = np.arange(n, dtype=np.int64)
+        self._indices_buffer = np.arange(n, dtype=np.int64)
         self.generator.shuffle(self._indices_buffer)
         return iter(self._indices_buffer[: self.num_samples].tolist())
 
@@ -280,14 +277,10 @@ def default_collate(batch: list) -> tuple:
     if isinstance(elem, tuple):
         return tuple(map(default_collate, zip(*batch)))
 
-    if hasattr(elem, "numpy"):
-        if all(hasattr(b, "numpy") for b in batch):
-            return fnn.stack(batch, dim=0)
-        batch_np = [to_numpy(b) for b in batch]
-        result_np = np.stack(batch_np, axis=0)
-        return fnn.tensor(result_np, result_np.shape)
+    if hasattr(elem, "numpy") and all(hasattr(b, "numpy") for b in batch):
+        return fnn.stack(batch, dim=0)
 
-    if isinstance(elem, np.ndarray):
+    if hasattr(elem, "numpy") or isinstance(elem, np.ndarray):
         batch_np = [to_numpy(b) for b in batch]
         result_np = np.stack(batch_np, axis=0)
         return fnn.tensor(result_np, result_np.shape)

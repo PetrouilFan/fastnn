@@ -10,17 +10,24 @@ __all__ = ["sum", "mean", "maximum", "minimum", "checkpoint"]
 
 def _apply_reduction(fn: Callable, a: Tensor, dim: Optional[int] = None, keepdim: bool = False) -> Tensor:
     if dim is None:
-        # Flatten then single reduction instead of O(dims) dispatches
-        flat = a.reshape([-1])
-        return fn(flat, 0, False)
+        if hasattr(_core, 'sum_all') and fn in (_core.sum, _core.mean):
+            result = _core.sum_all(a)
+            if fn == _core.mean:
+                result = result / a.numel()
+            return result
+        return fn(a.reshape([-1]), 0, False)
     return fn(a, dim, keepdim)
 
 
 def sum(a: Tensor, dim: Optional[int] = None, keepdim: bool = False) -> Tensor:
+    if dim is None and hasattr(_core, 'sum_all'):
+        return _core.sum_all(a)
     return _apply_reduction(_core.sum, a, dim, keepdim)
 
 
 def mean(a: Tensor, dim: Optional[int] = None, keepdim: bool = False) -> Tensor:
+    if dim is None and hasattr(_core, 'sum_all'):
+        return _core.sum_all(a) / a.numel()
     return _apply_reduction(_core.mean, a, dim, keepdim)
 
 

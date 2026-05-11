@@ -3528,13 +3528,42 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                 let start = chunk_idx * chunk_size;
                 let end = std::cmp::min(start + chunk_size, numel);
+                let len = end - start;
 
-                for i in start..end {
-                    unsafe {
-                        let x_val = *((x_usize + i * 4) as *const f32);
-                        let grad_val = *((grad_usize + i * 4) as *const f32);
+                let x_slice = unsafe { std::slice::from_raw_parts((x_usize + start * 4) as *const f32, len) };
+                let g_slice = unsafe { std::slice::from_raw_parts((grad_usize + start * 4) as *const f32, len) };
+                let out_slice = unsafe { std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len) };
 
-                        // Compute gelu'(x)
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if len >= 8 && is_x86_feature_detected!("avx2") {
+                    let sqrt_2_over_pi = f32x8::new([0.7978846; 8]);
+                    let coeff = f32x8::new([0.044715; 8]);
+                    let half = f32x8::new([0.5; 8]);
+                    let one = f32x8::new([1.0; 8]);
+                    let three = f32x8::new([3.0; 8]);
+                    let two = f32x8::new([2.0; 8]);
+
+                    for i in (0..len - 7).step_by(8) {
+                        let xv = from_slice_unaligned_f32x8(&x_slice[i..i + 8]);
+                        let gv = from_slice_unaligned_f32x8(&g_slice[i..i + 8]);
+
+                        let x2 = xv * xv;
+                        let inner = sqrt_2_over_pi * (xv + coeff * xv * x2);
+                        let exp_2x = (two * inner).exp();
+                        let t = (exp_2x - one) / (exp_2x + one);
+                        let t2 = t * t;
+                        let sech2 = one - t2;
+                        let d_inner = sqrt_2_over_pi * (one + three * coeff * x2);
+                        let deriv = half * (one + t) + half * xv * sech2 * d_inner;
+                        let result = gv * deriv;
+
+                        let out_arr: [f32; 8] = result.into();
+                        out_slice[i..i + 8].copy_from_slice(&out_arr);
+                    }
+                    let remainder_start = (len / 8) * 8;
+                    for i in remainder_start..len {
+                        let x_val = x_slice[i];
+                        let g_val = g_slice[i];
                         let x2 = x_val * x_val;
                         let x3 = x2 * x_val;
                         let inner = SQRT_2_OVER_PI * (x_val + COEFF * x3);
@@ -3543,8 +3572,21 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         let sech2 = 1.0 - t2;
                         let d_inner_dx = SQRT_2_OVER_PI * (1.0 + 3.0 * COEFF * x2);
                         let derivative = 0.5 * (1.0 + t) + 0.5 * x_val * sech2 * d_inner_dx;
-
-                        *((out_usize + i * 4) as *mut f32) = grad_val * derivative;
+                        out_slice[i] = g_val * derivative;
+                    }
+                } else {
+                    for i in 0..len {
+                        let x_val = x_slice[i];
+                        let g_val = g_slice[i];
+                        let x2 = x_val * x_val;
+                        let x3 = x2 * x_val;
+                        let inner = SQRT_2_OVER_PI * (x_val + COEFF * x3);
+                        let t = inner.tanh();
+                        let t2 = t * t;
+                        let sech2 = 1.0 - t2;
+                        let d_inner_dx = SQRT_2_OVER_PI * (1.0 + 3.0 * COEFF * x2);
+                        let derivative = 0.5 * (1.0 + t) + 0.5 * x_val * sech2 * d_inner_dx;
+                        out_slice[i] = g_val * derivative;
                     }
                 }
             });

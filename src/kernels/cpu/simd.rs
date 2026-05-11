@@ -1153,7 +1153,7 @@ pub fn sqrt_simd(input: &[f32], output: &mut [f32]) {
 }
 
 //=============================================================================
-// AVX-512 wrapper functions (call AVX2 versions using f32x8)
+// True 16-wide AVX-512 implementations
 //=============================================================================
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1166,7 +1166,15 @@ pub unsafe fn add_parallel_avx512(
     b_usize: usize,
     out_usize: usize,
 ) {
-    add_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+    let mut i = start;
+    while i + 16 <= end {
+        let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_add_ps(a, b));
+        i += 16;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1179,7 +1187,15 @@ pub unsafe fn mul_parallel_avx512(
     b_usize: usize,
     out_usize: usize,
 ) {
-    mul_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+    let mut i = start;
+    while i + 16 <= end {
+        let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_mul_ps(a, b));
+        i += 16;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1191,7 +1207,15 @@ pub unsafe fn relu_parallel_avx512(
     a_usize: usize,
     out_usize: usize,
 ) {
-    relu_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+    let zero = _mm512_setzero_ps();
+    let mut i = start;
+    while i + 16 <= end {
+        let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_max_ps(a, zero));
+        i += 16;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1204,7 +1228,15 @@ pub unsafe fn div_parallel_avx512(
     b_usize: usize,
     out_usize: usize,
 ) {
-    div_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+    let mut i = start;
+    while i + 16 <= end {
+        let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_div_ps(a, b));
+        i += 16;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1216,7 +1248,15 @@ pub unsafe fn neg_parallel_avx512(
     a_usize: usize,
     out_usize: usize,
 ) {
-    neg_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+    let sign_mask = _mm512_set1_ps(-0.0f32);
+    let mut i = start;
+    while i + 16 <= end {
+        let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_xor_ps(a, sign_mask));
+        i += 16;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1228,7 +1268,15 @@ pub unsafe fn abs_parallel_avx512(
     a_usize: usize,
     out_usize: usize,
 ) {
-    abs_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+    let sign_mask = _mm512_set1_ps(-0.0f32);
+    let mut i = start;
+    while i + 16 <= end {
+        let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_andnot_ps(sign_mask, a));
+        i += 16;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1241,7 +1289,15 @@ pub unsafe fn sub_parallel_avx512(
     b_usize: usize,
     out_usize: usize,
 ) {
-    sub_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize);
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+    let mut i = start;
+    while i + 16 <= end {
+        let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        let b = _mm512_loadu_ps((b_usize + i * 4) as *const f32);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_sub_ps(a, b));
+        i += 16;
+    }
 }
 
 //=============================================================================
@@ -1436,7 +1492,14 @@ pub unsafe fn sqrt_parallel_avx512(
     a_usize: usize,
     out_usize: usize,
 ) {
-    sqrt_parallel_avx2(chunk_idx, chunk_size, numel, a_usize, out_usize);
+    let start = chunk_idx * chunk_size;
+    let end = std::cmp::min(start + chunk_size, numel);
+    let mut i = start;
+    while i + 16 <= end {
+        let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
+        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_sqrt_ps(a));
+        i += 16;
+    }
 }
 
 //=============================================================================

@@ -225,6 +225,8 @@ pub struct DAGExecutor {
     params: HashMap<String, Tensor>,
     input_names: Vec<String>,
     output_names: Vec<String>,
+    name_to_id: HashMap<String, usize>,
+    total_tensors: usize,
 }
 
 fn parse_int_list(s: &str) -> Vec<i64> {
@@ -241,17 +243,53 @@ impl DAGExecutor {
         input_names: Vec<String>,
         output_names: Vec<String>,
     ) -> Self {
-        DAGExecutor { nodes, params, input_names, output_names }
+        let mut name_to_id = HashMap::new();
+        let mut next_id = 0;
+
+        for name in &input_names {
+            if !name_to_id.contains_key(name) {
+                name_to_id.insert(name.clone(), next_id);
+                next_id += 1;
+            }
+        }
+        for name in params.keys() {
+            if !name_to_id.contains_key(name) {
+                name_to_id.insert(name.clone(), next_id);
+                next_id += 1;
+            }
+        }
+        for node in &nodes {
+            for name in &node.inputs {
+                if !name.is_empty() && !name_to_id.contains_key(name) {
+                    name_to_id.insert(name.clone(), next_id);
+                    next_id += 1;
+                }
+            }
+            for name in &node.outputs {
+                if !name.is_empty() && !name_to_id.contains_key(name) {
+                    name_to_id.insert(name.clone(), next_id);
+                    next_id += 1;
+                }
+            }
+        }
+        let total_tensors = next_id;
+
+        DAGExecutor { nodes, params, input_names, output_names, name_to_id, total_tensors }
     }
 
     pub fn forward(&self, inputs: &HashMap<String, Tensor>) -> HashMap<String, Tensor> {
-        let mut buffer: HashMap<String, Tensor> = HashMap::new();
+        let mut buffer: Vec<Option<Tensor>> = (0..self.total_tensors).map(|_| None).collect();
 
         for name in &self.input_names {
-            if let Some(t) = inputs.get(name) {
-                buffer.insert(name.clone(), t.clone());
-            } else if let Some(p) = self.params.get(name) {
-                buffer.insert(name.clone(), p.clone());
+            if let Some(id) = self.name_to_id.get(name) {
+                let t = if let Some(t) = inputs.get(name) {
+                    t.clone()
+                } else if let Some(p) = self.params.get(name) {
+                    p.clone()
+                } else {
+                    continue;
+                };
+                buffer[*id] = Some(t);
             }
         }
 
@@ -261,16 +299,20 @@ impl DAGExecutor {
                 if in_name.is_empty() {
                     continue;
                 }
-                if let Some(t) = buffer.get(in_name) {
-                    args.push(t.clone());
+                if let Some(id) = self.name_to_id.get(in_name) {
+                    if let Some(Some(t)) = buffer.get(*id) {
+                        args.push(t.clone());
+                    } else if let Some(p) = self.params.get(in_name) {
+                        args.push(p.clone());
+                    }
                 } else if let Some(p) = self.params.get(in_name) {
                     args.push(p.clone());
                 }
             }
-            let op_lower = node.op_type.to_lowercase();
-            if args.is_empty() && op_lower != "constant" && op_lower != "constantop" {
+            if args.is_empty() && node.op_code != OpCode::Constant && node.op_code != OpCode::ConstantOfShape {
                 continue;
             }
+            let op_lower = node.op_type.to_lowercase();
             let result = match op_lower.as_str() {
                 "relu" => self.dispatch_unary("relu", &args),
                 "sigmoid" => self.dispatch_unary("sigmoid", &args),
@@ -1313,10 +1355,12 @@ impl DAGExecutor {
                 }
             };
 
-            if let Some(outputs) = result {
-                for (i, output_name) in node.outputs.iter().enumerate() {
-                    if i < outputs.len() {
-                        buffer.insert(output_name.clone(), outputs[i].clone());
+            if let Some(tensors) = result {
+                for (i, name) in node.outputs.iter().enumerate() {
+                    if let Some(t) = tensors.get(i) {
+                        if let Some(id) = self.name_to_id.get(name) {
+                            buffer[*id] = Some(t.clone());
+                        }
                     }
                 }
             }
@@ -1324,8 +1368,10 @@ impl DAGExecutor {
 
         let mut outputs = HashMap::new();
         for name in &self.output_names {
-            if let Some(t) = buffer.get(name) {
-                outputs.insert(name.clone(), t.clone());
+            if let Some(id) = self.name_to_id.get(name) {
+                if let Some(Some(t)) = buffer.get(*id) {
+                    outputs.insert(name.clone(), t.clone());
+                }
             }
         }
         outputs
