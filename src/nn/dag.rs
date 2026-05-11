@@ -223,6 +223,8 @@ pub struct DAGNode {
 pub struct DAGExecutor {
     nodes: Vec<DAGNode>,
     params: HashMap<String, Tensor>,
+    transposed_weights: HashMap<String, Tensor>,
+    scalar_cache: HashMap<i64, Tensor>,
     input_names: Vec<String>,
     output_names: Vec<String>,
     name_to_id: HashMap<String, usize>,
@@ -274,7 +276,61 @@ impl DAGExecutor {
         }
         let total_tensors = next_id;
 
-        DAGExecutor { nodes, params, input_names, output_names, name_to_id, total_tensors }
+        let mut scalar_cache = HashMap::new();
+        for i in 0..=32i64 {
+            scalar_cache.insert(i, Tensor::from_scalar(i as f32));
+        }
+
+        let mut transposed_weights = HashMap::new();
+        for node in &nodes {
+            if node.op_code == OpCode::Conv {
+                let weight_key = format!("{}.weight", node.name);
+                if let Some(w) = params.get(&weight_key) {
+                    let w_shape = w.shape_ref();
+                    if w_shape.len() >= 4 {
+                        let oc = w_shape[0] as usize;
+                        let ic = w_shape[1] as usize;
+                        let kh = w_shape[2] as usize;
+                        let kw = w_shape[3] as usize;
+
+                        if kh == 1 && kw == 1 {
+                            // 1x1: pre-transpose [oc, ic] -> [ic, oc]
+                            let reshaped = w.reshape(vec![oc as i64, ic as i64]);
+                            let transposed = reshaped.transpose(0, 1).contiguous();
+                            transposed_weights.insert(weight_key.clone(), transposed);
+                        } else if kh == 3 && kw == 3 {
+                            // 3x3: pre-transpose to [ic*9, oc] (WT_TRANS_BUF layout)
+                            let w_data = w.as_f32_slice();
+                            let mut t_data = vec![0.0f32; ic * 9 * oc];
+                            for ic_idx in 0..ic {
+                                for kh_idx in 0..3 {
+                                    for kw_idx in 0..3 {
+                                        let k_idx = ic_idx * 9 + kh_idx * 3 + kw_idx;
+                                        for oc_idx in 0..oc {
+                                            let w_idx = ((oc_idx * ic + ic_idx) * 3 + kh_idx) * 3 + kw_idx;
+                                            t_data[k_idx * oc + oc_idx] = w_data[w_idx];
+                                        }
+                                    }
+                                }
+                            }
+                            let transposed = Tensor::from_vec(t_data, vec![(ic * 9) as i64, oc as i64]);
+                            transposed_weights.insert(weight_key.clone(), transposed);
+                        }
+                    }
+                }
+            }
+        }
+
+        DAGExecutor {
+            nodes,
+            params,
+            transposed_weights,
+            scalar_cache,
+            input_names,
+            output_names,
+            name_to_id,
+            total_tensors,
+        }
     }
 
     pub fn forward(&self, inputs: &HashMap<String, Tensor>) -> HashMap<String, Tensor> {
@@ -312,35 +368,34 @@ impl DAGExecutor {
             if args.is_empty() && node.op_code != OpCode::Constant && node.op_code != OpCode::ConstantOfShape {
                 continue;
             }
-            let op_lower = node.op_type.to_lowercase();
-            let result = match op_lower.as_str() {
-                "relu" => self.dispatch_unary("relu", &args),
-                "sigmoid" => self.dispatch_unary("sigmoid", &args),
-                "tanh" => self.dispatch_unary("tanh", &args),
-                "silu" => self.dispatch_unary("silu", &args),
-                "gelu" => self.dispatch_unary("gelu", &args),
-                "leakyrelu" | "leaky_relu" => {
+            let result = match node.op_code {
+                OpCode::Relu => self.dispatch_unary("relu", &args),
+                OpCode::Sigmoid => self.dispatch_unary("sigmoid", &args),
+                OpCode::Tanh => self.dispatch_unary("tanh", &args),
+                OpCode::Silu => self.dispatch_unary("silu", &args),
+                OpCode::Gelu => self.dispatch_unary("gelu", &args),
+                OpCode::LeakyRelu => {
                     let slope = node.attrs.get("alpha")
                         .and_then(|a| a.parse::<f32>().ok())
                         .unwrap_or(0.01);
                     let slope_t = Tensor::from_scalar(slope);
                     dispatch("leaky_relu", DispatchKey::Cpu, &[&args[0], &slope_t]).ok()
                 }
-                "elu" => {
+                OpCode::Elu => {
                     let alpha = node.attrs.get("alpha")
                         .and_then(|a| a.parse::<f32>().ok())
                         .unwrap_or(1.0);
                     let alpha_t = Tensor::from_scalar(alpha);
                     dispatch("elu", DispatchKey::Cpu, &[&args[0], &alpha_t]).ok()
                 }
-                "softmax" => {
+                OpCode::Softmax => {
                     let axis = node.attrs.get("axis")
                         .and_then(|a| a.parse::<i32>().ok())
                         .unwrap_or(1);
                     Some(vec![args[0].softmax(axis)])
                 }
-                "hardswish" => self.dispatch_unary("hardswish", &args),
-                "softplus" => {
+                OpCode::Hardswish => self.dispatch_unary("hardswish", &args),
+                OpCode::Softplus => {
                     let beta = node.attrs.get("beta")
                         .and_then(|a| a.parse::<f32>().ok())
                         .unwrap_or(1.0);
@@ -352,14 +407,14 @@ impl DAGExecutor {
                     dispatch("softplus", DispatchKey::Cpu, &[&args[0], &beta_t, &threshold_t]).ok()
                 }
 
-                "conv" => self.dispatch_conv(node, &args),
-                "gemm" | "linear" => self.dispatch_gemm(node, &args),
-                "batchnormalization" | "batch_norm" | "batchnorm2d" => {
+                OpCode::Conv => self.dispatch_conv(node, &args),
+                OpCode::Gemm => self.dispatch_gemm(node, &args),
+                OpCode::BatchNorm => {
                     self.dispatch_batch_norm(node, &args)
                 }
-                "maxpool" | "max_pool2d" => self.dispatch_max_pool(node, &args),
-                "averagepool" | "avg_pool" | "avg_pool2d" => self.dispatch_avg_pool(node, &args),
-                "globalaveragepool" | "global_avg_pool" => {
+                OpCode::MaxPool => self.dispatch_max_pool(node, &args),
+                OpCode::AvgPool => self.dispatch_avg_pool(node, &args),
+                OpCode::GlobalAvgPool => {
                     let x = &args[0];
                     let shape = x.shape_ref();
                     let h = shape[2];
@@ -370,31 +425,30 @@ impl DAGExecutor {
                     dispatch("avg_pool2d", DispatchKey::Cpu, &[x, &k_t, &s_t, &p_t]).ok()
                 }
 
-                "add" | "elementwiseadd" => Some(vec![args[0].add(&args[1])]),
-                "sub" | "elementwisesub" => Some(vec![args[0].sub(&args[1])]),
-                "mul" | "elementwisemul" => Some(vec![args[0].mul(&args[1])]),
-                "div" | "elementwisediv" => Some(vec![args[0].div(&args[1])]),
-                "matmul" => Some(vec![args[0].matmul(&args[1])]),
-                "pow" | "elementwisepow" => {
+                OpCode::Add => Some(vec![args[0].add(&args[1])]),
+                OpCode::Sub => Some(vec![args[0].sub(&args[1])]),
+                OpCode::Mul => Some(vec![args[0].mul(&args[1])]),
+                OpCode::Div => Some(vec![args[0].div(&args[1])]),
+                OpCode::MatMul => Some(vec![args[0].matmul(&args[1])]),
+                OpCode::Pow => {
                     dispatch("pow", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
                 }
 
-                "exp" | "expop" => Some(vec![args[0].exp()]),
-                "sqrt" | "sqrtop" => Some(vec![args[0].sqrt()]),
-                "neg" | "negop" => Some(vec![-&args[0]]),
-                "log" | "logop" => Some(vec![args[0].ln()]),
-                "abs" => Some(vec![args[0].abs()]),
+                OpCode::Exp => Some(vec![args[0].exp()]),
+                OpCode::Sqrt => Some(vec![args[0].sqrt()]),
+                OpCode::Neg => Some(vec![-&args[0]]),
+                OpCode::Log => Some(vec![args[0].ln()]),
+                OpCode::Abs => Some(vec![args[0].abs()]),
 
-                "reshape" => self.dispatch_reshape(node, &args),
-                "flatten" => self.dispatch_flatten(node, &args),
-                "transpose" => self.dispatch_transpose(node, &args),
-                "concat" => self.dispatch_concat(node, &args),
-                "squeeze" | "squeezeop" => self.dispatch_squeeze(node, &args),
-                "unsqueeze" | "unsqueezeop" => self.dispatch_unsqueeze(node, &args),
-                "slice" | "sliceop" => {
+                OpCode::Reshape => self.dispatch_reshape(node, &args),
+                OpCode::Flatten => self.dispatch_flatten(node, &args),
+                OpCode::Transpose => self.dispatch_transpose(node, &args),
+                OpCode::Concat => self.dispatch_concat(node, &args),
+                OpCode::Squeeze => self.dispatch_squeeze(node, &args),
+                OpCode::Unsqueeze => self.dispatch_unsqueeze(node, &args),
+                OpCode::Slice => {
                     let x = &args[0];
 
-                    // Try string attributes first (older format)
                     let starts_str = node.attrs.get("starts");
                     let ends_str = node.attrs.get("ends");
 
@@ -415,7 +469,6 @@ impl DAGExecutor {
                         }
                         Some(vec![result])
                     } else if args.len() >= 3 {
-                        // Tensor-based slice (ONNX opset 10+): args[1]=starts, args[2]=ends
                         let starts: Vec<i64> = args[1].as_f32_slice().iter().map(|&v| v as i64).collect();
                         let ends: Vec<i64> = args[2].as_f32_slice().iter().map(|&v| v as i64).collect();
                         let axes: Vec<i64> = if args.len() >= 4 {
@@ -435,13 +488,12 @@ impl DAGExecutor {
                         }
                         Some(vec![result])
                     } else {
-                        // No slice info available
                         Some(vec![x.clone()])
                     };
                     slice_res
                 }
 
-                "pad" => {
+                OpCode::Pad => {
                     let x = &args[0];
                     let pads_str = node.attrs.get("pads");
                     let pads: Vec<i64> = if let Some(pads_str) = pads_str {
@@ -478,9 +530,9 @@ impl DAGExecutor {
                     }
                 }
 
-                "identity" | "identityop" | "dropout" => Some(vec![args[0].clone()]),
+                OpCode::Identity => Some(vec![args[0].clone()]),
 
-                "shape" | "shapeop" => {
+                OpCode::Shape => {
                     let x = &args[0];
                     let shape = x.shape_ref();
                     let shape_f32: Vec<f32> = shape.iter().map(|&d| d as f32).collect();
@@ -488,7 +540,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(shape_f32, dims)])
                 }
 
-                "cast" | "castop" => {
+                OpCode::Cast => {
                     let to_dtype_val = node.attrs.get("to")
                         .and_then(|a| a.parse::<i32>().ok())
                         .unwrap_or(1);
@@ -502,7 +554,7 @@ impl DAGExecutor {
                     Some(vec![args[0].to_dtype(target_dtype)])
                 }
 
-                "topk" | "topkop" => {
+                OpCode::TopK => {
                     let k_val = node.attrs.get("k")
                         .and_then(|a| a.parse::<i64>().ok())
                         .unwrap_or(1);
@@ -514,18 +566,15 @@ impl DAGExecutor {
                     let axis = if axis < 0 { axis + rank } else { axis };
 
                     if k_val == 1 && axis >= 0 {
-                        // Use max for k=1 case (returns values and indices)
                         let values = args[0].max(axis as i32, false);
-                        // No argmax kernel available; use placeholder for indices
                         let indices = args[0].clone();
                         Some(vec![values, indices])
                     } else {
-                        // Fallback for k>1: just pass through
                         Some(vec![args[0].clone(), args[0].clone()])
                     }
                 }
 
-                "reducemean" | "reduce_mean" => {
+                OpCode::ReduceMean => {
                     let axes_str = node.attrs.get("axes");
                     let keepdim = node.attrs.get("keepdims")
                         .and_then(|a| a.parse::<i64>().ok())
@@ -550,7 +599,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "reducesum" | "reduce_sum" => {
+                OpCode::ReduceSum => {
                     let axes_str = node.attrs.get("axes");
                     let keepdim = node.attrs.get("keepdims")
                         .and_then(|a| a.parse::<i64>().ok())
@@ -575,7 +624,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "hardsigmoid" | "hard_sigmoid" => {
+                OpCode::HardSigmoid => {
                     let alpha = node.attrs.get("alpha")
                         .and_then(|a| a.parse::<f32>().ok())
                         .unwrap_or(0.2);
@@ -587,11 +636,11 @@ impl DAGExecutor {
                     Some(vec![result.clamp(0.0, 1.0)])
                 }
 
-                "prelu" => {
+                OpCode::Prelu => {
                     dispatch("prelu", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
                 }
 
-                "layernormalization" | "layer_norm" | "layernorm" => {
+                OpCode::LayerNorm => {
                     let eps = node.attrs.get("epsilon")
                         .and_then(|a| a.parse::<f32>().ok())
                         .unwrap_or(1e-5);
@@ -613,7 +662,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "erf" | "erfop" => {
+                OpCode::Erf => {
                     let x = &args[0];
                     let data = x.as_f32_slice();
                     let result_data: Vec<f32> = data.iter().map(|&v| {
@@ -627,7 +676,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(result_data, shape)])
                 }
 
-                "gatherop" | "gather" => {
+                OpCode::Gather => {
                     let x = &args[0];
                     let axis = node.attrs.get("axis")
                         .and_then(|a| a.parse::<i64>().ok())
@@ -639,7 +688,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "tileop" | "tile" => {
+                OpCode::Tile => {
                     let x = &args[0];
                     if args.len() >= 2 {
                         let repeats_data = args[1].as_f32_slice();
@@ -650,7 +699,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "whereop" | "where" => {
+                OpCode::Where => {
                     if args.len() >= 3 {
                         Some(vec![args[0].where_tensor(&args[1], &args[2])])
                     } else {
@@ -658,7 +707,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "expand" => {
+                OpCode::Expand => {
                     let x = &args[0];
                     if args.len() >= 2 {
                         let shape_data = args[1].as_f32_slice();
@@ -669,7 +718,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "split" => {
+                OpCode::Split => {
                     let num_outputs = node.outputs.len();
                     let x = &args[0];
                     let axis = node.attrs.get("axis")
@@ -700,7 +749,7 @@ impl DAGExecutor {
                     Some(results)
                 }
 
-                "constant" | "constantop" => {
+                OpCode::Constant => {
                     let key = node.outputs[0].clone();
                     let value_key = format!("{}.value", node.name);
                     if let Some(t) = self.params.get(&key) {
@@ -712,14 +761,11 @@ impl DAGExecutor {
                     }
                 }
 
-                "nonmaxsuppression" => {
-                    // NonMaxSuppression is complex; keep as pass-through for now
-                    // Real NMS is done in Python post-processing
+                OpCode::NonMaxSuppression => {
                     Some(vec![args[0].clone()])
                 }
 
-                "resize" => {
-                    // Use Upsample module for nearest/bilinear interpolation
+                OpCode::Resize => {
                     let x = &args[0];
                     let mode = node.attrs.get("mode").map(|s| s.to_lowercase()).unwrap_or_else(|| "nearest".to_string());
                     let scales_str = node.attrs.get("scales");
@@ -729,9 +775,7 @@ impl DAGExecutor {
                             .split(',')
                             .filter_map(|s| s.trim().parse::<f64>().ok())
                             .collect();
-                        // Take the last two scales (H and W for 4D tensors)
                         if scales.len() >= 4 {
-                            // For NCHW format, scales[2] = H scale, scales[3] = W scale
                             scales[2].max(scales[3])
                         } else if scales.len() >= 2 {
                             scales[scales.len() - 1]
@@ -741,7 +785,6 @@ impl DAGExecutor {
                             2.0
                         }
                     } else if args.len() >= 2 {
-                        // scales from tensor input
                         let scales_data = args[1].as_f32_slice();
                         if scales_data.len() >= 4 {
                             scales_data[2].max(scales_data[3]) as f64
@@ -760,28 +803,28 @@ impl DAGExecutor {
                     Some(vec![upsampler.forward(x)])
                 }
 
-                "fusedconvbn" | "fused_conv_bn" => {
+                OpCode::FusedConvBn => {
                     if args.len() >= 2 {
                         dispatch("fused_conv_bn", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
                     } else {
                         Some(vec![args[0].clone()])
                     }
                 }
-                "fusedconvbnrelu" | "fused_conv_bn_relu" => {
+                OpCode::FusedConvBnRelu => {
                     if args.len() >= 2 {
                         dispatch("fused_conv_bn_relu", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
                     } else {
                         Some(vec![args[0].clone()])
                     }
                 }
-                "fusedconvbngelu" | "fused_conv_bn_gelu" => {
+                OpCode::FusedConvBnGelu => {
                     if args.len() >= 2 {
                         dispatch("fused_conv_bn_gelu", DispatchKey::Cpu, &[&args[0], &args[1]]).ok()
                     } else {
                         Some(vec![args[0].clone()])
                     }
                 }
-                "clip" => {
+                OpCode::Clip => {
                     let x = &args[0];
                     let min_val = node.attrs.get("min")
                         .and_then(|a| a.parse::<f32>().ok());
@@ -796,51 +839,51 @@ impl DAGExecutor {
                     Some(vec![result])
                 }
 
-                "ceil" | "ceilop" => {
+                OpCode::Ceil => {
                     let x = &args[0];
                     let data = x.as_f32_slice();
                     let result: Vec<f32> = data.iter().map(|&v| v.ceil()).collect();
                     Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
                 }
-                "floor" | "floorop" => {
+                OpCode::Floor => {
                     let x = &args[0];
                     let data = x.as_f32_slice();
                     let result: Vec<f32> = data.iter().map(|&v| v.floor()).collect();
                     Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
                 }
-                "round" | "roundop" => {
+                OpCode::Round => {
                     let x = &args[0];
                     let data = x.as_f32_slice();
                     let result: Vec<f32> = data.iter().map(|&v| v.round()).collect();
                     Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
                 }
-                "sign" | "signop" => {
+                OpCode::Sign => {
                     self.dispatch_unary("sign", &args)
                 }
-                "reciprocal" | "reciprocalop" => {
+                OpCode::Reciprocal => {
                     let x = &args[0];
                     let data = x.as_f32_slice();
                     let result: Vec<f32> = data.iter().map(|&v| if v == 0.0 { 0.0 } else { 1.0 / v }).collect();
                     Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
                 }
-                "isnan" | "isnanop" => {
+                OpCode::IsNan => {
                     let x = &args[0];
                     let data = x.as_f32_slice();
                     let result: Vec<f32> = data.iter().map(|&v| if v.is_nan() { 1.0 } else { 0.0 }).collect();
                     Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
                 }
-                "isinf" | "isinfop" => {
+                OpCode::IsInf => {
                     let x = &args[0];
                     let data = x.as_f32_slice();
                     let result: Vec<f32> = data.iter().map(|&v| if v.is_infinite() { 1.0 } else { 0.0 }).collect();
                     Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
                 }
 
-                "not" | "notop" => {
+                OpCode::Not => {
                     dispatch("logical_not", DispatchKey::Cpu, &[&args[0]]).ok()
                 }
 
-                "and" | "andop" => {
+                OpCode::And => {
                     let a = args[0].as_f32_slice();
                     let b = args[1].as_f32_slice();
 
@@ -849,7 +892,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(result, shape)])
                 }
 
-                "or" | "orop" => {
+                OpCode::Or => {
                     let a = args[0].as_f32_slice();
                     let b = args[1].as_f32_slice();
 
@@ -858,7 +901,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(result, shape)])
                 }
 
-                "xor" | "xorop" => {
+                OpCode::Xor => {
                     let a = args[0].as_f32_slice();
                     let b = args[1].as_f32_slice();
 
@@ -867,7 +910,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(result, shape)])
                 }
 
-                "less" | "lessop" => {
+                OpCode::Less => {
                     let a = args[0].as_f32_slice();
                     let b = args[1].as_f32_slice();
 
@@ -876,7 +919,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(result, shape)])
                 }
 
-                "greater" | "greaterop" => {
+                OpCode::Greater => {
                     let a = args[0].as_f32_slice();
                     let b = args[1].as_f32_slice();
 
@@ -885,7 +928,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(result, shape)])
                 }
 
-                "equal" | "equalop" => {
+                OpCode::Equal => {
                     let a = args[0].as_f32_slice();
                     let b = args[1].as_f32_slice();
 
@@ -894,7 +937,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(result, shape)])
                 }
 
-                "cumsum" => {
+                OpCode::CumSum => {
                     let dim = node.attrs.get("axis")
                         .and_then(|a| a.parse::<i64>().ok())
                         .unwrap_or(0);
@@ -907,7 +950,7 @@ impl DAGExecutor {
                     Some(vec![args[0].cumsum(dim, exclusive, reverse)])
                 }
 
-                "onehot" | "onehotop" => {
+                OpCode::OneHot => {
                     let indices = &args[0];
                     let depth = if let Some(d) = node.attrs.get("depth") {
                         d.parse::<i64>().unwrap_or(1)
@@ -931,7 +974,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(out_data, out_shape)])
                 }
 
-                "gathernd" | "gatherndop" => {
+                OpCode::GatherNd => {
                     if args.len() >= 2 {
                         let indices = &args[1];
                         let indices_shape = indices.shape_ref().to_vec();
@@ -945,17 +988,15 @@ impl DAGExecutor {
                     }
                 }
 
-                // scatternd: pass-through for now
-                "scatternd" | "scatterndop" => {
+                OpCode::ScatterNd => {
                     Some(vec![args[0].clone()])
                 }
 
-                // compress: pass-through for now
-                "compress" => {
+                OpCode::Compress => {
                     Some(vec![args[0].clone()])
                 }
 
-                "depthtospace" | "depth_to_space" => {
+                OpCode::DepthToSpace => {
                     let x = &args[0];
                     let blocksize = node.attrs.get("blocksize")
                         .and_then(|a| a.parse::<i64>().ok())
@@ -971,11 +1012,8 @@ impl DAGExecutor {
                         let w = shape[3];
                         let bs = blocksize;
                         let out_c = c / (bs * bs);
-                        // Reshape: [N, C, H, W] -> [N, bs, bs, out_c, H, W]
                         let reshaped = x.reshape(vec![n, bs, bs, out_c, h, w]);
-                        // Permute: [N, out_c, H, bs, W, bs]
                         let permuted = reshaped.permute(vec![0, 3, 4, 1, 5, 2]);
-                        // Reshape: [N, out_c, H*bs, W*bs]
                         let result = permuted.reshape(vec![n, out_c, h * bs, w * bs]);
                         Some(vec![result])
                     } else {
@@ -983,7 +1021,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "spacetodepth" | "space_to_depth" => {
+                OpCode::SpaceToDepth => {
                     let x = &args[0];
                     let blocksize = node.attrs.get("blocksize")
                         .and_then(|a| a.parse::<i64>().ok())
@@ -997,11 +1035,8 @@ impl DAGExecutor {
                         let bs = blocksize;
                         let out_h = h / bs;
                         let out_w = w / bs;
-                        // Reshape: [N, C, H/bs, bs, W/bs, bs]
                         let reshaped = x.reshape(vec![n, c, out_h, bs, out_w, bs]);
-                        // Permute: [N, bs, bs, C, H/bs, W/bs]
                         let permuted = reshaped.permute(vec![0, 3, 5, 1, 2, 4]);
-                        // Reshape: [N, C*bs^2, H/bs, W/bs]
                         let result = permuted.reshape(vec![n, c * bs * bs, out_h, out_w]);
                         Some(vec![result])
                     } else {
@@ -1009,7 +1044,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "eyelike" | "eyelikeop" => {
+                OpCode::EyeLike => {
                     let x = &args[0];
                     let shape = x.shape_ref().to_vec();
                     let k = node.attrs.get("k")
@@ -1031,9 +1066,9 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(data, vec![n, m])])
                 }
 
-                "convtranspose" | "conv_transpose" => self.dispatch_conv_transpose(node, &args),
+                OpCode::ConvTranspose => self.dispatch_conv_transpose(node, &args),
 
-                "instancenormalization" | "instance_norm" => {
+                OpCode::InstanceNorm => {
                     let x = &args[0];
                     let shape = x.shape_ref().to_vec();
                     let eps = node.attrs.get("epsilon")
@@ -1083,14 +1118,14 @@ impl DAGExecutor {
                     }
                 }
 
-                "logsoftmax" => {
+                OpCode::LogSoftmax => {
                     let axis = node.attrs.get("axis")
                         .and_then(|a| a.parse::<i32>().ok())
                         .unwrap_or(1);
                     Some(vec![args[0].log_softmax(axis)])
                 }
 
-                "selu" => {
+                OpCode::Selu => {
                     let x = &args[0];
                     let alpha = node.attrs.get("alpha")
                         .and_then(|a| a.parse::<f32>().ok())
@@ -1105,7 +1140,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(result, x.shape_ref().to_vec())])
                 }
 
-                "rmsnormalization" | "rms_norm" => {
+                OpCode::RmsNorm => {
                     let eps = node.attrs.get("epsilon")
                         .and_then(|a| a.parse::<f32>().ok())
                         .unwrap_or(1e-5);
@@ -1115,7 +1150,7 @@ impl DAGExecutor {
                     dispatch("rms_norm", DispatchKey::Cpu, &dispatch_args).ok()
                 }
 
-                "range" | "rangeop" => {
+                OpCode::Range => {
                     let start = if args.len() >= 1 { args[0].as_f32_slice()[0] } else { 0.0f32 };
                     let limit = if args.len() >= 2 { args[1].as_f32_slice()[0] } else { 1.0f32 };
                     let step = if args.len() >= 3 { args[2].as_f32_slice()[0] } else { 1.0f32 };
@@ -1136,7 +1171,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(data, vec![n])])
                 }
 
-                "randomnormal" => {
+                OpCode::RandomNormal => {
                     let shape_str = node.attrs.get("shape");
                     let shape: Vec<i64> = if let Some(s) = shape_str {
                         s.trim_matches(|c| c == '[' || c == ']')
@@ -1152,7 +1187,7 @@ impl DAGExecutor {
                     dispatch("randn", DispatchKey::Cpu, &[&shape_t]).ok()
                 }
 
-                "randomuniform" => {
+                OpCode::RandomUniform => {
                     let shape_str = node.attrs.get("shape");
                     let shape: Vec<i64> = if let Some(s) = shape_str {
                         s.trim_matches(|c| c == '[' || c == ']')
@@ -1168,9 +1203,7 @@ impl DAGExecutor {
                     dispatch("rand", DispatchKey::Cpu, &[&shape_t]).ok()
                 }
 
-                // ---- Simple ops ported from Python DAGModel ---- //
-
-                "argmax" => {
+                OpCode::ArgMax => {
                     let x = &args[0];
                     let axis = node.attrs.get("axis").and_then(|a| a.parse::<i64>().ok());
                     let keepdims = node.attrs.get("keepdims")
@@ -1179,7 +1212,6 @@ impl DAGExecutor {
                     let data = x.as_f32_slice();
                     let rank = shape.len() as i64;
 
-                    // Helper: compute argmax along an axis
                     let result = if let Some(ax) = axis {
                         let ax = if ax < 0 { (ax + rank) as usize } else { ax as usize };
                         let outer: usize = shape[..ax].iter().product::<i64>() as usize;
@@ -1205,7 +1237,6 @@ impl DAGExecutor {
                         if keepdims { out_shape.insert(ax, 1); }
                         Tensor::from_vec(out_data, out_shape)
                     } else {
-                        // Global argmax over all elements
                         let mut best_idx = 0usize;
                         let mut best_val = f32::NEG_INFINITY;
                         for (i, &v) in data.iter().enumerate() {
@@ -1216,7 +1247,7 @@ impl DAGExecutor {
                     Some(vec![result])
                 }
 
-                "argmin" => {
+                OpCode::ArgMin => {
                     let x = &args[0];
                     let axis = node.attrs.get("axis").and_then(|a| a.parse::<i64>().ok());
                     let keepdims = node.attrs.get("keepdims")
@@ -1260,7 +1291,7 @@ impl DAGExecutor {
                     Some(vec![result])
                 }
 
-                "min" | "minop" => {
+                OpCode::Min => {
                     if args.len() >= 2 {
                         Some(vec![args[0].minimum(&args[1])])
                     } else {
@@ -1268,7 +1299,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "max" | "maxop" => {
+                OpCode::Max => {
                     if args.len() >= 2 {
                         Some(vec![args[0].maximum(&args[1])])
                     } else {
@@ -1276,9 +1307,9 @@ impl DAGExecutor {
                     }
                 }
 
-                "swish" => self.dispatch_unary("silu", &args),
+                OpCode::Swish => self.dispatch_unary("silu", &args),
 
-                "reverse" => {
+                OpCode::Reverse => {
                     let x = &args[0];
                     let axes_str = node.attrs.get("axes");
                     let data = x.as_f32_slice();
@@ -1316,7 +1347,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(out_data, shape)])
                 }
 
-                "constantofshape" => {
+                OpCode::ConstantOfShape => {
                     let shape_arr: Vec<i64> = if !args.is_empty() {
                         args[0].as_f32_slice().iter().map(|&v| v as i64).collect()
                     } else {
@@ -1330,7 +1361,7 @@ impl DAGExecutor {
                     Some(vec![Tensor::from_vec(data, shape_arr)])
                 }
 
-                "biasadd" | "bias_add" => {
+                OpCode::BiasAdd => {
                     if args.len() >= 2 {
                         let x = &args[0];
                         let bias = &args[1];
@@ -1340,7 +1371,7 @@ impl DAGExecutor {
                     }
                 }
 
-                "biassub" | "bias_sub" => {
+                OpCode::BiasSub => {
                     if args.len() >= 2 {
                         let x = &args[0];
                         let bias = &args[1];
@@ -1383,6 +1414,10 @@ impl DAGExecutor {
         dispatch(op_name, DispatchKey::Cpu, &[&args[0]]).ok()
     }
 
+    fn scalar_tensor(&self, v: i64) -> Option<&Tensor> {
+        self.scalar_cache.get(&v)
+    }
+
     fn dispatch_conv(&self, node: &DAGNode, args: &[Tensor]) -> Option<Vec<Tensor>> {
         let x = &args[0];
         let weight_name = format!("{}.weight", node.name);
@@ -1402,18 +1437,28 @@ impl DAGExecutor {
             .and_then(|g| g.parse::<i64>().ok())
             .unwrap_or(1);
 
-        let stride_t = Tensor::from_scalar(stride as f32);
-        let pad_t = Tensor::from_scalar(padding as f32);
-        let dilation_t = Tensor::from_scalar(dilation as f32);
-        let groups_t = Tensor::from_scalar(groups as f32);
+        let stride_t = self.scalar_tensor(stride).cloned().unwrap_or_else(|| Tensor::from_scalar(stride as f32));
+        let pad_t = self.scalar_tensor(padding).cloned().unwrap_or_else(|| Tensor::from_scalar(padding as f32));
+        let dilation_t = self.scalar_tensor(dilation).cloned().unwrap_or_else(|| Tensor::from_scalar(dilation as f32));
+        let groups_t = self.scalar_tensor(groups).cloned().unwrap_or_else(|| Tensor::from_scalar(groups as f32));
+
+        let pre_t_weight = self.transposed_weights.get(&weight_name);
 
         if has_bias {
             let bias_name = format!("{}.bias", node.name);
             let bias = self.params.get(&bias_name)?;
-            dispatch("conv2d", DispatchKey::Cpu, &[x, weight, bias, &stride_t, &pad_t, &dilation_t, &groups_t]).ok()
+            if let Some(wt) = pre_t_weight {
+                dispatch("conv2d", DispatchKey::Cpu, &[x, weight, bias, &stride_t, &pad_t, &dilation_t, &groups_t, wt]).ok()
+            } else {
+                dispatch("conv2d", DispatchKey::Cpu, &[x, weight, bias, &stride_t, &pad_t, &dilation_t, &groups_t]).ok()
+            }
         } else {
             let zero_bias = Tensor::from_scalar(0.0f32);
-            dispatch("conv2d", DispatchKey::Cpu, &[x, weight, &zero_bias, &stride_t, &pad_t, &dilation_t, &groups_t]).ok()
+            if let Some(wt) = pre_t_weight {
+                dispatch("conv2d", DispatchKey::Cpu, &[x, weight, &zero_bias, &stride_t, &pad_t, &dilation_t, &groups_t, wt]).ok()
+            } else {
+                dispatch("conv2d", DispatchKey::Cpu, &[x, weight, &zero_bias, &stride_t, &pad_t, &dilation_t, &groups_t]).ok()
+            }
         }
     }
 
