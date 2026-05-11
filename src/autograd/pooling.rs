@@ -6,6 +6,7 @@ pub struct MaxPool2dBackward {
     pub dilation: i64,
     pub edges: Vec<Edge>,
     pub inputs: Vec<Tensor>,
+    pub argmax_indices: Vec<usize>,
 }
 
 impl MaxPool2dBackward {
@@ -17,6 +18,7 @@ impl MaxPool2dBackward {
         padding: i64,
         dilation: i64,
         edges: Vec<Edge>,
+        argmax_indices: Vec<usize>,
     ) -> Self {
         let inputs = vec![input.clone()];
         MaxPool2dBackward {
@@ -27,6 +29,7 @@ impl MaxPool2dBackward {
             dilation,
             edges,
             inputs,
+            argmax_indices,
         }
     }
 }
@@ -39,19 +42,10 @@ impl Node for MaxPool2dBackward {
 
         let input = &self.input;
         let input_shape = input.shape_ref();
-        let batch_size = input_shape[0];
-        let channels = input_shape[1];
-        let in_h = input_shape[2];
-        let in_w = input_shape[3];
 
         let grad_shape = grad.shape_ref();
-        let out_h = grad_shape[2];
-        let out_w = grad_shape[3];
-
-        let kernel_size = self.kernel_size;
-        let stride = self.stride;
-        let padding = self.padding;
-        let dilation = self.dilation;
+        let out_h = grad_shape[2] as usize;
+        let out_w = grad_shape[3] as usize;
 
         // Create zero-initialized gradient input
         let mut grad_input = Tensor::zeros(
@@ -60,58 +54,25 @@ impl Node for MaxPool2dBackward {
             grad.device(),
         );
 
-        let input_cpu = crate::autograd::ensure_cpu(input);
         let grad_cpu = crate::autograd::ensure_cpu(&grad);
-        let input_data = input_cpu.as_f32_slice();
         let grad_data = grad_cpu.as_f32_slice();
         let grad_input_data = grad_input.data_ptr_f32_mut();
 
-        let b_size = batch_size as usize;
-        let c_size = channels as usize;
-        let in_h_size = in_h as usize;
-        let in_w_size = in_w as usize;
-        let out_h_size = out_h as usize;
-        let out_w_size = out_w as usize;
-        let k_size = kernel_size as usize;
-        let s = stride as usize;
-        let d = dilation as usize;
-        let pad = padding;
+        let b_size = input_shape[0] as usize;
+        let c_size = input_shape[1] as usize;
 
+        // Use cached argmax indices
+        let mut idx = 0;
         for b in 0..b_size {
-            for c in 0..c_size {
-                for oh in 0..out_h_size {
-                    for ow in 0..out_w_size {
-                        // Find which input element was the max in this window
-                        let mut max_val = f32::NEG_INFINITY;
-                        let mut max_h: i64 = 0;
-                        let mut max_w: i64 = 0;
-
-                        for kh in 0..k_size {
-                            for kw in 0..k_size {
-                                let ih = (oh * s + kh * d) as i64 - pad;
-                                let iw = (ow * s + kw * d) as i64 - pad;
-
-                                if ih >= 0 && ih < in_h && iw >= 0 && iw < in_w {
-                                    let idx = ((b * c_size + c) * in_h_size + ih as usize) * in_w_size + iw as usize;
-                                    let val = input_data[idx];
-                                    if val > max_val {
-                                        max_val = val;
-                                        max_h = ih;
-                                        max_w = iw;
-                                    }
-                                }
-                            }
-                        }
-
-                        let grad_val = grad_data
-                            [((b * c_size + c) * out_h_size + oh) * out_w_size + ow];
-
-                        let grad_out_idx =
-                            ((b * c_size + c) * in_h_size + max_h as usize) * in_w_size + max_w as usize;
-                        // SAFETY: indices are bounds-checked by the loop ranges
-                        unsafe {
-                            *grad_input_data.add(grad_out_idx) += grad_val;
-                        }
+            for c_ in 0..c_size {
+                for oh in 0..out_h {
+                    for ow in 0..out_w {
+                        let grad_out_idx = ((b * c_size + c_) * out_h + oh) * out_w + ow;
+                        let grad_val = grad_data[grad_out_idx];
+                        let max_linear = self.argmax_indices[idx];
+                        idx += 1;
+                        // SAFETY: indices are computed from valid tensor shapes
+                        unsafe { *grad_input_data.add(max_linear) += grad_val; }
                     }
                 }
             }

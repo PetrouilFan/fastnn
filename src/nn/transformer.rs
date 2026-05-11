@@ -368,7 +368,7 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
     #[allow(dead_code)]
     /// Create a new quantized transformer block.
     pub fn new(d_model: i64, num_heads: i64, ff_dim: i64, dropout_p: f32) -> Self {
-        let self_attn = PackedMultiHeadAttention::<T>::new(d_model, num_heads, dropout_p, false);
+        let self_attn = PackedMultiHeadAttention::<T>::new(d_model, num_heads, dropout_p, false, 2048);
         let norm1 = LayerNorm::new(d_model, 1e-5);
         let norm2 = LayerNorm::new(d_model, 1e-5);
         let ff1 = PackedLinear::<T>::new(d_model as usize, ff_dim as usize, true);

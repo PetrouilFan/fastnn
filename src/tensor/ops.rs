@@ -1029,7 +1029,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::SigmoidBackward::new(self.clone(), edges));
+            let backward = Arc::new(autograd::SigmoidBackward::new(self.clone(), output.clone(), edges));
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -1043,7 +1043,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::TanhBackward::new(self.clone(), edges));
+            let backward = Arc::new(autograd::TanhBackward::new(self.clone(), output.clone(), edges));
             Self::attach_grad_fn(output, backward)
         } else {
             output

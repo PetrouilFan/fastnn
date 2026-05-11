@@ -78,7 +78,6 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             a_shape[a_shape.len() - 2],
             a_shape[a_shape.len() - 1],
         ])
-        .contiguous()
     } else {
         a.clone()
     };
@@ -89,7 +88,6 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             b_shape[b_shape.len() - 2],
             b_shape[b_shape.len() - 1],
         ])
-        .contiguous()
     } else {
         b.clone()
     };
@@ -430,25 +428,31 @@ pub unsafe fn parallel_matmul(
     let bs0 = b_stride_0 as usize;
     let bs1 = b_stride_1 as usize;
 
-    // Parallelize at the row level (batch * m rows).
-    // Each row calls blocked_row_matmul which tiles K and N for cache efficiency.
-    (0..total_rows).into_par_iter().for_each(|row_idx| {
-        blocked_row_matmul(
-            a_usize as *const f32,
-            b_usize as *const f32,
-            out_usize as *mut f32,
-            row_idx,
-            m_usize,
-            n_usize,
-            k_usize,
-            abs,
-            as0,
-            as1,
-            bbs,
-            bs0,
-            bs1,
-        );
-    });
+    let num_threads = rayon::current_num_threads();
+    let chunk_size = (total_rows / (num_threads * 4)).max(1);
+
+    (0..total_rows)
+        .into_par_iter()
+        .chunks(chunk_size)
+        .for_each(|row_chunk| {
+            for &row_idx in &row_chunk {
+                blocked_row_matmul(
+                    a_usize as *const f32,
+                    b_usize as *const f32,
+                    out_usize as *mut f32,
+                    row_idx,
+                    m_usize,
+                    n_usize,
+                    k_usize,
+                    abs,
+                    as0,
+                    as1,
+                    bbs,
+                    bs0,
+                    bs1,
+                );
+            }
+        });
 }
 
 /// Cache-blocked scalar matmul for one row of output: C[row, :] += A[row, :] @ B.
@@ -492,11 +496,18 @@ pub unsafe fn blocked_row_matmul(
     let b_off = bat * b_batch_stride;
     let out_off = row * n;
 
-    // Clear output row
-    for j in 0..n {
-        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
-        unsafe {
-            *out_ptr.add(out_off + j) = 0.0;
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let use_simd = a_stride_1 == 1 && b_stride_1 == 1 && n >= 8;
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let use_simd = false;
+
+    // Only zero output if we're NOT using SIMD (SIMD path uses local accumulators)
+    if !use_simd {
+        for j in 0..n {
+            // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
+            unsafe {
+                *out_ptr.add(out_off + j) = 0.0;
+            }
         }
     }
 
@@ -504,7 +515,7 @@ pub unsafe fn blocked_row_matmul(
     // For fixed (i, kk): C[i, j..j+8] += A[i, kk] * B[kk, j..j+8]
     // B[kk, j..j+8] is 8 contiguous floats — a correct plain load.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if a_stride_1 == 1 && b_stride_1 == 1 && n >= 8 {
+    if use_simd {
         use std::arch::x86_64::*;
 
         const TILE_N_SIMD: usize = 8;

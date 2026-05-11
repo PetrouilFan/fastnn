@@ -1013,6 +1013,7 @@ impl DAGExecutor {
                     .collect();
                 core_nn::dag::DAGNode {
                     name,
+                    op_code: core_nn::dag::op_type_to_code(&op_type),
                     op_type,
                     inputs,
                     outputs,
@@ -1087,7 +1088,7 @@ impl_nn_module!(PyPackedMultiHeadAttention4 {
     fn new(d_model: i64, num_heads: i64, dropout_p: f64, causal: bool) -> Self {
         PyPackedMultiHeadAttention4 {
             inner: crate::nn::attention::PackedMultiHeadAttention::new(
-                d_model, num_heads, dropout_p as f32, causal
+                d_model, num_heads, dropout_p as f32, causal, 2048
             )
         }
     }
@@ -1116,7 +1117,7 @@ impl_nn_module!(PyPackedMultiHeadAttention8 {
     fn new(d_model: i64, num_heads: i64, dropout_p: f64, causal: bool) -> Self {
         PyPackedMultiHeadAttention8 {
             inner: crate::nn::attention::PackedMultiHeadAttention::new(
-                d_model, num_heads, dropout_p as f32, causal
+                d_model, num_heads, dropout_p as f32, causal, 2048
             )
         }
     }
