@@ -38,6 +38,79 @@ def build_model_from_fnn(path: str) -> Any:
             raise ValueError("Unknown .fnn format: header has neither 'graph' nor 'layers'")
 
 
+def fuse_silu(graph: dict) -> dict:
+    """Fuse Sigmoid + Mul into SiLU where possible.
+
+    Detects pattern: input -> Sigmoid -> Mul(input, sigmoid_output) -> ...
+    Replaces with:   input -> Silu -> ...
+    """
+    nodes = graph.get("nodes", [])
+    if not nodes:
+        return graph
+
+    consumer_map = {}
+    for node in nodes:
+        for inp in node.get("inputs", []):
+            consumer_map.setdefault(inp, []).append(node)
+
+    fused_nodes = []
+    skip_names = set()
+    silu_count = 0
+
+    for node in nodes:
+        name = node.get("name", "")
+        if name in skip_names:
+            continue
+
+        op_type = node.get("op_type", "")
+
+        if op_type == "Sigmoid":
+            sig_outputs = node.get("outputs", [])
+            sig_inputs = node.get("inputs", [])
+            if not sig_outputs or not sig_inputs:
+                fused_nodes.append(node)
+                continue
+
+            sig_output = sig_outputs[0]
+            sig_input = sig_inputs[0]
+
+            consumers = consumer_map.get(sig_output, [])
+
+            # Only fuse when sigmoid has exactly one consumer that is a matching Mul
+            if len(consumers) == 1:
+                consumer = consumers[0]
+                if consumer.get("op_type") == "Mul":
+                    mul_inputs = consumer.get("inputs", [])
+                    mul_name = consumer.get("name", "")
+
+                    if len(mul_inputs) >= 2:
+                        # Check both orderings: x * sigmoid(x) or sigmoid(x) * x
+                        if (mul_inputs[0] == sig_input and mul_inputs[1] == sig_output) or \
+                           (mul_inputs[0] == sig_output and mul_inputs[1] == sig_input):
+                            silu_count += 1
+                            silu_node = {
+                                "name": f"fused_silu_{silu_count}",
+                                "op_type": "Silu",
+                                "inputs": [sig_input],
+                                "outputs": consumer.get("outputs", []),
+                            }
+                            fused_nodes.append(silu_node)
+                            skip_names.add(mul_name)
+                            continue
+
+            fused_nodes.append(node)
+
+        elif op_type == "Mul" and name in skip_names:
+            continue
+        else:
+            fused_nodes.append(node)
+
+    graph["nodes"] = fused_nodes
+    if silu_count:
+        logger.info("Fused %d Sigmoid+Mul -> SiLU node(s)", silu_count)
+    return graph
+
+
 def build_dag_model(header: dict, path: str) -> Any:
     """Build a Rust DAGExecutor from an ONNX-imported .fnn file.
 
@@ -126,9 +199,14 @@ def build_dag_model(header: dict, path: str) -> Any:
             if output_name not in initializer_to_param:
                 initializer_to_param[output_name] = value_key
 
-    # Run graph optimization passes (constant folding, dead node elimination, Conv+BN fusion)
+    # Run graph optimization passes (Sigmoid+Mul -> SiLU fusion, constant folding, dead node elimination, Conv+BN fusion)
     from fastnn.io.graph_optimizer import optimize_graph
+    graph = fuse_silu(graph)
     header = optimize_graph(header)
+
+    # Re-read nodes after optimization passes
+    graph = header.get("graph", {})
+    onnx_nodes = graph.get("nodes", [])
 
     # Convert ONNX nodes to DAGExecutor's node format
     dag_nodes = []
