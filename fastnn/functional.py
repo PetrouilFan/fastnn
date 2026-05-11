@@ -185,7 +185,6 @@ def layer_norm(x: Tensor, normalized_shape, weight=None, bias=None, eps=1e-5) ->
     """Applies Layer Normalization."""
     if isinstance(normalized_shape, int):
         normalized_shape = [normalized_shape]
-    ndim = len(normalized_shape)
     if weight is None:
         weight = fastnn.ones(normalized_shape)
     if bias is None:

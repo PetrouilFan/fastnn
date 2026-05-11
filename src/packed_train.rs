@@ -210,8 +210,7 @@ mod tests {
     #[test]
     fn test_optimizer_with_weight_decay() {
         let master = vec![1.0, 2.0, 3.0, 4.0];
-        let mut opt =
-            MasterWeightOptimizer::<F32x1>::new(&master, 0.01, (0.9, 0.999), 1e-8, 0.01);
+        let mut opt = MasterWeightOptimizer::<F32x1>::new(&master, 0.01, (0.9, 0.999), 1e-8, 0.01);
         let grad = vec![0.0, 0.0, 0.0, 0.0]; // zero grad, only weight decay
         opt.step(&grad, 1, 4);
         // Weight decay should reduce the weights

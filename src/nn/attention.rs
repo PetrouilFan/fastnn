@@ -7,7 +7,6 @@ use crate::tensor::Tensor;
 use crate::{impl_training_state, nn::TrainingState};
 use std::sync::Mutex;
 
-
 /// Quantized matrix multiplication using packed weights (GEMV per row).
 /// input: [m, k], weight: [n, k], output: [m, n]
 #[inline]
@@ -20,7 +19,11 @@ fn quantized_matmul<T: PackedWord>(
 ) -> Vec<f32> {
     let mut output = vec![0.0f32; m * n];
     for i in 0..m {
-        cpu::gemv_cpu(weight, &input[i * k..(i + 1) * k], &mut output[i * n..(i + 1) * n]);
+        cpu::gemv_cpu(
+            weight,
+            &input[i * k..(i + 1) * k],
+            &mut output[i * n..(i + 1) * n],
+        );
     }
     output
 }
@@ -48,7 +51,13 @@ pub struct PackedMultiHeadAttention<T: PackedWord> {
 impl<T: PackedWord> PackedMultiHeadAttention<T> {
     #[allow(dead_code)]
     /// Create a new quantized multi-head attention layer.
-    pub fn new(d_model: i64, num_heads: i64, dropout_p: f32, causal: bool, max_seq_len: usize) -> Self {
+    pub fn new(
+        d_model: i64,
+        num_heads: i64,
+        dropout_p: f32,
+        causal: bool,
+        max_seq_len: usize,
+    ) -> Self {
         assert!(
             d_model % num_heads == 0,
             "d_model must be divisible by num_heads"
@@ -113,7 +122,13 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         let x_data = x.to_numpy();
 
         // QKV projection: [batch, seq_len, d_model] @ [d_model*3, d_model]^T -> [batch, seq_len, d_model * 3]
-        let qkv = quantized_matmul(&x_data, &self.qkv_proj, batch * seq_len, d_model, d_model * 3);
+        let qkv = quantized_matmul(
+            &x_data,
+            &self.qkv_proj,
+            batch * seq_len,
+            d_model,
+            d_model * 3,
+        );
 
         // Split Q, K, V
         let q: Vec<f32> = qkv
@@ -173,7 +188,13 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         let attn_scores = if self.causal {
             if use_cache && total_seq_len != seq_len {
                 let cached_len = total_seq_len - seq_len;
-                self.apply_causal_mask_with_cache(attn_scores, batch, seq_len, total_seq_len, cached_len)
+                self.apply_causal_mask_with_cache(
+                    attn_scores,
+                    batch,
+                    seq_len,
+                    total_seq_len,
+                    cached_len,
+                )
             } else {
                 self.apply_causal_mask(attn_scores, batch, total_seq_len)
             }
@@ -203,8 +224,6 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
 
         Tensor::from_vec(output, vec![batch as i64, seq_len as i64, d_model as i64])
     }
-
-
 
     /// Reshape tensor to [batch, num_heads, seq_len, head_dim]
     #[inline]
@@ -309,7 +328,13 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
 
     /// Softmax for non-square attention score matrix (different Q and K seq_lens).
     #[inline]
-    fn softmax_strided(&self, x: &[f32], batch: usize, seq_len_q: usize, seq_len_k: usize) -> Vec<f32> {
+    fn softmax_strided(
+        &self,
+        x: &[f32],
+        batch: usize,
+        seq_len_q: usize,
+        seq_len_k: usize,
+    ) -> Vec<f32> {
         let num_heads = self.num_heads as usize;
         let mut output = vec![0.0f32; x.len()];
 
@@ -586,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_packed_attention_forward() {
-        let attn = PackedMultiHeadAttention::<F32x1>::new(64, 8, 0.1, false);
+        let attn = PackedMultiHeadAttention::<F32x1>::new(64, 8, 0.1, false, 512);
         let batch = 2;
         let seq_len = 16;
         let d_model = 64;
@@ -614,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_reshape_heads() {
-        let attn = PackedMultiHeadAttention::<F32x1>::new(64, 8, 0.1, false);
+        let attn = PackedMultiHeadAttention::<F32x1>::new(64, 8, 0.1, false, 512);
         let batch = 2;
         let seq_len = 16;
         let d_model = 64;

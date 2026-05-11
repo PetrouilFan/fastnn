@@ -24,9 +24,7 @@ impl Node for SumBackward {
         let shape = self.input.shape_ref();
         let grad_shape = grad.shape_ref();
 
-        if grad_shape.is_empty() {
-            vec![Some(grad.expand(shape.to_vec()))]
-        } else if self.keepdim {
+        if grad_shape.is_empty() || self.keepdim {
             vec![Some(grad.expand(shape.to_vec()))]
         } else {
             let mut expanded_shape: Vec<i64> = grad_shape.to_vec();

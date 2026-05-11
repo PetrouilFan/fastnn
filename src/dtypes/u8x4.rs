@@ -32,19 +32,35 @@ impl PackedWord for U8x4 {
         let bytes = [
             {
                 let clamped = vals[0].clamp(-128.0, 127.0).round();
-                if clamped.is_nan() { 0u8 } else { clamped as i8 as u8 }
+                if clamped.is_nan() {
+                    0u8
+                } else {
+                    clamped as i8 as u8
+                }
             },
             {
                 let clamped = vals[1].clamp(-128.0, 127.0).round();
-                if clamped.is_nan() { 0u8 } else { clamped as i8 as u8 }
+                if clamped.is_nan() {
+                    0u8
+                } else {
+                    clamped as i8 as u8
+                }
             },
             {
                 let clamped = vals[2].clamp(-128.0, 127.0).round();
-                if clamped.is_nan() { 0u8 } else { clamped as i8 as u8 }
+                if clamped.is_nan() {
+                    0u8
+                } else {
+                    clamped as i8 as u8
+                }
             },
             {
                 let clamped = vals[3].clamp(-128.0, 127.0).round();
-                if clamped.is_nan() { 0u8 } else { clamped as i8 as u8 }
+                if clamped.is_nan() {
+                    0u8
+                } else {
+                    clamped as i8 as u8
+                }
             },
         ];
         U8x4(u32::from_le_bytes(bytes))

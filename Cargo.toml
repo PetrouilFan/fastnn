@@ -1,6 +1,6 @@
 [package]
 name = "fastnn"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 
 [lib]
@@ -40,6 +40,7 @@ parallel = []
 simd = []
 prefetch = []
 simd_avx512 = []
+neon = []
 
 [profile.release]
 lto = true
@@ -55,7 +56,6 @@ codegen-units = 1
 opt-level = 3
 debug = false
 strip = true
-panic = "abort"
 
 [[bench]]
 name = "quantized_vs_pytorch"
@@ -82,10 +82,9 @@ name = "perf_optimizations"
 path = "benches/perf_optimizations.rs"
 harness = false
 
-[[bin]]
-name = "matmul_direct"
-path = "benches/matmul_direct.rs"
+[[bench]]
+name = "packed_dispatch_bench"
+path = "benches/packed_dispatch_bench.rs"
+harness = false
 
-[[bin]]
-name = "packed_bench_json"
-path = "benches/packed_bench_json.rs"
+

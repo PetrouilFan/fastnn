@@ -6,7 +6,7 @@ fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
     }
     let mut v = Vec::with_capacity(len);
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+    // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
     unsafe {
         std::ptr::write_bytes(v.as_mut_ptr() as *mut u8, 0, len * std::mem::size_of::<T>());
         v.set_len(len);
@@ -24,7 +24,13 @@ pub struct PackedTensor<T: PackedWord> {
 impl<T: PackedWord> PackedTensor<T> {
     pub fn zeros(shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
-        let packed_len = numel.div_ceil(T::ITEMS);
+        let packed_len = if shape.len() >= 2 {
+            let m = shape[0];
+            let inner: usize = shape[1..].iter().product();
+            m * inner.div_ceil(T::ITEMS)
+        } else {
+            numel.div_ceil(T::ITEMS)
+        };
         let data = zeroed_vec(packed_len);
         PackedTensor {
             data,
@@ -35,7 +41,12 @@ impl<T: PackedWord> PackedTensor<T> {
     }
 
     pub fn from_raw(data: Vec<T>, shape: Vec<usize>, scales: Vec<f32>, zeros: Vec<f32>) -> Self {
-        PackedTensor { data, shape, scales, zeros }
+        PackedTensor {
+            data,
+            shape,
+            scales,
+            zeros,
+        }
     }
 
     pub fn from_f32_slice(data: &[f32], shape: &[usize], scale: f32, zero: f32) -> Self {
@@ -49,33 +60,47 @@ impl<T: PackedWord> PackedTensor<T> {
             numel
         );
 
-        let packed_len = numel.div_ceil(T::ITEMS);
+        // Use per-row packing for 2D+ tensors so each row is independently packed.
+        // This matches the layout expected by GEMV kernels (row * k_packed offset).
+        let (m, inner_stride) = if shape.len() >= 2 {
+            (shape[0], shape[1..].iter().product())
+        } else {
+            (1, numel)
+        };
+        let k_packed = inner_stride.div_ceil(T::ITEMS);
+        let packed_len = m * k_packed;
         let mut packed = vec![T::default(); packed_len];
 
         if scale != 1.0 || zero != 0.0 {
             let inv_scale = 1.0 / scale;
-            for chunk_idx in 0..packed_len {
-                let mut arr = T::Array::default();
-                let arr_ref = arr.as_mut();
-                for i in 0..T::ITEMS {
-                    let elem_idx = chunk_idx * T::ITEMS + i;
-                    if elem_idx < numel {
-                        arr_ref[i] = (data[elem_idx] - zero) * inv_scale;
+            for row in 0..m {
+                for word in 0..k_packed {
+                    let chunk_idx = row * k_packed + word;
+                    let mut arr = T::Array::default();
+                    let arr_ref = arr.as_mut();
+                    for i in 0..T::ITEMS {
+                        let elem_idx = row * inner_stride + word * T::ITEMS + i;
+                        if elem_idx < (row + 1) * inner_stride && elem_idx < numel {
+                            arr_ref[i] = (data[elem_idx] - zero) * inv_scale;
+                        }
                     }
+                    packed[chunk_idx] = T::pack_from_f32(arr);
                 }
-                packed[chunk_idx] = T::pack_from_f32(arr);
             }
         } else {
-            for chunk_idx in 0..packed_len {
-                let mut arr = T::Array::default();
-                let arr_ref = arr.as_mut();
-                for i in 0..T::ITEMS {
-                    let elem_idx = chunk_idx * T::ITEMS + i;
-                    if elem_idx < numel {
-                        arr_ref[i] = data[elem_idx];
+            for row in 0..m {
+                for word in 0..k_packed {
+                    let chunk_idx = row * k_packed + word;
+                    let mut arr = T::Array::default();
+                    let arr_ref = arr.as_mut();
+                    for i in 0..T::ITEMS {
+                        let elem_idx = row * inner_stride + word * T::ITEMS + i;
+                        if elem_idx < (row + 1) * inner_stride && elem_idx < numel {
+                            arr_ref[i] = data[elem_idx];
+                        }
                     }
+                    packed[chunk_idx] = T::pack_from_f32(arr);
                 }
-                packed[chunk_idx] = T::pack_from_f32(arr);
             }
         }
 
@@ -98,11 +123,16 @@ impl<T: PackedWord> PackedTensor<T> {
         let mut result = Vec::with_capacity(numel);
         let is_per_row = self.scales.len() > 1;
 
+        // Per-row packing: word `i` = (row * k_packed + word_in_row)
+        let m = if self.shape.len() >= 2 { self.shape[0] } else { 1 };
+        let k_packed = self.data.len().checked_div(m).unwrap_or(0);
+
         for (i, word) in self.data.iter().enumerate() {
             let unpacked = word.unpack_to_f32();
             let arr = unpacked.as_ref();
-            let elem_idx_base = i * items;
-            let row = elem_idx_base / inner_stride;
+            let row = i.checked_div(k_packed).unwrap_or(0);
+            let word_in_row = i.checked_rem(k_packed).unwrap_or(0);
+            let elem_idx_base = row * inner_stride + word_in_row * items;
             let s = if is_per_row {
                 self.scales[row]
             } else {
@@ -240,8 +270,7 @@ impl<T: PackedWord> PackedTensor<T> {
 
     #[inline]
     pub fn as_u32(&self) -> &[u32] {
-
-// SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
+        // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
         unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const u32, self.data.len()) }
     }
 
@@ -314,7 +343,11 @@ impl<T: PackedWord> PackedTensor<T> {
 
         let scales = Self::compute_scales_per_channel(data, shape);
         let m = if shape.len() >= 2 { shape[0] } else { 1 };
-        let inner_stride = if shape.len() >= 2 { shape[1..].iter().product() } else { numel };
+        let inner_stride = if shape.len() >= 2 {
+            shape[1..].iter().product()
+        } else {
+            numel
+        };
 
         let packed_len = numel.div_ceil(T::ITEMS);
         let mut packed = vec![T::default(); packed_len];
@@ -406,7 +439,10 @@ mod tests {
             assert!(
                 (orig - rec).abs() <= tolerance,
                 "Mismatch at index {}: orig={}, rec={}, scale={}",
-                i, orig, rec, t.scale()
+                i,
+                orig,
+                rec,
+                t.scale()
             );
         }
     }
@@ -419,7 +455,10 @@ mod tests {
         for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
             assert!(
                 (orig - rec).abs() <= t.scale() + 0.01,
-                "Mismatch at index {}: orig={}, rec={}", i, orig, rec
+                "Mismatch at index {}: orig={}, rec={}",
+                i,
+                orig,
+                rec
             );
         }
     }
@@ -430,7 +469,12 @@ mod tests {
         let t = PackedTensor::<F16x2>::from_f32_auto(&data, &[2]);
         let recovered = t.to_f32_vec();
         for (orig, rec) in data.iter().zip(recovered.iter()) {
-            assert!((orig - rec).abs() < 0.01, "Mismatch: orig={}, rec={}", orig, rec);
+            assert!(
+                (orig - rec).abs() < 0.01,
+                "Mismatch: orig={}, rec={}",
+                orig,
+                rec
+            );
         }
     }
 
