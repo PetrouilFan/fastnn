@@ -1,4 +1,7 @@
-use crate::autograd::{self, AutogradMeta, BatchNorm2dBackward};
+use crate::autograd::{
+    self, AutogradMeta, BatchNorm1dBackward, BatchNorm2dBackward, GroupNormBackward,
+    RMSNormBackward,
+};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::tensor::Tensor;
 use crate::{
@@ -189,6 +192,30 @@ impl Module for BatchNorm1d {
         let running_mean = self.running_mean.read().clone();
         let running_var = self.running_var.read().clone();
 
+        let grads_needed = x.requires_grad()
+            || self.weight.as_ref().map_or(false, |w| w.requires_grad())
+            || self.bias.as_ref().map_or(false, |b| b.requires_grad());
+
+        // Compute batch stats for backward (before running stats update modifies them)
+        let (batch_mean, batch_var) = if is_training {
+            let x_shape = x.shape_ref();
+            let batch_size = x_shape[0];
+            let num_features = x_shape[1];
+            let spatial_size: i64 = if x_shape.len() > 2 {
+                x_shape[2..].iter().product()
+            } else {
+                1
+            };
+
+            let x_reshaped = x.reshape(vec![batch_size, num_features, spatial_size]);
+            let b_mean = x_reshaped.mean(2, false).mean(0, false);
+            let centered = x_reshaped.sub(&b_mean.reshape(vec![1, num_features, 1]));
+            let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
+            (b_mean, b_var)
+        } else {
+            (running_mean.clone(), running_var.clone())
+        };
+
         let result = dispatch(
             "batch_norm",
             DispatchKey::Cpu,
@@ -204,37 +231,26 @@ impl Module for BatchNorm1d {
         )
         .expect("BatchNorm1d::forward: dispatch failed");
 
-        let output = result[0].clone();
+        let mut output = result[0].clone();
 
         // In training mode, update the running stats
         if is_training {
-            // Compute batch statistics for updating running stats
             let x_shape = x.shape_ref();
             let batch_size = x_shape[0];
-            let num_features = x_shape[1];
+            let _num_features = x_shape[1];
             let spatial_size: i64 = if x_shape.len() > 2 {
                 x_shape[2..].iter().product()
             } else {
                 1
             };
 
-            // Compute mean over batch and spatial dimensions
-            let x_reshaped = x.reshape(vec![batch_size, num_features, spatial_size]);
-            let batch_mean = x_reshaped.mean(2, false).mean(0, false);
-
-            // Compute variance over batch and spatial dimensions
-            let centered = x_reshaped.sub(&batch_mean.reshape(vec![1, num_features, 1]));
-            let batch_var = centered.mul(&centered).mean(2, false).mean(0, false);
-
-            // PyTorch uses unbiased variance (Bessel correction) for running_var update
             let n = (batch_size * spatial_size) as f32;
             let unbiased_var = if n > 1.0 {
-                batch_var.mul_scalar(n / (n - 1.0))
+                batch_var.clone().mul_scalar(n / (n - 1.0))
             } else {
-                batch_var
+                batch_var.clone()
             };
 
-            // Update running stats: running = (1 - momentum) * running + momentum * batch (PyTorch convention)
             let mom = self.momentum as f32;
             let inv_mom = 1.0 - mom;
 
@@ -250,6 +266,33 @@ impl Module for BatchNorm1d {
                 .mul_scalar(inv_mom)
                 .add(&unbiased_var.mul_scalar(mom));
             *running_var_lock = new_var;
+        }
+
+        // Attach autograd
+        if grads_needed {
+            let edges = {
+                let mut edges = autograd::make_edge(x);
+                if let Some(w) = &self.weight {
+                    edges.extend(autograd::make_edge(w));
+                }
+                if let Some(b) = &self.bias {
+                    edges.extend(autograd::make_edge(b));
+                }
+                edges
+            };
+            let backward = BatchNorm1dBackward::new(
+                x.clone(),
+                self.weight.clone().unwrap_or_else(|| Tensor::from_scalar(1.0)),
+                self.bias.clone().unwrap_or_else(|| Tensor::from_scalar(0.0)),
+                batch_mean,
+                batch_var,
+                self.eps as f32,
+                edges,
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
         }
 
         output
@@ -323,7 +366,28 @@ impl Module for RMSNorm {
             &[x, &self.weight, &self.eps_scalar],
         )
         .expect("RMSNorm::forward: dispatch failed");
-        result[0].clone()
+        let mut output = result[0].clone();
+
+        if x.requires_grad() || self.weight.requires_grad() {
+            let edges = {
+                let mut edges = autograd::make_edge(x);
+                edges.extend(autograd::make_edge(&self.weight));
+                edges
+            };
+            let backward = RMSNormBackward::new(
+                x.clone(),
+                self.weight.clone(),
+                self.eps,
+                self.normalized_shape,
+                edges,
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -393,25 +457,53 @@ impl Module for GroupNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
         let x_shape = x.shape_ref();
         let batch = x_shape[0];
-            let channels = x_shape[1];
-            let spatial: i64 = x_shape[2..].iter().product();
+        let channels = x_shape[1];
+        let spatial: i64 = x_shape[2..].iter().product();
         let group_size = channels / self.num_groups;
 
-        let x_reshaped = x.reshape(vec![batch, self.num_groups, group_size, spatial]);
-        let mean = x_reshaped.mean(2, true).mean(3, true);
-        let var = x_reshaped.sub(&mean).pow(2.0).mean(2, true).mean(3, true);
-        let x_norm = x_reshaped.sub(&mean).div(&var.add_scalar(self.eps).sqrt());
-        let x_norm = x_norm.reshape(x_shape.to_vec());
+        // Compute forward in no_grad to avoid per-op graph, then attach fused backward
+        use crate::autograd::NoGradGuard;
+        let mut output = {
+            let _guard = NoGradGuard::new();
+            let x_reshaped = x.reshape(vec![batch, self.num_groups, group_size, spatial]);
+            let mean = x_reshaped.mean(2, true).mean(3, true);
+            let var = x_reshaped.sub(&mean).pow(2.0).mean(2, true).mean(3, true);
+            let x_norm = x_reshaped.sub(&mean).div(&var.add_scalar(self.eps).sqrt());
+            let x_norm = x_norm.reshape(x_shape.to_vec());
 
-        let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
-        weight_shape.push(1);
-        weight_shape.push(self.num_channels);
-        for _ in 2..x_shape.len() {
+            let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
             weight_shape.push(1);
+            weight_shape.push(self.num_channels);
+            for _ in 2..x_shape.len() {
+                weight_shape.push(1);
+            }
+            let w = self.weight.reshape(weight_shape.clone().into_vec());
+            let b = self.bias.reshape(weight_shape.into_vec());
+            x_norm.mul(&w).add(&b)
+        };
+
+        if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
+            let edges = {
+                let mut edges = autograd::make_edge(x);
+                edges.extend(autograd::make_edge(&self.weight));
+                edges.extend(autograd::make_edge(&self.bias));
+                edges
+            };
+            let backward = GroupNormBackward::new(
+                x.clone(),
+                self.weight.clone(),
+                self.bias.clone(),
+                self.num_groups,
+                self.eps,
+                edges,
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
         }
-        let w = self.weight.reshape(weight_shape.clone().into_vec());
-        let b = self.bias.reshape(weight_shape.into_vec());
-        x_norm.mul(&w).add(&b)
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {

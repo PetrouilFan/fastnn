@@ -43,10 +43,15 @@ FusedConvBnGelu = _core.FusedConvBnGelu
 from fastnn.layers import Flatten, PySequential, BasicBlock
 
 from fastnn._core import (
-    Linear4, Linear8, Linear16, Linear32,
-    PackedMultiHeadAttention4, PackedMultiHeadAttention8,
-    PackedTransformerEncoder4, PackedTransformerEncoder8,
+    PyLinear4 as Linear4, PyLinear8 as Linear8, PyLinear16 as Linear16, PyLinear32 as Linear32,
+    PyPackedMultiHeadAttention4 as PackedMultiHeadAttention4,
+    PyPackedMultiHeadAttention8 as PackedMultiHeadAttention8,
+    PyPackedTransformerEncoder4 as PackedTransformerEncoder4,
+    PyPackedTransformerEncoder8 as PackedTransformerEncoder8,
 )
+
+# Weight initialization (use submodule import to avoid __getattr__ fallback)
+import fastnn.init as init
 
 
 # Model classes
@@ -96,4 +101,5 @@ __all__ = [
     "PySequential",
     "BasicBlock",
     "MLP",
+    "init",
 ]
