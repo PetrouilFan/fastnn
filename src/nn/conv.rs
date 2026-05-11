@@ -208,9 +208,7 @@ impl ConvTranspose2d {
                 crate::storage::DType::F32,
                 crate::storage::Device::Cpu,
             );
-            let b = b;
-            b.requires_grad_(true);
-            Some(b)
+            Some(b.requires_grad_(true))
         } else {
             None
         };
@@ -333,9 +331,7 @@ impl Conv1d {
                 crate::storage::DType::F32,
                 crate::storage::Device::Cpu,
             );
-            let b = b;
-            b.requires_grad_(true);
-            Some(b)
+            Some(b.requires_grad_(true))
         } else {
             None
         };
@@ -480,9 +476,7 @@ impl Conv3d {
                 crate::storage::DType::F32,
                 crate::storage::Device::Cpu,
             );
-            let b = b;
-            b.requires_grad_(true);
-            Some(b)
+            Some(b.requires_grad_(true))
         } else {
             None
         };

@@ -123,33 +123,30 @@ pub unsafe fn im2col_kernel(
 
                                     for kw in 0..kernel_width {
 
-                                        let ih = oh * stride + kh * dilation;
+                                        let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
 
-                                        let iw = ow * stride + kw * dilation;
+                                        let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
+
+                                        // NOTE: ih/iw are in input-coordinate space (wrapping_sub handles
+                                        // negative padding positions via usize overflow). The fast path
+                                        // (stride=1) uses padded coordinates with `x_ih = ih - padding`,
+                                        // but this general path already subtracted padding above.
 
                                         let col_col =
 
                                             ((ic * kernel_height) + kh) * kernel_width + kw;
 
-                                        if ih >= padding
+                                        if ih < in_height
 
-                                            && ih < padding + in_height
-
-                                            && iw >= padding
-
-                                            && iw < padding + in_width
+                                            && iw < in_width
 
                                         {
 
-                                            let x_ih = ih - padding;
-
-                                            let x_iw = iw - padding;
-
-                                            let x_idx = ((n * in_channels + ic) * in_height + x_ih)
+                                            let x_idx = ((n * in_channels + ic) * in_height + ih)
 
                                                 * in_width
 
-                                                + x_iw;
+                                                + iw;
 
                                             *col_p.add(col_row * col_cols + col_col) =
 
@@ -185,27 +182,17 @@ pub unsafe fn im2col_kernel(
 
                             for kw in 0..kernel_width {
 
-                                let ih = oh * stride + kh * dilation;
+                                let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
 
-                                let iw = ow * stride + kw * dilation;
+                                let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
 
                                 let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
 
-                                if ih >= padding
-
-                                    && ih < padding + in_height
-
-                                    && iw >= padding
-
-                                    && iw < padding + in_width
+                                if ih < in_height && iw < in_width
 
                                 {
 
-                                    let x_ih = ih - padding;
-
-                                    let x_iw = iw - padding;
-
-                                    let x_idx = (ic * in_height + x_ih) * in_width + x_iw;
+                                    let x_idx = (ic * in_height + ih) * in_width + iw;
 
                                     col_data[col_row * col_cols + col_col] =
 
@@ -248,31 +235,21 @@ pub unsafe fn im2col_kernel(
 
                             for kw in 0..kernel_width {
 
-                                let ih = oh * stride + kh * dilation;
+                                let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
 
-                                let iw = ow * stride + kw * dilation;
+                                let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
 
                                 let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
 
-                                if ih >= padding
-
-                                    && ih < padding + in_height
-
-                                    && iw >= padding
-
-                                    && iw < padding + in_width
+                                if ih < in_height && iw < in_width
 
                                 {
 
-                                    let x_ih = ih - padding;
-
-                                    let x_iw = iw - padding;
-
-                                    let x_idx = ((n * in_channels + ic) * in_height + x_ih)
+                                    let x_idx = ((n * in_channels + ic) * in_height + ih)
 
                                         * in_width
 
-                                        + x_iw;
+                                        + iw;
 
                                     col_data[col_row * col_cols + col_col] =
 
@@ -305,7 +282,13 @@ pub unsafe fn im2col_kernel(
 
 pub unsafe fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
-    let x = args[0];
+    // Ensure contiguous input to handle non-contiguous views (e.g., from Split/Slice ops).
+    // All downstream kernels (im2col, 1x1, 3x3 direct, depthwise) assume contiguous
+    // layout with storage_offset == 0, and use raw pointer arithmetic via data_ptr().
+    // We must NOT use as_f32_slice() for non-contiguous tensors because it returns elements
+    // in storage order (ignoring strides). Instead we use contiguous() which properly
+    // iterates over logical indices respecting strides.
+    let x = args[0].contiguous();
 
     let w = args[1];
 
@@ -405,7 +388,7 @@ pub unsafe fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         return vec![depthwise_conv2d(
 
-            x, w, bias, stride, padding, dilation, out_height, out_width,
+            &x, w, bias, stride, padding, dilation, out_height, out_width,
 
         )];
 
@@ -429,7 +412,7 @@ pub unsafe fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         return vec![conv2d_1x1(
 
-            x,
+            &x,
 
             w,
 
@@ -469,7 +452,7 @@ pub unsafe fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
         return vec![conv2d_3x3_direct(
 
-            x,
+            &x,
 
             w,
 
@@ -496,9 +479,7 @@ pub unsafe fn conv2d_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
 
     vec![conv2d_im2col(
-
-        x,
-
+        &x,
         w,
 
         bias,
@@ -4514,7 +4495,7 @@ pub unsafe fn depthwise_conv2d(
 
     stride: usize,
 
-    _padding: usize,
+    padding: usize,
 
     dilation: usize,
 
@@ -4632,9 +4613,9 @@ pub unsafe fn depthwise_conv2d(
 
                     for kw in 0..kernel_width {
 
-                        let ih = oh * stride + kh * dilation;
+                        let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
 
-                        let iw = ow * stride + kw * dilation;
+                        let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
 
 
 
@@ -4710,9 +4691,9 @@ pub unsafe fn depthwise_conv2d(
 
                             for kw in 0..kernel_width {
 
-                                let ih = oh * stride + kh * dilation;
+                                let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
 
-                                let iw = ow * stride + kw * dilation;
+                                let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
 
 
 
@@ -5095,30 +5076,23 @@ pub unsafe fn conv2d_im2col(
                         } else {
 
                             // General path: arbitrary stride/dilation
-
+                            // Note: ih/iw are computed in input-coordinate space via wrapping_sub;
+                            // no further padding adjustment is needed.
                             for kh in 0..kernel_height {
 
-                                let ih = oh * stride + kh * dilation;
+                                let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
 
-
-
-                                if ih >= padding && ih < padding + in_height {
-
-                                    let x_ih = ih - padding;
+                                if ih < in_height {
 
                                     let x_row_base = (n * in_channels + ic) * in_height * in_width
 
-                                        + x_ih * in_width;
-
-
+                                        + ih * in_width;
 
                                     for kw in 0..kernel_width {
 
-                                        let iw = ow * stride + kw * dilation;
+                                        let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
 
-                                        if iw >= padding && iw < padding + in_width {
-
-                                            let x_iw = iw - padding;
+                                        if iw < in_width {
 
                                             let col_col = col_base + kh * kernel_width + kw;
 
@@ -5126,7 +5100,7 @@ pub unsafe fn conv2d_im2col(
 
                                                 col_chunk[col_col] = *((x_usize as *const f32)
 
-                                                    .add(x_row_base + x_iw));
+                                                    .add(x_row_base + iw));
 
                                             }
 
@@ -5255,36 +5229,28 @@ pub unsafe fn conv2d_im2col(
 
                                 for kh in 0..kernel_height {
 
-                                    let ih = oh * stride + kh * dilation;
+                                    let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
 
-
-
-                                    if ih >= padding && ih < padding + in_height {
-
-                                        let x_ih = ih - padding;
+                                    if ih < in_height {
 
                                         let x_row_base =
 
                                             (n * in_channels + ic) * in_height * in_width
 
-                                                + x_ih * in_width;
-
-
+                                                + ih * in_width;
 
                                         for kw in 0..kernel_width {
 
-                                            let iw = ow * stride + kw * dilation;
+                                            let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
 
-                                            if iw >= padding && iw < padding + in_width {
-
-                                                let x_iw = iw - padding;
+                                            if iw < in_width {
 
                                                 let col_col = col_base + kh * kernel_width + kw;
 
                                                 col_chunk[col_col] =
 
-                                                    // SAFETY: x_row_base + x_iw computed from input indices is bounded by x tensor element count.
-                                                    unsafe { *x_ptr.add(x_row_base + x_iw) };
+                                                    // SAFETY: x_row_base + iw computed from input indices is bounded by x tensor element count.
+                                                    unsafe { *x_ptr.add(x_row_base + iw) };
 
                                             }
 

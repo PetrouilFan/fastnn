@@ -201,7 +201,12 @@ impl TensorImpl {
     #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
         match &self.storage.as_ref() {
-            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
+            Storage::Cpu(cpu) => {
+                let ptr = cpu.data.as_ref().as_ptr();
+                let elem_size = self.dtype.size();
+                // SAFETY: storage_offset * elem_size is within bounds of the storage allocation.
+                unsafe { ptr.add(self.storage_offset as usize * elem_size) }
+            }
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
                 panic!(
