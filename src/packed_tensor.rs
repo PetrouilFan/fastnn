@@ -125,13 +125,13 @@ impl<T: PackedWord> PackedTensor<T> {
 
         // Per-row packing: word `i` = (row * k_packed + word_in_row)
         let m = if self.shape.len() >= 2 { self.shape[0] } else { 1 };
-        let k_packed = if m > 0 { self.data.len() / m } else { 0 };
+        let k_packed = self.data.len().checked_div(m).unwrap_or(0);
 
         for (i, word) in self.data.iter().enumerate() {
             let unpacked = word.unpack_to_f32();
             let arr = unpacked.as_ref();
-            let row = if k_packed > 0 { i / k_packed } else { 0 };
-            let word_in_row = if k_packed > 0 { i % k_packed } else { 0 };
+            let row = i.checked_div(k_packed).unwrap_or(0);
+            let word_in_row = i.checked_rem(k_packed).unwrap_or(0);
             let elem_idx_base = row * inner_stride + word_in_row * items;
             let s = if is_per_row {
                 self.scales[row]
