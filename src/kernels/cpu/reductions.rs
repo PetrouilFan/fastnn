@@ -141,6 +141,40 @@ pub unsafe fn sum_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     vec![output]
 }
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn reduce_min(values: &[f32]) -> f32 {
+    if is_x86_feature_detected!("avx2") && values.len() >= 8 {
+        unsafe {
+            use std::arch::x86_64::*;
+            let mut acc = _mm256_set1_ps(f32::MAX);
+            let mut i = 0;
+            while i + 8 <= values.len() {
+                let v = _mm256_loadu_ps(values.as_ptr().add(i));
+                acc = _mm256_min_ps(acc, v);
+                i += 8;
+            }
+            let mut arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+            _mm256_storeu_ps(arr.as_mut_ptr() as *mut f32, acc);
+            let arr = arr.assume_init();
+            let mut result = f32::MAX;
+            for j in 0..8 {
+                result = result.min(arr[j]);
+            }
+            for j in i..values.len() {
+                result = result.min(values[j]);
+            }
+            result
+        }
+    } else {
+        values.iter().copied().fold(f32::MAX, f32::min)
+    }
+}
+
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+fn reduce_min(values: &[f32]) -> f32 {
+    values.iter().copied().fold(f32::MAX, f32::min)
+}
+
 pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a = args[0];
     let dim = if args.len() > 1 {
@@ -202,35 +236,18 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
     #[cfg(feature = "parallel")]
     {
-        if total_blocks > 64 && dim_size > 8 {
+        if total_blocks > 4 && dim_size > 4 {
             // SAFETY: The pointer is valid, properly aligned, and points to initialized
             // elements derived from a valid Tensor allocation.
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
-            let results: Vec<f32> = (0..total_blocks)
-                .into_par_iter()
-                .map(|block| {
-                    let block_before = block / (strides_after as usize);
-                    let block_after = block % (strides_after as usize);
-
-                    let mut min_val = f32::MAX;
-                    for d in 0..dim_size {
-                        let linear_idx =
-                            (block_before * dim_size + d) * strides_after as usize + block_after;
-                        if linear_idx < a_numel {
-                            min_val = min_val.min(a_slice[linear_idx]);
-                        }
-                    }
-                    min_val
-                })
-                .collect();
-
-            for (i, &min_val) in results.iter().enumerate() {
-                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
-                // The pointer is valid for this element access.
-                unsafe {
-                    *out_ptr.add(i) = min_val;
-                }
-            }
+            let out_slice: &mut [f32] = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_blocks) };
+            use rayon::prelude::*;
+            out_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(block, out_val)| {
+                    *out_val = reduce_min(&a_slice[block * dim_size..][..dim_size.min(a_numel - block * dim_size)]);
+                });
             return vec![output];
         }
     }
@@ -271,13 +288,17 @@ pub unsafe fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let dim_normalized = if dim_i32 < 0 { ndim + dim_i32 } else { dim_i32 };
         dim_normalized as usize
     } else {
-        // When no dim provided, reduce all dims (flatten then mean)
-        let flat = a.reshape(vec![-1]);
-        let flat_args: Vec<&Tensor> = vec![&flat];
-        let sum_result = sum_kernel(&flat_args);
-        let total_elements = a.shape_ref().iter().product::<i64>() as f32;
-        let scale = Tensor::full(vec![], 1.0 / total_elements, DType::F32, Device::Cpu);
-        return vec![sum_result[0].clone() * scale];
+        // When no dim provided, reduce all dims
+        let total_elements = a.numel() as usize;
+        let a_ptr = a.data_ptr_f32();
+        let mut output = Tensor::empty(vec![1], a.dtype(), a.device());
+        // Compute sum directly over all elements
+        let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, total_elements) };
+        let sum: f64 = a_slice.iter().map(|&x| x as f64).sum();
+        let mean = (sum / total_elements as f64) as f32;
+        let out_ptr = output.data_ptr_f32_mut();
+        unsafe { *out_ptr = mean; }
+        return vec![output];
     };
     let keepdim = if args.len() > 2 {
         args[2].item() != 0.0
@@ -314,6 +335,40 @@ pub unsafe fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     };
 
     vec![result]
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn reduce_max(values: &[f32]) -> f32 {
+    if is_x86_feature_detected!("avx2") && values.len() >= 8 {
+        unsafe {
+            use std::arch::x86_64::*;
+            let mut acc = _mm256_set1_ps(f32::MIN);
+            let mut i = 0;
+            while i + 8 <= values.len() {
+                let v = _mm256_loadu_ps(values.as_ptr().add(i));
+                acc = _mm256_max_ps(acc, v);
+                i += 8;
+            }
+            let mut arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
+            _mm256_storeu_ps(arr.as_mut_ptr() as *mut f32, acc);
+            let arr = arr.assume_init();
+            let mut result = f32::MIN;
+            for j in 0..8 {
+                result = result.max(arr[j]);
+            }
+            for j in i..values.len() {
+                result = result.max(values[j]);
+            }
+            result
+        }
+    } else {
+        values.iter().copied().fold(f32::MIN, f32::max)
+    }
+}
+
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+fn reduce_max(values: &[f32]) -> f32 {
+    values.iter().copied().fold(f32::MIN, f32::max)
 }
 
 pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
@@ -373,35 +428,22 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     }
 
     let total_blocks = strides_before as usize * strides_after as usize;
-    let a_usize = a_ptr as usize;
-    let out_usize = out_ptr as usize;
+    let a_numel = a.numel() as usize;
 
     #[cfg(feature = "parallel")]
     {
-        if total_blocks > 64 {
+        if total_blocks > 4 && dim_size > 4 {
+            // SAFETY: The pointer is valid, properly aligned, and points to initialized
+            // elements derived from a valid Tensor allocation.
+            let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
+            let out_slice: &mut [f32] = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_blocks) };
             use rayon::prelude::*;
-            (0..total_blocks).into_par_iter().for_each(|block| {
-                let mut max_val = f32::NEG_INFINITY;
-                let a_p = a_usize as *const f32;
-                let ds = dim_size;
-                let sa = strides_after as usize;
-                for i in 0..ds {
-                    let a_idx = (block / sa) * ds * sa + i * sa + block % sa;
-                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
-                    // The pointer is valid for this element access.
-                    unsafe {
-                        let val = *a_p.add(a_idx);
-                        if val > max_val {
-                            max_val = val;
-                        }
-                    }
-                }
-                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
-                // The pointer is valid for this element access.
-                unsafe {
-                    *(out_usize as *mut f32).add(block) = max_val;
-                }
-            });
+            out_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(block, out_val)| {
+                    *out_val = reduce_max(&a_slice[block * dim_size..][..dim_size.min(a_numel - block * dim_size)]);
+                });
             return vec![output];
         }
     }

@@ -42,12 +42,13 @@ pub struct PackedMultiHeadAttention<T: PackedWord> {
     /// Scale factor for attention scores
     scale: f32,
     kv_cache: Mutex<Option<(Vec<f32>, Vec<f32>)>>,
+    max_seq_len: usize,
 }
 
 impl<T: PackedWord> PackedMultiHeadAttention<T> {
     #[allow(dead_code)]
     /// Create a new quantized multi-head attention layer.
-    pub fn new(d_model: i64, num_heads: i64, dropout_p: f32, causal: bool) -> Self {
+    pub fn new(d_model: i64, num_heads: i64, dropout_p: f32, causal: bool, max_seq_len: usize) -> Self {
         assert!(
             d_model % num_heads == 0,
             "d_model must be divisible by num_heads"
@@ -79,6 +80,7 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
             training: TrainingState::new(),
             scale: 1.0 / (head_dim as f32).sqrt(),
             kv_cache: Mutex::new(None),
+            max_seq_len,
         }
     }
 
@@ -136,19 +138,19 @@ impl<T: PackedWord> PackedMultiHeadAttention<T> {
         let use_cache = !self.training.is_training();
         let (k, v, total_seq_len) = if self.causal && use_cache {
             let mut cache_guard = self.kv_cache.lock().unwrap();
-            if let Some((ref k_cache, ref v_cache)) = *cache_guard {
+            if let Some((ref mut k_cache, ref mut v_cache)) = *cache_guard {
                 let cached_len = k_cache.len() / (batch * d_model);
                 let total = cached_len + seq_len;
-                let mut k = Vec::with_capacity(batch * total * d_model);
-                k.extend_from_slice(k_cache);
-                k.extend_from_slice(&k_new);
-                let mut v = Vec::with_capacity(batch * total * d_model);
-                v.extend_from_slice(v_cache);
-                v.extend_from_slice(&v_new);
-                *cache_guard = Some((k.clone(), v.clone()));
-                (k, v, total)
+                k_cache.extend_from_slice(&k_new);
+                v_cache.extend_from_slice(&v_new);
+                (k_cache.clone(), v_cache.clone(), total)
             } else {
-                *cache_guard = Some((k_new.clone(), v_new.clone()));
+                let needed = batch * self.max_seq_len * d_model;
+                let mut k_buf = Vec::with_capacity(needed);
+                let mut v_buf = Vec::with_capacity(needed);
+                k_buf.extend_from_slice(&k_new);
+                v_buf.extend_from_slice(&v_new);
+                *cache_guard = Some((k_buf, v_buf));
                 (k_new, v_new, seq_len)
             }
         } else {
@@ -573,11 +575,11 @@ mod tests {
 
     #[test]
     fn test_packed_attention_creation() {
-        let attn_f32 = PackedMultiHeadAttention::<F32x1>::new(64, 8, 0.1, false);
+        let attn_f32 = PackedMultiHeadAttention::<F32x1>::new(64, 8, 0.1, false, 2048);
         assert_eq!(attn_f32.d_model, 64);
         assert_eq!(attn_f32.num_heads, 8);
 
-        let attn_u8 = PackedMultiHeadAttention::<U8x4>::new(64, 8, 0.1, false);
+        let attn_u8 = PackedMultiHeadAttention::<U8x4>::new(64, 8, 0.1, false, 2048);
         assert_eq!(attn_u8.d_model, 64);
         assert_eq!(attn_u8.num_heads, 8);
     }

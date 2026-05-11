@@ -52,6 +52,9 @@ impl Module for MaxPool2d {
         let mut output = result[0].clone();
 
         if x.requires_grad() {
+            let argmax_data = result[1].as_f32_slice();
+            let argmax_indices: Vec<usize> = argmax_data.iter().map(|&v| v as usize).collect();
+
             let backward = MaxPool2dBackward::new(
                 x.clone(),
                 self.kernel_size,
@@ -59,6 +62,7 @@ impl Module for MaxPool2d {
                 self.padding,
                 self.dilation,
                 autograd::make_edge(x),
+                argmax_indices,
             );
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));

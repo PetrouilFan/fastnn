@@ -341,73 +341,57 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         ensure_daz_ftz();
 
         if is_x86_feature_detected!("avx2") && total_per_channel >= 8 {
-            // AVX2 SIMD path - process 8 elements at a time
             let mut sum = _mm256_setzero_ps();
             let mut sum_sq = _mm256_setzero_ps();
+            let mut total_sum: f64 = 0.0;
+            let mut total_sum_sq: f64 = 0.0;
 
-            // Precompute channel offset: c * spatial_size
-            let _c_offset = channel * spatial_size;
+            for b in 0.._batch_size {
+                let batch_offset = (b * num_channels + channel) * spatial_size;
+                let mut s = 0;
 
-            // Process chunks of 8 elements across batches and spatial dims
-            let mut idx = 0;
-            let chunks = total_per_channel / 8;
-            for _ in 0..chunks {
-                let mut vals = [0.0f32; 8];
-                for j in 0..8 {
-                    // Compute memory index: (b * num_channels + c) * spatial_size + s
-                    // We need to decompose idx into (b, s)
-                    let b = idx / spatial_size;
-                    let s = idx % spatial_size;
-                    let mem_idx = (b * num_channels + channel) * spatial_size + s;
-                    vals[j] = *x_ptr.add(mem_idx);
-                    idx += 1;
+                while s + 8 <= spatial_size {
+                    let v = _mm256_loadu_ps(x_ptr.add(batch_offset + s));
+                    sum = _mm256_add_ps(sum, v);
+                    sum_sq = _mm256_fmadd_ps(v, v, sum_sq);
+                    s += 8;
                 }
-                let v = _mm256_loadu_ps(vals.as_ptr());
-                sum = _mm256_add_ps(sum, v);
-                sum_sq = _mm256_fmadd_ps(v, v, sum_sq);
+
+                for s_rem in s..spatial_size {
+                    let val = *x_ptr.add(batch_offset + s_rem);
+                    total_sum += val as f64;
+                    total_sum_sq += (val as f64) * (val as f64);
+                }
             }
 
-            // Horizontal sum - use f64 accumulator to avoid catastrophic cancellation
             let mut sum_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
             _mm256_storeu_ps(sum_arr.as_mut_ptr() as *mut f32, sum);
-            // SAFETY: All 8 lanes are initialized by _mm256_storeu_ps above.
-            let mut total_sum: f64 = sum_arr.assume_init_ref().iter().map(|&x| x as f64).sum();
+            let sum_arr = sum_arr.assume_init();
+            for &v in &sum_arr { total_sum += v as f64; }
 
             let mut sum_sq_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
             _mm256_storeu_ps(sum_sq_arr.as_mut_ptr() as *mut f32, sum_sq);
-            // SAFETY: All 8 lanes are initialized by _mm256_storeu_ps above.
-            let mut total_sum_sq: f64 =
-                sum_sq_arr.assume_init_ref().iter().map(|&x| x as f64).sum();
-
-            // Handle remainder
-            for i in (chunks * 8)..total_per_channel {
-                let b = i / spatial_size;
-                let s = i % spatial_size;
-                let mem_idx = (b * num_channels + channel) * spatial_size + s;
-                let val = *x_ptr.add(mem_idx);
-                total_sum += val as f64;
-                total_sum_sq += (val as f64) * (val as f64);
-            }
+            let sum_sq_arr = sum_sq_arr.assume_init();
+            for &v in &sum_sq_arr { total_sum_sq += v as f64; }
 
             let mean = (total_sum / total_per_channel as f64) as f32;
             let var = (total_sum_sq / total_per_channel as f64) as f32 - mean * mean;
-            (mean, var.max(0.0)) // Ensure non-negative variance
+            (mean, var.max(0.0))
         } else {
-            // Scalar fallback using Welford's algorithm
             let mut count = 0.0f32;
             let mut mean = 0.0f32;
             let mut m2 = 0.0f32;
 
-            for i in 0..total_per_channel {
-                let b = i / spatial_size;
-                let s = i % spatial_size;
-                let mem_idx = (b * num_channels + channel) * spatial_size + s;
-                let val = *x_ptr.add(mem_idx);
-                count += 1.0;
-                let delta = val - mean;
-                mean += delta / count;
-                let delta2 = val - mean;
-                m2 += delta * delta2;
+            for b in 0.._batch_size {
+                let batch_offset = (b * num_channels + channel) * spatial_size;
+                for s in 0..spatial_size {
+                    let val = *x_ptr.add(batch_offset + s);
+                    count += 1.0;
+                    let delta = val - mean;
+                    mean += delta / count;
+                    let delta2 = val - mean;
+                    m2 += delta * delta2;
+                }
             }
 
             let var = m2 / count;
@@ -424,23 +408,22 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         spatial_size: usize,
         channel: usize,
         _batch_size: usize,
-        total_per_channel: usize,
+        _total_per_channel: usize,
     ) -> (f32, f32) {
-        // Scalar fallback using Welford's algorithm with on-the-fly index computation
         let mut count = 0.0f32;
         let mut mean = 0.0f32;
         let mut m2 = 0.0f32;
 
-        for i in 0..total_per_channel {
-            let b = i / spatial_size;
-            let s = i % spatial_size;
-            let mem_idx = (b * num_channels + channel) * spatial_size + s;
-            let val = *x_ptr.add(mem_idx);
-            count += 1.0;
-            let delta = val - mean;
-            mean += delta / count;
-            let delta2 = val - mean;
-            m2 += delta * delta2;
+        for b in 0.._batch_size {
+            let batch_offset = (b * num_channels + channel) * spatial_size;
+            for s in 0..spatial_size {
+                let val = *x_ptr.add(batch_offset + s);
+                count += 1.0;
+                let delta = val - mean;
+                mean += delta / count;
+                let delta2 = val - mean;
+                m2 += delta * delta2;
+            }
         }
 
         let var = m2 / count;

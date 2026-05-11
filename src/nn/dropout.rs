@@ -25,18 +25,25 @@ impl Module for Dropout {
             let x_data = x.as_f32_slice();
             let scale = 1.0 / (1.0 - self.p) as f32;
             let keep_prob = 1.0 - self.p;
-            // Use thread-local RNG for batch generation (much faster than rand::random per element)
+            let numel = x_data.len();
+
             let mut rng = rand::thread_rng();
-            let mask_data: Vec<f32> = x_data
-                .iter()
-                .map(|&v| {
-                    if rng.gen::<f64>() < keep_prob {
-                        v * scale
-                    } else {
-                        0.0
+            let mut mask_data = vec![0.0f32; numel];
+
+            let chunk_size = 4096;
+            for chunk_start in (0..numel).step_by(chunk_size) {
+                let chunk_end = std::cmp::min(chunk_start + chunk_size, numel);
+                let chunk_len = chunk_end - chunk_start;
+
+                let mut rand_vals = vec![0.0f32; chunk_len];
+                rng.fill(&mut rand_vals[..]);
+
+                for i in 0..chunk_len {
+                    if rand_vals[i] < keep_prob as f32 {
+                        mask_data[chunk_start + i] = x_data[chunk_start + i] * scale;
                     }
-                })
-                .collect();
+                }
+            }
 
             let shape = x.shape_ref();
             let mut out = Tensor::from_vec(mask_data, shape.to_vec());
@@ -88,15 +95,15 @@ impl Module for Dropout2d {
 
             // Generate one mask value per channel per batch
             let mut rng = rand::thread_rng();
-            let channel_mask: Vec<f32> = (0..batch * channels)
-                .map(|_| {
-                    if rng.gen::<f64>() < keep_prob {
-                        scale
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
+            let num_masks = batch * channels;
+            let mut channel_mask = vec![0.0f32; num_masks];
+            let mut rand_vals = vec![0.0f32; num_masks];
+            rng.fill(&mut rand_vals[..]);
+            for i in 0..num_masks {
+                if rand_vals[i] < keep_prob as f32 {
+                    channel_mask[i] = scale;
+                }
+            }
 
             // Apply mask: each channel's spatial dimensions get the same mask value
             let x_data = x.as_f32_slice();

@@ -388,15 +388,58 @@ impl Node for LeakyReLUBackward {
         let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
             return vec![None];
         };
-        let mask = self.input.gt_scalar(0.0);
-        let _neg_slope_t = Tensor::from_scalar(self.negative_slope);
-        let grad_input = mask.mul(&grad_output).add(
-            &mask
-                .logical_not()
-                .mul(&grad_output)
-                .mul_scalar(self.negative_slope),
-        );
-        vec![Some(grad_input)]
+
+        use crate::storage::Storage;
+        use std::sync::Arc;
+
+        let numel = self.input.numel() as usize;
+        let x_ptr = self.input.data_ptr() as usize;
+        let grad_ptr = grad_output.data_ptr() as usize;
+
+        let mut result = Tensor::empty(self.input.shape_ref().to_vec(), self.input.dtype(), self.input.device());
+
+        let result_inner = Arc::make_mut(&mut result.inner);
+        let result_storage = Arc::make_mut(&mut result_inner.storage);
+        let Storage::Cpu(cpu) = result_storage else {
+            panic!("Expected CPU storage");
+        };
+        let result_data = Arc::make_mut(&mut cpu.data);
+        let result_ptr = result_data.as_mut_ptr() as usize;
+
+        let negative_slope = self.negative_slope;
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = 32768;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = std::cmp::min(start + chunk_size, numel);
+                for i in start..end {
+                    unsafe {
+                        let x = *(x_ptr as *const f32).add(i);
+                        let g = *(grad_ptr as *const f32).add(i);
+                        let out = if x > 0.0 { g } else { g * negative_slope };
+                        *(result_ptr as *mut f32).add(i) = out;
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let x = *(x_ptr as *const f32).add(i);
+                    let g = *(grad_ptr as *const f32).add(i);
+                    let out = if x > 0.0 { g } else { g * negative_slope };
+                    *(result_ptr as *mut f32).add(i) = out;
+                }
+            }
+        }
+
+        vec![Some(result)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -531,17 +574,59 @@ impl Node for EluBackward {
         let Some(grad_output) = crate::autograd::extract_first_grad(grad_outputs) else {
             return vec![None];
         };
-        // d/dx elu(x) = 1 if x > 0 else alpha * exp(x)
-        let mask = self.input.gt_scalar(0.0);
-        let exp_x = self.input.exp();
-        let grad_input = mask.mul(&grad_output).add(
-            &mask
-                .logical_not()
-                .mul(&exp_x)
-                .mul_scalar(self.alpha)
-                .mul(&grad_output),
-        );
-        vec![Some(grad_input)]
+
+        use crate::storage::Storage;
+        use std::sync::Arc;
+
+        let numel = self.input.numel() as usize;
+        let x_ptr = self.input.data_ptr() as usize;
+        let grad_ptr = grad_output.data_ptr() as usize;
+
+        let mut result = Tensor::empty(self.input.shape_ref().to_vec(), self.input.dtype(), self.input.device());
+
+        let result_inner = Arc::make_mut(&mut result.inner);
+        let result_storage = Arc::make_mut(&mut result_inner.storage);
+        let Storage::Cpu(cpu) = result_storage else {
+            panic!("Expected CPU storage");
+        };
+        let result_data = Arc::make_mut(&mut cpu.data);
+        let result_ptr = result_data.as_mut_ptr() as usize;
+
+        let alpha = self.alpha;
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = 32768;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = std::cmp::min(start + chunk_size, numel);
+                for i in start..end {
+                    unsafe {
+                        let x = *(x_ptr as *const f32).add(i);
+                        let g = *(grad_ptr as *const f32).add(i);
+                        // d/dx elu(x) = 1 if x > 0 else alpha * exp(x)
+                        let out = if x > 0.0 { g } else { g * alpha * x.exp() };
+                        *(result_ptr as *mut f32).add(i) = out;
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..numel {
+                unsafe {
+                    let x = *(x_ptr as *const f32).add(i);
+                    let g = *(grad_ptr as *const f32).add(i);
+                    let out = if x > 0.0 { g } else { g * alpha * x.exp() };
+                    *(result_ptr as *mut f32).add(i) = out;
+                }
+            }
+        }
+
+        vec![Some(result)]
     }
 
     fn next_edges(&self) -> &[Edge] {
