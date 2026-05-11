@@ -1,7 +1,8 @@
 import numpy as np
 import fastnn._core as _core
+import fastnn.precision as precision
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Exception hierarchy - imported from _core (Rust side)
 FastnnError = _core.FastnnError
@@ -69,6 +70,7 @@ from fastnn.io import (  # noqa: E402
     DAGModel,
 )
 from fastnn.io.graph_builder import build_model_from_fnn  # noqa: E402
+from fastnn.precision import Precision, Quantizer, PrecisionConfig, QuantizationScheme  # noqa: E402
 
 __all__ = [
     # Context managers and utilities
@@ -246,6 +248,12 @@ __all__ = [
     "elu",
     "softplus",
     "hardswish",
+    # Precision system
+    "precision",
+    "Precision",
+    "Quantizer",
+    "PrecisionConfig",
+    "QuantizationScheme",
     # YOLO model wrapper
     "YOLO",
     "load_yolo",
@@ -418,6 +426,24 @@ Linear8 = _core.PyLinear8
 Linear16 = _core.PyLinear16
 Linear32 = _core.PyLinear32
 
+# Packed fused linear+gelu
+PackedLinearGelu4 = _core.PyPackedLinearGelu4
+PackedLinearGelu8 = _core.PyPackedLinearGelu8
+PackedLinearGelu16 = _core.PyPackedLinearGelu16
+PackedLinearGelu32 = _core.PyPackedLinearGelu32
+
+# Packed conv2d
+PackedConv2d4 = _core.PyPackedConv2d4
+PackedConv2d8 = _core.PyPackedConv2d8
+PackedConv2d16 = _core.PyPackedConv2d16
+PackedConv2d32 = _core.PyPackedConv2d32
+
+# Packed fused conv+relu
+PackedConvRelu4 = _core.PyPackedConvRelu4
+PackedConvRelu8 = _core.PyPackedConvRelu8
+PackedConvRelu16 = _core.PyPackedConvRelu16
+PackedConvRelu32 = _core.PyPackedConvRelu32
+
 # Packed tensors
 PackedTensor4 = _core.PyPackedTensor4
 PackedTensor8 = _core.PyPackedTensor8
@@ -489,19 +515,21 @@ use_cpu = _core.use_cpu
 is_wgpu = _core.is_wgpu
 
 
-def import_onnx(onnx_path: str, fnn_path: str):
+def import_onnx(onnx_path: str, fnn_path: str, config=None):
     """Import an ONNX model and save it in fastnn format.
 
     Args:
         onnx_path: Path to .onnx file
         fnn_path: Path to output .fnn file
+        config: Optional PrecisionConfig for quantized import.
+            When set, weights are quantized per the config specification.
 
     Returns:
         Dictionary with model info (layers, input_shape, output_shape)
     """
     from fastnn.io.onnx import import_onnx as _import
 
-    return _import(onnx_path, fnn_path)
+    return _import(onnx_path, fnn_path, config=config)
 
 
 def load_state_dict(model, state_dict):

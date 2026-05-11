@@ -48,8 +48,7 @@ impl Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && numel >= 8 {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                         unsafe {
                             let mut i = 0;
                             while i + 8 <= numel {
@@ -64,8 +63,7 @@ impl Tensor {
                         }
                     } else {
                         for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                            // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                             unsafe {
                                 *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
                             }
@@ -75,8 +73,7 @@ impl Tensor {
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                        // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                         unsafe {
                             *out_ptr.add(i) = *a_ptr.add(i) + *b_ptr.add(i);
                         }
@@ -105,8 +102,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("add", dispatch_key, &[self, other])
-            .expect("Tensor::add: dispatch failed");
+        let result =
+            dispatch("add", dispatch_key, &[self, other]).expect("Tensor::add: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -166,8 +163,7 @@ impl Tensor {
                             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                             {
                                 if is_x86_feature_detected!("avx2") {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                                     unsafe {
                                         let mut i = start;
                                         while i + 8 <= end {
@@ -186,8 +182,7 @@ impl Tensor {
                             }
                             // Scalar fallback for this chunk
                             for i in start..end {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                                // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                                 unsafe {
                                     *self_ptr.add(i) += *other_ptr.add(i);
                                 }
@@ -200,8 +195,7 @@ impl Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && numel >= 8 {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                         unsafe {
                             let mut i = 0;
                             while i + 8 <= numel {
@@ -220,8 +214,7 @@ impl Tensor {
                 }
                 // Scalar fallback
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) += *other_ptr.add(i);
                     }
@@ -231,8 +224,7 @@ impl Tensor {
                 let self_ptr = self_ptr as *mut f64;
                 let other_ptr = other_ptr as *const f64;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) += *other_ptr.add(i);
                     }
@@ -242,8 +234,7 @@ impl Tensor {
                 let self_ptr = self_ptr as *mut i32;
                 let other_ptr = other_ptr as *const i32;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) += *other_ptr.add(i);
                     }
@@ -253,8 +244,7 @@ impl Tensor {
                 let self_ptr = self.data_ptr_mut() as *mut half::bf16;
                 let other_ptr = other.data_ptr() as *const half::bf16;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         let self_val = f32::from(*self_ptr.add(i));
                         let other_val = f32::from(*other_ptr.add(i));
@@ -266,8 +256,7 @@ impl Tensor {
                 let self_ptr = self.data_ptr_mut() as *mut half::f16;
                 let other_ptr = other.data_ptr() as *const half::f16;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         let self_val = f32::from(*self_ptr.add(i));
                         let other_val = f32::from(*other_ptr.add(i));
@@ -320,8 +309,7 @@ impl Tensor {
                             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                             {
                                 if is_x86_feature_detected!("avx2") {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                                     unsafe {
                                         let mut i = start;
                                         while i + 8 <= end {
@@ -338,8 +326,7 @@ impl Tensor {
                                 }
                             }
                             for j in start..end {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                                // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                                 unsafe {
                                     *s_p.add(j) *= *o_p.add(j);
                                 }
@@ -351,8 +338,7 @@ impl Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && numel >= 8 {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                         unsafe {
                             let mut i = 0;
                             while i + 8 <= numel {
@@ -369,8 +355,7 @@ impl Tensor {
                     }
                 }
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) *= *other_ptr.add(i);
                     }
@@ -380,8 +365,7 @@ impl Tensor {
                 let self_ptr = self_ptr as *mut f64;
                 let other_ptr = other_ptr as *const f64;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) *= *other_ptr.add(i);
                     }
@@ -391,8 +375,7 @@ impl Tensor {
                 let self_ptr = self_ptr as *mut i32;
                 let other_ptr = other_ptr as *const i32;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) *= *other_ptr.add(i);
                     }
@@ -402,8 +385,7 @@ impl Tensor {
                 let self_ptr = self.data_ptr_mut() as *mut half::bf16;
                 let other_ptr = other.data_ptr() as *const half::bf16;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         let self_val = f32::from(*self_ptr.add(i));
                         let other_val = f32::from(*other_ptr.add(i));
@@ -415,8 +397,7 @@ impl Tensor {
                 let self_ptr = self.data_ptr_mut() as *mut half::f16;
                 let other_ptr = other.data_ptr() as *const half::f16;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         let self_val = f32::from(*self_ptr.add(i));
                         let other_val = f32::from(*other_ptr.add(i));
@@ -442,8 +423,7 @@ impl Tensor {
         let numel = self.inner.numel() as usize;
         let self_ptr = self.data_ptr_f32_mut();
         for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+            // SAFETY: The pointer offset stays within the bounds of the allocated storage.
             unsafe {
                 *self_ptr.add(i) *= scalar;
             }
@@ -471,8 +451,7 @@ impl Tensor {
         let numel = self.inner.numel() as usize;
         let self_ptr = self.data_ptr_f32_mut();
         for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+            // SAFETY: The pointer offset stays within the bounds of the allocated storage.
             unsafe {
                 *self_ptr.add(i) += scalar;
             }
@@ -520,14 +499,16 @@ impl Tensor {
                             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                             {
                                 if is_x86_feature_detected!("avx2") {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                                     unsafe {
                                         let mut i = start;
                                         while i + 8 <= end {
                                             let sv = _mm256_loadu_ps(self_ptr.add(i));
                                             let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                            _mm256_storeu_ps(self_ptr.add(i), _mm256_sub_ps(sv, ov));
+                                            _mm256_storeu_ps(
+                                                self_ptr.add(i),
+                                                _mm256_sub_ps(sv, ov),
+                                            );
                                             i += 8;
                                         }
                                         for j in i..end {
@@ -539,8 +520,7 @@ impl Tensor {
                             }
                             // Scalar fallback for this chunk
                             for i in start..end {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                                // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                                 unsafe {
                                     *self_ptr.add(i) -= *other_ptr.add(i);
                                 }
@@ -553,8 +533,7 @@ impl Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && numel >= 8 {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                         unsafe {
                             let mut i = 0;
                             while i + 8 <= numel {
@@ -572,8 +551,7 @@ impl Tensor {
                 }
                 // Scalar fallback
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) -= *other_ptr.add(i);
                     }
@@ -583,8 +561,7 @@ impl Tensor {
                 let self_ptr = self_ptr as *mut f64;
                 let other_ptr = other_ptr as *const f64;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) -= *other_ptr.add(i);
                     }
@@ -594,8 +571,7 @@ impl Tensor {
                 let self_ptr = self_ptr as *mut i32;
                 let other_ptr = other_ptr as *const i32;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) -= *other_ptr.add(i);
                     }
@@ -605,8 +581,7 @@ impl Tensor {
                 let self_ptr = self.data_ptr_mut() as *mut half::bf16;
                 let other_ptr = other.data_ptr() as *const half::bf16;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         let self_val = f32::from(*self_ptr.add(i));
                         let other_val = f32::from(*other_ptr.add(i));
@@ -618,8 +593,7 @@ impl Tensor {
                 let self_ptr = self.data_ptr_mut() as *mut half::f16;
                 let other_ptr = other.data_ptr() as *const half::f16;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         let self_val = f32::from(*self_ptr.add(i));
                         let other_val = f32::from(*other_ptr.add(i));
@@ -672,14 +646,16 @@ impl Tensor {
                             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                             {
                                 if is_x86_feature_detected!("avx2") {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                                     unsafe {
                                         let mut i = start;
                                         while i + 8 <= end {
                                             let sv = _mm256_loadu_ps(self_ptr.add(i));
                                             let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                            _mm256_storeu_ps(self_ptr.add(i), _mm256_div_ps(sv, ov));
+                                            _mm256_storeu_ps(
+                                                self_ptr.add(i),
+                                                _mm256_div_ps(sv, ov),
+                                            );
                                             i += 8;
                                         }
                                         for j in i..end {
@@ -691,8 +667,7 @@ impl Tensor {
                             }
                             // Scalar fallback for this chunk
                             for i in start..end {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                                // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                                 unsafe {
                                     *self_ptr.add(i) /= *other_ptr.add(i);
                                 }
@@ -705,8 +680,7 @@ impl Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && numel >= 8 {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                         unsafe {
                             let mut i = 0;
                             while i + 8 <= numel {
@@ -724,8 +698,7 @@ impl Tensor {
                 }
                 // Scalar fallback
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) /= *other_ptr.add(i);
                     }
@@ -735,8 +708,7 @@ impl Tensor {
                 let self_ptr = self_ptr as *mut f64;
                 let other_ptr = other_ptr as *const f64;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) /= *other_ptr.add(i);
                     }
@@ -746,8 +718,7 @@ impl Tensor {
                 let self_ptr = self_ptr as *mut i32;
                 let other_ptr = other_ptr as *const i32;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *self_ptr.add(i) /= *other_ptr.add(i);
                     }
@@ -757,8 +728,7 @@ impl Tensor {
                 let self_ptr = self.data_ptr_mut() as *mut half::bf16;
                 let other_ptr = other.data_ptr() as *const half::bf16;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         let self_val = f32::from(*self_ptr.add(i));
                         let other_val = f32::from(*other_ptr.add(i));
@@ -770,8 +740,7 @@ impl Tensor {
                 let self_ptr = self.data_ptr_mut() as *mut half::f16;
                 let other_ptr = other.data_ptr() as *const half::f16;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         let self_val = f32::from(*self_ptr.add(i));
                         let other_val = f32::from(*other_ptr.add(i));
@@ -823,8 +792,7 @@ impl Tensor {
                         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                         {
                             if is_x86_feature_detected!("avx2") {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                                // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                                 unsafe {
                                     let mut i = start;
                                     while i + 8 <= end {
@@ -845,8 +813,7 @@ impl Tensor {
                         }
                         // Scalar fallback
                         for i in start..end {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                             unsafe {
                                 *s_p.add(i) += *t1_p.add(i) * *t2_p.add(i);
                             }
@@ -860,8 +827,7 @@ impl Tensor {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 if is_x86_feature_detected!("avx2") && numel >= 8 {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                     unsafe {
                         let mut i = 0;
                         while i + 8 <= numel {
@@ -883,8 +849,7 @@ impl Tensor {
 
             // Scalar fallback
             for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                 unsafe {
                     *self_ptr.add(i) += *t1_ptr.add(i) * *t2_ptr.add(i);
                 }
@@ -904,8 +869,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("sub", dispatch_key, &[self, other])
-            .expect("Tensor::sub: dispatch failed");
+        let result =
+            dispatch("sub", dispatch_key, &[self, other]).expect("Tensor::sub: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -950,8 +915,7 @@ impl Tensor {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && numel >= 8 {
-
-// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
+                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
                         unsafe {
                             let mut i = 0;
                             while i + 8 <= numel {
@@ -966,8 +930,7 @@ impl Tensor {
                         }
                     } else {
                         for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                            // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                             unsafe {
                                 *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
                             }
@@ -977,8 +940,7 @@ impl Tensor {
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                        // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                         unsafe {
                             *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
                         }
@@ -1005,8 +967,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("mul", dispatch_key, &[self, other])
-            .expect("Tensor::mul: dispatch failed");
+        let result =
+            dispatch("mul", dispatch_key, &[self, other]).expect("Tensor::mul: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -1030,8 +992,8 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("div", dispatch_key, &[self, other])
-            .expect("Tensor::div: dispatch failed");
+        let result =
+            dispatch("div", dispatch_key, &[self, other]).expect("Tensor::div: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
@@ -1118,7 +1080,7 @@ impl Tensor {
             let b_ptr = other.data_ptr_f32();
             let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
-// SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, m * k) };
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k * n) };
             let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, m * n) };
@@ -1144,8 +1106,7 @@ impl Tensor {
 
     pub fn neg(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("neg", dispatch_key, &[self])
-            .expect("Tensor::neg: dispatch failed");
+        let result = dispatch("neg", dispatch_key, &[self]).expect("Tensor::neg: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1171,8 +1132,7 @@ impl Tensor {
                 let a_ptr = self.data_ptr_f32();
                 let out_ptr = out_data.as_mut_ptr() as *mut f32;
                 for i in 0..numel {
-
-// SAFETY: The pointer offset stays within the bounds of the allocated storage.
+                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
                     unsafe {
                         *out_ptr.add(i) = (*a_ptr.add(i)).max(0.0);
                     }
@@ -1190,8 +1150,8 @@ impl Tensor {
         }
 
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("relu", dispatch_key, &[self])
-            .expect("Tensor::relu: dispatch failed");
+        let result =
+            dispatch("relu", dispatch_key, &[self]).expect("Tensor::relu: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1204,8 +1164,7 @@ impl Tensor {
 
     pub fn exp(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("exp", dispatch_key, &[self])
-            .expect("Tensor::exp: dispatch failed");
+        let result = dispatch("exp", dispatch_key, &[self]).expect("Tensor::exp: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1218,8 +1177,7 @@ impl Tensor {
 
     pub fn ln(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("log", dispatch_key, &[self])
-            .expect("Tensor::log: dispatch failed");
+        let result = dispatch("log", dispatch_key, &[self]).expect("Tensor::log: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1232,12 +1190,16 @@ impl Tensor {
 
     pub fn sigmoid(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("sigmoid", dispatch_key, &[self])
-            .expect("Tensor::sigmoid: dispatch failed");
+        let result =
+            dispatch("sigmoid", dispatch_key, &[self]).expect("Tensor::sigmoid: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::SigmoidBackward::new(self.clone(), output.clone(), edges));
+            let backward = Arc::new(autograd::SigmoidBackward::new(
+                self.clone(),
+                output.clone(),
+                edges,
+            ));
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -1246,12 +1208,16 @@ impl Tensor {
 
     pub fn tanh(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("tanh", dispatch_key, &[self])
-            .expect("Tensor::tanh: dispatch failed");
+        let result =
+            dispatch("tanh", dispatch_key, &[self]).expect("Tensor::tanh: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::TanhBackward::new(self.clone(), output.clone(), edges));
+            let backward = Arc::new(autograd::TanhBackward::new(
+                self.clone(),
+                output.clone(),
+                edges,
+            ));
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -1260,8 +1226,8 @@ impl Tensor {
 
     pub fn silu(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("silu", dispatch_key, &[self])
-            .expect("Tensor::silu: dispatch failed");
+        let result =
+            dispatch("silu", dispatch_key, &[self]).expect("Tensor::silu: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1274,8 +1240,8 @@ impl Tensor {
 
     pub fn gelu(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("gelu", dispatch_key, &[self])
-            .expect("Tensor::gelu: dispatch failed");
+        let result =
+            dispatch("gelu", dispatch_key, &[self]).expect("Tensor::gelu: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1375,8 +1341,8 @@ impl Tensor {
 
     pub fn sqrt(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("sqrt", dispatch_key, &[self])
-            .expect("Tensor::sqrt: dispatch failed");
+        let result =
+            dispatch("sqrt", dispatch_key, &[self]).expect("Tensor::sqrt: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1424,7 +1390,12 @@ impl Tensor {
         let result = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::ClampBackward::new(self.clone(), min_val, max_val, edges));
+            let backward = Arc::new(autograd::ClampBackward::new(
+                self.clone(),
+                min_val,
+                max_val,
+                edges,
+            ));
             Self::attach_grad_fn(result, backward)
         } else {
             result
@@ -1447,8 +1418,7 @@ impl Tensor {
 
     pub fn abs(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("abs", dispatch_key, &[self])
-            .expect("Tensor::abs: dispatch failed");
+        let result = dispatch("abs", dispatch_key, &[self]).expect("Tensor::abs: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -1472,7 +1442,7 @@ impl Tensor {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::LogSoftmaxBackward::new(
                 output.clone(),
-                dim as i32,
+                dim,
                 edges,
             ));
             Self::attach_grad_fn(output, backward)
@@ -1494,13 +1464,21 @@ impl Tensor {
 
     pub fn erf(&self) -> Tensor {
         let data = self.as_f32_slice();
-        let result_data: Vec<f32> = data.iter().map(|&v| {
-            let sign = if v >= 0.0 { 1.0f32 } else { -1.0f32 };
-            let x = v.abs();
-            let t = 1.0 / (1.0 + 0.3275911 * x);
-            let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
-            sign * y
-        }).collect();
+        let result_data: Vec<f32> = data
+            .iter()
+            .map(|&v| {
+                let sign = if v >= 0.0 { 1.0f32 } else { -1.0f32 };
+                let x = v.abs();
+                let t = 1.0 / (1.0 + 0.3275911 * x);
+                let y = 1.0
+                    - (((((1.061_405_4 * t - 1.453_152_1) * t) + 1.421_413_8) * t - 0.284_496_72)
+                        * t
+                        + 0.254_829_6)
+                        * t
+                        * (-x * x).exp();
+                sign * y
+            })
+            .collect();
         Tensor::from_vec(result_data, self.shape_ref().to_vec())
     }
 }

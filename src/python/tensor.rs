@@ -154,7 +154,7 @@ impl PyTensor {
         // managed tensor pointer, which is valid per the DLPack protocol.
         unsafe {
             let ptr = pyo3::ffi::PyCapsule_GetPointer(
-                capsule.as_ptr() as *mut pyo3::ffi::PyObject,
+                capsule.as_ptr(),
                 c"dltensor".as_ptr(),
             );
             if ptr.is_null() {
@@ -163,7 +163,7 @@ impl PyTensor {
             let tensor =
                 crate::io::dlpack::from_dlpack(ptr as *mut crate::io::dlpack::DLManagedTensor)?;
             pyo3::ffi::PyCapsule_SetName(
-                capsule.as_ptr() as *mut pyo3::ffi::PyObject,
+                capsule.as_ptr(),
                 c"used_dltensor".as_ptr(),
             );
             Ok(PyTensor::from_tensor(tensor))

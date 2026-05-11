@@ -411,3 +411,103 @@ pub struct PyLinear32 {
 }
 
 impl_pylinear_pymethods!(PyLinear32, F32x1);
+
+// ---- Fused PackedLinearGelu wrappers ----
+
+macro_rules! impl_pylinear_gelu_pymethods {
+    ($linear_gelu:ident) => {
+        #[pymethods]
+        impl $linear_gelu {
+            #[new]
+            #[pyo3(signature = (in_features, out_features, bias = true))]
+            fn new(in_features: i64, out_features: i64, bias: bool) -> Self {
+                $linear_gelu {
+                    inner: PackedLinear::new(in_features as usize, out_features as usize, bias),
+                }
+            }
+
+            fn __call__(&self, input: &PyTensor) -> PyResult<PyTensor> {
+                let input_vec = input.inner.to_numpy();
+                let shape = input.inner.shape();
+                match shape.len() {
+                    1 => {
+                        let in_f = shape[0] as usize;
+                        assert_eq!(in_f, self.inner.in_features,
+                            "Input length {} != in_features {}", in_f, self.inner.in_features);
+                        let output = self.inner.forward_gelu(&input_vec);
+                        let t = Tensor::from_vec(output, vec![self.inner.out_features as i64]);
+                        Ok(PyTensor::from_tensor(t))
+                    }
+                    2 => {
+                        let batch = shape[0] as usize;
+                        let in_f = shape[1] as usize;
+                        assert_eq!(in_f, self.inner.in_features,
+                            "Input features {} != in_features {}", in_f, self.inner.in_features);
+                        let mut outputs = Vec::with_capacity(batch * self.inner.out_features);
+                        for b in 0..batch {
+                            let row = &input_vec[b * in_f .. (b + 1) * in_f];
+                            let out = self.inner.forward_gelu(row);
+                            outputs.extend_from_slice(&out);
+                        }
+                        let t = Tensor::from_vec(outputs, vec![batch as i64, self.inner.out_features as i64]);
+                        Ok(PyTensor::from_tensor(t))
+                    }
+                    _ => Err(PyRuntimeError::new_err(format!(
+                        "Expected 1D or 2D input, got {}D tensor with shape {:?}", shape.len(), shape
+                    ))),
+                }
+            }
+
+            fn forward(&self, input: &PyTensor) -> PyResult<PyTensor> {
+                self.__call__(input)
+            }
+
+            #[getter]
+            fn in_features(&self) -> i64 { self.inner.in_features as i64 }
+
+            #[getter]
+            fn out_features(&self) -> i64 { self.inner.out_features as i64 }
+
+            #[getter]
+            fn num_params(&self) -> i64 { self.inner.num_params() as i64 }
+
+            #[getter]
+            fn memory_savings(&self) -> f64 { self.inner.memory_savings() as f64 }
+
+            fn train(&self) { self.inner.train_mode(); }
+
+            fn eval(&self) { self.inner.eval_mode(); }
+
+            #[getter]
+            fn is_training(&self) -> bool { self.inner.is_training() }
+        }
+    };
+}
+
+#[pyclass]
+pub struct PyPackedLinearGelu4 {
+    inner: PackedLinear<U4x8>,
+}
+
+impl_pylinear_gelu_pymethods!(PyPackedLinearGelu4);
+
+#[pyclass]
+pub struct PyPackedLinearGelu8 {
+    inner: PackedLinear<U8x4>,
+}
+
+impl_pylinear_gelu_pymethods!(PyPackedLinearGelu8);
+
+#[pyclass]
+pub struct PyPackedLinearGelu16 {
+    inner: PackedLinear<F16x2>,
+}
+
+impl_pylinear_gelu_pymethods!(PyPackedLinearGelu16);
+
+#[pyclass]
+pub struct PyPackedLinearGelu32 {
+    inner: PackedLinear<F32x1>,
+}
+
+impl_pylinear_gelu_pymethods!(PyPackedLinearGelu32);

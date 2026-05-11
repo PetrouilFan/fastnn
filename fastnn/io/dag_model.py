@@ -55,7 +55,6 @@ class DAGModel:
         This method builds the bridge between them based on op-specific positional
         conventions (first input is data, subsequent inputs are params).
         """
-        OP_PARAM_SUFFIXES = [".weight", ".bias", ".running_mean", ".running_var", ".value", ".scale", ".beta", ".gamma"]
         OP_PARAM_MAP = {
             "Conv": [".weight", ".bias"],
             "Gemm": [".weight", ".bias"],
@@ -683,9 +682,11 @@ class DAGModel:
                 x_np = x.numpy()
                 w_np = weight.numpy()
                 stride = node.get("stride", node.get("strides", 1))
-                if isinstance(stride, list): stride = stride[0]
+                if isinstance(stride, list):
+                    stride = stride[0]
                 padding = node.get("padding", node.get("pads", 0))
-                if isinstance(padding, list): padding = padding[0]
+                if isinstance(padding, list):
+                    padding = padding[0]
                 b, c_in, h_in, w_in = x_np.shape
                 c_out, c_in_w, k_h, k_w = w_np.shape
                 h_out = (h_in - 1) * stride + k_h - 2 * padding
@@ -792,7 +793,6 @@ class DAGModel:
                 w_np = tensors[1].numpy()
                 r_np = tensors[2].numpy()
                 b_np = tensors[3].numpy() if len(tensors) > 3 else None
-                seq_lens = tensors[4].numpy().flatten().astype(int) if len(tensors) > 4 else None
                 init_h = tensors[5].numpy() if len(tensors) > 5 else None
                 seq_len, batch_size, input_size = x_np.shape
                 num_directions = w_np.shape[0]
@@ -1154,7 +1154,7 @@ class DAGModel:
     def _dispatch_global_avg_pool(self, tensors: List, node: Dict) -> Optional[List]:
         x = tensors[0]
         shape = x.shape
-        h, w = shape[2], shape[3]
+        h = shape[2]
         pool = fnn.AvgPool2d(h, stride=1, padding=0)
         return [pool(x)]
 

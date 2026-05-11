@@ -32,5 +32,4 @@ pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + 
 
     /// WGSL type returned by unpack (e.g. `"mat2x4<f32>"`, `"vec4<f32>"`)
     fn wgsl_return_type() -> &'static str;
-
 }

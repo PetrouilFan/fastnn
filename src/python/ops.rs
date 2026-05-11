@@ -412,7 +412,7 @@ mod checkpoint_impl {
             let args: Vec<&Tensor> = self.inputs.iter().collect();
             let _ = dispatch_op(&self.fn_name, &args);
 
-            grad_outputs.into_iter().map(|g| g).collect()
+            grad_outputs.into_iter().collect()
         }
 
         fn next_edges(&self) -> &[Edge] {

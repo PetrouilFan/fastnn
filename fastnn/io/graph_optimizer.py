@@ -737,9 +737,6 @@ def fuse_conv_bn(nodes: List[dict]) -> List[dict]:
         bn_outputs = bn_node.get("outputs", [])
         if not bn_outputs:
             continue
-        bn_output = bn_outputs[0]
-        bn_consumers_count = len(output_to_consumer.get(bn_output, []))
-        
         # Determine activation after Conv (if any)
         # Check if Conv has a direct activation attribute
         

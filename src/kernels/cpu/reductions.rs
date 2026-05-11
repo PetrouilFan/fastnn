@@ -240,13 +240,16 @@ pub unsafe fn min_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // SAFETY: The pointer is valid, properly aligned, and points to initialized
             // elements derived from a valid Tensor allocation.
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
-            let out_slice: &mut [f32] = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_blocks) };
+            let out_slice: &mut [f32] =
+                unsafe { std::slice::from_raw_parts_mut(out_ptr, total_blocks) };
             use rayon::prelude::*;
             out_slice
                 .par_iter_mut()
                 .enumerate()
                 .for_each(|(block, out_val)| {
-                    *out_val = reduce_min(&a_slice[block * dim_size..][..dim_size.min(a_numel - block * dim_size)]);
+                    *out_val = reduce_min(
+                        &a_slice[block * dim_size..][..dim_size.min(a_numel - block * dim_size)],
+                    );
                 });
             return vec![output];
         }
@@ -297,7 +300,9 @@ pub unsafe fn mean_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         let sum: f64 = a_slice.iter().map(|&x| x as f64).sum();
         let mean = (sum / total_elements as f64) as f32;
         let out_ptr = output.data_ptr_f32_mut();
-        unsafe { *out_ptr = mean; }
+        unsafe {
+            *out_ptr = mean;
+        }
         return vec![output];
     };
     let keepdim = if args.len() > 2 {
@@ -436,13 +441,16 @@ pub unsafe fn max_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // SAFETY: The pointer is valid, properly aligned, and points to initialized
             // elements derived from a valid Tensor allocation.
             let a_slice: &[f32] = unsafe { std::slice::from_raw_parts(a_ptr, a_numel) };
-            let out_slice: &mut [f32] = unsafe { std::slice::from_raw_parts_mut(out_ptr, total_blocks) };
+            let out_slice: &mut [f32] =
+                unsafe { std::slice::from_raw_parts_mut(out_ptr, total_blocks) };
             use rayon::prelude::*;
             out_slice
                 .par_iter_mut()
                 .enumerate()
                 .for_each(|(block, out_val)| {
-                    *out_val = reduce_max(&a_slice[block * dim_size..][..dim_size.min(a_numel - block * dim_size)]);
+                    *out_val = reduce_max(
+                        &a_slice[block * dim_size..][..dim_size.min(a_numel - block * dim_size)],
+                    );
                 });
             return vec![output];
         }
