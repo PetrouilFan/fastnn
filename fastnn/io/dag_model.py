@@ -268,9 +268,21 @@ class DAGModel:
                 shape_arr = np.array(tensors[0].shape, dtype=np.int64)
                 return [fnn.tensor(shape_arr, list(shape_arr.shape))]
             elif op_type == "Cast" or op_type == "castop":
-                return [tensors[0]]
+                # ONNX Cast: to attribute is an int mapping to dtype
+                to_dtype = node.get("to", 1)
+                dtype_map = {1: np.float32, 7: np.int64, 9: np.bool_, 10: np.int32, 11: np.int64}
+                target_dtype = dtype_map.get(to_dtype, np.float32)
+                x_np = tensors[0].numpy().astype(target_dtype)
+                return [fnn.tensor(x_np, list(x_np.shape))]
             elif op_type == "Gather" or op_type == "gatherop":
-                return [tensors[0]]
+                # ONNX Gather: data[axes] with axis attribute
+                if len(tensors) < 2:
+                    return [tensors[0]]
+                data_np = tensors[0].numpy()
+                indices_np = tensors[1].numpy().astype(int)
+                axis = node.get("axis", 0)
+                result_np = np.take(data_np, indices_np, axis=axis)
+                return [fnn.tensor(result_np, list(result_np.shape))]
             elif op_type in ("Identity", "identityop", "Dropout", "dropout"):
                 return [tensors[0]]
             elif op_type == "Resize":

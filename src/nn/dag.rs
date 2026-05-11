@@ -896,6 +896,188 @@ impl DAGExecutor {
                     dispatch("rand", DispatchKey::Cpu, &[&shape_t]).ok()
                 }
 
+                // ---- Simple ops ported from Python DAGModel ---- //
+
+                "argmax" => {
+                    let x = &args[0];
+                    let axis = node.attrs.get("axis").and_then(|a| a.parse::<i64>().ok());
+                    let keepdims = node.attrs.get("keepdims")
+                        .and_then(|a| a.parse::<i64>().ok()).unwrap_or(1) != 0;
+                    let shape = x.shape_ref().to_vec();
+                    let data = x.as_f32_slice();
+                    let rank = shape.len() as i64;
+
+                    // Helper: compute argmax along an axis
+                    let result = if let Some(ax) = axis {
+                        let ax = if ax < 0 { (ax + rank) as usize } else { ax as usize };
+                        let outer: usize = shape[..ax].iter().product::<i64>() as usize;
+                        let dim = shape[ax] as usize;
+                        let inner: usize = shape[ax + 1..].iter().product::<i64>() as usize;
+                        let mut out_data = vec![0.0f32; outer * inner];
+                        for o in 0..outer {
+                            for i in 0..inner {
+                                let mut best_idx = 0usize;
+                                let mut best_val = f32::NEG_INFINITY;
+                                for d in 0..dim {
+                                    let idx = (o * dim + d) * inner + i;
+                                    if data[idx] > best_val {
+                                        best_val = data[idx];
+                                        best_idx = d;
+                                    }
+                                }
+                                out_data[o * inner + i] = best_idx as f32;
+                            }
+                        }
+                        let mut out_shape: Vec<i64> = shape.clone();
+                        out_shape.remove(ax);
+                        if keepdims { out_shape.insert(ax, 1); }
+                        Tensor::from_vec(out_data, out_shape)
+                    } else {
+                        // Global argmax over all elements
+                        let mut best_idx = 0usize;
+                        let mut best_val = f32::NEG_INFINITY;
+                        for (i, &v) in data.iter().enumerate() {
+                            if v > best_val { best_val = v; best_idx = i; }
+                        }
+                        Tensor::from_vec(vec![best_idx as f32], vec![1])
+                    };
+                    Some(vec![result])
+                }
+
+                "argmin" => {
+                    let x = &args[0];
+                    let axis = node.attrs.get("axis").and_then(|a| a.parse::<i64>().ok());
+                    let keepdims = node.attrs.get("keepdims")
+                        .and_then(|a| a.parse::<i64>().ok()).unwrap_or(1) != 0;
+                    let shape = x.shape_ref().to_vec();
+                    let data = x.as_f32_slice();
+                    let rank = shape.len() as i64;
+
+                    let result = if let Some(ax) = axis {
+                        let ax = if ax < 0 { (ax + rank) as usize } else { ax as usize };
+                        let outer: usize = shape[..ax].iter().product::<i64>() as usize;
+                        let dim = shape[ax] as usize;
+                        let inner: usize = shape[ax + 1..].iter().product::<i64>() as usize;
+                        let mut out_data = vec![0.0f32; outer * inner];
+                        for o in 0..outer {
+                            for i in 0..inner {
+                                let mut best_idx = 0usize;
+                                let mut best_val = f32::INFINITY;
+                                for d in 0..dim {
+                                    let idx = (o * dim + d) * inner + i;
+                                    if data[idx] < best_val {
+                                        best_val = data[idx];
+                                        best_idx = d;
+                                    }
+                                }
+                                out_data[o * inner + i] = best_idx as f32;
+                            }
+                        }
+                        let mut out_shape: Vec<i64> = shape.clone();
+                        out_shape.remove(ax);
+                        if keepdims { out_shape.insert(ax, 1); }
+                        Tensor::from_vec(out_data, out_shape)
+                    } else {
+                        let mut best_idx = 0usize;
+                        let mut best_val = f32::INFINITY;
+                        for (i, &v) in data.iter().enumerate() {
+                            if v < best_val { best_val = v; best_idx = i; }
+                        }
+                        Tensor::from_vec(vec![best_idx as f32], vec![1])
+                    };
+                    Some(vec![result])
+                }
+
+                "min" | "minop" => {
+                    if args.len() >= 2 {
+                        Some(vec![args[0].minimum(&args[1])])
+                    } else {
+                        Some(vec![args[0].clone()])
+                    }
+                }
+
+                "max" | "maxop" => {
+                    if args.len() >= 2 {
+                        Some(vec![args[0].maximum(&args[1])])
+                    } else {
+                        Some(vec![args[0].clone()])
+                    }
+                }
+
+                "swish" => self.dispatch_unary("silu", &args),
+
+                "reverse" => {
+                    let x = &args[0];
+                    let axes_str = node.attrs.get("axes");
+                    let data = x.as_f32_slice();
+                    let shape = x.shape_ref().to_vec();
+
+                    let axes: Vec<usize> = if let Some(s) = axes_str {
+                        parse_int_list(s).iter().map(|&v| {
+                            if v < 0 { (v + shape.len() as i64) as usize } else { v as usize }
+                        }).collect()
+                    } else {
+                        (0..shape.len()).collect()
+                    };
+
+                    let mut out_data = data.to_vec();
+                    let rank = shape.len();
+
+                    for &ax in &axes {
+                        let ax = ax.min(rank - 1);
+                        let dim = shape[ax] as usize;
+                        let outer: usize = shape[..ax].iter().product::<i64>() as usize;
+                        let inner: usize = shape[ax + 1..].iter().product::<i64>() as usize;
+
+                        let mut new_data = out_data.clone();
+                        for o in 0..outer {
+                            for i in 0..inner {
+                                for d in 0..dim {
+                                    let src_idx = (o * dim + d) * inner + i;
+                                    let dst_idx = (o * dim + (dim - 1 - d)) * inner + i;
+                                    new_data[dst_idx] = out_data[src_idx];
+                                }
+                            }
+                        }
+                        out_data = new_data;
+                    }
+                    Some(vec![Tensor::from_vec(out_data, shape)])
+                }
+
+                "constantofshape" => {
+                    let shape_arr: Vec<i64> = if !args.is_empty() {
+                        args[0].as_f32_slice().iter().map(|&v| v as i64).collect()
+                    } else {
+                        vec![1]
+                    };
+                    let value = node.attrs.get("value")
+                        .and_then(|a| a.parse::<f32>().ok())
+                        .unwrap_or(0.0);
+                    let n: usize = shape_arr.iter().product::<i64>() as usize;
+                    let data = vec![value; n];
+                    Some(vec![Tensor::from_vec(data, shape_arr)])
+                }
+
+                "biasadd" | "bias_add" => {
+                    if args.len() >= 2 {
+                        let x = &args[0];
+                        let bias = &args[1];
+                        Some(vec![x.add(bias)])
+                    } else {
+                        Some(vec![args[0].clone()])
+                    }
+                }
+
+                "biassub" | "bias_sub" => {
+                    if args.len() >= 2 {
+                        let x = &args[0];
+                        let bias = &args[1];
+                        Some(vec![x.sub(bias)])
+                    } else {
+                        Some(vec![args[0].clone()])
+                    }
+                }
+
                 _ => {
                     args.first().cloned().map(|t| vec![t])
                 }
