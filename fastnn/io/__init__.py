@@ -6,6 +6,7 @@ converting from other formats (PyTorch, ONNX), and managing model I/O.
 
 import struct
 import json
+import numpy as np
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -87,7 +88,6 @@ def write_tensor(f, name: str, data) -> None:
         name: Parameter name.
         data: Tensor data as numpy array (float32).
     """
-    import numpy as np
     name_bytes = name.encode("utf-8")
     shape = list(data.shape)
     data_f32 = data.astype(np.float32, copy=False).ravel()
@@ -106,7 +106,6 @@ def read_tensor(f) -> tuple:
     Returns:
         Tuple of (name, data) where data is numpy array.
     """
-    import numpy as np
     name_len = _unpack_u64(f.read(8))
     name = f.read(name_len).decode("utf-8")
     shape_len = _unpack_u64(f.read(8))
@@ -120,7 +119,7 @@ def write_fnn_file(f, header, params, magic=MODEL_MAGIC, version=MODEL_VERSION):
     """Write standard .fnn file format (magic + version + JSON header + parameters)."""
     f.write(magic)
     f.write(_pack_u32(version))
-    header_json = json.dumps(header, indent=2)
+    header_json = json.dumps(header, separators=(',', ':'))
     header_bytes = header_json.encode("utf-8")
     f.write(_pack_u64(len(header_bytes)))
     f.write(header_bytes)
