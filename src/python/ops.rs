@@ -674,6 +674,9 @@ fn im2col(
     let out_width = (in_width + 2 * padding_us - kernel_w) / stride_us + 1;
 
     // Call the internal im2col_kernel
+    // SAFETY: `x_inner` is a valid tensor reference; the function parameters
+    // (kernel dimensions, strides, padding, dilation) were computed from the
+    // tensor's shape above and are valid.
     let col_tensor = unsafe {
         crate::kernels::cpu::im2col_kernel(
             x_inner,
@@ -733,6 +736,7 @@ fn erf(tensor: &PyTensor) -> PyTensor {
     PyTensor::from_tensor(tensor.inner.erf())
 }
 
+#[allow(dead_code)]
 #[pyfunction]
 fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
     tensor.inner.nonzero()

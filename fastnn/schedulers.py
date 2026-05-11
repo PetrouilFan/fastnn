@@ -64,7 +64,8 @@ class LRScheduler:
                     pg['lr'] = lr
                 self.optimizer.load_state_dict(sd)
             else:
-                self.optimizer.param_groups[0]['lr'] = lr
+                sd['lr'] = lr
+                self.optimizer.load_state_dict(sd)
 
     def _get_param_groups(self) -> Optional[list]:
         if self._has_param_groups and self.optimizer.param_groups:

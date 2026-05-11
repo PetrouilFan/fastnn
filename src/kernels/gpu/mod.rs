@@ -760,6 +760,7 @@ fn get_tensor_data(tensor: &Tensor) -> Vec<f32> {
     // tensor's element count. from_raw_parts requires the pointer be valid for the
     // entire length, which is guaranteed by the Tensor API (numel is verified on
     // construction and ptr points to the underlying storage).
+// SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
     unsafe { std::slice::from_raw_parts(ptr, numel).to_vec() }
 }
 

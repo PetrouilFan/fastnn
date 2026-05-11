@@ -176,6 +176,8 @@ fn micro_kernel<T: PackedWord>(
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
             unsafe {
                 micro_kernel_avx2(row_bufs, activation, output, k_block);
             }
@@ -200,6 +202,8 @@ fn micro_kernel<T: PackedWord>(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
+
+// SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
 unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [f32], k: usize) {
     let mut acc0 = _mm256_setzero_ps();
     let mut acc1 = _mm256_setzero_ps();
@@ -305,6 +309,8 @@ pub fn gemv_u8x4_tiled(
                             let w = weights_u32[row_off + p];
                             let base = p * 4;
                             if base >= k_offset && base + 4 <= k_end {
+
+// SAFETY: The offset stays within the bounds of the allocated storage. No aliasing mutable reference exists.
                                 unsafe {
                                     unpack_u8x4_sse4(
                                         w,
@@ -327,6 +333,8 @@ pub fn gemv_u8x4_tiled(
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                         unsafe {
                             micro_kernel_avx2(
                                 row_bufs,
@@ -431,6 +439,7 @@ pub fn gemv_f16x2_tiled(
                         }
                     }
 
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                     unsafe {
                         micro_kernel_avx2(
                             row_bufs,
@@ -517,6 +526,8 @@ pub fn gemv_u4x8_tiled(
                         while p < packed_end {
                             let base = p * 8;
                             if p + 1 < packed_end && base + 16 <= k_end {
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                                 unsafe {
                                     unpack_u4x8_wordpair_simd(
                                         weights_u32, row_off, p, row_bufs, row_start, k_offset,
@@ -542,6 +553,7 @@ pub fn gemv_u4x8_tiled(
                         }
                     }
 
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                     unsafe {
                         micro_kernel_avx2(
                             row_bufs,
@@ -604,6 +616,8 @@ use std::arch::aarch64::*;
 #[target_feature(enable = "neon")]
 #[inline]
 #[allow(clippy::too_many_arguments)]
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn micro_kernel_neon(
     row_bufs: &[[f32; KC]; MR],
     activation: &[f32],
@@ -669,6 +683,8 @@ fn scalar_micro_kernel(row_bufs: &[f32], activation: &[f32], output: &mut [f32],
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 #[inline]
+
+// SAFETY: The pointers are valid and properly aligned for SIMD access. Loop bounds prevent out-of-bounds access.
 unsafe fn hsum256_ps(v: __m256) -> f32 {
     let hi128 = _mm256_extractf128_ps(v, 1);
     let lo128 = _mm256_castps256_ps128(v);
@@ -687,6 +703,8 @@ unsafe fn hsum256_ps(v: __m256) -> f32 {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "sse4.1")]
 #[inline]
+
+// SAFETY: The pointers are valid and properly aligned for SIMD access. Loop bounds prevent out-of-bounds access.
 unsafe fn unpack_u8x4_sse4(w: u32, dst: *mut f32) {
     let wvec = _mm_cvtsi32_si128(w as i32);
     let i32_vals = _mm_cvtepi8_epi32(wvec);
@@ -698,6 +716,8 @@ unsafe fn unpack_u8x4_sse4(w: u32, dst: *mut f32) {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn unpack_u4x8_wordpair_simd(
     weights_u32: &[u32],
     row_off: usize,

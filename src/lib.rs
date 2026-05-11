@@ -14,8 +14,6 @@ pub mod storage;
 pub mod storage_pool;
 pub mod storage_quantized;
 pub mod tensor;
-pub mod train;
-
 pub use error::{FastnnError, FastnnResult};
 pub use storage_quantized::QuantizedTensor;
 

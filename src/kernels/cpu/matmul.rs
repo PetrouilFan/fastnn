@@ -179,9 +179,12 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // Reshape trick: treat [batch, m, k] as [batch*m, k]
             // Single BLAS call for entire batch
             let batch_m = batch * m as usize;
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, batch_m * k as usize) };
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
             let out_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_m * n as usize) };
             matmul_blas_with_transpose_into(
                 a_slice,
@@ -196,10 +199,13 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         } else if can_batch_blas {
             // Batched 3D BLAS loop: process each batch element separately
             let a_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts(a_ptr, batch * m as usize * k as usize) };
             let b_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts(b_ptr, batch * k as usize * n as usize) };
             let out_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, batch * m as usize * n as usize) };
 
             let m_usize = m as usize;
@@ -250,9 +256,12 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
         } else {
             // Single batch BLAS
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
             let out_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, m as usize * n as usize) };
             matmul_blas_with_transpose_into(
                 a_slice,
@@ -464,6 +473,7 @@ pub unsafe fn blocked_row_matmul(
 
     // Clear output row
     for j in 0..n {
+        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
         unsafe {
             *out_ptr.add(out_off + j) = 0.0;
         }

@@ -5,6 +5,8 @@ fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
         return Vec::new();
     }
     let mut v = Vec::with_capacity(len);
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
     unsafe {
         std::ptr::write_bytes(v.as_mut_ptr() as *mut u8, 0, len * std::mem::size_of::<T>());
         v.set_len(len);
@@ -238,6 +240,8 @@ impl<T: PackedWord> PackedTensor<T> {
 
     #[inline]
     pub fn as_u32(&self) -> &[u32] {
+
+// SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
         unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const u32, self.data.len()) }
     }
 

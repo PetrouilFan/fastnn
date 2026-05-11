@@ -171,6 +171,10 @@ impl Storage {
                 let mut storage = Storage::new_cpu(dtype, nbytes);
                 if let Storage::Cpu(cpu) = &mut storage {
                     let ptr = Arc::make_mut(&mut cpu.data).as_mut_ptr() as *mut T;
+                    // SAFETY: The destination pointer is derived from a freshly allocated
+                    // and uniquely owned `Vec<u8>` via `Arc::make_mut`. The source pointer
+                    // comes from the input `data` vector. Both point to `data.len()` elements
+                    // of type `T` and are guaranteed non-overlapping.
                     unsafe {
                         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
                     }
@@ -183,6 +187,10 @@ impl Storage {
                 let mut cpu_storage = Storage::new_cpu(dtype, nbytes);
                 if let Storage::Cpu(cpu) = &mut cpu_storage {
                     let ptr = Arc::make_mut(&mut cpu.data).as_mut_ptr() as *mut T;
+                    // SAFETY: The destination pointer is derived from a freshly allocated
+                    // and uniquely owned `Vec<u8>` via `Arc::make_mut`. The source pointer
+                    // comes from the input `data` vector. Both point to `data.len()` elements
+                    // of type `T` and are guaranteed non-overlapping.
                     unsafe {
                         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
                     }

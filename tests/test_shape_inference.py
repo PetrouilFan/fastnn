@@ -96,3 +96,115 @@ class TestShapeInference:
     def test_where(self):
         shapes = infer_shape("Where", [[1, 3, 8, 8], [1, 3, 8, 8], [1, 3, 8, 8]], {})
         assert shapes == [[1, 3, 8, 8]]
+
+
+class TestExtendedOps:
+    def test_erf(self):
+        assert infer_shape("Erf", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_cumsum(self):
+        assert infer_shape("CumSum", [[1, 3, 8, 8]], {"axis": 1}) == [[1, 3, 8, 8]]
+
+    def test_onehot(self):
+        assert infer_shape("OneHot", [[2, 3], [1], [1]], {"axis": -1}) == [[2, 3, 1]]
+
+    def test_gathernd(self):
+        assert infer_shape("GatherND", [[1, 3, 8, 8], [1, 1]], {}) == [[1, 3, 8, 8]]
+
+    def test_depthtospace(self):
+        assert infer_shape("DepthToSpace", [[1, 12, 8, 8]], {"blocksize": 2}) == [[1, 3, 16, 16]]
+
+    def test_spacetodepth(self):
+        assert infer_shape("SpaceToDepth", [[1, 3, 16, 16]], {"blocksize": 2}) == [[1, 12, 8, 8]]
+
+    def test_eyelike(self):
+        assert infer_shape("EyeLike", [[5, 5]], {}) == [[5, 5]]
+
+    def test_convtranspose(self):
+        assert infer_shape("ConvTranspose", [[1, 3, 8, 8]], {"out_channels": 6, "kernel_size": 3, "stride": 2}) == [[1, 6, 17, 17]]
+
+    def test_instancenormalization(self):
+        assert infer_shape("InstanceNormalization", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_logsoftmax(self):
+        assert infer_shape("LogSoftmax", [[1, 3, 8, 8]], {"axis": 1}) == [[1, 3, 8, 8]]
+
+    def test_selu(self):
+        assert infer_shape("Selu", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_rmsnorm(self):
+        assert infer_shape("RmsNormalization", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_loop(self):
+        assert infer_shape("Loop", [[1], [1]], {}, num_outputs=2) == [[1], [1]]
+
+    def test_if(self):
+        assert infer_shape("If", [[1]], {}, num_outputs=1) == [[1]]
+
+    def test_nonmaxsuppression(self):
+        assert infer_shape("NonMaxSuppression", [[100, 4]], {}) == [[1, 3]]
+
+    def test_topk(self):
+        assert infer_shape("TopK", [[1, 3, 8, 8]], {"k": 5, "axis": -1}) == [[1, 3, 8, 5], [1, 3, 8, 5]]
+
+    def test_hardsigmoid(self):
+        assert infer_shape("HardSigmoid", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_prelu(self):
+        assert infer_shape("PRelu", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_constant(self):
+        assert infer_shape("Constant", [], {"dims": [3, 4]}) == [[3, 4]]
+
+    def test_compress(self):
+        assert infer_shape("Compress", [[1, 3, 8, 8]], {"axis": 0}) == [[None, 3, 8, 8]]
+
+
+class TestDelegation:
+    def test_and_via_delegation(self):
+        assert infer_shape("And", [[8], [8]], {}) == [[8]]
+
+    def test_ceil_via_delegation(self):
+        assert infer_shape("Ceil", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_equal_via_delegation(self):
+        assert infer_shape("Equal", [[8], [8]], {}) == [[8]]
+
+    def test_floor_via_delegation(self):
+        assert infer_shape("Floor", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_greater_via_delegation(self):
+        assert infer_shape("Greater", [[8], [8]], {}) == [[8]]
+
+    def test_isinf_via_delegation(self):
+        assert infer_shape("IsInf", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_isnan_via_delegation(self):
+        assert infer_shape("IsNan", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_less_via_delegation(self):
+        assert infer_shape("Less", [[8], [8]], {}) == [[8]]
+
+    def test_not_via_delegation(self):
+        assert infer_shape("Not", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_or_via_delegation(self):
+        assert infer_shape("Or", [[8], [8]], {}) == [[8]]
+
+    def test_range_via_delegation(self):
+        assert infer_shape("Range", [[1]], {}) == [[None]]
+
+    def test_reciprocal_via_delegation(self):
+        assert infer_shape("Reciprocal", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_round_via_delegation(self):
+        assert infer_shape("Round", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_sign_via_delegation(self):
+        assert infer_shape("Sign", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]
+
+    def test_xor_via_delegation(self):
+        assert infer_shape("Xor", [[8], [8]], {}) == [[8]]
+
+    def test_layernormalization_via_delegation(self):
+        assert infer_shape("LayerNormalization", [[1, 3, 8, 8]], {}) == [[1, 3, 8, 8]]

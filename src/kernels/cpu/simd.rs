@@ -447,6 +447,9 @@ pub fn fused_add_relu_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             let val = *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
             *((out_usize + i * 4) as *mut f32) = val.max(0.0);
@@ -467,6 +470,9 @@ pub fn fused_mul_add_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             let a_val = *((a_usize + i * 4) as *const f32);
             let b_val = *((b_usize + i * 4) as *const f32);
@@ -536,6 +542,9 @@ pub fn mul_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             *((out_usize + i * 4) as *mut f32) =
                 *((a_usize + i * 4) as *const f32) * *((b_usize + i * 4) as *const f32);
@@ -598,6 +607,9 @@ pub fn relu_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             let val = *((a_usize + i * 4) as *const f32);
             *((out_usize + i * 4) as *mut f32) = val.max(0.0);
@@ -665,6 +677,9 @@ pub fn div_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             *((out_usize + i * 4) as *mut f32) =
                 *((a_usize + i * 4) as *const f32) / *((b_usize + i * 4) as *const f32);
@@ -727,6 +742,9 @@ pub fn neg_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             *((out_usize + i * 4) as *mut f32) = -*((a_usize + i * 4) as *const f32);
         }
@@ -788,6 +806,9 @@ pub fn abs_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).abs();
         }
@@ -854,6 +875,9 @@ pub fn sub_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             *((out_usize + i * 4) as *mut f32) =
                 *((a_usize + i * 4) as *const f32) - *((b_usize + i * 4) as *const f32);
@@ -875,6 +899,9 @@ pub fn add_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             *((out_usize + i * 4) as *mut f32) =
                 *((a_usize + i * 4) as *const f32) + *((b_usize + i * 4) as *const f32);
@@ -893,6 +920,9 @@ pub fn sigmoid_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             let x = *((a_usize + i * 4) as *const f32);
             *((out_usize + i * 4) as *mut f32) = scalar_sigmoid(x);
@@ -911,6 +941,9 @@ pub fn tanh_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             let x = *((a_usize + i * 4) as *const f32);
             *((out_usize + i * 4) as *mut f32) = scalar_tanh(x);
@@ -929,6 +962,9 @@ pub fn sqrt_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             let x = *((a_usize + i * 4) as *const f32);
             *((out_usize + i * 4) as *mut f32) = scalar_sqrt(x);
@@ -947,6 +983,9 @@ pub fn log_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             let x = *((a_usize + i * 4) as *const f32);
             *((out_usize + i * 4) as *mut f32) = scalar_ln(x);
@@ -965,6 +1004,9 @@ pub fn gelu_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             let x = *((a_usize + i * 4) as *const f32);
             *((out_usize + i * 4) as *mut f32) = scalar_gelu(x);
@@ -1295,6 +1337,9 @@ pub fn exp_parallel_scalar(
     let start = chunk_idx * chunk_size;
     let end = std::cmp::min(start + chunk_size, numel);
     for i in start..end {
+        // SAFETY: The pointer derived from `usize` was converted from a valid
+        // `*const f32`/`*mut f32`. The byte offset `i * 4` keeps each access within
+        // the bounds of the allocated tensor storage.
         unsafe {
             *((out_usize + i * 4) as *mut f32) = (*((a_usize + i * 4) as *const f32)).exp();
         }
