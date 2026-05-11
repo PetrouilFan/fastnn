@@ -42,6 +42,7 @@ def get_pooling_config(node, default_kernel=(2, 2)):
 def _get_attr(node: "onnx.NodeProto", name: str, default=None):
     """Get attribute value from node."""
     import onnx
+    from onnx import numpy_helper
     for attr in node.attribute:
         if attr.name == name:
             if attr.HasField("f"):
@@ -50,6 +51,9 @@ def _get_attr(node: "onnx.NodeProto", name: str, default=None):
                 return attr.i
             elif attr.HasField("s"):
                 return attr.s.decode("utf-8")
+            elif attr.HasField("t"):
+                # Tensor attribute: return as numpy array
+                return numpy_helper.to_array(attr.t)
             elif attr.ints:
                 return list(attr.ints)
             elif attr.floats:
@@ -87,6 +91,10 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
 
     # Collect all parameters first
     params = []
+
+    # Add all initializers as params (including scalar constants used by Gather, Range, etc.)
+    for init_name, init_arr in initializer_map.items():
+        params.append((init_name, init_arr))
 
     for node in model.graph.node:
         op_type = node.op_type
@@ -403,6 +411,9 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
         elif op_type == "Equal":
             layer_info["type"] = "EqualOp"
 
+        elif op_type == "Expand":
+            layer_info["type"] = "Expand"
+
         elif op_type == "Ceil":
             layer_info["type"] = "CeilOp"
 
@@ -571,8 +582,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             value = _get_attr(node, "value", None)
             layer_info["type"] = "ConstantOfShape"
             if value is not None:
-                import onnx.numpy_helper
-                const_tensor = onnx.numpy_helper.to_array(value)
+                const_tensor = value if isinstance(value, np.ndarray) else onnx.numpy_helper.to_array(value)
                 layer_info["value"] = const_tensor.flatten()[0].item() if hasattr(const_tensor, 'flatten') else float(const_tensor)
                 layer_info["dims"] = list(const_tensor.shape)
 
@@ -656,13 +666,27 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
         layers.append(layer_info)
 
     # Store full graph topology for DAG reconstruction
-    graph = {
-        "nodes": [{
-            "name": node.name or f"{node.op_type}_{i}",
+    # Build a name->layer_info lookup so we can merge parsed attributes into graph nodes
+    layer_by_name = {li["name"]: li for li in layers}
+    graph_nodes = []
+    for i, node in enumerate(model.graph.node):
+        node_name = node.name or f"{node.op_type}_{i}"
+        gn = {
+            "name": node_name,
             "op_type": node.op_type,
             "inputs": list(node.input),
             "outputs": list(node.output),
-        } for i, node in enumerate(model.graph.node)],
+        }
+        # Merge parsed attributes from layer_info (excluding name/type to avoid collision)
+        layer_info = layer_by_name.get(node_name)
+        if layer_info is not None:
+            for k, v in layer_info.items():
+                if k not in ("name", "type") and v is not None:
+                    gn[k] = v
+        graph_nodes.append(gn)
+
+    graph = {
+        "nodes": graph_nodes,
         "inputs": [{
             "name": inp.name,
             "shape": [d.dim_value for d in inp.type.tensor_type.shape.dim] if inp.type.tensor_type.HasField("shape") else None

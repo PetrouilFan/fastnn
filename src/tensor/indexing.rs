@@ -444,8 +444,31 @@ impl Tensor {
         let shape = self.shape_ref();
         let axis = if axis < 0 { shape.len() as i64 + axis } else { axis } as usize;
 
-        let mut out_shape = shape.to_vec();
-        out_shape[axis] = indices_data.len() as i64;
+        // ONNX Gather semantics:
+        // - If indices is 0-D (scalar), the gathered dim is *removed*
+        //   (output rank = data.rank - 1).
+        // - If indices is 1+D, the gathered dim is *replaced* by the indices shape
+        //   (output rank = data.rank - 1 + indices.rank).
+        let indices_ndim = indices.ndim();
+        let scalar_idx = indices_ndim == 0;
+
+        let out_shape: Vec<i64> = if scalar_idx {
+            let mut s = shape.to_vec();
+            s.remove(axis);
+            s
+        } else {
+            let mut s = shape.to_vec();
+            if indices_ndim == 1 {
+                s[axis] = indices_data.len() as i64;
+            } else {
+                // N-D indices: replace gathered dim with all indices dims
+                s.remove(axis);
+                for d in (0..indices_ndim).rev() {
+                    s.insert(axis, indices.inner.sizes[d]);
+                }
+            }
+            s
+        };
         let mut out_data = vec![0.0f32; out_shape.iter().product::<i64>() as usize];
 
         let inner = if axis + 1 < shape.len() {
@@ -459,15 +482,29 @@ impl Tensor {
             1
         };
 
-        for o in 0..outer {
-            for (i, &idx) in indices_data.iter().enumerate() {
-                if idx as usize >= shape[axis] as usize {
-                    panic!("gather: index {} is out of bounds for dimension {} (size {})", idx, axis, shape[axis]);
-                }
-                let src_idx = (o * shape[axis] as usize + idx as usize) * inner;
-                let dst_idx = (o * out_shape[axis] as usize + i) * inner;
+        if scalar_idx {
+            let idx = indices_data[0] as usize;
+            if idx >= shape[axis] as usize {
+                panic!("gather: index {} is out of bounds for dimension {} (size {})", idx, axis, shape[axis]);
+            }
+            for o in 0..outer {
+                let src_off = (o * shape[axis] as usize + idx) * inner;
+                let dst_off = o * inner;
                 for k in 0..inner {
-                    out_data[dst_idx + k] = x_data[src_idx + k];
+                    out_data[dst_off + k] = x_data[src_off + k];
+                }
+            }
+        } else {
+            for o in 0..outer {
+                for (i, &idx) in indices_data.iter().enumerate() {
+                    if idx as usize >= shape[axis] as usize {
+                        panic!("gather: index {} is out of bounds for dimension {} (size {})", idx, axis, shape[axis]);
+                    }
+                    let src_off = (o * shape[axis] as usize + idx as usize) * inner;
+                    let dst_off = (o * out_shape[axis] as usize + i) * inner;
+                    for k in 0..inner {
+                        out_data[dst_off + k] = x_data[src_off + k];
+                    }
                 }
             }
         }

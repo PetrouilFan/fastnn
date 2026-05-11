@@ -32,46 +32,6 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let k = a_shape[a_shape.len() - 1] as i32;
     let n = b_shape[b_shape.len() - 1] as i32;
 
-    // Detect transposed matrices by checking strides
-    // A contiguous matrix [rows, cols] has strides [cols, 1]
-    // A transposed matrix (from [rows, cols]) has strides [1, rows]
-    let a_strides = a.strides();
-    let b_strides = b.strides();
-    let _a_is_transposed =
-        a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] == a_shape[a_shape.len() - 2];
-    let b_is_transposed =
-        b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] == b_shape[b_shape.len() - 2];
-
-    // For matmul: A[m, k] @ B[k, n] = C[m, n]
-    // When B is transposed (shape [n, k] representing original [k, n]):
-    // The transposed view has shape [n, k] where n is the original outer dim
-    // and k is the original inner dim
-    if b_is_transposed {
-        // B is transposed: shape [n, k] represents original matrix [k, n]
-        // For matmul A[m,k] @ B[k,n], we need B's inner dim (k) to match A's inner dim (k)
-        // In the transposed view [n, k], the inner dim k is at position 0 (b_shape[0])
-        let b_inner_dim = b_shape[0] as i32; // k is at position 0 for transposed
-        if b_inner_dim != k {
-            panic!(
-                "matmul: transposed B dimensions incompatible: A[{}, {}] @ B.T[{}, {}]",
-                m, k, b_shape[0], b_shape[1]
-            );
-        }
-    } else {
-        // Standard case: B is not transposed, shape [k, n]
-        if b_shape[b_shape.len() - 2] as i32 != k {
-            panic!(
-                "matmul: A[{}, {}] @ B[{}, {}] - B second-to-last dim {} != k {}",
-                m,
-                k,
-                b_shape[b_shape.len() - 2],
-                b_shape[b_shape.len() - 1],
-                b_shape[b_shape.len() - 2],
-                k
-            );
-        }
-    }
-
     // Use custom tiled matmul
     let batch_a = if a_shape.len() > 2 {
         a_shape[..a_shape.len() - 2].iter().product::<i64>() as usize
@@ -112,6 +72,20 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     } else {
         b.clone()
     };
+
+    // Validate inner dimensions on the (possibly flattened) 3D tensors.
+    // This must run after batch flattening so shape indexing is unambiguous
+    // for ND inputs (e.g. 4D batched attention tensors).
+    let a_3d_shape = a_3d.shape_ref();
+    let b_3d_shape = b_3d.shape_ref();
+    let a_inner = a_3d_shape[a_3d_shape.len() - 1];
+    let b_inner = b_3d_shape[b_3d_shape.len() - 2];
+    if a_inner != b_inner {
+        panic!(
+            "matmul: inner dimension mismatch: A[..{}] @ B[..{}]",
+            a_inner, b_inner
+        );
+    }
 
     let a = &a_3d;
     let b = &b_3d;
