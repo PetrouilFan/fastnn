@@ -14,6 +14,17 @@ x = fnn.tensor([1.0, 2.0, 3.0, 4.0], [2, 2])
 print(x.shape)  # [2, 2]
 ```
 
+### From NumPy
+
+```python
+import numpy as np
+
+arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+x = fnn.from_numpy(arr)          # Direct from numpy
+# or equivalently:
+x = fnn.tensor(arr.flatten().tolist(), list(arr.shape))
+```
+
 ### Utility Functions
 
 ```python
@@ -105,6 +116,7 @@ y = x.softplus()      # Softplus
 y = x.hardswish()     # Hard swish
 y = x.softmax(dim=-1) # Softmax
 y = x.log_softmax(dim=-1)  # Log softmax
+y = x.mish()          # Mish
 ```
 
 ### Reduction Operations
@@ -120,6 +132,31 @@ mn = x.min(dim=1, keepdim=False)  # min along axis 1
 # Softmax
 sm = fnn.softmax(x, dim=-1)
 lsm = fnn.log_softmax(x, dim=-1)
+
+# Cumulative sum
+cs = fnn.cumsum(x, dim=0)      # [[1, 2], [4, 6]]
+```
+
+### Advanced Operations
+
+```python
+# Top-k values and indices
+values, indices = fnn.topk(x, k=2, dim=1)
+
+# Gather values along dimension
+result = fnn.gather(x, dim=1, index=indices)
+
+# Repeat tensor along dimensions
+y = x.repeat([2, 3])  # [4, 9]
+
+# Expand tensor (broadcast without copy)
+y = x.expand([10, 2, 3])
+
+# Slice along dimension
+y = fnn.slice(x, dim=0, start=0, end=2)
+
+# Error function
+y = fnn.erf(x)
 ```
 
 ### Reshaping
@@ -183,6 +220,16 @@ cond = fnn.tensor([1.0, 0.0, 1.0], [3])
 on_true = fnn.tensor([10.0, 20.0, 30.0], [3])
 on_false = fnn.tensor([0.0, 0.0, 0.0], [3])
 result = on_true.where_tensor(cond, on_false)  # [10.0, 0.0, 30.0]
+```
+
+### Fused Linear + Activation
+
+```python
+# Single-pass matmul + ReLU
+result = x.fused_linear_relu(weight, bias)
+
+# Single-pass matmul + GELU
+result = x.fused_linear_gelu(weight, bias)
 ```
 
 ### Einstein Summation
@@ -297,9 +344,12 @@ print(x_gpu.device)  # Device.Wgpu(0)
 x = fnn.randn([3, 4])
 arr = x.numpy()
 
-# Numpy to tensor
+# Numpy to tensor (recommended)
 import numpy as np
-arr = np.array([[1.0, 2.0], [3.0, 4.0]])
+arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+x = fnn.from_numpy(arr)
+
+# Alternative: via flatten + shape
 x = fnn.tensor(arr.flatten().tolist(), list(arr.shape))
 ```
 
