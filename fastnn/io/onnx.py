@@ -193,17 +193,17 @@ def import_onnx(
             params.append((f"{node.name}.running_var", var))
 
         elif op_type == "MaxPool":
-            config = get_pooling_config(node)
-            layer_info["kernel_size"] = config["kernel_size"]
-            layer_info["stride"] = config["stride"]
-            layer_info["padding"] = config["padding"]
+            pool_config = get_pooling_config(node)
+            layer_info["kernel_size"] = pool_config["kernel_size"]
+            layer_info["stride"] = pool_config["stride"]
+            layer_info["padding"] = pool_config["padding"]
 
         elif op_type == "AveragePool":
-            config = get_pooling_config(node)
+            pool_config = get_pooling_config(node)
             layer_info["type"] = "AvgPool"
-            layer_info["kernel_size"] = config["kernel_size"]
-            layer_info["stride"] = config["stride"]
-            layer_info["padding"] = config["padding"]
+            layer_info["kernel_size"] = pool_config["kernel_size"]
+            layer_info["stride"] = pool_config["stride"]
+            layer_info["padding"] = pool_config["padding"]
 
         elif op_type == "GlobalAveragePool":
             layer_info["type"] = "GlobalAvgPool"
@@ -815,9 +815,9 @@ def import_onnx(
         with open(fnn_path, "wb") as f:
             write_fnn_file_v3(f, header, params_v3, version=3)
     else:
-        # v2 format: all F32
+        # v2 format: all F32 (non-quantized ONNX import stays v2 for backward compat)
         with open(fnn_path, "wb") as f:
-            write_fnn_file(f, header, params)
+            write_fnn_file(f, header, params, version=2)
 
     # Get input/output shapes
     input_shape = None

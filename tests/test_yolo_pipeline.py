@@ -315,7 +315,7 @@ class TestBenchmarks:
             
             nodes = []
             for i in range(10):
-                node = helper.make_node("Relu", inputs=[f"X" if i == 0 else f"out_{i-1}"],
+                node = helper.make_node("Relu", inputs=["X" if i == 0 else f"out_{i-1}"],
                                         outputs=[f"out_{i}" if i < 9 else "Y"],
                                         name=f"relu_{i}")
                 nodes.append(node)
