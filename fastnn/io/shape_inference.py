@@ -347,7 +347,6 @@ def _infer_reshape(input_shapes, attrs, num_outputs):
 def _infer_flatten(input_shapes, attrs, num_outputs):
     """Flatten: (N, C, H, W) -> (N, C*H*W) or custom axis."""
     x_shape = input_shapes[0]
-    axis = attrs.get("axis", 1)
     outer = int(x_shape[0])
     inner = 1
     for d in x_shape[1:]:

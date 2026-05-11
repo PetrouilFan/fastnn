@@ -106,13 +106,17 @@ impl Module for Conv2d {
                     for h in 0..x_shape[2] {
                         for w in 0..x_shape[3] {
                             let src = ((b * x_shape[1] + c) * x_shape[2] + h) * x_shape[3] + w;
-                            let dst = ((b * x_shape[1] + c) * new_h + (h + pad_top)) * new_w + (w + pad_left);
+                            let dst = ((b * x_shape[1] + c) * new_h + (h + pad_top)) * new_w
+                                + (w + pad_left);
                             padded_data[dst as usize] = x_data[src as usize];
                         }
                     }
                 }
             }
-            (Tensor::from_vec(padded_data, vec![x_shape[0], x_shape[1], new_h, new_w]), Tensor::from_scalar(0.0f32))
+            (
+                Tensor::from_vec(padded_data, vec![x_shape[0], x_shape[1], new_h, new_w]),
+                Tensor::from_scalar(0.0f32),
+            )
         } else {
             (x.clone(), self.padding_scalar.clone())
         };
@@ -391,7 +395,9 @@ impl Module for Conv1d {
 
         // Reshape weight from 3D to 4D
         let w_shape = self.weight.shape_ref();
-        let w_4d = self.weight.reshape(vec![w_shape[0], w_shape[1], 1, w_shape[2]]);
+        let w_4d = self
+            .weight
+            .reshape(vec![w_shape[0], w_shape[1], 1, w_shape[2]]);
 
         // Use conv2d with padding=0 (since we pre-padded) and the user's stride/dilation
         let zero_pad = Tensor::from_scalar(0.0);
@@ -405,7 +411,7 @@ impl Module for Conv1d {
                 &w_4d,
                 bias_ref,
                 &self.stride_scalar,
-                &zero_pad,   // padding=0 (already pre-padded)
+                &zero_pad, // padding=0 (already pre-padded)
                 &self.dilation_scalar,
                 &Tensor::from_scalar(1.0), // groups
             ],

@@ -26,9 +26,10 @@ impl<T: PackedWord> QuantizedTensor<T> {
     /// Create a new quantized tensor from f32 data with block-wise quantization.
     pub fn from_f32_blockwise(data: &[f32], shape: &[usize], block_size: usize) -> Self {
         assert!(
-            block_size % T::ITEMS == 0,
+            block_size.is_multiple_of(T::ITEMS),
             "block_size ({}) must be a multiple of T::ITEMS ({}) for QuantizedTensor",
-            block_size, T::ITEMS
+            block_size,
+            T::ITEMS
         );
         let numel: usize = shape.iter().product();
         let n_blocks = numel.div_ceil(block_size);

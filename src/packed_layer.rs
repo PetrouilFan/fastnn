@@ -59,6 +59,16 @@ pub struct PackedLinear<T: PackedWord> {
 impl<T: PackedWord> PackedLinear<T> {
     /// Create a new packed linear layer with Kaiming initialization.
     pub fn new(in_features: usize, out_features: usize, use_bias: bool) -> Self {
+        assert!(
+            in_features > 0,
+            "PackedLinear: in_features must be > 0 (got {})",
+            in_features
+        );
+        assert!(
+            out_features > 0,
+            "PackedLinear: out_features must be > 0 (got {})",
+            out_features
+        );
         let numel = in_features * out_features;
         // Kaiming initialization
         let std = (2.0 / in_features as f32).sqrt();
@@ -127,12 +137,20 @@ impl<T: PackedWord> PackedLinear<T> {
         if self.training.load(std::sync::atomic::Ordering::Relaxed) {
             *self.cached_input.lock().unwrap() = Some(input.to_vec());
         }
-        assert_eq!(input.len(), self.in_features,
+        assert_eq!(
+            input.len(),
+            self.in_features,
             "PackedLinear::forward_into: input length {} != in_features {}",
-            input.len(), self.in_features);
-        assert_eq!(output.len(), self.out_features,
+            input.len(),
+            self.in_features
+        );
+        assert_eq!(
+            output.len(),
+            self.out_features,
             "PackedLinear::forward_into: output length {} != out_features {}",
-            output.len(), self.out_features);
+            output.len(),
+            self.out_features
+        );
         output.fill(0.0);
         cpu::gemv_cpu(&self.weight, input, output);
         if let Some(ref bias) = self.bias {
@@ -193,18 +211,24 @@ impl<T: PackedWord> PackedLinear<T> {
         let out_f = self.out_features;
         let in_f = self.in_features;
         let cached = self.cached_input.lock().unwrap();
-        let input = cached.as_ref().expect("backward called without forward pass");
+        let input = cached
+            .as_ref()
+            .expect("backward called without forward pass");
 
         // Compute input gradient: W^T @ grad_output
-        let grad_input = cpu::packed_linear_backward_input_cpu(
-            &self.weight, grad_output, input, out_f, in_f
-        );
+        let grad_input =
+            cpu::packed_linear_backward_input_cpu(&self.weight, grad_output, input, out_f, in_f);
 
         // Accumulate weight gradient: dL/dW = dL/dout ⊗ input
         // grad_output[j] * input[i] → master_grad[j * in_f + i] += ...
         let mut mg = self.master_grad.lock().unwrap();
         cpu::packed_linear_backward_weight_cpu(
-            &self.weight, grad_output, input, &mut mg, out_f, in_f
+            &self.weight,
+            grad_output,
+            input,
+            &mut mg,
+            out_f,
+            in_f,
         );
 
         grad_input
@@ -217,12 +241,14 @@ impl<T: PackedWord> PackedLinear<T> {
 
     /// Set training mode
     pub fn train_mode(&self) {
-        self.training.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.training
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set evaluation mode
     pub fn eval_mode(&self) {
-        self.training.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.training
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Check if in training mode
@@ -351,6 +377,25 @@ impl<T: PackedWord> PackedLinear<T> {
         let packed_bytes = self.packed_weight_bytes();
         f32_bytes as f32 / packed_bytes as f32
     }
+
+    /// Fused forward: linear → GELU, fused in one pass.
+    pub fn forward_gelu(&self, input: &[f32]) -> Vec<f32> {
+        let mut out = self.forward_cpu(input);
+        for v in out.iter_mut() {
+            let x = *v;
+            // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+            // erf approximation via Abramowitz & Stegun
+            let z = x * 0.707_106_77;
+            let t = 1.0 / (1.0 + 0.3275911 * z.abs());
+            let poly = ((((1.061_405_4 * t + -1.453_152_1) * t) + 1.421_413_8) * t + -0.284_496_72)
+                * t
+                + 0.254_829_6;
+            let erf = 1.0 - poly * (-z * z).exp();
+            let erf_sgn = if z >= 0.0 { erf } else { -erf };
+            *v = 0.5 * x * (1.0 + erf_sgn);
+        }
+        out
+    }
 }
 
 impl<T: PackedWord> Clone for PackedLinear<T> {
@@ -362,7 +407,7 @@ impl<T: PackedWord> Clone for PackedLinear<T> {
             cached_input: Mutex::new(None),
             master_grad: Mutex::new(self.master_grad.lock().unwrap().clone()),
             training: std::sync::atomic::AtomicBool::new(
-                self.training.load(std::sync::atomic::Ordering::Relaxed)
+                self.training.load(std::sync::atomic::Ordering::Relaxed),
             ),
             in_features: self.in_features,
             out_features: self.out_features,
@@ -425,5 +470,36 @@ mod tests {
         for (a, b) in orig.iter().zip(repacked.iter()) {
             assert!((a - b).abs() <= layer.weight.scale() + 0.01);
         }
+    }
+
+    #[test]
+    fn test_packed_linear_u4_non_multiple_feature_dim() {
+        let layer = PackedLinear::<U4x8>::new(7, 16, true);
+        assert_eq!(layer.in_features, 7);
+        assert_eq!(layer.out_features, 16);
+        let input = vec![1.0; 7];
+        let output = layer.forward_cpu(&input);
+        assert_eq!(output.len(), 16);
+        assert!(output.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_packed_linear_u8_non_multiple_feature_dim() {
+        let layer = PackedLinear::<U8x4>::new(10, 8, false);
+        let input = vec![0.5; 10];
+        let output = layer.forward_cpu(&input);
+        assert_eq!(output.len(), 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "in_features must be > 0")]
+    fn test_packed_linear_zero_in_features_panics() {
+        let _layer = PackedLinear::<F32x1>::new(0, 4, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "out_features must be > 0")]
+    fn test_packed_linear_zero_out_features_panics() {
+        let _layer = PackedLinear::<F32x1>::new(4, 0, true);
     }
 }

@@ -77,14 +77,18 @@ pub fn swar_max_u8x4(a: u32, b: u32) -> u32 {
 
     let a_even_biased = a_biased & U8_EVEN;
     let b_even_biased = b_biased & U8_EVEN;
-    let diff_even = a_even_biased.wrapping_add(U8_EVEN).wrapping_sub(b_even_biased);
+    let diff_even = a_even_biased
+        .wrapping_add(U8_EVEN)
+        .wrapping_sub(b_even_biased);
     let borrow_even = (diff_even >> 8) & 0x0001_0001;
     let mask_even = borrow_even * 0xFF;
     let result_even = ((a & U8_EVEN) & mask_even) | ((b & U8_EVEN) & !mask_even);
 
     let a_odd_biased = (a_biased >> 8) & U8_EVEN;
     let b_odd_biased = (b_biased >> 8) & U8_EVEN;
-    let diff_odd = a_odd_biased.wrapping_add(U8_EVEN).wrapping_sub(b_odd_biased);
+    let diff_odd = a_odd_biased
+        .wrapping_add(U8_EVEN)
+        .wrapping_sub(b_odd_biased);
     let borrow_odd = (diff_odd >> 8) & 0x0001_0001;
     let mask_odd = borrow_odd * 0xFF;
     let result_odd = ((((a >> 8) & U8_EVEN) & mask_odd) | (((b >> 8) & U8_EVEN) & !mask_odd)) << 8;
@@ -99,14 +103,18 @@ pub fn swar_min_u8x4(a: u32, b: u32) -> u32 {
 
     let a_even_biased = a_biased & U8_EVEN;
     let b_even_biased = b_biased & U8_EVEN;
-    let diff_even = b_even_biased.wrapping_add(U8_EVEN).wrapping_sub(a_even_biased);
+    let diff_even = b_even_biased
+        .wrapping_add(U8_EVEN)
+        .wrapping_sub(a_even_biased);
     let borrow_even = (diff_even >> 8) & 0x0001_0001;
     let mask_even = borrow_even * 0xFF;
     let result_even = ((a & U8_EVEN) & mask_even) | ((b & U8_EVEN) & !mask_even);
 
     let a_odd_biased = (a_biased >> 8) & U8_EVEN;
     let b_odd_biased = (b_biased >> 8) & U8_EVEN;
-    let diff_odd = b_odd_biased.wrapping_add(U8_EVEN).wrapping_sub(a_odd_biased);
+    let diff_odd = b_odd_biased
+        .wrapping_add(U8_EVEN)
+        .wrapping_sub(a_odd_biased);
     let borrow_odd = (diff_odd >> 8) & 0x0001_0001;
     let mask_odd = borrow_odd * 0xFF;
     let result_odd = ((((a >> 8) & U8_EVEN) & mask_odd) | (((b >> 8) & U8_EVEN) & !mask_odd)) << 8;
@@ -133,10 +141,10 @@ mod tests {
         let b = (10u32) | ((20u32) << 8) | ((200u32) << 16) | ((0xCEu32) << 24);
         let result = swar_max_u8x4(a, b);
         let bytes = result.to_le_bytes();
-        assert_eq!(bytes[0] as i8, 50);   // max(50, 10) = 50
-        assert_eq!(bytes[1] as i8, 20);   // max(-30, 20) = 20
-        assert_eq!(bytes[2] as i8, 100);  // max(100, -56) = 100
-        assert_eq!(bytes[3] as i8, -1);   // max(-1, -50) = -1
+        assert_eq!(bytes[0] as i8, 50); // max(50, 10) = 50
+        assert_eq!(bytes[1] as i8, 20); // max(-30, 20) = 20
+        assert_eq!(bytes[2] as i8, 100); // max(100, -56) = 100
+        assert_eq!(bytes[3] as i8, -1); // max(-1, -50) = -1
     }
 
     #[test]
@@ -145,10 +153,10 @@ mod tests {
         let b = (10u32) | ((20u32) << 8) | ((200u32) << 16) | ((0xCEu32) << 24);
         let result = swar_min_u8x4(a, b);
         let bytes = result.to_le_bytes();
-        assert_eq!(bytes[0] as i8, 10);   // min(50, 10) = 10
-        assert_eq!(bytes[1] as i8, -30);  // min(-30, 20) = -30
-        assert_eq!(bytes[2] as i8, -56);  // min(100, -56) = -56
-        assert_eq!(bytes[3] as i8, -50);  // min(-1, -50) = -50
+        assert_eq!(bytes[0] as i8, 10); // min(50, 10) = 10
+        assert_eq!(bytes[1] as i8, -30); // min(-30, 20) = -30
+        assert_eq!(bytes[2] as i8, -56); // min(100, -56) = -56
+        assert_eq!(bytes[3] as i8, -50); // min(-1, -50) = -50
     }
 
     #[test]

@@ -13,6 +13,29 @@ const TILED_K_THRESHOLD: usize = 4096;
 /// Generic GEMV (matrix × vector) on CPU using packed representation.
 #[inline(always)]
 pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], output: &mut [f32]) {
+    // ARM NEON dispatch for integer packed types on aarch64
+    #[cfg(all(target_arch = "aarch64", feature = "neon"))]
+    {
+        if T::BIT_WIDTH == 8 && !T::IS_FLOAT {
+            // SAFETY: U8x4 and T have the same packed word layout (u32-based).
+            // Transmuting PackedTensor<T> to PackedTensor<U8x4> is valid because
+            // the memory representation is identical — only the type parameter changes.
+            let w = unsafe {
+                &*(weights as *const PackedTensor<T> as *const PackedTensor<crate::dtypes::U8x4>)
+            };
+            crate::kernels::cpu::arm_neon::gemv_u8x4_neon(w, activation, output);
+            return;
+        }
+        if T::BIT_WIDTH == 4 && !T::IS_FLOAT {
+            // SAFETY: Same rationale as above — U4x8 and T share the same u32 layout.
+            let w = unsafe {
+                &*(weights as *const PackedTensor<T> as *const PackedTensor<crate::dtypes::U4x8>)
+            };
+            crate::kernels::cpu::arm_neon::gemv_u4x8_neon(w, activation, output);
+            return;
+        }
+    }
+
     let k = weights.shape()[1];
     if k > TILED_K_THRESHOLD {
         // Use cache-blocked tiled kernel for large K
@@ -34,6 +57,23 @@ pub fn gemm_cpu<T: PackedWord>(
     assert_eq!(batch_inputs.len(), outputs.len());
     // Use batched GEMM: unpack weights once, process all inputs
     super::packed_simd::gemm_packed_batched(weights, batch_inputs, outputs);
+}
+
+/// Batch GEMM: multiply packed weight matrix [M, K] by activation matrix [N, K],
+/// producing output [N, M]. All rows processed together for better cache utilization.
+///
+/// Tiles the K dimension so activation data stays in L2 cache across all M output rows.
+/// Dispatches to the SIMD batched kernel when available.
+#[inline(always)]
+pub fn gemm_batch_packed<T: PackedWord>(
+    weight: &PackedTensor<T>,
+    activations: &[f32], // [N, K] flat
+    output: &mut [f32],  // [N, M] flat
+    n: usize,            // batch size
+    k: usize,            // inner dim
+    m: usize,            // outer dim (output features)
+) {
+    super::packed_simd::gemm_batch_packed_simd(weight, activations, output, n, k, m);
 }
 
 /// Element-wise ReLU on a packed tensor using SWAR for ALL types.
@@ -171,9 +211,12 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
             {
                 use rayon::prelude::*;
                 if grad_raw.len() > 4096 {
-                    grad_raw.par_iter_mut().zip(pre_raw.par_iter()).for_each(|(g, p)| {
-                        *g = crate::swar::ops_4bit::swar_relu_backward_u4x8(*g, *p);
-                    });
+                    grad_raw
+                        .par_iter_mut()
+                        .zip(pre_raw.par_iter())
+                        .for_each(|(g, p)| {
+                            *g = crate::swar::ops_4bit::swar_relu_backward_u4x8(*g, *p);
+                        });
                     return;
                 }
             }
@@ -196,9 +239,12 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
             {
                 use rayon::prelude::*;
                 if grad_raw.len() > 4096 {
-                    grad_raw.par_iter_mut().zip(pre_raw.par_iter()).for_each(|(g, p)| {
-                        *g = crate::swar::ops_8bit::swar_relu_backward_u8x4(*g, *p);
-                    });
+                    grad_raw
+                        .par_iter_mut()
+                        .zip(pre_raw.par_iter())
+                        .for_each(|(g, p)| {
+                            *g = crate::swar::ops_8bit::swar_relu_backward_u8x4(*g, *p);
+                        });
                     return;
                 }
             }
@@ -211,9 +257,12 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
             {
                 use rayon::prelude::*;
                 if grad_raw.len() > 4096 {
-                    grad_raw.par_iter_mut().zip(pre_raw.par_iter()).for_each(|(g, p)| {
-                        *g = crate::swar::ops_16bit::swar_relu_backward_f16x2(*g, *p);
-                    });
+                    grad_raw
+                        .par_iter_mut()
+                        .zip(pre_raw.par_iter())
+                        .for_each(|(g, p)| {
+                            *g = crate::swar::ops_16bit::swar_relu_backward_f16x2(*g, *p);
+                        });
                     return;
                 }
             }
@@ -236,9 +285,12 @@ pub fn relu_backward_cpu<T: PackedWord>(grad: &mut PackedTensor<T>, pre_relu: &P
             {
                 use rayon::prelude::*;
                 if grad_raw.len() > 4096 {
-                    grad_raw.par_iter_mut().zip(pre_raw.par_iter()).for_each(|(g, p)| {
-                        *g = crate::swar::ops_32bit::swar_relu_backward_f32x1(*g, *p);
-                    });
+                    grad_raw
+                        .par_iter_mut()
+                        .zip(pre_raw.par_iter())
+                        .for_each(|(g, p)| {
+                            *g = crate::swar::ops_32bit::swar_relu_backward_f32x1(*g, *p);
+                        });
                     return;
                 }
             }
@@ -340,14 +392,14 @@ pub fn relu_fused_cpu<T: PackedWord>(tensor: &mut PackedTensor<T>, grad: &mut Pa
             for (d, g) in data_raw.iter_mut().zip(grad_raw.iter_mut()) {
                 let (relu_out, mask) = crate::swar::ops_4bit::swar_fused_relu_u4x8(*d);
                 *d = relu_out;
-                *g = *g & mask;
+                *g &= mask;
             }
         }
         (8, false) => {
             for (d, g) in data_raw.iter_mut().zip(grad_raw.iter_mut()) {
                 let (relu_out, mask) = crate::swar::ops_8bit::swar_fused_relu_u8x4(*d);
                 *d = relu_out;
-                *g = *g & mask;
+                *g &= mask;
             }
         }
         _ => {
@@ -446,7 +498,11 @@ pub fn max_cpu<T: PackedWord>(a: &PackedTensor<T>, b: &PackedTensor<T>) -> Packe
         _ => {
             let a_f32 = a.to_f32_vec();
             let b_f32 = b.to_f32_vec();
-            let r: Vec<f32> = a_f32.iter().zip(b_f32.iter()).map(|(x, y)| x.max(*y)).collect();
+            let r: Vec<f32> = a_f32
+                .iter()
+                .zip(b_f32.iter())
+                .map(|(x, y)| x.max(*y))
+                .collect();
             let scale = PackedTensor::<T>::compute_scale(&r);
             PackedTensor::from_f32_slice(&r, a.shape(), scale, 0.0)
         }
@@ -478,7 +534,11 @@ pub fn min_cpu<T: PackedWord>(a: &PackedTensor<T>, b: &PackedTensor<T>) -> Packe
         _ => {
             let a_f32 = a.to_f32_vec();
             let b_f32 = b.to_f32_vec();
-            let r: Vec<f32> = a_f32.iter().zip(b_f32.iter()).map(|(x, y)| x.min(*y)).collect();
+            let r: Vec<f32> = a_f32
+                .iter()
+                .zip(b_f32.iter())
+                .map(|(x, y)| x.min(*y))
+                .collect();
             let scale = PackedTensor::<T>::compute_scale(&r);
             PackedTensor::from_f32_slice(&r, a.shape(), scale, 0.0)
         }

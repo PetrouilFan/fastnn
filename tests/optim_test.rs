@@ -1,4 +1,4 @@
-use fastnn::optim::{Adam, AdamW, Lion, Muon, Optimizer, RMSprop, SGD, WeightDecayOptimizer};
+use fastnn::optim::{Adam, AdamW, Lion, Muon, Optimizer, RMSprop, WeightDecayOptimizer, SGD};
 use fastnn::tensor::Tensor;
 
 fn create_test_params() -> Vec<Tensor> {

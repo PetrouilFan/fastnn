@@ -367,12 +367,16 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let mut sum_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
             _mm256_storeu_ps(sum_arr.as_mut_ptr() as *mut f32, sum);
             let sum_arr = sum_arr.assume_init();
-            for &v in &sum_arr { total_sum += v as f64; }
+            for &v in &sum_arr {
+                total_sum += v as f64;
+            }
 
             let mut sum_sq_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
             _mm256_storeu_ps(sum_sq_arr.as_mut_ptr() as *mut f32, sum_sq);
             let sum_sq_arr = sum_sq_arr.assume_init();
-            for &v in &sum_sq_arr { total_sum_sq += v as f64; }
+            for &v in &sum_sq_arr {
+                total_sum_sq += v as f64;
+            }
 
             let mean = (total_sum / total_per_channel as f64) as f32;
             let var = (total_sum_sq / total_per_channel as f64) as f32 - mean * mean;

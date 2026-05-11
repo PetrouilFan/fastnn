@@ -1,6 +1,8 @@
 use crate::autograd::{make_edge, AutogradMeta, BatchNorm2dBackward, Conv2dBackward};
 use crate::dispatcher::{dispatch, DispatchKey};
+use crate::dtypes::PackedWord;
 use crate::nn::Module;
+use crate::packed_tensor::PackedTensor;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
@@ -182,7 +184,7 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
             ],
         )
         .expect("FusedConvBn::conv2d: dispatch failed")[0]
-        .clone();
+            .clone();
 
         let conv_out = if x.requires_grad() || self.conv_weight.requires_grad() {
             let edges = {
@@ -236,7 +238,7 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
             ],
         )
         .expect("FusedConvBn::batch_norm: dispatch failed")[0]
-        .clone();
+            .clone();
 
         let bn_out = if conv_out.requires_grad()
             || self.bn_weight.requires_grad()
@@ -336,6 +338,48 @@ pub type FusedConvBnGelu = FusedConvBn<GeluAct>;
 
 /// FusedConvBn (no activation) specific methods
 impl FusedConvBn<NoAct> {
+    /// Fold BatchNorm2d parameters into packed conv weights.
+    ///
+    /// Given Conv weight W and BN params (gamma, beta, mean, var, eps):
+    ///   W_fused[i] = W[i] * gamma[i] / sqrt(var[i] + eps)
+    ///   bias_fused[i] = beta[i] + (bias[i] - mean[i]) * gamma[i] / sqrt(var[i] + eps)
+    ///
+    /// For packed weights, dequantize to f32, fold BN, requantize per-channel.
+    pub fn fold_bn_into_packed_conv<T: PackedWord>(
+        conv_weight: &PackedTensor<T>,
+        conv_bias: Option<&[f32]>,
+        bn_weight: &[f32],
+        bn_bias: &[f32],
+        bn_mean: &[f32],
+        bn_var: &[f32],
+        eps: f32,
+    ) -> (PackedTensor<T>, Option<Vec<f32>>) {
+        let w_f32 = conv_weight.to_f32_vec();
+        let shape = conv_weight.shape().to_vec();
+        let out_channels = shape[0];
+        let inner = w_f32.len() / out_channels;
+
+        let mut w_fused = w_f32.clone();
+        let mut bias_fused: Vec<f32> = if let Some(b) = conv_bias {
+            b.to_vec()
+        } else {
+            vec![0.0; out_channels]
+        };
+
+        for oc in 0..out_channels {
+            let idx_oc = oc.min(bn_weight.len() - 1);
+            let scale = bn_weight[idx_oc] / (bn_var[idx_oc] + eps).sqrt();
+            for i in 0..inner {
+                w_fused[oc * inner + i] *= scale;
+            }
+            bias_fused[oc] = bn_bias[idx_oc] + (bias_fused[oc] - bn_mean[idx_oc]) * scale;
+        }
+
+        let packed = PackedTensor::from_f32_per_channel(&w_fused, &shape);
+
+        (packed, Some(bias_fused))
+    }
+
     /// Fuse parameters from separate Conv2d and BatchNorm2d layers
     pub fn from_conv_bn(conv: &crate::nn::conv::Conv2d, bn: &crate::nn::norm::BatchNorm2d) -> Self {
         let stride = conv.stride;

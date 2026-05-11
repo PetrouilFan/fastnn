@@ -1,12 +1,12 @@
 # fastnn
 
-**fastnn** is a high-performance neural network library built from scratch in Rust, with seamless Python bindings. It is designed to be a drop-in PyTorch replacement for CPU-based deep learning — achieving **14–25× speedup over PyTorch** on common Conv+BN+Activation pipelines, and up to **7.4× faster GEMV with 8× memory savings** via native packed precision.
+**fastnn** is a high-performance neural network library built from scratch in Rust, with seamless Python bindings. It is designed to be a drop-in PyTorch replacement for CPU-based deep learning — achieving **14–25× speedup over PyTorch** on common Conv+BN+Activation pipelines, up to **7.4× faster GEMV with 8× memory savings** via native packed precision, with **quantized ONNX runtime support** for Q/DQ, QLinearConv, and MatMulInteger ops, plus **ARM NEON SIMD** and **batch GEMM** acceleration for packed inference.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
 [![Rust: stable](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
 
-> **Version:** v1.2.0 — Fused kernel optimizations & performance overhaul
+> **Version:** v1.3.0 — Packed precision expansion, quantized ONNX, fused packed layers, batch GEMM, ARM NEON & WGPU packed conv
 
 ---
 
@@ -147,12 +147,46 @@ The entire core — tensor operations, autograd, convolutions, optimizers — is
 - **Vectorized CPU kernels** — Runtime-dispatched SIMD: AVX-512 → AVX2 → NEON → scalar fallback. Cephes-style fast approximations for `exp`, `log`
 - **Fast GEMM** — Pure-Rust matrix multiplication via `matrixmultiply`: **88 GFLOP/s** at 1024×1024
 - **Autograd engine** — Built-in automatic differentiation with operation tracking and `no_grad` context
-- **Convolutions** — Conv1d, Conv2d, Conv3d, ConvTranspose2d with im2col and specialized 1×1, 3×3, and depthwise kernels
-- **Fused layers** — `FusedConvBn`, `FusedConvBnReLU`, `FusedConvBnGELU`, `LayerNorm+GELU`, `RMSNorm+GELU`
+- **Convolutions** — Conv1d, Conv2d, Conv3d, ConvTranspose2d with im2col and specialized 1×1, 3×3, and depthwise kernels; packed dispatch for MatMul, ConvTranspose, Embedding
+- **Fused layers** — `FusedConvBn`, `FusedConvBnReLU`, `FusedConvBnGELU`, `PackedConvRelu`, `PackedLinearGelu`, `LayerNorm+GELU`, `RMSNorm+GELU`; BN folding into packed conv
 - **Optimizers** — SGD, Adam, AdamW, Muon, Lion, RMSprop with fused update steps
 - **Data loading** — Multi-threaded DataLoader with automatic resource tuning and prefetch
-- **GPU acceleration** *(experimental)* — Cross-platform compute via [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12)
-- **ONNX model import** — Load and run models from PyTorch, YOLO, and other frameworks (46 ops supported)
+- **GPU acceleration** *(experimental)* — Cross-platform compute via [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12); WGPU packed convolution compute shader
+- **ONNX model import** — Load and run models from PyTorch, YOLO, and other frameworks (50 ops supported); Q/DQ folding, NonZero, Unique, Tril, Triu, Pad v2
+- **Calibration & profiling** — `ActivationCalibrator` for activation statistics with KL-divergence scale refinement; `PrecisionProfiler` for per-layer sensitivity analysis and automatic mixed-precision configuration
+
+---
+
+## New Features (feat/precision-system)
+
+### Quantized Dispatch
+
+- **Packed dispatch for additional ops** — `MatMul`, `ConvTranspose`, and `Embedding` operations now support packed (U4/U8) weight dispatch through the DAG executor, falling back to f32 when weights aren't packed.
+- **QuantizeLinear / DequantizeLinear** — ONNX-standard quantization operators (`OpCode::QuantizeLinear`, `OpCode::DequantizeLinear`) for DAG execution, enabling quantized runtime with scale+round+clamp quantization and (v−zp)×scale dequantization.
+- **QLinearConv / MatMulInteger** — Quantized integer matrix ops: `QLinearConv` dequantizes quantized input and weight, runs f32 conv, and requantizes the output; `MatMulInteger` dequantizes both quantized inputs and runs f32 matmul.
+
+### ONNX Import
+
+- **Q/DQ folding** — The ONNX importer (`onnx.py`) detects `QuantizeLinear → DequantizeLinear` patterns around `Conv`/`MatMul` nodes and folds them, converting weights to packed storage during import for zero-cost quantized inference.
+- **4 new ONNX ops** — `NonZero`, `Unique`, `Tril`, `Triu`.
+- **Pad v2** — Tensor-based pad sizes with 4 padding modes (constant, reflect, replicate, edge).
+
+### Calibration & Profiling
+
+- **`ActivationCalibrator`** (`fastnn.io.act_calibrate`) — Runs calibration data through the model, collects per-layer activation distributions, and refines quantization scales using weighted KL-divergence (NVIDIA's method). Integrates with the existing `Calibrator` infrastructure and `fastnn-convert` CLI.
+- **`PrecisionProfiler`** (`fastnn.io.profiler`) — Per-layer sensitivity analysis: quantizes each layer in isolation, measures output MSE perturbation, and sorts by sensitivity. `auto_config()` generates a `PrecisionConfig` that assigns U4 to least-sensitive layers, U8 to mid, and F32 to most-sensitive given a target memory budget.
+
+### Fused Layers
+
+- **`PackedConvRelu`** — Standalone fused packed convolution + in-place ReLU in all 4 precisions (U4/U8/U16/F32), exposed via Python.
+- **`PackedLinearGelu`** — Fused packed linear + GELU with Abramowitz & Stegun erf approximation, all 4 precisions.
+- **BN folding** — `fold_bn_into_packed_conv()` dequantizes packed weights to f32, applies `W_fused = W × γ / √(σ² + ε)`, and requantizes per-channel — enabling BN fusion in quantized conv layers.
+
+### Performance Kernels
+
+- **Batch GEMM for packed MatMul** — K-tiled batch GEMM (`gemm_batch_packed()`) processes all batch rows within each K-tile before moving to the next, improving L2 cache reuse significantly (~5–6× speedup over per-row GEMV).
+- **ARM NEON SIMD** — `gemv_u4x8_neon()` and `gemv_u8x4_neon()` kernels using full SIMD widening chain (int8 → int16 → int32 → f32 → FMA) for aarch64 targets. Gated behind a `neon` feature flag in `Cargo.toml`.
+- **WGPU packed conv** — Experimental `conv_packed.wgsl` compute shader implementing packed convolution on GPU with per-channel scaling and bias, plus full Rust scaffolding (`conv2d_packed_wgpu()`) for pipeline creation, buffer management, and dispatch.
 
 ---
 
@@ -208,7 +242,8 @@ The full API reference is maintained in [`docs/api-reference.md`](docs/api-refer
 - **Learning rate schedulers** — `StepLR`, `CosineAnnealingLR`, `ExponentialLR`, `ReduceLROnPlateau`
 - **Data** — `Dataset`, `TensorDataset`, `DataLoader` (with multi-threaded auto-tuning)
 - **Model I/O** — `save`, `load`, `convert_from_pytorch`, `convert_from_onnx`, `load_state_dict`
-- **Packed precision Python API** — `Linear4/8/16/32`, `PackedTensor4/8/16/32`, `MasterWeightOptimizer4/8/16/32`
+- **Packed precision Python API** — `Linear4/8/16/32`, `PackedConvRelu`, `PackedLinearGelu`, `PackedTensor4/8/16/32`, `MasterWeightOptimizer4/8/16/32`
+- **Calibration & profiling** — `ActivationCalibrator` (KL-divergence scale refinement), `PrecisionProfiler` (per-layer sensitivity analysis, automatic mixed-precision config)
 - **Utilities** — `no_grad`, `set_seed`, `set_num_threads`, `set_default_device`, `clip_grad_norm_`, `clip_grad_value_`, `flash_attention`
 
 ---
@@ -247,6 +282,7 @@ cargo bench --bench packed_bench
 - [x] v1.0 — Core tensor ops, autograd, Conv2d, optimizers, PyTorch export
 - [x] v1.1 — Packed precision, SWAR ops, GPU backend, modular architecture
 - [x] v1.2 — Fused kernels (Conv+BN+Activation, LayerNorm+GELU), ONNX import, YOLO support
+- [x] v1.3 — Packed precision expansion, quantized ONNX, fused packed layers, batch GEMM, ARM NEON, WGPU packed conv
 - [ ] FlashAttention SIMD optimization (AVX2/AVX512 block kernels)
 - [ ] Raspberry Pi benchmark suite (ARM NEON validation)
 - [ ] Multi-GPU training via wgpu

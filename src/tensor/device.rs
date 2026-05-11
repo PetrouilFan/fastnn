@@ -1,7 +1,7 @@
 use crate::storage::{CpuStorage, DType, Device, GpuStorage, Storage};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use super::{Tensor, TensorImpl};
 
@@ -59,12 +59,11 @@ impl TensorImpl {
                         let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
                         slice.iter().map(|&v| f32::from(v)).collect()
                     }
-                    DType::Bool => {
-                        data[self.storage_offset as usize..self.storage_offset as usize + numel]
-                            .iter()
-                            .map(|&v| if v != 0 { 1.0 } else { 0.0 })
-                            .collect()
-                    }
+                    DType::Bool => data
+                        [self.storage_offset as usize..self.storage_offset as usize + numel]
+                        .iter()
+                        .map(|&v| if v != 0 { 1.0 } else { 0.0 })
+                        .collect(),
                 };
 
                 // Convert f32 to target dtype
@@ -99,7 +98,9 @@ impl TensorImpl {
                         for (i, &v) in f32_data.iter().enumerate() {
                             // SAFETY: `dst` points to a valid `new_bytes` allocation of sufficient
                             // size, and `i` is within bounds (0..numel).
-                            unsafe { *dst.add(i) = half::f16::from_f32(v); }
+                            unsafe {
+                                *dst.add(i) = half::f16::from_f32(v);
+                            }
                         }
                     }
                     DType::BF16 => {
@@ -107,7 +108,9 @@ impl TensorImpl {
                         for (i, &v) in f32_data.iter().enumerate() {
                             // SAFETY: `dst` points to a valid `new_bytes` allocation of sufficient
                             // size, and `i` is within bounds (0..numel).
-                            unsafe { *dst.add(i) = half::bf16::from_f32(v); }
+                            unsafe {
+                                *dst.add(i) = half::bf16::from_f32(v);
+                            }
                         }
                     }
                     DType::Bool => {
@@ -196,9 +199,10 @@ impl Tensor {
 
     pub fn to_cpu(&self) -> Tensor {
         match self.inner.storage.as_ref() {
-            Storage::Cpu(_) => {
-                Tensor::new(self.inner.new_on_device(self.inner.storage.clone(), Device::Cpu))
-            }
+            Storage::Cpu(_) => Tensor::new(
+                self.inner
+                    .new_on_device(self.inner.storage.clone(), Device::Cpu),
+            ),
             Storage::Wgpu(gpu) => {
                 use crate::kernels::gpu::get_context;
                 let ctx = get_context(gpu.device_id);

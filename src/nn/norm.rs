@@ -193,8 +193,8 @@ impl Module for BatchNorm1d {
         let running_var = self.running_var.read().clone();
 
         let grads_needed = x.requires_grad()
-            || self.weight.as_ref().map_or(false, |w| w.requires_grad())
-            || self.bias.as_ref().map_or(false, |b| b.requires_grad());
+            || self.weight.as_ref().is_some_and(|w| w.requires_grad())
+            || self.bias.as_ref().is_some_and(|b| b.requires_grad());
 
         // Compute batch stats for backward (before running stats update modifies them)
         let (batch_mean, batch_var) = if is_training {
@@ -282,8 +282,12 @@ impl Module for BatchNorm1d {
             };
             let backward = BatchNorm1dBackward::new(
                 x.clone(),
-                self.weight.clone().unwrap_or_else(|| Tensor::from_scalar(1.0)),
-                self.bias.clone().unwrap_or_else(|| Tensor::from_scalar(0.0)),
+                self.weight
+                    .clone()
+                    .unwrap_or_else(|| Tensor::from_scalar(1.0)),
+                self.bias
+                    .clone()
+                    .unwrap_or_else(|| Tensor::from_scalar(0.0)),
                 batch_mean,
                 batch_var,
                 self.eps as f32,
@@ -607,19 +611,20 @@ impl Module for BatchNorm2d {
         let running_var = self.running_var.read().clone();
 
         // Compute batch stats (used for backward in training mode, or empty tensors as placeholders)
-        let (batch_mean, batch_var) = if is_training && (x.requires_grad() || self.weight.requires_grad()) {
-            let x_shape = x.shape_ref();
-            let batch = x_shape[0];
-            let channels = x_shape[1];
-            let spatial: i64 = x_shape[2..].iter().product();
-            let x_reshaped = x.reshape(vec![batch, channels, spatial]);
-            let b_mean = x_reshaped.mean(2, false).mean(0, false);
-            let centered = x_reshaped.sub(&b_mean.reshape(vec![1, channels, 1]));
-            let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
-            (b_mean, b_var)
-        } else {
-            (running_mean.clone(), running_var.clone())
-        };
+        let (batch_mean, batch_var) =
+            if is_training && (x.requires_grad() || self.weight.requires_grad()) {
+                let x_shape = x.shape_ref();
+                let batch = x_shape[0];
+                let channels = x_shape[1];
+                let spatial: i64 = x_shape[2..].iter().product();
+                let x_reshaped = x.reshape(vec![batch, channels, spatial]);
+                let b_mean = x_reshaped.mean(2, false).mean(0, false);
+                let centered = x_reshaped.sub(&b_mean.reshape(vec![1, channels, 1]));
+                let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
+                (b_mean, b_var)
+            } else {
+                (running_mean.clone(), running_var.clone())
+            };
 
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
         let result = crate::dispatcher::dispatch(

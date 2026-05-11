@@ -975,12 +975,14 @@ pub struct DAGExecutor {
 #[pymethods]
 impl DAGExecutor {
     #[new]
-    #[pyo3(signature = (nodes, params, input_names, output_names))]
+    #[pyo3(signature = (nodes, params, input_names, output_names, packed_params = None))]
+    #[allow(clippy::type_complexity)]
     fn new(
         nodes: Vec<HashMap<String, String>>,
         params: HashMap<String, PyTensor>,
         input_names: Vec<String>,
         output_names: Vec<String>,
+        packed_params: Option<HashMap<String, (Vec<u8>, Vec<usize>, u8, Vec<f64>, Vec<f64>)>>,
     ) -> Self {
         let dag_nodes: Vec<core_nn::dag::DAGNode> = nodes
             .into_iter()
@@ -1025,8 +1027,44 @@ impl DAGExecutor {
             .into_iter()
             .map(|(k, v)| (k, v.inner))
             .collect();
-        DAGExecutor {
-            inner: core_nn::dag::DAGExecutor::new(dag_nodes, rust_params, input_names, output_names),
+
+        if let Some(pk) = packed_params {
+            let rust_packed: HashMap<String, core_nn::dag::WeightStorage> = pk
+                .into_iter()
+                .map(|(k, (raw_data, shape, dtype, scales, zeros))| {
+                    let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
+                    let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
+                    let storage = match dtype {
+                        1 => {
+                            let data: Vec<F16x2> = bytemuck::cast_slice(&raw_data).to_vec();
+                            core_nn::dag::WeightStorage::F16(crate::packed_tensor::PackedTensor::from_raw(data, shape, scales_f32, zeros_f32))
+                        }
+                        2 => {
+                            let data: Vec<U8x4> = bytemuck::cast_slice(&raw_data).to_vec();
+                            core_nn::dag::WeightStorage::U8(crate::packed_tensor::PackedTensor::from_raw(data, shape, scales_f32, zeros_f32))
+                        }
+                        3 => {
+                            let data: Vec<U4x8> = bytemuck::cast_slice(&raw_data).to_vec();
+                            core_nn::dag::WeightStorage::U4(crate::packed_tensor::PackedTensor::from_raw(data, shape, scales_f32, zeros_f32))
+                        }
+                        _ => core_nn::dag::WeightStorage::F32,
+                    };
+                    (k, storage)
+                })
+                .collect();
+            DAGExecutor {
+                inner: core_nn::dag::DAGExecutor::with_packed(
+                    dag_nodes,
+                    rust_params,
+                    rust_packed,
+                    input_names,
+                    output_names,
+                ),
+            }
+        } else {
+            DAGExecutor {
+                inner: core_nn::dag::DAGExecutor::new(dag_nodes, rust_params, input_names, output_names),
+            }
         }
     }
 

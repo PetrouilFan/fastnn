@@ -118,10 +118,63 @@ def build_dag_model(header: dict, path: str) -> Any:
     """
     import fastnn as fnn
 
-    # Load parameters from file
+    # Load parameters from file (version-aware)
     with open(path, "rb") as f:
-        _, _, _, num_params = read_fnn_header(f)
-        params = read_fnn_parameters(f, num_params)
+        _, file_version, _, num_params = read_fnn_header(f)
+        raw_params = read_fnn_parameters(f, num_params, version=file_version)
+
+    # Unpack v3 format if needed: convert (data, dtype, scales, zeros) tuples -> tensors + packed_params
+    from fastnn.io import DTYPE_F32, DTYPE_U4, DTYPE_U8, DTYPE_F16
+    params = {}
+    packed_params_dict = {}
+    for name, value in raw_params.items():
+        if isinstance(value, tuple) and len(value) == 4:
+            data, dtype, scales, zeros = value
+            if dtype == DTYPE_F32:
+                # F32: data is numpy array
+                params[name] = fnn.tensor(data, list(data.shape))
+            else:
+                # Packed: store BOTH f32 dequantized version (for DAG fallback)
+                # AND packed raw data for WeightStorage dispatch
+                dtype_map = {
+                    DTYPE_U4: "u4",
+                    DTYPE_U8: "u8",
+                    DTYPE_F16: "f16",
+                }
+                dtype_str = dtype_map.get(dtype, "f32")
+                packed_cls = {
+                    "u4": fnn.PackedTensor4,
+                    "u8": fnn.PackedTensor8,
+                    "f16": fnn.PackedTensor16,
+                }[dtype_str]
+
+                shape = list(data.shape) if hasattr(data, 'shape') else []
+
+                # Reconstruct packed tensor to get shape info
+                packed = packed_cls.from_bytes(bytes(data), shape,
+                                                list(scales), list(zeros))
+                f32_data = packed.to_f32_vec()
+
+                # Store f32 tensor for DAG fallback
+                params[name] = fnn.tensor(f32_data, shape)
+
+                # Store packed raw data for WeightStorage native dispatch
+                if shape:
+                    # Shape must be known for WeightStorage
+                    weight_shape = shape
+                else:
+                    # Infer from packed tensor
+                    weight_shape = list(packed.shape())
+                packed_params_dict[name] = (
+                    bytes(data),         # raw packed bytes
+                    weight_shape,        # shape list
+                    dtype,               # dtype tag (2=U8, 3=U4, 1=F16)
+                    list(scales),        # scales
+                    list(zeros),         # zeros
+                )
+        else:
+            # v2 format: value is already a numpy array
+            params[name] = fnn.tensor(value, list(value.shape))
 
     graph = header.get("graph", {})
     onnx_nodes = graph.get("nodes", [])
@@ -130,7 +183,6 @@ def build_dag_model(header: dict, path: str) -> Any:
 
     # Build param name mapping: ONNX initializer names -> {node_name}.{param_type}
     # Bridges the gap between ONNX node input references and how import_onnx stores params.
-    OP_PARAM_SUFFIXES = [".weight", ".bias", ".running_mean", ".running_var", ".value", ".scale", ".beta", ".gamma"]
     # Known op-type to suffix mapping (positional)
     OP_PARAM_MAP = {
         "Conv": [".weight", ".bias"],
@@ -239,8 +291,12 @@ def build_dag_model(header: dict, path: str) -> Any:
         if init_name not in fnn_params and param_name in fnn_params:
             fnn_params[init_name] = fnn_params[param_name]
 
-    # Build the Rust DAGExecutor
-    executor = fnn.DAGExecutor(dag_nodes, fnn_params, input_names, output_names)
+    # Build the Rust DAGExecutor (with packed params for type-aware dispatch)
+    packed_params_kwargs = packed_params_dict if packed_params_dict else None
+    executor = fnn.DAGExecutor(
+        dag_nodes, fnn_params, input_names, output_names,
+        packed_params=packed_params_kwargs,
+    )
     return executor
 
 
