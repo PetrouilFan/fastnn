@@ -93,7 +93,6 @@ class YOLO:
             # Detect model type from output shape
             output_shape = info.get("output_shape", [])
             if len(output_shape) >= 3:
-                num_detections = output_shape[1] if len(output_shape) > 1 else output_shape[0]
                 num_channels = output_shape[-1]
                 logger.info("Output shape: %s, %d channels", output_shape, num_channels)
 

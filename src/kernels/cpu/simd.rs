@@ -1274,7 +1274,10 @@ pub unsafe fn abs_parallel_avx512(
     let mut i = start;
     while i + 16 <= end {
         let a = _mm512_loadu_ps((a_usize + i * 4) as *const f32);
-        _mm512_storeu_ps((out_usize + i * 4) as *mut f32, _mm512_andnot_ps(sign_mask, a));
+        _mm512_storeu_ps(
+            (out_usize + i * 4) as *mut f32,
+            _mm512_andnot_ps(sign_mask, a),
+        );
         i += 16;
     }
 }
@@ -1814,8 +1817,8 @@ pub unsafe fn fast_exp_avx2(x: __m256) -> __m256 {
     // Coefficients computed via iterative reweighted least squares (minimax optimization)
     // Max relative error: ~8e-8 (< 1 ULP for f32)
     let p0 = _mm256_set1_ps(1.990_696_6e-4_f32);
-    let p1 = _mm256_set1_ps(1.393_937_0e-3_f32);
-    let p2 = _mm256_set1_ps(8.333_279_8e-3_f32);
+    let p1 = _mm256_set1_ps(1.393_937e-3_f32);
+    let p2 = _mm256_set1_ps(8.333_28e-3_f32);
     let p3 = _mm256_set1_ps(4.166_636_2e-2_f32);
     let p4 = _mm256_set1_ps(1.666_666_7e-1_f32);
     let p5 = _mm256_set1_ps(5.0e-1_f32);

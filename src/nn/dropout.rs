@@ -115,7 +115,8 @@ impl Module for Dropout2d {
                 }
             }
 
-            let channel_mask = Tensor::from_vec(channel_mask_data, vec![batch as i64, channels as i64, 1, 1]);
+            let channel_mask =
+                Tensor::from_vec(channel_mask_data, vec![batch as i64, channels as i64, 1, 1]);
             let mut out = x.mul(&channel_mask);
 
             if x.requires_grad() {

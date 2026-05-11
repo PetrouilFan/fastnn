@@ -39,8 +39,7 @@ thread_local! {
 #[cfg(debug_assertions)]
 fn check_gradient_validity(tensor: &Tensor, context: &str) {
     if let Some(data) = tensor.inner.cpu_data() {
-
-// SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
+        // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
         let f32_data: &[f32] = unsafe {
             std::slice::from_raw_parts(
                 data.as_ptr() as *const f32,

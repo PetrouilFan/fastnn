@@ -24,8 +24,11 @@ macro_rules! impl_stateless_activation {
 
         impl Module for $name {
             fn forward(&self, x: &Tensor) -> Tensor {
-                let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x])
-                    .expect(concat!("Activation::forward: ", $dispatch_name, " dispatch failed"));
+                let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x]).expect(concat!(
+                    "Activation::forward: ",
+                    $dispatch_name,
+                    " dispatch failed"
+                ));
                 result[0].clone()
             }
 

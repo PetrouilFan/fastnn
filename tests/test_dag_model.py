@@ -664,7 +664,7 @@ class TestRotaryEmbedding:
 
     def test_rope_rotation(self):
         """With cos=0, sin=1 along dim pairs, verify rotation."""
-        batch, seq_len, num_heads, head_dim = 1, 2, 1, 4
+        _, seq_len, _, head_dim = 1, 2, 1, 4
         q = np.array([[[[1.0, 0.0, 0.0, 0.0]]]], dtype=np.float32)  # [1,2,1,4]
         k = np.array([[[[0.0, 1.0, 0.0, 0.0]]]], dtype=np.float32)
         # sin with alternating pattern: [0,1,0,1,...] at each position

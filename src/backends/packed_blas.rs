@@ -121,7 +121,11 @@ pub fn gemv_packed_tiled<T: PackedWord>(
 
         for row in 0..m {
             output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
-            debug_assert_eq!(weights.zero_for_row(row), 0.0, "Non-zero zero_point not yet supported in GEMV kernels");
+            debug_assert_eq!(
+                weights.zero_for_row(row),
+                0.0,
+                "Non-zero zero_point not yet supported in GEMV kernels"
+            );
         }
     });
 }
@@ -176,8 +180,7 @@ fn micro_kernel<T: PackedWord>(
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+            // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
             unsafe {
                 micro_kernel_avx2(row_bufs, activation, output, k_block);
             }
@@ -202,7 +205,6 @@ fn micro_kernel<T: PackedWord>(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-
 // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
 unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [f32], k: usize) {
     let mut acc0 = _mm256_setzero_ps();
@@ -218,9 +220,18 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
         if kk + 32 < k {
             _mm_prefetch(activation.as_ptr().add(kk + 32) as *const i8, _MM_HINT_T0);
             _mm_prefetch(row_bufs.as_ptr().add(kk + 32) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(row_bufs.as_ptr().add(KC + kk + 32) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(row_bufs.as_ptr().add(2 * KC + kk + 32) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(row_bufs.as_ptr().add(3 * KC + kk + 32) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(
+                row_bufs.as_ptr().add(KC + kk + 32) as *const i8,
+                _MM_HINT_T0,
+            );
+            _mm_prefetch(
+                row_bufs.as_ptr().add(2 * KC + kk + 32) as *const i8,
+                _MM_HINT_T0,
+            );
+            _mm_prefetch(
+                row_bufs.as_ptr().add(3 * KC + kk + 32) as *const i8,
+                _MM_HINT_T0,
+            );
         }
 
         let act = _mm256_loadu_ps(activation.as_ptr().add(kk));
@@ -306,26 +317,26 @@ pub fn gemv_u8x4_tiled(
                     let packed_end = k_end.div_ceil(4);
 
                     for p in packed_start..packed_end {
-                            let w = weights_u32[row_off + p];
-                            let base = p * 4;
-                            if base >= k_offset && base + 4 <= k_end {
-
-// SAFETY: The offset stays within the bounds of the allocated storage. No aliasing mutable reference exists.
-                                unsafe {
-                                    unpack_u8x4_sse4(
-                                        w,
-                                        row_bufs.as_mut_ptr().add(row_start + (base - k_offset)),
-                                    );
-                                }
-                            } else {
-                                let bytes = w.to_le_bytes();
-                                for j in 0..4 {
-                                    let idx = base + j;
-                                    if idx >= k_offset && idx < k_end {
-                                        row_bufs[row_start + (idx - k_offset)] = (bytes[j] as i8) as f32;
-                                    }
+                        let w = weights_u32[row_off + p];
+                        let base = p * 4;
+                        if base >= k_offset && base + 4 <= k_end {
+                            // SAFETY: The offset stays within the bounds of the allocated storage. No aliasing mutable reference exists.
+                            unsafe {
+                                unpack_u8x4_sse4(
+                                    w,
+                                    row_bufs.as_mut_ptr().add(row_start + (base - k_offset)),
+                                );
+                            }
+                        } else {
+                            let bytes = w.to_le_bytes();
+                            for j in 0..4 {
+                                let idx = base + j;
+                                if idx >= k_offset && idx < k_end {
+                                    row_bufs[row_start + (idx - k_offset)] =
+                                        (bytes[j] as i8) as f32;
                                 }
                             }
+                        }
                     }
                 }
 
@@ -333,8 +344,7 @@ pub fn gemv_u8x4_tiled(
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                        // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                         unsafe {
                             micro_kernel_avx2(
                                 row_bufs,
@@ -439,7 +449,7 @@ pub fn gemv_f16x2_tiled(
                         }
                     }
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                    // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                     unsafe {
                         micro_kernel_avx2(
                             row_bufs,
@@ -526,11 +536,15 @@ pub fn gemv_u4x8_tiled(
                         while p < packed_end {
                             let base = p * 8;
                             if p + 1 < packed_end && base + 16 <= k_end {
-
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                                // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                                 unsafe {
                                     unpack_u4x8_wordpair_simd(
-                                        weights_u32, row_off, p, row_bufs, row_start, k_offset,
+                                        weights_u32,
+                                        row_off,
+                                        p,
+                                        row_bufs,
+                                        row_start,
+                                        k_offset,
                                     );
                                 }
                                 p += 2;
@@ -553,7 +567,7 @@ pub fn gemv_u4x8_tiled(
                         }
                     }
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+                    // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                     unsafe {
                         micro_kernel_avx2(
                             row_bufs,
@@ -683,7 +697,6 @@ fn scalar_micro_kernel(row_bufs: &[f32], activation: &[f32], output: &mut [f32],
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 #[inline]
-
 // SAFETY: The pointers are valid and properly aligned for SIMD access. Loop bounds prevent out-of-bounds access.
 unsafe fn hsum256_ps(v: __m256) -> f32 {
     let hi128 = _mm256_extractf128_ps(v, 1);
@@ -703,7 +716,6 @@ unsafe fn hsum256_ps(v: __m256) -> f32 {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "sse4.1")]
 #[inline]
-
 // SAFETY: The pointers are valid and properly aligned for SIMD access. Loop bounds prevent out-of-bounds access.
 unsafe fn unpack_u8x4_sse4(w: u32, dst: *mut f32) {
     let wvec = _mm_cvtsi32_si128(w as i32);
@@ -716,7 +728,6 @@ unsafe fn unpack_u8x4_sse4(w: u32, dst: *mut f32) {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-
 // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe fn unpack_u4x8_wordpair_simd(
     weights_u32: &[u32],
@@ -748,7 +759,10 @@ unsafe fn unpack_u4x8_wordpair_simd(
 
     let base = p * 8;
     _mm256_storeu_ps(row_bufs.as_mut_ptr().add(row_start + (base - k_offset)), f0);
-    _mm256_storeu_ps(row_bufs.as_mut_ptr().add(row_start + (base + 8 - k_offset)), f1);
+    _mm256_storeu_ps(
+        row_bufs.as_mut_ptr().add(row_start + (base + 8 - k_offset)),
+        f1,
+    );
 }
 
 // ============================================================

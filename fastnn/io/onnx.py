@@ -15,7 +15,11 @@ import numpy as np
 if TYPE_CHECKING:
     import onnx
 
-from fastnn.io import MODEL_MAGIC, MODEL_VERSION, _pack_u32, _pack_u64, write_tensor, write_fnn_file
+from fastnn.io import (
+    MODEL_MAGIC, MODEL_VERSION, _pack_u32, _pack_u64, _pack_u8,
+    write_tensor, write_tensor_v3, write_fnn_file, write_fnn_file_v3,
+    DTYPE_F32, DTYPE_F16, DTYPE_U8, DTYPE_U4,
+)
 
 __all__ = ["import_onnx"]
 
@@ -61,12 +65,19 @@ def _get_attr(node: "onnx.NodeProto", name: str, default=None):
     return default
 
 
-def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
+def import_onnx(
+    onnx_path: str,
+    fnn_path: str,
+    config: Optional[Any] = None,
+) -> Dict[str, Any]:
     """Import an ONNX model and save it in fastnn format.
 
     Args:
         onnx_path: Path to .onnx file
         fnn_path: Path to output .fnn file
+        config: Optional PrecisionConfig for quantized import.
+            When set, weight parameters matching the config are quantized.
+            Non-weight params (bias, running_mean/var, constants) stay F32.
 
     Returns:
         Dictionary with model info (layers, input_shape, output_shape)
@@ -75,6 +86,15 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
     import onnx.numpy_helper
 
     model = onnx.load(onnx_path)
+    
+    # If config is given, resolve the precision module
+    if config is not None:
+        from fastnn.precision import Precision, Quantizer, PrecisionConfig as _PrecisionConfig
+        if not isinstance(config, _PrecisionConfig):
+            try:
+                config = _PrecisionConfig.from_dict_spec(config) if isinstance(config, dict) else config
+            except Exception:
+                pass
     
     layers = []
     layer_index = 0
@@ -173,17 +193,17 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             params.append((f"{node.name}.running_var", var))
 
         elif op_type == "MaxPool":
-            config = get_pooling_config(node)
-            layer_info["kernel_size"] = config["kernel_size"]
-            layer_info["stride"] = config["stride"]
-            layer_info["padding"] = config["padding"]
+            pool_config = get_pooling_config(node)
+            layer_info["kernel_size"] = pool_config["kernel_size"]
+            layer_info["stride"] = pool_config["stride"]
+            layer_info["padding"] = pool_config["padding"]
 
         elif op_type == "AveragePool":
-            config = get_pooling_config(node)
+            pool_config = get_pooling_config(node)
             layer_info["type"] = "AvgPool"
-            layer_info["kernel_size"] = config["kernel_size"]
-            layer_info["stride"] = config["stride"]
-            layer_info["padding"] = config["padding"]
+            layer_info["kernel_size"] = pool_config["kernel_size"]
+            layer_info["stride"] = pool_config["stride"]
+            layer_info["padding"] = pool_config["padding"]
 
         elif op_type == "GlobalAveragePool":
             layer_info["type"] = "GlobalAvgPool"
@@ -330,12 +350,29 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             mode = _get_attr(node, "mode", "constant")
             layer_info["type"] = "Pad"
             layer_info["mode"] = mode
+            pads = _get_attr(node, "pads", None)
+            if pads is not None:
+                layer_info["pads"] = list(pads)
+            elif len(node.input) > 1 and node.input[1] in initializer_map:
+                layer_info["pads"] = initializer_map[node.input[1]].flatten().tolist()
 
         elif op_type == "Slice":
             layer_info["type"] = "SliceOp"
 
         elif op_type == "Where":
             layer_info["type"] = "WhereOp"
+
+        elif op_type == "NonZero":
+            layer_info["type"] = "NonZeroOp"
+
+        elif op_type == "Unique":
+            layer_info["type"] = "UniqueOp"
+
+        elif op_type == "Tril":
+            layer_info["type"] = "TrilOp"
+
+        elif op_type == "Triu":
+            layer_info["type"] = "TriuOp"
 
         elif op_type == "NonMaxSuppression":
             layer_info["type"] = "NonMaxSuppression"
@@ -529,7 +566,6 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             layer_info["equation"] = equation
 
         elif op_type == "EyeLike":
-            dtype = _get_attr(node, "dtype", 1)
             k = _get_attr(node, "k", 0)
             layer_info["type"] = "EyeLike"
             layer_info["k"] = k
@@ -540,7 +576,6 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             layer_info["axis"] = axis
 
         elif op_type == "RandomNormal":
-            dtype = _get_attr(node, "dtype", 1)
             mean = _get_attr(node, "mean", 0.0)
             scale = _get_attr(node, "scale", 1.0)
             shape = _get_attr(node, "shape", None)
@@ -554,7 +589,6 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                 layer_info["seed"] = seed
 
         elif op_type == "RandomUniform":
-            dtype = _get_attr(node, "dtype", 1)
             low = _get_attr(node, "low", 0.0)
             high = _get_attr(node, "high", 1.0)
             shape = _get_attr(node, "shape", None)
@@ -685,6 +719,11 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
                     gn[k] = v
         graph_nodes.append(gn)
 
+    # Fold QuantizeLinear/DequantizeLinear patterns
+    graph_nodes, layers, params = _fold_qdq_patterns(
+        graph_nodes, layers, params, initializer_map
+    )
+
     graph = {
         "nodes": graph_nodes,
         "inputs": [{
@@ -697,14 +736,88 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
         } for out in model.graph.output],
     }
 
-    # Write to file with unified format
+    # Write to file with unified format (v3 if quantized, v2 otherwise)
     header = {
         "layers": layers,
         "graph": graph,
         "total_parameters": len(params),
     }
-    with open(fnn_path, "wb") as f:
-        write_fnn_file(f, header, params)
+
+    is_quantized = config is not None and config.default.should_quantize()
+
+    if is_quantized:
+        # v3 format: quantize weights per config, non-weights stay F32
+        params_v3 = []
+        for name, arr in params:
+            quantizer = config.get_quantizer(name)
+            is_weight = any(name.endswith(s) for s in [".weight", ".gamma", ".beta"])
+
+            if is_weight and quantizer.should_quantize():
+                # Quantize this weight
+                scales, zeros = quantizer.quantize(arr)
+                use_per_channel = quantizer.scheme == "per_channel" and len(scales) > 1
+
+                if use_per_channel:
+                    # Use per-channel quantization via Rust bindings
+                    from fastnn import PackedTensor4, PackedTensor8, PackedTensor16
+                    cls_map = {
+                        4: PackedTensor4,
+                        8: PackedTensor8,
+                        16: PackedTensor16,
+                    }
+                    bit_width = quantizer.precision.bit_width
+                    packed_cls = cls_map[bit_width]
+                    shape = list(arr.shape)
+                    packed = packed_cls.from_f32_per_channel(
+                        arr.flatten().tolist(), shape
+                    )
+                    params_v3.append((
+                        name,
+                        bytes(packed.to_bytes()),
+                        {
+                            4: DTYPE_U4,
+                            8: DTYPE_U8,
+                            16: DTYPE_F16,
+                        }[bit_width],
+                        packed.scales(),
+                        packed.zeros(),
+                    ))
+                else:
+                    # Per-tensor quantization
+                    from fastnn import PackedTensor4, PackedTensor8, PackedTensor16
+                    cls_map = {
+                        4: PackedTensor4,
+                        8: PackedTensor8,
+                        16: PackedTensor16,
+                    }
+                    bit_width = quantizer.precision.bit_width
+                    packed_cls = cls_map[bit_width]
+                    shape = list(arr.shape)
+                    s = float(scales[0]) if len(scales) > 0 else 1.0
+                    z = float(zeros[0]) if len(zeros) > 0 else 0.0
+                    packed = packed_cls(arr.flatten().tolist(), shape, s, z)
+                    params_v3.append((
+                        name,
+                        bytes(packed.to_bytes()),
+                        {
+                            4: DTYPE_U4,
+                            8: DTYPE_U8,
+                            16: DTYPE_F16,
+                        }[bit_width],
+                        packed.scales(),
+                        packed.zeros(),
+                    ))
+            else:
+                # Store as-is (F32)
+                params_v3.append((name, arr, DTYPE_F32, [], []))
+
+        header["precision"] = config.to_dict()
+        with open(fnn_path, "wb") as f:
+            write_fnn_file_v3(f, header, params_v3, version=3)
+    else:
+        # v2 format: all F32 (non-quantized ONNX import stays v2 for backward compat)
+        with open(fnn_path, "wb") as f:
+            write_fnn_file(f, header, params, version=2)
 
     # Get input/output shapes
     input_shape = None
@@ -726,3 +839,163 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
         "output_shape": output_shape,
     }
     return result
+
+
+def _fold_qdq_patterns(
+    graph_nodes: list,
+    layers: list,
+    params: list,
+    initializer_map: dict,
+):
+    """Fold QuantizeLinear/DequantizeLinear patterns in the graph.
+
+    Detects Q → single_op → DQ patterns and folds them by removing
+    the Q/DQ nodes and optionally quantizing the op's weights.
+    Also handles standalone Q/DQ on weight initializers.
+
+    Returns:
+        Tuple of (modified_graph_nodes, modified_layers, modified_params).
+    """
+    if not graph_nodes:
+        return graph_nodes, layers, params
+
+    # Build consumer map: output_name -> list of consuming nodes
+    output_to_consumers = {}
+    for node in graph_nodes:
+        for inp in node.get("inputs", []):
+            if inp not in output_to_consumers:
+                output_to_consumers[inp] = []
+            output_to_consumers[inp].append(node)
+
+    # Build output to producer map
+    output_to_producer = {}
+    for node in graph_nodes:
+        for out in node.get("outputs", []):
+            output_to_producer[out] = node
+
+    nodes_to_remove = set()
+    folded_count = 0
+
+    # Pass 1: Detect Q → single_op → DQ patterns
+    for node in list(graph_nodes):
+        if node["op_type"] != "QuantizeLinear":
+            continue
+        q_name = node["name"]
+        if q_name in nodes_to_remove:
+            continue
+
+        q_output = node["outputs"][0]
+        consumers = output_to_consumers.get(q_output, [])
+
+        if len(consumers) != 1:
+            continue
+
+        mid_node = consumers[0]
+        if mid_node["op_type"] in ("QuantizeLinear", "DequantizeLinear"):
+            continue
+        if mid_node["name"] in nodes_to_remove:
+            continue
+
+        mid_output = mid_node["outputs"][0]
+        mid_consumers = output_to_consumers.get(mid_output, [])
+
+        if len(mid_consumers) != 1:
+            continue
+
+        dq_node = mid_consumers[0]
+        if dq_node["op_type"] != "DequantizeLinear":
+            continue
+        if dq_node["name"] in nodes_to_remove:
+            continue
+
+        # Found Q → mid_node → DQ pattern
+        q_input = node["inputs"][0]
+
+        # Extract scale/zero_point from initializers
+        q_scale = 1.0
+        q_zp = 0.0
+        dq_scale = 1.0
+        dq_zp = 0.0
+        if len(node["inputs"]) > 1 and node["inputs"][1] in initializer_map:
+            q_scale = float(initializer_map[node["inputs"][1]].flatten()[0])
+        if len(node["inputs"]) > 2 and node["inputs"][2] in initializer_map:
+            q_zp = float(initializer_map[node["inputs"][2]].flatten()[0])
+        if len(dq_node["inputs"]) > 1 and dq_node["inputs"][1] in initializer_map:
+            dq_scale = float(initializer_map[dq_node["inputs"][1]].flatten()[0])
+        if len(dq_node["inputs"]) > 2 and dq_node["inputs"][2] in initializer_map:
+            dq_zp = float(initializer_map[dq_node["inputs"][2]].flatten()[0])
+
+        # Rewire: mid_node takes Q's input and its output goes to DQ's consumers
+        mid_node["inputs"][0] = q_input
+        mid_node["outputs"] = list(dq_node["outputs"])
+
+        # Store Q/DQ metadata on the mid node for weight quantization
+        mid_node["qdq_scale"] = q_scale
+        mid_node["qdq_zp"] = q_zp
+        mid_node["qdq_dq_scale"] = dq_scale
+        mid_node["qdq_dq_zp"] = dq_zp
+
+        nodes_to_remove.add(q_name)
+        nodes_to_remove.add(dq_node["name"])
+        folded_count += 1
+
+    # Pass 2: Handle standalone QuantizeLinear on weight initializers
+    for node in list(graph_nodes):
+        if node["op_type"] != "QuantizeLinear":
+            continue
+        if node["name"] in nodes_to_remove:
+            continue
+
+        q_input = node["inputs"][0]
+        if q_input not in initializer_map:
+            continue
+
+        # This Q applies directly to a weight initializer
+        weight_arr = initializer_map[q_input]
+        q_scale = 1.0
+        q_zp = 0.0
+        if len(node["inputs"]) > 1 and node["inputs"][1] in initializer_map:
+            q_scale = float(initializer_map[node["inputs"][1]].flatten()[0])
+        if len(node["inputs"]) > 2 and node["inputs"][2] in initializer_map:
+            q_zp = float(initializer_map[node["inputs"][2]].flatten()[0])
+
+        # Store as packed U8 with given scales
+        quantized = np.round(weight_arr / q_scale + q_zp).astype(np.int8)
+        params.append((q_input, quantized.astype(np.uint8)))
+        nodes_to_remove.add(node["name"])
+
+    # Pass 3: Handle standalone DequantizeLinear on weight initializers
+    for node in list(graph_nodes):
+        if node["op_type"] != "DequantizeLinear":
+            continue
+        if node["name"] in nodes_to_remove:
+            continue
+
+        dq_input = node["inputs"][0]
+        if dq_input not in initializer_map:
+            continue
+
+        dq_scale = 1.0
+        dq_zp = 0.0
+        if len(node["inputs"]) > 1 and node["inputs"][1] in initializer_map:
+            dq_scale = float(initializer_map[node["inputs"][1]].flatten()[0])
+        if len(node["inputs"]) > 2 and node["inputs"][2] in initializer_map:
+            dq_zp = float(initializer_map[node["inputs"][2]].flatten()[0])
+
+        # Dequantize back to f32
+        dq_data = initializer_map[dq_input]
+        dequantized = (dq_data.astype(np.float32) - dq_zp) * dq_scale
+        params.append((dq_input, dequantized))
+        nodes_to_remove.add(node["name"])
+
+    # Remove folded nodes from graph_nodes
+    if nodes_to_remove:
+        remaining_nodes = [n for n in graph_nodes if n["name"] not in nodes_to_remove]
+        remaining_layers = [l for l in layers if l["name"] not in nodes_to_remove]
+
+        if folded_count > 0:
+            logger.info("Q/DQ folding: folded %d Q→Op→DQ pattern(s), removed %d total Q/DQ nodes", folded_count, len(nodes_to_remove))
+
+        return remaining_nodes, remaining_layers, params
+
+    return graph_nodes, layers, params

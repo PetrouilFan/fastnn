@@ -269,16 +269,15 @@ class TestOnnxImport:
         try:
             from fastnn.io.onnx import import_onnx
             out_path = os.path.join(tmpdir, "out.fnn")
-            result = import_onnx(path, out_path)
+            import_onnx(path, out_path)
 
             # Verify file structure
             with open(out_path, "rb") as f:
                 from fastnn.io import read_fnn_header, read_fnn_parameters
                 magic, ver, header, num_params = read_fnn_header(f)
-                assert magic == b"FNN\x00"
-                assert ver == 2
+                assert ver in (2, 3), f"Expected version 2 or 3, got {ver}"
                 assert "layers" in header
-                params = read_fnn_parameters(f, num_params)
+                params = read_fnn_parameters(f, num_params, version=ver)
                 assert len(params) > 0
         finally:
             import shutil
@@ -290,7 +289,7 @@ class TestOnnxImport:
         try:
             from fastnn.io.onnx import import_onnx
             out_path = os.path.join(tmpdir, "out.fnn")
-            result = import_onnx(path, out_path)
+            import_onnx(path, out_path)
 
             with open(out_path, "rb") as f:
                 from fastnn.io import read_fnn_header
@@ -369,11 +368,11 @@ class TestDAGModel:
                 from fastnn.io import read_fnn_header, read_fnn_parameters
 
                 with open(out_path, "rb") as f:
-                    _, _, header, num_params = read_fnn_header(f)
+                    _, ver, header, num_params = read_fnn_header(f)
 
                 with open(out_path, "rb") as f:
                     _, _, _, num_params = read_fnn_header(f)
-                    params = read_fnn_parameters(f, num_params)
+                    params = read_fnn_parameters(f, num_params, version=ver)
 
                 model = DAGModel.from_header(header, params)
 

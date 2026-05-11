@@ -1,3 +1,4 @@
+use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 
 // ---- PyPackedTensor4 (4-bit, U4x8) ----
@@ -25,6 +26,27 @@ impl PyPackedTensor4 {
         PyPackedTensor4 { inner }
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (data, shape))]
+    fn from_f32_per_channel(data: Vec<f64>, shape: Vec<usize>) -> Self {
+        let data_f32: Vec<f32> = data.into_iter().map(|x| x as f32).collect();
+        let inner = PackedTensor::from_f32_per_channel(&data_f32, &shape);
+        PyPackedTensor4 { inner }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (data_bytes, shape, scales, zeros))]
+    fn from_bytes(data_bytes: Vec<u8>, shape: Vec<usize>, scales: Vec<f64>, zeros: Vec<f64>) -> Self {
+        let numel: usize = shape.iter().product();
+        let packed_len = numel.div_ceil(<U4x8 as PackedWord>::ITEMS);
+        let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
+        let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
+        assert_eq!(data_bytes.len(), packed_len * 4, "from_bytes: data length mismatch");
+        let data: Vec<U4x8> = bytemuck::cast_slice(&data_bytes).to_vec();
+        let inner = PackedTensor::from_raw(data, shape, scales_f32, zeros_f32);
+        PyPackedTensor4 { inner }
+    }
+
     fn to_f32_vec(&self) -> Vec<f64> {
         self.inner.to_f32_vec().into_iter().map(|x| x as f64).collect()
     }
@@ -34,6 +56,18 @@ impl PyPackedTensor4 {
         let shape: Vec<i64> = self.inner.shape().iter().map(|&s| s as i64).collect();
         let t = Tensor::from_vec(data, shape);
         PyTensor::from_tensor(t)
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        self.inner.as_bytes().to_vec()
+    }
+
+    fn scales(&self) -> Vec<f64> {
+        self.inner.scales.iter().map(|&s| s as f64).collect()
+    }
+
+    fn zeros(&self) -> Vec<f64> {
+        self.inner.zeros.iter().map(|&z| z as f64).collect()
     }
 
     #[getter]
@@ -81,6 +115,27 @@ impl PyPackedTensor8 {
         PyPackedTensor8 { inner }
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (data, shape))]
+    fn from_f32_per_channel(data: Vec<f64>, shape: Vec<usize>) -> Self {
+        let data_f32: Vec<f32> = data.into_iter().map(|x| x as f32).collect();
+        let inner = PackedTensor::from_f32_per_channel(&data_f32, &shape);
+        PyPackedTensor8 { inner }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (data_bytes, shape, scales, zeros))]
+    fn from_bytes(data_bytes: Vec<u8>, shape: Vec<usize>, scales: Vec<f64>, zeros: Vec<f64>) -> Self {
+        let numel: usize = shape.iter().product();
+        let packed_len = numel.div_ceil(<U8x4 as PackedWord>::ITEMS);
+        let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
+        let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
+        assert_eq!(data_bytes.len(), packed_len * 4, "from_bytes: data length mismatch");
+        let data: Vec<U8x4> = bytemuck::cast_slice(&data_bytes).to_vec();
+        let inner = PackedTensor::from_raw(data, shape, scales_f32, zeros_f32);
+        PyPackedTensor8 { inner }
+    }
+
     fn to_f32_vec(&self) -> Vec<f64> {
         self.inner.to_f32_vec().into_iter().map(|x| x as f64).collect()
     }
@@ -90,6 +145,18 @@ impl PyPackedTensor8 {
         let shape: Vec<i64> = self.inner.shape().iter().map(|&s| s as i64).collect();
         let t = Tensor::from_vec(data, shape);
         PyTensor::from_tensor(t)
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        self.inner.as_bytes().to_vec()
+    }
+
+    fn scales(&self) -> Vec<f64> {
+        self.inner.scales.iter().map(|&s| s as f64).collect()
+    }
+
+    fn zeros(&self) -> Vec<f64> {
+        self.inner.zeros.iter().map(|&z| z as f64).collect()
     }
 
     #[getter]
@@ -137,6 +204,27 @@ impl PyPackedTensor16 {
         PyPackedTensor16 { inner }
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (data, shape))]
+    fn from_f32_per_channel(data: Vec<f64>, shape: Vec<usize>) -> Self {
+        let data_f32: Vec<f32> = data.into_iter().map(|x| x as f32).collect();
+        let inner = PackedTensor::from_f32_per_channel(&data_f32, &shape);
+        PyPackedTensor16 { inner }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (data_bytes, shape, scales, zeros))]
+    fn from_bytes(data_bytes: Vec<u8>, shape: Vec<usize>, scales: Vec<f64>, zeros: Vec<f64>) -> Self {
+        let numel: usize = shape.iter().product();
+        let packed_len = numel.div_ceil(<F16x2 as PackedWord>::ITEMS);
+        let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
+        let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
+        assert_eq!(data_bytes.len(), packed_len * 4, "from_bytes: data length mismatch");
+        let data: Vec<F16x2> = bytemuck::cast_slice(&data_bytes).to_vec();
+        let inner = PackedTensor::from_raw(data, shape, scales_f32, zeros_f32);
+        PyPackedTensor16 { inner }
+    }
+
     fn to_f32_vec(&self) -> Vec<f64> {
         self.inner.to_f32_vec().into_iter().map(|x| x as f64).collect()
     }
@@ -146,6 +234,18 @@ impl PyPackedTensor16 {
         let shape: Vec<i64> = self.inner.shape().iter().map(|&s| s as i64).collect();
         let t = Tensor::from_vec(data, shape);
         PyTensor::from_tensor(t)
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        self.inner.as_bytes().to_vec()
+    }
+
+    fn scales(&self) -> Vec<f64> {
+        self.inner.scales.iter().map(|&s| s as f64).collect()
+    }
+
+    fn zeros(&self) -> Vec<f64> {
+        self.inner.zeros.iter().map(|&z| z as f64).collect()
     }
 
     #[getter]
@@ -193,6 +293,27 @@ impl PyPackedTensor32 {
         PyPackedTensor32 { inner }
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (data, shape))]
+    fn from_f32_per_channel(data: Vec<f64>, shape: Vec<usize>) -> Self {
+        let data_f32: Vec<f32> = data.into_iter().map(|x| x as f32).collect();
+        let inner = PackedTensor::from_f32_per_channel(&data_f32, &shape);
+        PyPackedTensor32 { inner }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (data_bytes, shape, scales, zeros))]
+    fn from_bytes(data_bytes: Vec<u8>, shape: Vec<usize>, scales: Vec<f64>, zeros: Vec<f64>) -> Self {
+        let numel: usize = shape.iter().product();
+        let packed_len = numel.div_ceil(<F32x1 as PackedWord>::ITEMS);
+        let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
+        let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
+        assert_eq!(data_bytes.len(), packed_len * 4, "from_bytes: data length mismatch");
+        let data: Vec<F32x1> = bytemuck::cast_slice(&data_bytes).to_vec();
+        let inner = PackedTensor::from_raw(data, shape, scales_f32, zeros_f32);
+        PyPackedTensor32 { inner }
+    }
+
     fn to_f32_vec(&self) -> Vec<f64> {
         self.inner.to_f32_vec().into_iter().map(|x| x as f64).collect()
     }
@@ -202,6 +323,18 @@ impl PyPackedTensor32 {
         let shape: Vec<i64> = self.inner.shape().iter().map(|&s| s as i64).collect();
         let t = Tensor::from_vec(data, shape);
         PyTensor::from_tensor(t)
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        self.inner.as_bytes().to_vec()
+    }
+
+    fn scales(&self) -> Vec<f64> {
+        self.inner.scales.iter().map(|&s| s as f64).collect()
+    }
+
+    fn zeros(&self) -> Vec<f64> {
+        self.inner.zeros.iter().map(|&z| z as f64).collect()
     }
 
     #[getter]

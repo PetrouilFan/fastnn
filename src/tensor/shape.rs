@@ -442,8 +442,7 @@ impl Tensor {
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward =
-                Arc::new(autograd::PermuteBackward::new(self.clone(), dims, edges));
+            let backward = Arc::new(autograd::PermuteBackward::new(self.clone(), dims, edges));
             Self::attach_grad_fn(output, backward)
         } else {
             output

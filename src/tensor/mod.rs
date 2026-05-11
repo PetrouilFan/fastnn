@@ -6,10 +6,10 @@ use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use self::factories::simd_copy_f32;
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 use self::factories::memcpy_f32;
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use self::factories::simd_copy_f32;
 use self::shape::compute_strides;
 
 mod device;
@@ -188,8 +188,6 @@ impl TensorImpl {
         new.into()
     }
 
-
-
     pub fn increment_version(&self) {
         self.version_counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -323,7 +321,6 @@ impl TensorImpl {
             std::slice::from_raw_parts_mut(ptr, numel)
         }
     }
-
 }
 
 impl Clone for TensorImpl {
@@ -353,7 +350,6 @@ impl Drop for TensorImpl {
     }
 }
 
-
 #[derive(Clone)]
 pub struct Tensor {
     pub inner: Arc<TensorImpl>,
@@ -366,20 +362,9 @@ impl Tensor {
         }
     }
 
-
-
-
     pub fn id(&self) -> usize {
         self.inner.id()
     }
-
-
-
-
-
-
-
-
 
     pub fn dtype(&self) -> DType {
         self.inner.dtype
@@ -389,7 +374,10 @@ impl Tensor {
         self.inner.device
     }
 
-    pub(crate) fn attach_grad_fn(mut output: Tensor, backward: Arc<dyn autograd::Node + 'static>) -> Tensor {
+    pub(crate) fn attach_grad_fn(
+        mut output: Tensor,
+        backward: Arc<dyn autograd::Node + 'static>,
+    ) -> Tensor {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
         Arc::make_mut(&mut output.inner).autograd_meta =
@@ -743,7 +731,6 @@ impl Tensor {
     pub fn version(&self) -> u64 {
         self.inner.version()
     }
-
 }
 
 impl From<TensorImpl> for Tensor {
@@ -763,7 +750,6 @@ impl std::fmt::Debug for Tensor {
         )
     }
 }
-
 
 pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     let parts: Vec<&str> = equation.split("->").collect();

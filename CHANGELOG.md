@@ -1,5 +1,77 @@
 # Changelog
 
+## [Unreleased] — Next
+
+### Added
+
+- Placeholder for upcoming features beyond the v1.3.0 precision-system release.
+
+---
+
+## v1.3.0 — Packed Precision Expansion & Quantized ONNX Support
+
+### DAG Packed Dispatch Expansion
+
+- **MatMul packed dispatch**: `OpCode::MatMul` now tries packed weights first via `dispatch_matmul_packed()`, falls back to f32 matmul.
+- **ConvTranspose packed dispatch**: `dispatch_conv_transpose_packed()` handles packed conv transpose weights.
+- **Embedding packed dispatch**: Packed embedding table lookup via gemv for memory-efficient embeddings.
+- **Real packed conv fix**: `conv_packed_from()` now uses `PackedConv2d::forward_cpu()` (im2col + packed gemm) instead of dequantizing to f32 and running f32 conv2d — this was the single biggest performance bug fix.
+
+### Quantized ONNX Runtime Ops
+
+- **QuantizeLinear / DequantizeLinear**: New OpCode handlers for ONNX Q/DQ format — supports scale+round+clamp quantization and (v-zp)*scale dequantization at runtime.
+- **QLinearConv**: Takes quantized input + quantized weight, dequantizes internally, runs f32 conv, requantizes output.
+- **MatMulInteger**: Takes quantized inputs, dequantizes both, runs f32 matmul.
+
+### ONNX Import Improvements
+
+- **Q/DQ folding**: `onnx.py` now detects QuantizeLinear→DequantizeLinear patterns around Conv/MatMul nodes and folds them, converting to packed weight storage during import.
+- **New ONNX ops**: NonZero, Unique, Tril, Triu, Pad v2 (tensor-based pads) support added to `onnx.py`.
+
+### Activation-Aware Calibration
+
+- **`ActivationCalibrator`**: New module that runs calibration data through the model, collects per-layer activation distributions, and refines quantization scales using weighted KL-divergence (NVIDIA's method).
+- Integrates with the existing `Calibrator` infrastructure and `fastnn-convert` CLI.
+
+### Mixed-Precision Auto-Profiler
+
+- **`PrecisionProfiler`**: Per-layer sensitivity analysis — quantizes each layer in isolation, measures output MSE perturbation, sorts by sensitivity.
+- **`auto_config()`**: Generates a `PrecisionConfig` with U4 assigned to least-sensitive layers, U8 to mid, F32 to most-sensitive, given a target memory budget.
+
+### Performance: Batch GEMM & ARM NEON
+
+- **Batch GEMM for packed MatMul**: `gemm_batch_packed()` with K-tiled cache blocking — processes all batch rows within each K-tile before moving to the next, improving L2 cache reuse significantly over the old per-row GEMV loop.
+- **ARM NEON SIMD kernels**: `gemv_u4x8_neon()` and `gemv_u8x4_neon()` — full SIMD widening chain (int8→int16→int32→f32→FMA) for aarch64 targets.
+- **NEON feature flag**: Added `neon = []` feature in Cargo.toml, gated on `#[cfg(all(target_arch = "aarch64", feature = "neon"))]`.
+
+### Fused Packed Layers
+
+- **PackedConvRelu**: Standalone fused conv + in-place ReLU, all 4 precisions (U4/U8/F16/F32), exposed via Python.
+- **PackedLinearGelu**: Standalone fused linear + GELU with Abramowitz & Stegun erf approximation, all 4 precisions.
+- **BN folding**: `fold_bn_into_packed_conv()` function — dequantizes packed weights to f32, applies `W_fused = W * gamma / sqrt(var + eps)`, requantizes per-channel.
+
+### WGPU Packed Conv Support
+
+- **WGSL compute shader**: `conv_packed.wgsl` implementing packed convolution on GPU with per-channel scaling and bias.
+- **Rust scaffolding**: `conv2d_packed_wgpu()` function with full WGPU pipeline creation, buffer management, and dispatch.
+
+### Code Quality
+
+- **Build warnings fixed**: Removed duplicate `[[bin]]` entries for benchmark files, fixed `[profile.bench]` panic setting.
+- **107/108 Rust unit tests pass** (1 pre-existing benchmark correctness check).
+
+### New Files
+
+- `fastnn/io/act_calibrate.py` — Activation-aware calibration
+- `fastnn/io/profiler.py` — Mixed-precision profiler
+- `src/kernels/cpu/arm_neon.rs` — ARM NEON SIMD kernels
+- `src/backends/wgpu/shaders/conv_packed.wgsl` — WGPU packed conv shader
+- `tests/test_dag_packed.py` — DAG packed dispatch tests
+- `tests/test_packed_fused.py` — Fused packed layer tests
+- `benches/packed_dispatch_bench.rs` — Packed dispatch performance benchmarks
+
+---
+
 ## v1.2.0 — Fused Kernel Optimizations & Performance Overhaul
 
 ### Performance: Fused Operator Kernels
