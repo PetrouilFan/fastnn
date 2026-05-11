@@ -304,7 +304,7 @@ impl RMSNorm {
             crate::storage::Device::Cpu,
         );
         let w = weight.clone();
-        w.requires_grad_(true);
+        let w = w.requires_grad_(true);
         RMSNorm {
             weight: w,
             eps,
@@ -377,8 +377,8 @@ impl GroupNorm {
         );
         let w = weight.clone();
         let b = bias.clone();
-        w.requires_grad_(true);
-        b.requires_grad_(true);
+        let w = w.requires_grad_(true);
+        let b = b.requires_grad_(true);
         GroupNorm {
             weight: w,
             bias: b,
@@ -482,8 +482,8 @@ impl BatchNorm2d {
         );
         let w = weight.clone();
         let b = bias.clone();
-        w.requires_grad_(true);
-        b.requires_grad_(true);
+        let w = w.requires_grad_(true);
+        let b = b.requires_grad_(true);
         BatchNorm2d {
             weight: w,
             bias: b,

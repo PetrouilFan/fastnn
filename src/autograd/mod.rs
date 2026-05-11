@@ -213,11 +213,23 @@ pub fn extract_first_grad(grad_outputs: Vec<Option<Tensor>>) -> Option<Tensor> {
 
 /// Helper to ensure a tensor is on CPU, returning a CPU tensor.
 /// If the tensor is already on CPU, returns a clone. Otherwise, converts to CPU.
+///
+/// **Important**: This also materializes broadcast views (e.g., from `expand()`) into
+/// contiguous storage. Without this, a gradient created via `expand()` has `numel=N` but
+/// shares the scalar's underlying storage (`storage_len=1`), causing `as_f32_slice()` to
+/// panic with `offset + numel exceeds storage bounds`.
 pub fn ensure_cpu(tensor: &Tensor) -> Tensor {
-    if tensor.inner.is_cpu() {
+    let t = if tensor.inner.is_cpu() {
         tensor.clone()
     } else {
         tensor.to_cpu()
+    };
+    // Materialize broadcast views (stride=0) so that as_f32_slice() can return
+    // a valid flat slice covering all logical elements.
+    if !t.is_contiguous() {
+        t.contiguous()
+    } else {
+        t
     }
 }
 
