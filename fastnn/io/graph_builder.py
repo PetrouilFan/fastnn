@@ -126,6 +126,10 @@ def build_dag_model(header: dict, path: str) -> Any:
             if output_name not in initializer_to_param:
                 initializer_to_param[output_name] = value_key
 
+    # Run graph optimization passes (constant folding, dead node elimination, Conv+BN fusion)
+    from fastnn.io.graph_optimizer import optimize_graph
+    header = optimize_graph(header)
+
     # Convert ONNX nodes to DAGExecutor's node format
     dag_nodes = []
     for node in onnx_nodes:

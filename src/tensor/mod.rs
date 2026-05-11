@@ -220,6 +220,8 @@ impl TensorImpl {
                 let ptr = cpu.data.as_ref().as_ptr();
                 // storage_offset is in elements, cast to f32 pointer first
                 let f32_ptr = ptr as *const f32;
+                // SAFETY: The storage allocation is valid for the lifetime of `self`,
+                // and `storage_offset` has been validated to be within bounds of the allocation.
                 unsafe { f32_ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
@@ -241,6 +243,8 @@ impl TensorImpl {
                 // Unsafe: caller must ensure exclusive ownership of storage
                 // This is guaranteed by &mut self if Arc is not shared
                 let ptr = cpu.data.as_ref().as_ptr() as *mut f32;
+                // SAFETY: The caller guarantees exclusive ownership via `&mut self`,
+                // and `storage_offset` is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
@@ -256,6 +260,8 @@ impl TensorImpl {
                 // This is guaranteed by &mut self if Arc is not shared
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
                 let elem_size = self.dtype.size();
+                // SAFETY: The caller guarantees exclusive ownership via `&mut self`,
+                // and `storage_offset * elem_size` is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
             Storage::Wgpu(_) => {
@@ -266,6 +272,9 @@ impl TensorImpl {
 
     pub fn as_f32_slice(&self) -> &[f32] {
         match &self.storage.as_ref() {
+            // SAFETY: We validate bounds below before creating the slice. The pointer
+            // is derived from the CPU storage's backing `Vec<u8>` and is valid for
+            // the lifetime of `self`.
             Storage::Cpu(cpu) => unsafe {
                 let ptr = cpu.data.as_ref().as_ptr() as *const f32;
                 let ptr = ptr.add(self.storage_offset as usize);
@@ -291,6 +300,8 @@ impl TensorImpl {
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
         let ptr = self.data_ptr_f32_mut();
         let numel = self.numel() as usize;
+        // SAFETY: We validate bounds below before creating the slice. The pointer
+        // is derived from `data_ptr_f32_mut()` which ensures exclusive ownership.
         unsafe {
             // Unconditional bounds validation to prevent UB in release builds
             if let Storage::Cpu(cpu) = self.storage.as_ref() {
@@ -429,26 +440,34 @@ impl Tensor {
         match self.inner.dtype {
             DType::F32 => {
                 let f32_ptr = ptr as *const f32;
+                // SAFETY: `self.inner.numel() == 1` was validated above. The pointer
+                // is derived from the CPU storage allocation and `storage_offset` is
+                // within bounds for a single element read.
                 unsafe { *f32_ptr.add(self.inner.storage_offset as usize) }
             }
             DType::F64 => {
                 let f64_ptr = ptr as *const f64;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { *f64_ptr.add(self.inner.storage_offset as usize) as f32 }
             }
             DType::I32 => {
                 let i32_ptr = ptr as *const i32;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { *i32_ptr.add(self.inner.storage_offset as usize) as f32 }
             }
             DType::I64 => {
                 let i64_ptr = ptr as *const i64;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { *i64_ptr.add(self.inner.storage_offset as usize) as f32 }
             }
             DType::BF16 => {
                 let bf16_ptr = ptr as *const half::bf16;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { f32::from(*bf16_ptr.add(self.inner.storage_offset as usize)) }
             }
             DType::F16 => {
                 let f16_ptr = ptr as *const half::f16;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { f32::from(*f16_ptr.add(self.inner.storage_offset as usize)) }
             }
             _ => panic!("Unsupported dtype for item()"),

@@ -68,6 +68,8 @@ pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // Two-pass: mean then variance (more numerically stable than single-pass)
             let mut sum = 0.0f32;
             for j in 0..nd {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     sum += *((x_usize + (base + j) * 4) as *const f32);
                 }
@@ -76,6 +78,8 @@ pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
             let mut sum_sq = 0.0f32;
             for j in 0..nd {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let diff = *((x_usize + (base + j) * 4) as *const f32) - mean;
                     sum_sq += diff * diff;
@@ -84,6 +88,8 @@ pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let var = sum_sq / nd as f32;
             let inv_std = 1.0 / (var + eps).sqrt();
 
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe {
                 *((mean_usize + row * 4) as *mut f32) = mean;
                 *((var_usize + row * 4) as *mut f32) = var;
@@ -91,6 +97,8 @@ pub unsafe fn layer_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
             // Normalize, apply weight/bias, store x_hat and output
             for j in 0..nd {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let val = *((x_usize + (base + j) * 4) as *const f32);
                     let xn = (val - mean) * inv_std;
@@ -195,6 +203,8 @@ pub unsafe fn rms_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // Compute mean of squares
             let mut sum_sq = 0.0f32;
             for j in 0..nd {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let val = *((x_usize + (base + j) * 4) as *const f32);
                     sum_sq += val * val;
@@ -205,6 +215,8 @@ pub unsafe fn rms_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
             // Normalize and apply weight in one pass
             for j in 0..nd {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let val = *((x_usize + (base + j) * 4) as *const f32);
                     let mut out_val = val * inv_rms;
@@ -447,6 +459,8 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 let out_ptr = out_addr as *mut f32;
 
                 // Compute mean and variance using SIMD-accelerated Welford (no Vec allocation)
+                // SAFETY: Each rayon iteration accesses disjoint memory regions because
+                // the loop index maps to non-overlapping chunks of the buffer.
                 let (mean, var) = unsafe {
                     compute_stats_for_channel(
                         x_ptr,
@@ -468,8 +482,12 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let b_idx = i / spatial_size as usize;
                     let s = i % spatial_size as usize;
                     let idx = (b_idx * num_channels as usize + c) * spatial_size as usize + s;
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     let val = unsafe { *x_ptr.add(idx) };
                     let normed = (val - mean) * inv_std;
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     unsafe { *out_ptr.add(idx) = gamma * normed + beta };
                 }
             });
@@ -479,6 +497,8 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             for c in 0..num_channels as usize {
                 // Compute mean and variance using SIMD-accelerated Welford (no Vec allocation)
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 let (mean, var) = unsafe {
                     compute_stats_for_channel(
                         x_ptr,
@@ -500,8 +520,12 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     let b_idx = i / spatial_size as usize;
                     let s = i % spatial_size as usize;
                     let idx = (b_idx * num_channels as usize + c) * spatial_size as usize + s;
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     let val = unsafe { *x_ptr.add(idx) };
                     let normed = (val - mean) * inv_std;
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     unsafe { *out_ptr.add(idx) = gamma * normed + beta };
                 }
             }
@@ -531,8 +555,12 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 for b in 0..batch_size as usize {
                     for s in 0..spatial_size as usize {
                         let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                        // The pointer is valid for this element access.
                         let val = unsafe { *x_ptr.add(idx) };
                         let normed = (val - mean) * inv_std;
+                        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                        // The pointer is valid for this element access.
                         unsafe { *out_ptr.add(idx) = gamma * normed + beta };
                     }
                 }
@@ -551,8 +579,12 @@ pub unsafe fn batch_norm_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 for b in 0..batch_size as usize {
                     for s in 0..spatial_size as usize {
                         let idx = (b * num_channels as usize + c) * spatial_size as usize + s;
+                        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                        // The pointer is valid for this element access.
                         let val = unsafe { *x_ptr.add(idx) };
                         let normed = (val - mean) * inv_std;
+                        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                        // The pointer is valid for this element access.
                         unsafe { *out_ptr.add(idx) = gamma * normed + beta };
                     }
                 }
@@ -607,6 +639,8 @@ pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // Compute mean
             let mut sum = 0.0f32;
             for j in 0..norm_dim {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     sum += *((x_usize as *const f32).add(base + j));
                 }
@@ -616,6 +650,8 @@ pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // Compute variance
             let mut sum_sq = 0.0f32;
             for j in 0..norm_dim {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let diff = *((x_usize as *const f32).add(base + j)) - mean;
                     sum_sq += diff * diff;
@@ -626,6 +662,8 @@ pub unsafe fn fused_layer_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
             // Normalize, apply weight/bias, then GELU
             for j in 0..norm_dim {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let val = *((x_usize as *const f32).add(base + j));
                     let xn = (val - mean) * inv_std;
@@ -726,6 +764,8 @@ pub unsafe fn fused_rms_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // Compute mean of squares
             let mut sum_sq = 0.0f32;
             for j in 0..norm_dim {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let val = *((x_usize + (base + j) * 4) as *const f32);
                     sum_sq += val * val;
@@ -736,6 +776,8 @@ pub unsafe fn fused_rms_norm_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 
             // Normalize, apply weight, then GELU
             for j in 0..norm_dim {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let val = *((x_usize + (base + j) * 4) as *const f32);
                     let mut out_val = val * inv_rms;

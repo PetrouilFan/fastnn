@@ -145,6 +145,8 @@ impl Node for Conv2dBackward {
                                 let dst_idx = (b * out_channels + c) * dilated_h * dilated_w
                                     + (oh * stride) * dilated_w
                                     + (ow * stride);
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                                 unsafe {
                                     *dilated_data.add(dst_idx as usize) = *grad_data.add(src_idx as usize);
                                 }

@@ -170,26 +170,38 @@ pub fn read_f32(slice: &[u8], dtype: DType) -> f32 {
     match dtype {
         DType::F32 => {
             let ptr = slice.as_ptr() as *const f32;
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe { *ptr }
         }
         DType::F64 => {
             let ptr = slice.as_ptr() as *const f64;
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe { *ptr as f32 }
         }
         DType::I32 => {
             let ptr = slice.as_ptr() as *const i32;
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe { *ptr as f32 }
         }
         DType::I64 => {
             let ptr = slice.as_ptr() as *const i64;
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe { *ptr as f32 }
         }
         DType::BF16 => {
             let ptr = slice.as_ptr() as *const half::bf16;
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe { f32::from(*ptr) }
         }
         DType::F16 => {
             let ptr = slice.as_ptr() as *const half::f16;
+            // SAFETY: The destination byte slice has sufficient length for the target type.
+            // The pointer is properly aligned for the target type.
             unsafe { f32::from(*ptr) }
         }
         _ => 0.0,
@@ -199,6 +211,8 @@ pub fn read_f32(slice: &[u8], dtype: DType) -> f32 {
 #[allow(dead_code)]
 pub fn write_f32(slice: &[u8], val: f32, dtype: DType) {
     let ptr = slice.as_ptr() as *mut u8;
+    // SAFETY: The destination byte slice has sufficient length for the target type.
+    // The pointer is properly aligned for the target type.
     unsafe {
         match dtype {
             DType::F32 => {

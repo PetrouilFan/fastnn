@@ -18,6 +18,10 @@ pub fn device_to_dispatch_key(device: Device) -> DispatchKey {
     }
 }
 
+/// # Safety
+/// The function pointer must accept the given tensor arguments and return
+/// valid tensors. The caller is responsible for upholding the safety contract
+/// of the specific kernel implementation.
 pub type KernelFn = unsafe fn(&[&Tensor]) -> Vec<Tensor>;
 
 struct DispatcherInner {
@@ -55,6 +59,8 @@ pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> FastnnResul
         ))
     })?;
 
+    // SAFETY: The kernel was registered for this dispatch key and is
+    // trusted to handle the given tensor arguments correctly.
     Ok(unsafe { kernel(args) })
 }
 

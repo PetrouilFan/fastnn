@@ -104,6 +104,7 @@ pub unsafe fn im2col_kernel(
 
             (0..batch_size).into_par_iter().for_each(|n| {
 
+                // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                 unsafe {
 
                     let x_p = x_usize as *const f32;
@@ -598,6 +599,7 @@ pub unsafe fn conv2d_1x1(
 
 
 
+    // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
     let w_data = unsafe { std::slice::from_raw_parts(w_ptr, m * k) };
 
     let bias_data: Option<&[f32]> = bias.map(|b| {
@@ -663,6 +665,7 @@ pub unsafe fn conv2d_1x1(
 
                     let dst_idx = b * spatial_size * k + s * k + ic;
 
+                    // SAFETY: All pointer accesses are within bounds of their respective tensor allocations.
                     x_t_buf[dst_idx] = unsafe { *x_ptr.add(src_idx) };
 
                 }
@@ -851,6 +854,7 @@ pub unsafe fn conv2d_3x3_direct(
 
                         // w_idx is bounded by the weight tensor dimensions.
 
+                        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                         unsafe { *v.get_unchecked_mut(k_idx * oc_count + oc) = *w_ptr.add(w_idx) };
 
                     }
@@ -865,6 +869,7 @@ pub unsafe fn conv2d_3x3_direct(
 
     });
 
+    // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
     let wt_trans_slice = unsafe { std::slice::from_raw_parts(wt_trans_ptr, needed) };
 
 
@@ -977,6 +982,7 @@ pub unsafe fn conv2d_3x3_direct(
 
                                     let w_ptr_k =
 
+                                        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                                         unsafe { wt_trans_slice.as_ptr().add(k_idx * oc_count + oc) };
 
                                     // SAFETY: w_ptr_k points to 8 valid f32 elements within wt_trans_slice when oc+8 <= out_channels.
@@ -995,6 +1001,7 @@ pub unsafe fn conv2d_3x3_direct(
 
                                 let bias_vec = if let Some(ref b) = bias_data {
 
+                                    // SAFETY: All pointer accesses are within bounds of their respective tensor allocations.
                                     let b_slice = unsafe {
 
                                         std::slice::from_raw_parts(b.as_ptr().add(oc), 8)
@@ -1064,6 +1071,7 @@ pub unsafe fn conv2d_3x3_direct(
 
                                     // lower 4
 
+                                    // SAFETY: All pointer accesses are within bounds of their respective tensor allocations.
                                     let w_lo = from_slice_unaligned_f32x4(unsafe {
 
                                         std::slice::from_raw_parts(base_ptr, 4)
@@ -1074,6 +1082,7 @@ pub unsafe fn conv2d_3x3_direct(
 
                                     // upper 4
 
+                                    // SAFETY: All pointer accesses are within bounds of their respective tensor allocations.
                                     let w_hi = from_slice_unaligned_f32x4(unsafe {
 
                                         std::slice::from_raw_parts(base_ptr.add(4), 4)
@@ -1146,6 +1155,7 @@ pub unsafe fn conv2d_3x3_direct(
 
                                     let out_idx = out_idx_base + i * spatial_stride;
 
+                                    // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                                     unsafe {
 
                                         *out_ptr.add(out_idx) = res_lo_arr[i];

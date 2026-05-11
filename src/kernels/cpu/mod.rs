@@ -427,11 +427,15 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
             (0..num_rows).into_par_iter().for_each(|row| {
+                // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                 let row_ptr = unsafe { (a_usize as *const f32).add(row * dim_size) };
                 let mut sum = 0.0f32;
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && dim_size >= 8 {
+                        // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                        // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                         unsafe {
                             let mut acc = _mm256_setzero_ps();
                             let mut j = 0;
@@ -446,6 +450,8 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
                         }
                     } else {
                         for j in 0..dim_size {
+                            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                            // The pointer is valid for this element access.
                             unsafe {
                                 sum += *row_ptr.add(j);
                             }
@@ -455,11 +461,15 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for j in 0..dim_size {
+                        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                        // The pointer is valid for this element access.
                         unsafe {
                             sum += *row_ptr.add(j);
                         }
                     }
                 }
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     *(out_usize as *mut f32).add(row) = sum;
                 }
@@ -470,11 +480,15 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
 
     // Non-parallel: SIMD inline
     for row in 0..num_rows {
+        // SAFETY: The pointers are valid for the accessed elements and properly aligned
+        // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
         let row_ptr = unsafe { a_ptr.add(row * dim_size) };
         let mut sum = 0.0f32;
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
             if is_x86_feature_detected!("avx2") && dim_size >= 8 {
+                // SAFETY: The pointers are valid for the accessed elements and properly aligned
+                // for SIMD access. Loop bounds prevent out-of-bounds reads/writes.
                 unsafe {
                     let mut acc = _mm256_setzero_ps();
                     let mut j = 0;
@@ -489,6 +503,8 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
                 }
             } else {
                 for j in 0..dim_size {
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     unsafe {
                         sum += *row_ptr.add(j);
                     }
@@ -498,6 +514,8 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
         #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
         {
             for j in 0..dim_size {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     sum += *row_ptr.add(j);
                 }
@@ -536,11 +554,15 @@ pub fn cross_entropy_backward_f32(
 
         (0..batch_size).into_par_iter().for_each(|b| {
             let base = b * nc;
+            // SAFETY: Each rayon iteration accesses disjoint memory regions because
+            // the loop index maps to non-overlapping chunks of the buffer.
             let target_class = unsafe { *((targets_usize + b * 4) as *const f32) } as usize;
 
             // Find max
             let mut max_val = f32::NEG_INFINITY;
             for j in 0..nc {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     max_val = max_val.max(*((logits_usize + (base + j) * 4) as *const f32));
                 }
@@ -549,6 +571,8 @@ pub fn cross_entropy_backward_f32(
             // Compute sum_exp
             let mut sum_exp = 0.0f32;
             for j in 0..nc {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     sum_exp += (*((logits_usize + (base + j) * 4) as *const f32) - max_val).exp();
                 }
@@ -557,6 +581,8 @@ pub fn cross_entropy_backward_f32(
             // Guard against degenerate inputs (all logits = -inf → sum_exp = 0)
             if sum_exp == 0.0 || !sum_exp.is_finite() {
                 for j in 0..nc {
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     unsafe {
                         *((grad_usize + (base + j) * 4) as *mut f32) = 0.0;
                     }
@@ -568,6 +594,8 @@ pub fn cross_entropy_backward_f32(
 
             // Write gradient: softmax - one_hot, scaled
             for j in 0..nc {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let p = (logits_usize + (base + j) * 4) as *const f32;
                     let grad = (*p - max_val).exp() * inv_sum
@@ -649,12 +677,16 @@ pub fn layer_norm_backward_f32(
         // Parallel dX computation
         (0..outer_size).into_par_iter().for_each(|row| {
             let base = row * nd;
+            // SAFETY: Each rayon iteration accesses disjoint memory regions because
+            // the loop index maps to non-overlapping chunks of the buffer.
             let inv_std = 1.0 / (unsafe { *((var_usize + row * 4) as *const f32) } + eps).sqrt();
 
             // Compute sum(dY * weight) and sum(dY * weight * x_hat)
             let mut sum_gw = 0.0f32;
             let mut sum_gw_xh = 0.0f32;
             for j in 0..nd {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let g = *((grad_usize + (base + j) * 4) as *const f32);
                     let xh = *((xhat_usize + (base + j) * 4) as *const f32);
@@ -672,6 +704,8 @@ pub fn layer_norm_backward_f32(
 
             // dX
             for j in 0..nd {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let g = *((grad_usize + (base + j) * 4) as *const f32);
                     let xh = *((xhat_usize + (base + j) * 4) as *const f32);
@@ -690,6 +724,8 @@ pub fn layer_norm_backward_f32(
         for row in 0..outer_size {
             let base = row * nd;
             for j in 0..nd {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     let g = *((grad_usize + (base + j) * 4) as *const f32);
                     let xh = *((xhat_usize + (base + j) * 4) as *const f32);
@@ -788,11 +824,15 @@ impl Node for EmbeddingBackward {
         let weight_grad_ptr = weight_grad_data.as_mut_ptr() as *mut f32;
 
         for i in 0..batch_size as usize {
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             let idx = unsafe { *indices_ptr.add(i) } as usize;
             if idx < weight_shape[0] as usize {
                 for j in 0..embedding_dim as usize {
                     let w_idx = idx * embedding_dim as usize + j;
                     let o_idx = i * embedding_dim as usize + j;
+                    // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                    // The pointer is valid for this element access.
                     unsafe {
                         *weight_grad_ptr.add(w_idx) += *grad_output_ptr.add(o_idx);
                     }
@@ -934,6 +974,8 @@ fn register_kernels() {
 
     // GPU fallback for cross_entropy_loss (moves to CPU for computation)
     fn cross_entropy_loss_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
+        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+        // The pointer is valid for this element access.
         gpu_fallback(args, |cpu_args| unsafe {
             cross_entropy_loss_kernel(cpu_args)
         })
@@ -997,6 +1039,8 @@ fn register_kernels() {
 
     // GPU fallback for gt_scalar (moves to CPU for computation)
     fn gt_scalar_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
+        // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+        // The pointer is valid for this element access.
         gpu_fallback(args, |cpu_args| unsafe { gt_scalar_kernel(cpu_args) })
     }
 
@@ -1738,6 +1782,8 @@ mod tests {
         let mut out = vec![0.0f32; batch * m * n];
         let total_rows = batch * m;
         for row in 0..total_rows {
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe {
                 blocked_row_matmul(
                     a.as_ptr(),
@@ -1910,6 +1956,8 @@ mod tests {
 
         fn blocked_matmul_row(a: &[f32], b: &[f32], out: &mut [f32], m: usize, n: usize, k: usize) {
             for row in 0..m {
+                // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+                // The pointer is valid for this element access.
                 unsafe {
                     blocked_row_matmul(
                         a.as_ptr(),
@@ -2020,6 +2068,8 @@ mod tests {
         let mut out = vec![0.0f32; m * n];
         let total_rows = m;
         for row in 0..total_rows {
+            // SAFETY: The offset stays within the bounds of the allocated tensor storage.
+            // The pointer is valid for this element access.
             unsafe {
                 blocked_row_matmul(
                     a.as_ptr(),

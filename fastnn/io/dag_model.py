@@ -270,51 +270,46 @@ class DAGModel:
                 shape_arr = np.array(tensors[0].shape, dtype=np.int64)
                 return [fnn.tensor(shape_arr, list(shape_arr.shape))]
             elif op_type == "Cast" or op_type == "castop":
-                return [tensors[0]]
+                # ONNX Cast: to attribute is an int mapping to dtype
+                to_dtype = node.get("to", 1)
+                dtype_map = {1: np.float32, 7: np.int64, 9: np.bool_, 10: np.int32, 11: np.int64}
+                target_dtype = dtype_map.get(to_dtype, np.float32)
+                x_np = tensors[0].numpy().astype(target_dtype)
+                return [fnn.tensor(x_np, list(x_np.shape))]
             elif op_type == "Gather" or op_type == "gatherop":
-                # ONNX Gather: data[tensor], axis, indices from tensors[1]
-                data = tensors[0]
-                if len(tensors) >= 2:
-                    axis = int(node.get("axis", 0))
-                    indices = tensors[1]
-                    data_np = data.numpy()
-                    indices_np = indices.numpy().astype(int)
-                    result_np = np.take(data_np, indices_np, axis=axis)
-                    # np.take may return scalar; ensure it's an array for fnn.tensor
-                    if np.isscalar(result_np):
-                        result_np = np.array(result_np)
-                    return [fnn.tensor(result_np, list(result_np.shape))]
-                return [tensors[0]]
-            elif op_type == "RangeOp":
-                # ONNX Range: output = np.arange(start, limit, delta)
-                if len(tensors) >= 3:
-                    start = float(tensors[0].numpy().flatten()[0])
-                    limit = float(tensors[1].numpy().flatten()[0])
-                    delta = float(tensors[2].numpy().flatten()[0])
-                    result_np = np.arange(start, limit, delta, dtype=np.float32)
-                    return [fnn.tensor(result_np, list(result_np.shape))]
-                return [tensors[0]] if tensors else None
-            elif op_type == "ConstantOfShape":
-                # ONNX ConstantOfShape: fill tensor with constant value
-                if tensors:
-                    shape_np = tensors[0].numpy().astype(int)
-                    shape = list(shape_np.flatten())
-                    value = node.get("value", 0.0)
-                    result_np = np.full(shape, value, dtype=np.float32)
-                    return [fnn.tensor(result_np, list(result_np.shape))]
-                return None
-            elif op_type == "Expand":
-                # ONNX Expand: broadcast tensor to given shape
-                if len(tensors) >= 2:
-                    x_np = tensors[0].numpy()
-                    shape_np = tensors[1].numpy().astype(int)
-                    shape = list(shape_np.flatten())
-                    result_np = np.broadcast_to(x_np, shape)
-                    return [fnn.tensor(result_np, list(result_np.shape))]
-                return [tensors[0]]
+                # ONNX Gather: data[axes] with axis attribute
+                if len(tensors) < 2:
+                    return [tensors[0]]
+                data_np = tensors[0].numpy()
+                indices_np = tensors[1].numpy().astype(int)
+                axis = node.get("axis", 0)
+                result_np = np.take(data_np, indices_np, axis=axis)
+                # np.take may return scalar; ensure it's an array for fnn.tensor
+                if np.isscalar(result_np):
+                    result_np = np.array(result_np)
+                return [fnn.tensor(result_np, list(result_np.shape))]
             elif op_type in ("Identity", "identityop", "Dropout", "dropout"):
                 return [tensors[0]]
             elif op_type == "Resize":
+                x = tensors[0]
+                mode = node.get("mode", "nearest").lower()
+                scales = node.get("scales", None)
+                if scales is not None and hasattr(x, "numpy"):
+                    x_np = x.numpy()
+                    if len(scales) >= 4:
+                        scale_h, scale_w = scales[2], scales[3]
+                        import math
+                        new_h = int(x_np.shape[2] * scale_h)
+                        new_w = int(x_np.shape[3] * scale_w)
+                        result_np = np.zeros((x_np.shape[0], x_np.shape[1], new_h, new_w), dtype=x_np.dtype)
+                        for b in range(x_np.shape[0]):
+                            for c in range(x_np.shape[1]):
+                                for h in range(new_h):
+                                    for w in range(new_w):
+                                        src_h = min(int(h / scale_h), x_np.shape[2] - 1)
+                                        src_w = min(int(w / scale_w), x_np.shape[3] - 1)
+                                        result_np[b, c, h, w] = x_np[b, c, src_h, src_w]
+                        return [fnn.tensor(result_np, list(result_np.shape))]
                 return [tensors[0]]
             elif op_type in ("ReduceMean",):
                 axes = node.get("axes", None)
@@ -337,6 +332,10 @@ class DAGModel:
                     return [fnn.sum(x)]
             elif op_type in ("Slice", "sliceop"):
                 x = tensors[0]
+                if hasattr(x, "numpy"):
+                    x_np = x.numpy()
+                else:
+                    x_np = np.array(x)
                 starts = node.get("starts", None)
                 ends = node.get("ends", None)
                 axes = node.get("axes", None)
@@ -346,18 +345,15 @@ class DAGModel:
                         axes = list(range(len(starts)))
                     if steps is None:
                         steps = [1] * len(starts)
-                    # Use numpy since fastnn tensor doesn't support
-                    # multi-dimensional __getitem__ with tuple of slices
                     x_np = x.numpy()
                     for i, ax in enumerate(axes):
                         st = int(starts[i])
                         en = int(ends[i])
                         step = int(steps[i]) if i < len(steps) else 1
                         slices = [slice(None)] * len(x_np.shape)
-                        slices[ax] = slice(st, en, step)
+                        slices[int(ax)] = slice(st, en, step)
                         x_np = x_np[tuple(slices)]
-                    result = fnn.tensor(x_np, list(x_np.shape))
-                    return [result]
+                    return [fnn.tensor(x_np, list(x_np.shape))]
                 else:
                     return [tensors[0]]
             elif op_type in ("Pad",):
@@ -392,11 +388,14 @@ class DAGModel:
                     return list(fnn.topk(tensors[0], k, axis))
                 return [tensors[0]]
             elif op_type in ("Split",):
-                axis = node.get("axis", 0)
+                axis = int(node.get("axis", 0))
                 split_sizes = node.get("split", None)
                 x = tensors[0]
-                shape = x.shape
-                dim_size = shape[axis] if axis < len(shape) else shape[0]
+                if hasattr(x, "numpy"):
+                    x_np = x.numpy()
+                else:
+                    x_np = np.array(x)
+                dim_size = x_np.shape[axis] if axis < len(x_np.shape) else x_np.shape[0]
                 num_outputs = len(node.get("outputs", [1]))
                 if split_sizes is not None:
                     sizes = split_sizes
@@ -409,11 +408,10 @@ class DAGModel:
                 # multi-dimensional __getitem__ with tuple of slices
                 x_np = x.numpy()
                 for sz in sizes:
-                    slices = [slice(None)] * len(shape)
+                    slices = [slice(None)] * len(x_np.shape)
                     slices[axis] = slice(start, start + sz)
                     result_np = x_np[tuple(slices)]
-                    result = fnn.tensor(result_np, list(result_np.shape))
-                    results.append(result)
+                    results.append(fnn.tensor(result_np, list(result_np.shape)))
                     start += sz
                 return results
             elif op_type in ("Squeeze", "squeezeop"):
@@ -449,9 +447,23 @@ class DAGModel:
                 logger.warning("Control flow op %s not yet supported, passing through", op_type)
                 return [tensors[0]] if tensors else None
             elif op_type in ("Erf", "erfop"):
+                x = tensors[0]
+                if hasattr(x, "numpy"):
+                    x_np = x.numpy()
+                    signs = np.where(x_np >= 0, 1.0, -1.0)
+                    x_abs = np.abs(x_np)
+                    t = 1.0 / (1.0 + 0.3275911 * x_abs)
+                    y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * np.exp(-x_abs * x_abs)
+                    result_np = signs * y
+                    result = fnn.tensor(result_np, list(x.shape))
+                    return [result]
                 return [tensors[0]]
             elif op_type in ("Pow", "elementwisepow"):
-                return [fnn.pow(tensors[0], tensors[1])] if len(tensors) > 1 else [tensors[0]]
+                if len(tensors) > 1:
+                    # Extract scalar exponent from tensor
+                    exponent = tensors[1].numpy().flatten()[0].item() if hasattr(tensors[1], "numpy") else float(tensors[1])
+                    return [fnn.pow(tensors[0], exponent)]
+                return [tensors[0]]
             elif op_type == "BiasAdd":
                 return [fnn.add(tensors[0], self.params.get(node.get("name", "") + ".bias", tensors[0]))]
             elif op_type == "BiasSub":
@@ -460,11 +472,562 @@ class DAGModel:
                 min_val = node.get("min", None)
                 max_val = node.get("max", None)
                 result = tensors[0]
-                if min_val is not None:
-                    result = fnn.clamp(result, min=min_val)
-                if max_val is not None:
-                    result = fnn.clamp(result, max=max_val)
+                if min_val is not None and max_val is not None:
+                    return [fnn.clamp(result, min_val, max_val)]
+                elif min_val is not None:
+                    return [fnn.clamp(result, min_val, float('inf'))]
+                elif max_val is not None:
+                    return [fnn.clamp(result, float('-inf'), max_val)]
                 return [result]
+            elif op_type in ("Abs",):
+                return [fnn.abs(tensors[0])]
+            elif op_type in ("Elu",):
+                alpha = node.get("alpha", 1.0)
+                return [fnn.elu(tensors[0], alpha)]
+            elif op_type in ("Ceil",):
+                return [fnn.tensor(np.ceil(tensors[0].numpy()).astype(tensors[0].numpy().dtype), list(tensors[0].shape))]
+            elif op_type in ("Floor",):
+                return [fnn.tensor(np.floor(tensors[0].numpy()).astype(tensors[0].numpy().dtype), list(tensors[0].shape))]
+            elif op_type in ("Round",):
+                return [fnn.tensor(np.round(tensors[0].numpy()).astype(tensors[0].numpy().dtype), list(tensors[0].shape))]
+            elif op_type in ("Sign",):
+                return [fnn.tensor(np.sign(tensors[0].numpy()), list(tensors[0].shape))]
+            elif op_type in ("Reciprocal",):
+                return [fnn.div(fnn.tensor(np.array(1.0, dtype=np.float32), []), tensors[0])]
+            elif op_type in ("And",):
+                return [fnn.tensor(np.logical_and(tensors[0].numpy(), tensors[1].numpy()).astype(np.bool_), list(tensors[0].shape))]
+            elif op_type in ("Or",):
+                return [fnn.tensor(np.logical_or(tensors[0].numpy(), tensors[1].numpy()).astype(np.bool_), list(tensors[0].shape))]
+            elif op_type in ("Xor",):
+                return [fnn.tensor(np.logical_xor(tensors[0].numpy(), tensors[1].numpy()).astype(np.bool_), list(tensors[0].shape))]
+            elif op_type in ("Not",):
+                return [fnn.tensor(np.logical_not(tensors[0].numpy()).astype(np.bool_), list(tensors[0].shape))]
+            elif op_type in ("Equal",):
+                return [fnn.tensor(np.equal(tensors[0].numpy(), tensors[1].numpy()), list(tensors[0].shape))]
+            elif op_type in ("Greater",):
+                return [fnn.tensor(np.greater(tensors[0].numpy(), tensors[1].numpy()), list(tensors[0].shape))]
+            elif op_type in ("Less",):
+                return [fnn.tensor(np.less(tensors[0].numpy(), tensors[1].numpy()), list(tensors[0].shape))]
+            elif op_type in ("IsNaN",):
+                return [fnn.tensor(np.isnan(tensors[0].numpy()), list(tensors[0].shape))]
+            elif op_type in ("IsInf",):
+                return [fnn.tensor(np.isinf(tensors[0].numpy()), list(tensors[0].shape))]
+            elif op_type in ("Expand",):
+                shape = tensors[1].numpy().astype(int).tolist() if len(tensors) > 1 else node.get("shape", list(tensors[0].shape))
+                result_np = np.broadcast_to(tensors[0].numpy(), shape)
+                return [fnn.tensor(result_np, list(result_np.shape))]
+            elif op_type in ("CumSum",):
+                axis = node.get("axis", 0)
+                return [fnn.tensor(np.cumsum(tensors[0].numpy(), axis=axis), list(tensors[0].shape))]
+            elif op_type in ("Compress",):
+                axis = node.get("axis", None)
+                condition = tensors[1].numpy().astype(bool) if len(tensors) > 1 else np.array([True])
+                result = np.compress(condition, tensors[0].numpy(), axis=axis)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("DepthToSpace",):
+                blocksize = node.get("blocksize", 1)
+                mode = node.get("mode", "DCR")
+                x = tensors[0].numpy()
+                b, c, h, w = x.shape
+                if mode == "DCR":
+                    x = x.reshape(b, blocksize, blocksize, c // (blocksize**2), h, w).transpose(0, 3, 4, 1, 5, 2)
+                else:
+                    x = x.reshape(b, c // (blocksize**2), blocksize, blocksize, h, w).transpose(0, 1, 4, 2, 5, 3)
+                result = x.reshape(b, c // (blocksize**2), h * blocksize, w * blocksize)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("SpaceToDepth",):
+                blocksize = node.get("blocksize", 1)
+                x = tensors[0].numpy()
+                b, c, h, w = x.shape
+                x = x.reshape(b, c, h // blocksize, blocksize, w // blocksize, blocksize)
+                x = x.transpose(0, 3, 5, 1, 2, 4).reshape(b, c * blocksize * blocksize, h // blocksize, w // blocksize)
+                return [fnn.tensor(x, list(x.shape))]
+            elif op_type in ("EyeLike",):
+                shape = tensors[0].shape
+                k = node.get("k", 0)
+                result = np.eye(shape[0], shape[1] if len(shape) > 1 else shape[0], k=k, dtype=tensors[0].numpy().dtype)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("OneHot",):
+                axis = node.get("axis", -1)
+                indices = tensors[0].numpy().astype(int)
+                depth = int(tensors[1].numpy().flatten()[0]) if len(tensors) > 1 else 1
+                values = tensors[2].numpy() if len(tensors) > 2 else np.array([0.0, 1.0])
+                off_val, on_val = values[0], values[1] if len(values) > 1 else 1.0
+                shape = list(indices.shape)
+                if axis < 0:
+                    axis = len(shape) + 1 + axis
+                shape.insert(axis, depth)
+                result = np.full(shape, off_val, dtype=np.float32)
+                idx_tuple = [np.arange(s) for s in indices.shape]
+                idx_tuple.insert(axis, indices)
+                result[tuple(idx_tuple)] = on_val
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("Range",):
+                start = float(tensors[0].numpy().flatten()[0])
+                limit = float(tensors[1].numpy().flatten()[0])
+                delta = float(tensors[2].numpy().flatten()[0]) if len(tensors) > 2 else 1.0
+                result = np.arange(start, limit, delta, dtype=np.float32)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("Reverse",):
+                axes = node.get("axes", None)
+                x = tensors[0].numpy()
+                if axes is not None:
+                    slices = [slice(None)] * x.ndim
+                    for ax in axes:
+                        slices[ax] = slice(None, None, -1)
+                    result = x[tuple(slices)]
+                else:
+                    result = x[::-1]
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("RandomNormal",):
+                shape = node.get("shape", [1])
+                mean = node.get("mean", 0.0)
+                scale = node.get("scale", 1.0)
+                seed = node.get("seed", None)
+                if seed is not None:
+                    np.random.seed(int(seed))
+                result = np.random.normal(mean, scale, size=shape).astype(np.float32)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("RandomUniform",):
+                shape = node.get("shape", [1])
+                low = node.get("low", 0.0)
+                high = node.get("high", 1.0)
+                seed = node.get("seed", None)
+                if seed is not None:
+                    np.random.seed(int(seed))
+                result = np.random.uniform(low, high, size=shape).astype(np.float32)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("ConstantOfShape",):
+                shape = tensors[0].numpy().astype(int).tolist() if tensors else node.get("shape", [1])
+                value = node.get("value", 0.0)
+                result = np.full(shape, value, dtype=np.float32)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("HardSigmoid",):
+                alpha = node.get("alpha", 0.2)
+                beta = node.get("beta", 0.5)
+                x = tensors[0].numpy()
+                result = np.maximum(0, np.minimum(1, alpha * x + beta)).astype(x.dtype)
+                return [fnn.tensor(result, list(tensors[0].shape))]
+            elif op_type in ("HardSwish",):
+                return [fnn.hardswish(tensors[0])]
+            elif op_type in ("Selu",):
+                alpha = node.get("alpha", 1.67326)
+                gamma = node.get("gamma", 1.0507)
+                x = tensors[0].numpy()
+                result = gamma * np.where(x >= 0, x, alpha * (np.exp(x) - 1))
+                return [fnn.tensor(result, list(tensors[0].shape))]
+            elif op_type in ("SoftPlus",):
+                return [fnn.softplus(tensors[0])]
+            elif op_type in ("LogSoftmax",):
+                axis = node.get("axis", 1)
+                return [fnn.log_softmax(tensors[0], axis)]
+            elif op_type in ("Swish",):
+                return [fnn.silu(tensors[0])]
+            elif op_type in ("ArgMax",):
+                axis = node.get("axis", None)
+                keepdims = node.get("keepdims", 1)
+                x = tensors[0].numpy()
+                if axis is None:
+                    result = np.array([np.argmax(x)])
+                else:
+                    result = np.argmax(x, axis=axis)
+                    if keepdims:
+                        result = np.expand_dims(result, axis)
+                return [fnn.tensor(result.astype(np.int64), list(result.shape))]
+            elif op_type in ("ArgMin",):
+                axis = node.get("axis", None)
+                keepdims = node.get("keepdims", 1)
+                x = tensors[0].numpy()
+                if axis is None:
+                    result = np.array([np.argmin(x)])
+                else:
+                    result = np.argmin(x, axis=axis)
+                    if keepdims:
+                        result = np.expand_dims(result, axis)
+                return [fnn.tensor(result.astype(np.int64), list(result.shape))]
+            elif op_type in ("Min", "min"):
+                result = tensors[0].numpy()
+                for t in tensors[1:]:
+                    result = np.minimum(result, t.numpy())
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("Max", "max"):
+                result = tensors[0].numpy()
+                for t in tensors[1:]:
+                    result = np.maximum(result, t.numpy())
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("PRelu",):
+                slope = tensors[1].numpy() if len(tensors) > 1 else 0.01
+                x = tensors[0].numpy()
+                result = np.where(x > 0, x, slope * x)
+                return [fnn.tensor(result, list(tensors[0].shape))]
+            elif op_type in ("GatherND",):
+                data = tensors[0].numpy()
+                indices = tensors[1].numpy().astype(int) if len(tensors) > 1 else np.array([[0]])
+                idx_tuple = tuple(indices[..., i] for i in range(indices.shape[-1]))
+                result = data[idx_tuple]
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("ScatterND",):
+                data = tensors[0].numpy().copy()
+                indices = tensors[1].numpy().astype(int) if len(tensors) > 1 else np.array([[0]])
+                updates = tensors[2].numpy() if len(tensors) > 2 else np.array([0.0])
+                idx_tuple = tuple(indices[..., i] for i in range(indices.shape[-1]))
+                data[idx_tuple] = updates
+                return [fnn.tensor(data, list(tensors[0].shape))]
+            elif op_type in ("ConvTranspose",):
+                x = tensors[0]
+                node_name = node.get("name", "")
+                weight = self.params.get(f"{node_name}.weight")
+                if weight is None:
+                    logger.warning("ConvTranspose %s: weight not found", node_name)
+                    return [x]
+                x_np = x.numpy()
+                w_np = weight.numpy()
+                stride = node.get("stride", node.get("strides", 1))
+                if isinstance(stride, list): stride = stride[0]
+                padding = node.get("padding", node.get("pads", 0))
+                if isinstance(padding, list): padding = padding[0]
+                b, c_in, h_in, w_in = x_np.shape
+                c_out, c_in_w, k_h, k_w = w_np.shape
+                h_out = (h_in - 1) * stride + k_h - 2 * padding
+                w_out = (w_in - 1) * stride + k_w - 2 * padding
+                result = np.zeros((b, c_out, h_out, w_out), dtype=np.float32)
+                for bi in range(b):
+                    for co in range(c_out):
+                        for ci in range(c_in_w):
+                            for kh in range(k_h):
+                                for kw in range(k_w):
+                                    for hi in range(h_in):
+                                        for wi in range(w_in):
+                                            oh = hi * stride + kh - padding
+                                            ow = wi * stride + kw - padding
+                                            if 0 <= oh < h_out and 0 <= ow < w_out:
+                                                result[bi, co, oh, ow] += x_np[bi, ci, hi, wi] * w_np[co, ci, kh, kw]
+                bias = self.params.get(f"{node_name}.bias")
+                if bias is not None:
+                    result += bias.numpy().reshape(1, c_out, 1, 1)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("InstanceNormalization", "instancenormalization"):
+                x = tensors[0].numpy()
+                eps = node.get("epsilon", node.get("eps", 1e-5))
+                b, c, h, w = x.shape
+                x_r = x.reshape(b, c, -1)
+                mean = x_r.mean(axis=2, keepdims=True)
+                var = x_r.var(axis=2, keepdims=True)
+                normalized = (x_r - mean) / np.sqrt(var + eps)
+                normalized = normalized.reshape(b, c, h, w)
+                node_name = node.get("name", "")
+                scale = self.params.get(f"{node_name}.weight")
+                bias = self.params.get(f"{node_name}.bias")
+                if scale is not None:
+                    normalized = normalized * scale.numpy().reshape(1, c, 1, 1)
+                if bias is not None:
+                    normalized = normalized + bias.numpy().reshape(1, c, 1, 1)
+                return [fnn.tensor(normalized, list(x.shape))]
+            elif op_type in ("LayerNormalization", "layernormalization"):
+                x = tensors[0].numpy()
+                axis = node.get("axis", -1)
+                eps = node.get("epsilon", node.get("eps", 1e-5))
+                mean = x.mean(axis=axis, keepdims=True)
+                var = x.var(axis=axis, keepdims=True)
+                normalized = (x - mean) / np.sqrt(var + eps)
+                node_name = node.get("name", "")
+                weight = self.params.get(f"{node_name}.weight")
+                bias = self.params.get(f"{node_name}.bias")
+                if weight is not None:
+                    normalized = normalized * weight.numpy()
+                if bias is not None:
+                    normalized = normalized + bias.numpy()
+                return [fnn.tensor(normalized, list(x.shape))]
+            elif op_type in ("RMSNormalization", "rmsnormalization"):
+                x = tensors[0].numpy()
+                eps = node.get("epsilon", node.get("eps", 1e-5))
+                rms = np.sqrt(np.mean(x ** 2, axis=-1, keepdims=True) + eps)
+                normalized = x / rms
+                node_name = node.get("name", "")
+                weight = self.params.get(f"{node_name}.weight")
+                if weight is not None:
+                    normalized = normalized * weight.numpy()
+                return [fnn.tensor(normalized, list(x.shape))]
+            elif op_type in ("SkipLayerNormalization",):
+                x = tensors[0].numpy()
+                skip = tensors[1].numpy() if len(tensors) > 1 else 0
+                eps = node.get("epsilon", node.get("eps", 1e-5))
+                residual = x + skip
+                mean = residual.mean(axis=-1, keepdims=True)
+                var = residual.var(axis=-1, keepdims=True)
+                normalized = (residual - mean) / np.sqrt(var + eps)
+                node_name = node.get("name", "")
+                weight = self.params.get(f"{node_name}.weight")
+                bias = self.params.get(f"{node_name}.bias")
+                if weight is not None:
+                    normalized = normalized * weight.numpy()
+                if bias is not None:
+                    normalized = normalized + bias.numpy()
+                return [fnn.tensor(normalized, list(x.shape))]
+            elif op_type in ("Attention", "MultiHeadAttention", "GroupQueryAttention"):
+                # Basic scaled dot-product attention
+                if len(tensors) >= 3:
+                    q, k, v = [t.numpy() for t in tensors[:3]]
+                    scale = 1.0 / np.sqrt(k.shape[-1])
+                    scores = q @ k.transpose(0, 1, 3, 2) * scale
+                    weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
+                    weights /= weights.sum(axis=-1, keepdims=True)
+                    result = weights @ v
+                    return [fnn.tensor(result, list(result.shape))]
+                logger.warning("Attention op '%s' needs Q, K, V inputs", op_type)
+                return [tensors[0]]
+            elif op_type in ("GRU",):
+                # GRU: gated recurrent unit
+                # Inputs: [X, W, R, B?, sequence_lens?, initial_h?]
+                # X: [seq_len, batch_size, input_size]
+                # W: [num_directions, 3*hidden_size, input_size]  (z, r, h)
+                # R: [num_directions, 3*hidden_size, hidden_size]
+                # B: [num_directions, 6*hidden_size] (optional)
+                # sequence_lens: [batch_size] (optional)
+                # initial_h: [num_directions, batch_size, hidden_size] (optional)
+                if len(tensors) < 3:
+                    logger.warning("GRU needs X, W, R")
+                    return [tensors[0]]
+                x_np = tensors[0].numpy()
+                w_np = tensors[1].numpy()
+                r_np = tensors[2].numpy()
+                b_np = tensors[3].numpy() if len(tensors) > 3 else None
+                seq_lens = tensors[4].numpy().flatten().astype(int) if len(tensors) > 4 else None
+                init_h = tensors[5].numpy() if len(tensors) > 5 else None
+                seq_len, batch_size, input_size = x_np.shape
+                num_directions = w_np.shape[0]
+                hidden_size = w_np.shape[1] // 3
+                # Initialize hidden state
+                h = np.zeros((num_directions, batch_size, hidden_size), dtype=np.float32)
+                if init_h is not None:
+                    h[:] = init_h
+                # Process biases
+                w_b = np.zeros((num_directions, 3 * hidden_size), dtype=np.float32)
+                r_b = np.zeros((num_directions, 3 * hidden_size), dtype=np.float32)
+                if b_np is not None:
+                    w_b = b_np[:, :3 * hidden_size]
+                    r_b = b_np[:, 3 * hidden_size:]
+                outputs = []
+                for t in range(seq_len):
+                    x_t = x_np[t]  # [batch_size, input_size]
+                    for d in range(num_directions):
+                        # Gate weights for this direction
+                        w = w_np[d]  # [3*hidden, input_size]
+                        r = r_np[d]  # [3*hidden, hidden_size]
+                        w_b_d = w_b[d]
+                        r_b_d = r_b[d]
+                        h_d = h[d]  # [batch_size, hidden_size]
+                        # Split gates: z (update), r (reset), h (new)
+                        w_z, w_r, w_h = np.split(w, 3, axis=0)
+                        r_z, r_r, r_h = np.split(r, 3, axis=0)
+                        b_wz, b_wr, b_wh = np.split(w_b_d, 3)
+                        b_rz, b_rr, b_rh = np.split(r_b_d, 3)
+                        # Gate computations
+                        z = 1.0 / (1.0 + np.exp(-(x_t @ w_z.T + h_d @ r_z.T + b_wz + b_rz)))
+                        r_gate = 1.0 / (1.0 + np.exp(-(x_t @ w_r.T + h_d @ r_r.T + b_wr + b_rr)))
+                        n = np.tanh(x_t @ w_h.T + r_gate * (h_d @ r_h.T + b_rh) + b_wh)
+                        h_new = (1.0 - z) * n + z * h_d
+                        h[d] = h_new
+                    outputs.append(h.copy())
+                # Output Y: [seq_len, num_directions, batch_size, hidden_size]
+                y = np.stack(outputs, axis=0)
+                ret = [fnn.tensor(y, list(y.shape))]
+                # Y_h: [num_directions, batch_size, hidden_size]
+                ret.append(fnn.tensor(h, list(h.shape)))
+                return ret
+            elif op_type in ("LSTM",):
+                # LSTM: long short-term memory
+                # Inputs: [X, W, R, B?, sequence_lens?, initial_h?, initial_c?]
+                # X: [seq_len, batch_size, input_size]
+                # W: [num_directions, 4*hidden_size, input_size]  (i, o, f, c)
+                # R: [num_directions, 4*hidden_size, hidden_size]
+                # B: [num_directions, 8*hidden_size] (optional)
+                if len(tensors) < 3:
+                    logger.warning("LSTM needs X, W, R")
+                    return [tensors[0]]
+                x_np = tensors[0].numpy()
+                w_np = tensors[1].numpy()
+                r_np = tensors[2].numpy()
+                b_np = tensors[3].numpy() if len(tensors) > 3 else None
+                init_h = tensors[5].numpy() if len(tensors) > 5 else None
+                init_c = tensors[6].numpy() if len(tensors) > 6 else None
+                seq_len, batch_size, input_size = x_np.shape
+                num_directions = w_np.shape[0]
+                hidden_size = w_np.shape[1] // 4
+                h = np.zeros((num_directions, batch_size, hidden_size), dtype=np.float32)
+                c = np.zeros((num_directions, batch_size, hidden_size), dtype=np.float32)
+                if init_h is not None:
+                    h[:] = init_h
+                if init_c is not None:
+                    c[:] = init_c
+                w_b = np.zeros((num_directions, 4 * hidden_size), dtype=np.float32)
+                r_b = np.zeros((num_directions, 4 * hidden_size), dtype=np.float32)
+                if b_np is not None:
+                    w_b = b_np[:, :4 * hidden_size]
+                    r_b = b_np[:, 4 * hidden_size:]
+                def _sig(x):
+                    return 1.0 / (1.0 + np.exp(-x))
+                outputs = []
+                for t in range(seq_len):
+                    x_t = x_np[t]
+                    for d in range(num_directions):
+                        w = w_np[d]
+                        r = r_np[d]
+                        w_b_d = w_b[d]
+                        r_b_d = r_b[d]
+                        h_d = h[d]
+                        c_d = c[d]
+                        # Split gates: i (input), o (output), f (forget), c (cell)
+                        w_i, w_o, w_f, w_c_g = np.split(w, 4, axis=0)
+                        r_i, r_o, r_f, r_c_g = np.split(r, 4, axis=0)
+                        b_wi, b_wo, b_wf, b_wc = np.split(w_b_d, 4)
+                        b_ri, b_ro, b_rf, b_rc = np.split(r_b_d, 4)
+                        # Gate computations
+                        i = _sig(x_t @ w_i.T + h_d @ r_i.T + b_wi + b_ri)
+                        f = _sig(x_t @ w_f.T + h_d @ r_f.T + b_wf + b_rf)
+                        o = _sig(x_t @ w_o.T + h_d @ r_o.T + b_wo + b_ro)
+                        c_tilde = np.tanh(x_t @ w_c_g.T + h_d @ r_c_g.T + b_wc + b_rc)
+                        c_new = f * c_d + i * c_tilde
+                        h_new = o * np.tanh(c_new)
+                        h[d] = h_new
+                        c[d] = c_new
+                    outputs.append(h.copy())
+                y = np.stack(outputs, axis=0)
+                ret = [fnn.tensor(y, list(y.shape))]
+                ret.append(fnn.tensor(h, list(h.shape)))
+                ret.append(fnn.tensor(c, list(c.shape)))
+                return ret
+            elif op_type in ("BiasGelu",):
+                x = tensors[0].numpy()
+                bias = tensors[1].numpy() if len(tensors) > 1 else np.array(0.0)
+                x_b = x + bias
+                result = 0.5 * x_b * (1.0 + np.tanh(0.7978846 * (x_b + 0.044715 * x_b ** 3)))
+                return [fnn.tensor(result, list(tensors[0].shape))]
+            elif op_type in ("FastGelu",):
+                x = tensors[0].numpy()
+                result = 0.5 * x * (1.0 + np.tanh(0.7978846 * (x + 0.044715 * x ** 3)))
+                return [fnn.tensor(result, list(tensors[0].shape))]
+            elif op_type in ("RotaryEmbedding",):
+                # Rotary position embedding (RoPE)
+                # Inputs: [Q, K, cos_cache, sin_cache, position_ids?]
+                # Q/K shape: [batch, seq_len, num_heads, head_dim] or [batch, num_heads, seq_len, head_dim]
+                # cos/sin cache shape: [max_seq_len, head_dim] or [seq_len, head_dim]
+                # If fewer than 4 inputs, pass through
+                if len(tensors) < 4:
+                    logger.warning("RotaryEmbedding needs Q, K, cos, sin; got %d inputs", len(tensors))
+                    return [tensors[0]]
+                q = tensors[0].numpy()
+                k = tensors[1].numpy()
+                cos = tensors[2].numpy()
+                sin = tensors[3].numpy()
+                # Get position IDs if provided
+                if len(tensors) >= 5:
+                    position_ids = tensors[4].numpy().flatten().astype(int)
+                else:
+                    position_ids = np.arange(q.shape[1], dtype=int)
+                # Apply rotary embedding to Q and K
+                def _rope_single(x, cos_vals, sin_vals, pos_ids):
+                    # x shape: [batch, seq_len, num_heads, head_dim] or [batch, num_heads, seq_len, head_dim]
+                    # Determine if seq_len is axis 1 or 2
+                    if x.shape[1] == len(pos_ids) or (x.ndim >= 3 and x.shape[-2] == len(pos_ids)):
+                        seq_axis = 1
+                    else:
+                        seq_axis = -2 if x.ndim >= 2 else 1
+                    head_dim = x.shape[-1]
+                    half = head_dim // 2
+                    if seq_axis == 1:
+                        x_flat = x.reshape(-1, x.shape[1], head_dim)
+                    else:
+                        x_flat = x.reshape(x.shape[0], x.shape[1], -1, head_dim)
+                        x_flat = x_flat.transpose(0, 2, 1, 3).reshape(-1, x_flat.shape[2], head_dim)
+                    # Split into pairs and rotate
+                    x_even = x_flat[..., :half]
+                    x_odd = x_flat[..., half:]
+                    # Gather cos/sin for each position (use first half for pair-wise rotation)
+                    cos_gathered = cos_vals[pos_ids][:, :half]  # [seq_len, half]
+                    sin_gathered = sin_vals[pos_ids][:, :half]  # [seq_len, half]
+                    # Reshape for broadcasting: [1, seq_len, half]
+                    cos_gathered = cos_gathered.reshape(1, -1, half)
+                    sin_gathered = sin_gathered.reshape(1, -1, half)
+                    # Apply rotation
+                    x_even_rot = x_even * cos_gathered - x_odd * sin_gathered
+                    x_odd_rot = x_even * sin_gathered + x_odd * cos_gathered
+                    x_rot = np.concatenate([x_even_rot, x_odd_rot], axis=-1)
+                    # Restore original layout
+                    if seq_axis != 1:
+                        x_rot = x_rot.reshape(x.shape[0], -1, x.shape[-2], head_dim).transpose(0, 2, 1, 3)
+                    return x_rot.reshape(x.shape)
+                q_rot = _rope_single(q, cos, sin, position_ids)
+                k_rot = _rope_single(k, cos, sin, position_ids)
+                return [fnn.tensor(q_rot, list(q_rot.shape)), fnn.tensor(k_rot, list(k_rot.shape))]
+            elif op_type in ("DequantizeLinear",):
+                # y = (x - x_zero_point) * x_scale
+                x = tensors[0].numpy()
+                x_scale = tensors[1].numpy().flatten()[0] if len(tensors) > 1 else 1.0
+                x_zero_point = tensors[2].numpy().flatten()[0] if len(tensors) > 2 else 0.0
+                result = (x.astype(np.float32) - float(x_zero_point)) * float(x_scale)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("QuantizeLinear",):
+                # y = round(x / y_scale) + y_zero_point
+                x = tensors[0].numpy()
+                y_scale = tensors[1].numpy().flatten()[0] if len(tensors) > 1 else 1.0
+                y_zero_point = tensors[2].numpy().flatten()[0] if len(tensors) > 2 else 0.0
+                result = np.round(x / float(y_scale)).astype(np.int8) + int(y_zero_point)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("EmbedLayerNormalization",):
+                # Embedding + Layer Normalization (BERT-style)
+                # Inputs: [input_ids, word_embedding, position_embedding,
+                #          segment_embedding?, gamma, beta, mask?]
+                if len(tensors) < 5:
+                    logger.warning("EmbedLayerNorm needs input_ids, word_emb, pos_emb, gamma, beta")
+                    return [tensors[0]]
+                input_ids = tensors[0].numpy().astype(int)
+                word_emb = tensors[1].numpy()
+                pos_emb = tensors[2].numpy()
+                has_segment = len(tensors) >= 7
+                gamma = tensors[4 if has_segment else 3].numpy()
+                beta = tensors[5 if has_segment else 4].numpy()
+                batch_size, seq_len = input_ids.shape
+                hidden_size = word_emb.shape[-1]
+                # Word embeddings
+                word_out = word_emb[input_ids]
+                # Position embeddings
+                pos_ids = np.arange(seq_len, dtype=int)
+                pos_out = pos_emb[pos_ids]
+                pos_out = np.broadcast_to(pos_out, (batch_size, seq_len, hidden_size))
+                output = word_out + pos_out
+                # Add segment embeddings if provided
+                if has_segment:
+                    seg_emb = tensors[3].numpy()
+                    seg_ids = np.zeros((batch_size, seq_len), dtype=int)
+                    seg_out = seg_emb[seg_ids]
+                    output = output + seg_out
+                # Layer normalization
+                mean = output.mean(axis=-1, keepdims=True)
+                var = output.var(axis=-1, keepdims=True)
+                eps = node.get("epsilon", node.get("eps", 1e-5))
+                output = (output - mean) / np.sqrt(var + eps)
+                output = output * gamma.reshape(1, 1, -1) + beta.reshape(1, 1, -1)
+                return [fnn.tensor(output.astype(np.float32), list(output.shape))]
+            elif op_type in ("Einsum",):
+                equation = node.get("equation", "")
+                tensors_np = [t.numpy() for t in tensors]
+                result = np.einsum(equation, *tensors_np)
+                return [fnn.tensor(result, list(result.shape))]
+            elif op_type in ("LRN",):
+                x = tensors[0].numpy()
+                alpha = node.get("alpha", 0.0001)
+                beta = node.get("beta", 0.75)
+                size = node.get("size", 5)
+                bias_val = node.get("bias", 1.0)
+                pad = size // 2
+                sq = x ** 2
+                sq_pad = np.pad(sq, ((0,0), (pad,pad), (0,0), (0,0)), mode='constant')
+                scale = np.zeros_like(x)
+                for i in range(size):
+                    scale += sq_pad[:, i:i+x.shape[1], :, :]
+                scale = (bias_val + alpha * scale / size) ** beta
+                return [fnn.tensor(x / scale, list(x.shape))]
             else:
                 logger.warning("DAGModel: unsupported op '%s', passing through", op_type)
                 return [tensors[0]] if tensors else None
