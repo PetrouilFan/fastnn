@@ -112,8 +112,9 @@ impl Drop for ScopedVec {
 pub struct TlsVecPool;
 
 impl TlsVecPool {
-    /// Acquire a Vec with at least `min_capacity` capacity.
-    /// The Vec may contain stale data (NOT zero-initialized).
+    /// Acquire a Vec with at least `min_capacity` capacity and length.
+    /// The Vec may contain stale data (NOT zero-initialized) — the caller
+    /// must overwrite every element in `0..min_capacity` before reading.
     pub fn alloc(min_capacity: usize) -> ScopedVec {
         let mut v = TLS_VEC_POOL
             .with(|pool| pool.borrow_mut().pop())
@@ -121,13 +122,18 @@ impl TlsVecPool {
         if v.capacity() < min_capacity {
             v.reserve(min_capacity - v.capacity());
         }
+        // SAFETY: The caller promises to write all min_capacity elements
+        // before any read. This avoids the cost of zero-initialization.
+        unsafe {
+            v.set_len(min_capacity);
+        }
         ScopedVec { inner: Some(v) }
     }
 
     /// Acquire a Vec with exactly `len` elements, all zeroed.
     pub fn alloc_zeroed(len: usize) -> ScopedVec {
         let mut v = Self::alloc(len);
-        v.resize(len, 0.0);
+        v.fill(0.0);
         v
     }
 }
