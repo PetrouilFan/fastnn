@@ -2,7 +2,9 @@
 
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
+use crate::dtypes::{U4x8, U8x4};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorValue};
+use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use std::cell::UnsafeCell;
 
@@ -166,12 +168,32 @@ impl Backend for CpuBackend {
                         .get(1)
                         .and_then(|s| s.last().cloned())
                         .unwrap_or(DimExpr::Known(n as u64));
+                    // Extract weight metadata for quantized matmul kernels
+                    let weight_meta = if is_quantized {
+                        node.inputs.get(1).and_then(|&w_id| {
+                            graph.get_node(w_id).map(|wn| {
+                                let (scale, zp) = match &wn.output_type.dtype {
+                                    IrDType::U4 { scale, zero_point } => (*scale, *zero_point as f32),
+                                    IrDType::U8 { scale, zero_point } => (*scale, *zero_point as f32),
+                                    _ => (1.0, 0.0),
+                                };
+                                let w_shape: Vec<usize> = wn.output_type.shape.iter()
+                                    .filter_map(|d| d.evaluate())
+                                    .map(|v| v as usize)
+                                    .collect();
+                                (scale, zp, w_shape)
+                            })
+                        })
+                    } else {
+                        None
+                    };
                     instructions.push(Instruction::CallKernel {
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
                         params: vec![m, k, n],
                         param_dims: Some(vec![m_dim, k_dim, n_dim]),
+                        weight_meta,
                     });
                 }
                 Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
@@ -198,6 +220,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![],
                         param_dims: None,
+                        weight_meta: None,
                     });
                 }
                 Opcode::Relu
@@ -229,6 +252,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![],
                         param_dims: None,
+                        weight_meta: None,
                     });
                 }
                 Opcode::Reshape | Opcode::Flatten | Opcode::Squeeze | Opcode::Unsqueeze => {
@@ -253,6 +277,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![],
                         param_dims: None,
+                        weight_meta: None,
                     });
                 }
                 Opcode::BatchNorm | Opcode::LayerNorm => {
@@ -262,6 +287,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![],
                         param_dims: None,
+                        weight_meta: None,
                     });
                 }
                 Opcode::Softmax | Opcode::BiasAdd => {
@@ -271,6 +297,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![],
                         param_dims: None,
+                        weight_meta: None,
                     });
                 }
                 Opcode::BatchNorm | Opcode::LayerNorm => {
@@ -280,6 +307,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![],
                         param_dims: None,
+                        weight_meta: None,
                     });
                 }
                 Opcode::Softmax => {
@@ -289,6 +317,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![],
                         param_dims: None,
+                        weight_meta: None,
                     });
                 }
                 Opcode::ReduceSum | Opcode::ReduceMean => {
@@ -316,6 +345,7 @@ impl Backend for CpuBackend {
                         // can re-evaluate it when shape_env is available (e.g.
                         // reduce over symbolic batch dim N).
                         param_dims: Some(vec![group_size_dim]),
+                        weight_meta: None,
                     });
                 }
                 Opcode::Transpose => {
@@ -342,6 +372,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![m, n],
                         param_dims: Some(vec![m_dim, n_dim]),
+                        weight_meta: None,
                     });
                 }
                 // Input nodes have no producer instruction — data is written
@@ -382,6 +413,7 @@ impl Backend for CpuBackend {
                     output_slice,
                     params,
                     param_dims,
+                    weight_meta,
                 } => {
                     let out_start = output_slice.offset;
                     let out_end = output_slice.offset + output_slice.size;
@@ -772,31 +804,25 @@ impl Backend for CpuBackend {
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3);
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u4: expected params [M,K,N]".into())); };
-                                let k_packed = k.div_ceil(8);
+                                let (scale, zp, w_shape) = weight_meta.clone().unwrap_or((1.0, 0.0, vec![m, k]));
+                                // Construct PackedTensor from arena data and call SIMD gemm
+                                let num_words = weights.len();
+                                let u4x8_data: Vec<U4x8> = bytemuck::cast_slice(&weights).to_vec();
+                                let pt = PackedTensor::from_raw(u4x8_data, w_shape.clone(), vec![scale], vec![zp]);
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
+                                // Slice activations and outputs per batch item
+                                let mut batch_inputs: Vec<Vec<f32>> = (0..m)
+                                    .map(|i| activations[i * k..(i + 1) * k].to_vec())
+                                    .collect();
+                                let mut batch_outputs: Vec<Vec<f32>> = (0..m)
+                                    .map(|i| vec![0.0f32; n])
+                                    .collect();
+                                crate::backend::cpu::microkernels::gemm_cpu::<U4x8>(&pt, &batch_inputs, &mut batch_outputs);
                                 for i in 0..m {
-                                    for j in 0..n {
-                                        let mut sum = 0.0f32;
-                                        for p in 0..k_packed {
-                                            let w = weights[i * k_packed + p];
-                                            for nib in 0..8 {
-                                                let idx = p * 8 + nib;
-                                                if idx < k {
-                                                    let nibble = (w >> (nib * 4)) & 0xF;
-                                                    let signed = if nibble & 0x8 != 0 {
-                                                        (nibble | 0xFFFFFFF0) as i32
-                                                    } else {
-                                                        nibble as i32
-                                                    };
-                                                    sum += (signed as f32) * activations[j * k + idx];
-                                                }
-                                            }
-                                        }
-                                        out_f32[i * n + j] = sum;
-                                    }
+                                    out_f32[i * n..(i + 1) * n].copy_from_slice(&batch_outputs[i]);
                                 }
                             }
                         }
@@ -809,26 +835,23 @@ impl Backend for CpuBackend {
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3);
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u8: expected params [M,K,N]".into())); };
-                                let k_packed = k.div_ceil(4);
+                                let (scale, zp, w_shape) = weight_meta.clone().unwrap_or((1.0, 0.0, vec![m, k]));
+                                // Construct PackedTensor from arena data and call SIMD gemm
+                                let u8x4_data: Vec<U8x4> = bytemuck::cast_slice(&weights).to_vec();
+                                let pt = PackedTensor::from_raw(u8x4_data, w_shape.clone(), vec![scale], vec![zp]);
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
+                                let mut batch_inputs: Vec<Vec<f32>> = (0..m)
+                                    .map(|i| activations[i * k..(i + 1) * k].to_vec())
+                                    .collect();
+                                let mut batch_outputs: Vec<Vec<f32>> = (0..m)
+                                    .map(|i| vec![0.0f32; n])
+                                    .collect();
+                                crate::backend::cpu::microkernels::gemm_cpu::<U8x4>(&pt, &batch_inputs, &mut batch_outputs);
                                 for i in 0..m {
-                                    for j in 0..n {
-                                        let mut sum = 0.0f32;
-                                        for p in 0..k_packed {
-                                            let w = weights[i * k_packed + p];
-                                            let bytes = w.to_le_bytes();
-                                            for b in 0..4 {
-                                                let idx = p * 4 + b;
-                                                if idx < k {
-                                                    sum += (bytes[b] as i8 as f32) * activations[j * k + idx];
-                                                }
-                                            }
-                                        }
-                                        out_f32[i * n + j] = sum;
-                                    }
+                                    out_f32[i * n..(i + 1) * n].copy_from_slice(&batch_outputs[i]);
                                 }
                             }
                         }
