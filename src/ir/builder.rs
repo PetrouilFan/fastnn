@@ -202,6 +202,12 @@ impl GraphBuilder {
         self.input(shape, dtype)
     }
 
+    /// Register a learnable parameter with symbolic [`DimExpr`] dimensions.
+    /// Like [`parameter`](Self::parameter) but accepts `&[DimExpr]` for dynamic shapes.
+    pub fn parameter_with_dims(&self, shape: &[DimExpr], dtype: IrDType) -> GraphTensor {
+        self.input_with_dims(shape, dtype)
+    }
+
     /// Create a constant tensor node with raw byte data.
     pub fn constant(&self, data: &[u8], tensor_type: TensorType) -> GraphTensor {
         let value = TensorValue::Data {
@@ -772,18 +778,25 @@ fn conv_spatial_dim(input_dim: &DimExpr, kernel_dim: &DimExpr, stride: usize, pa
                     DimExpr::Known(((h + 2 * p).saturating_sub(k)) / s + 1)
                 }
                 _ => {
-                    // Cannot fully evaluate — produce a Bounded or Symbol expression
+                    // Cannot fully evaluate — produce a Bounded expression with provenance
                     let h_eval = input_dim.evaluate().unwrap_or(SYMBOL_DIM_MAX);
                     let k_eval = kernel_dim.evaluate().unwrap_or(1);
                     let estimated = ((h_eval + 2 * p).saturating_sub(k_eval)) / s + 1;
-                    match input_dim {
-                        DimExpr::Symbol(sym) => {
-                            DimExpr::Bounded {
-                                sym: format!("conv_spatial({})", sym),
-                                max: estimated,
-                            }
+                    let sym_name = match (input_dim, kernel_dim) {
+                        (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
+                            format!("conv_spatial({},{})", s, t)
                         }
-                        _ => DimExpr::Known(estimated),
+                        (DimExpr::Symbol(s), _) => format!("conv_spatial({})", s),
+                        (DimExpr::Bounded { sym, .. }, DimExpr::Symbol(t)) => {
+                            format!("conv_spatial({},{})", sym, t)
+                        }
+                        (DimExpr::Bounded { sym, .. }, _) => format!("conv_spatial({})", sym),
+                        (_, DimExpr::Symbol(t)) => format!("conv_spatial({})", t),
+                        _ => format!("conv_spatial({})", estimated),
+                    };
+                    DimExpr::Bounded {
+                        sym: sym_name,
+                        max: estimated,
                     }
                 }
             }
