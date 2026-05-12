@@ -967,23 +967,27 @@ mod tests {
         // MatMul: [N, 64] @ [64, 10] → [N, 10]
         let logits = g.matmul(&x, &w);
 
+        // Compile ONCE, execute with multiple batch sizes.
+        let (plan, memory_plan, compiled_graph) = g.compile(&[&logits], CpuBackend).unwrap();
+        let executor = GraphExecutor::new(CpuBackend);
+
         // Two different batch sizes — both should work at runtime
         // Batch = 3: input data is 3*64*4 = 768 bytes
         let x_data_3 = f32_data(&(0..192).map(|i| i as f32).collect::<Vec<_>>());
         let w_data = f32_data(&(0..640).map(|i| (i % 10) as f32).collect::<Vec<_>>());
 
         // Execute with batch=3
-        let result_3 = g.compile_and_execute(
-            &[&logits], CpuBackend, &[&x_data_3, &w_data],
+        let result_3 = executor.execute(
+            &compiled_graph, &plan, &memory_plan, &[&x_data_3, &w_data],
         ).unwrap();
         let out_3 = read_f32(&result_3[0]);
         // Output should be [3, 10] = 30 elements
         assert_eq!(out_3.len(), 30, "batch=3 should produce 30 elements, got {}", out_3.len());
 
-        // Batch = 1: input data is 1*64*4 = 256 bytes
+        // Batch = 1: input data is 1*64*4 = 256 bytes — same compiled plan
         let x_data_1 = f32_data(&(0..64).map(|i| i as f32).collect::<Vec<_>>());
-        let result_1 = g.compile_and_execute(
-            &[&logits], CpuBackend, &[&x_data_1, &w_data],
+        let result_1 = executor.execute(
+            &compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data],
         ).unwrap();
         let out_1 = read_f32(&result_1[0]);
         // Output should be [1, 10] = 10 elements
@@ -995,6 +999,14 @@ mod tests {
         let expected_0 = (0..64).map(|k| k as f32 * (0 % 10) as f32).sum::<f32>();
         assert!((out_1[0] - expected_0).abs() < 1e-3,
             "expected logit[0,0]={}, got {}", expected_0, out_1[0]);
+
+        // Batch = 7 (another shape) — verify the pattern generalizes
+        let x_data_7 = f32_data(&(0..448).map(|i| i as f32).collect::<Vec<_>>()); // 7*64 = 448 f32s
+        let result_7 = executor.execute(
+            &compiled_graph, &plan, &memory_plan, &[&x_data_7, &w_data],
+        ).unwrap();
+        let out_7 = read_f32(&result_7[0]);
+        assert_eq!(out_7.len(), 70, "batch=7 should produce 70 elements, got {}", out_7.len());
     }
 
     #[test]

@@ -13,29 +13,36 @@ pub mod microkernels;
 /// Resolve kernel dimension params at dispatch time using the runtime shape
 /// environment. Returns `params` unchanged if no symbolic dims are present.
 ///
-/// # Panics
-/// If `param_dims` is `Some` but has fewer than `expected` elements, which
-/// indicates a lowering bug in the backend compiler pass.
+/// Resolve symbolic parameters to concrete values using the runtime ShapeEnv.
+///
+/// Returns `Err(BackendError::Dispatch)` when `param_dims` is malformed
+/// (backend lowering bug) or a symbolic dimension cannot be resolved.
 fn resolve_params(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
     shape_env: &ShapeEnv,
     expected: usize,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, BackendError> {
     if let Some(dims) = param_dims {
-        assert!(
-            dims.len() >= expected,
-            "resolve_params: param_dims has {} elements but expected {} (params={:?})",
-            dims.len(),
-            expected,
-            params
-        );
-        return dims[..expected]
+        if dims.len() < expected {
+            return Err(BackendError::Dispatch(format!(
+                "resolve_params: param_dims has {} elements but expected {} (params={:?})",
+                dims.len(),
+                expected,
+                params
+            )));
+        }
+        dims[..expected]
             .iter()
-            .map(|d| d.evaluate_with_env(shape_env).unwrap_or(1) as usize)
-            .collect();
+            .map(|d| {
+                d.evaluate_with_env(shape_env)
+                    .map(|v| v as usize)
+                    .map_err(|e| BackendError::Dispatch(format!("resolve_params: {e}")))
+            })
+            .collect()
+    } else {
+        Ok(params.to_vec())
     }
-    params.to_vec()
 }
 
 /// CPU memory arena with interior mutability for zero-allocation dispatch.
@@ -715,7 +722,7 @@ impl Backend for CpuBackend {
                                     ).to_vec();
                                     (a_f32, b_f32)
                                 };
-                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul: expected params [M,K,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
@@ -750,7 +757,7 @@ impl Backend for CpuBackend {
                                     ).to_vec();
                                     (a_f32, b_f32, bias_f32)
                                 };
-                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("fused_matmul_add_relu: expected params [M,K,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
@@ -777,7 +784,7 @@ impl Backend for CpuBackend {
                                     (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
                                      bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec())
                                 };
-                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_relu: expected params [M,K,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
@@ -801,7 +808,7 @@ impl Backend for CpuBackend {
                                     (bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec(),
                                      bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec())
                                 };
-                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u4: expected params [M,K,N]".into())); };
                                 let (scale, zp, w_shape) = weight_meta.clone().unwrap_or((1.0, 0.0, vec![m, k]));
                                 // Construct PackedTensor from arena data and call SIMD gemm
@@ -832,7 +839,7 @@ impl Backend for CpuBackend {
                                     (bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec(),
                                      bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec())
                                 };
-                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u8: expected params [M,K,N]".into())); };
                                 let (scale, zp, w_shape) = weight_meta.clone().unwrap_or((1.0, 0.0, vec![m, k]));
                                 // Construct PackedTensor from arena data and call SIMD gemm
@@ -868,7 +875,10 @@ impl Backend for CpuBackend {
                                 // reducing over the batch dimension).
                                 let effective_group_size = match param_dims {
                                     Some(dims) if dims.len() >= 1 => {
-                                        dims[0].evaluate_with_env(shape_env).unwrap_or(group_size as u64) as usize
+                                        dims[0]
+                                            .evaluate_with_env(shape_env)
+                                            .map_err(|e| BackendError::Dispatch(format!("reduce_f32: {e}")))?
+                                            as usize
                                     }
                                     _ => group_size,
                                 };
@@ -901,7 +911,7 @@ impl Backend for CpuBackend {
                                         &d[input_slice.offset..input_slice.offset + input_slice.size]
                                     ).to_vec()
                                 };
-                                let transpose_params = resolve_params(params, param_dims, shape_env, 2);
+                                let transpose_params = resolve_params(params, param_dims, shape_env, 2)?;
                                 let &[m, n] = &transpose_params[..] else { return Err(BackendError::Dispatch("transpose_f32: expected params [M,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();

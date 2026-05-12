@@ -370,21 +370,32 @@ impl DimExpr {
     /// # Panics
     /// If a [`DimExpr::Bounded`] symbol resolves but the value exceeds `max`,
     /// indicating the runtime shape overflows the compile-time bound contract.
-    pub fn evaluate_with_env(&self, env: &ShapeEnv) -> Option<u64> {
+    /// Evaluate the dimension expression using a runtime [`ShapeEnv`].
+    ///
+    /// Returns:
+    /// - `Ok(value)` if the expression resolves successfully
+    /// - `Err(message)` if a [`DimExpr::Symbol`] is unresolved, or a
+    ///   [`DimExpr::Bounded`] resolves to a value exceeding its compile-time
+    ///   `max` bound.
+    pub fn evaluate_with_env(&self, env: &ShapeEnv) -> Result<u64, String> {
         match self {
-            DimExpr::Known(v) => Some(*v),
+            DimExpr::Known(v) => Ok(*v),
             DimExpr::Bounded { sym, max } => match env.resolve(sym) {
                 Some(v) => {
-                    assert!(
-                        v <= *max,
-                        "DimExpr::Bounded: symbol '{}' resolved to {}, exceeds bound {}",
-                        sym, v, max
-                    );
-                    Some(v)
+                    if v > *max {
+                        Err(format!(
+                            "DimExpr::Bounded: symbol '{}' resolved to {}, exceeds bound {}",
+                            sym, v, max
+                        ))
+                    } else {
+                        Ok(v)
+                    }
                 }
-                None => Some(*max),
+                None => Ok(*max),
             },
-            DimExpr::Symbol(s) => env.resolve(s),
+            DimExpr::Symbol(s) => env.resolve(s).ok_or_else(|| {
+                format!("DimExpr::Symbol '{}' is not bound in the ShapeEnv", s)
+            }),
         }
     }
 }
@@ -470,7 +481,7 @@ impl TensorType {
                 DimExpr::Known(v) => *v as usize,
                 DimExpr::Bounded { max, .. } => *max as usize,
                 DimExpr::Symbol(_) => match env {
-                    Some(e) => d.evaluate_with_env(e).unwrap_or(symbol_max as u64) as usize,
+                    Some(e) => d.evaluate_with_env(e).ok().unwrap_or(symbol_max as u64) as usize,
                     None => symbol_max,
                 },
             })
