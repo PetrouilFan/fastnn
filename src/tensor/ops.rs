@@ -955,19 +955,6 @@ impl Tensor {
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
-        // Fast path: 2D CPU matmul, skip dispatch overhead
-        if self.inner.ndim() == 2
-            && other.inner.ndim() == 2
-            && self.device() == Device::Cpu
-            && other.device() == Device::Cpu
-            && self.inner.dtype == DType::F32
-            && other.inner.dtype == DType::F32
-            && self.is_contiguous()
-            && other.is_contiguous()
-        {
-            return self.matmul_fast_2d(other);
-        }
-
         let output = if self.device() == Device::Cpu && other.device() == Device::Cpu {
             Tensor::exec_aot(&[self, other], |g, ins| vec![g.matmul(&ins[0], &ins[1])])
                 .expect("Tensor::matmul: AOT execution failed")
@@ -994,60 +981,6 @@ impl Tensor {
         } else {
             output
         }
-    }
-
-    /// Fast 2D contiguous F32 matmul bypassing dispatch
-    fn matmul_fast_2d(&self, other: &Tensor) -> Tensor {
-        let a_shape = &self.inner.sizes;
-        let b_shape = &other.inner.sizes;
-        let m = a_shape[0] as usize;
-        let k = a_shape[1] as usize;
-        let n = b_shape[1] as usize;
-
-        // Allocate output directly
-        let sizes: SmallVec<[i64; 8]> = smallvec![m as i64, n as i64];
-        let nbytes = m * n * DType::F32.size();
-        let data = vec![0u8; nbytes];
-        let storage = Arc::new(Storage::Cpu(CpuStorage {
-            data: Arc::new(data),
-            nbytes,
-            gpu_buffer_cache: RwLock::new(HashMap::new()),
-        }));
-        let mut output = Tensor::new(TensorImpl::new(storage, sizes, DType::F32));
-        {
-            let output_inner = Arc::make_mut(&mut output.inner);
-            let output_storage = Arc::make_mut(&mut output_inner.storage);
-            let Storage::Cpu(cpu_storage) = output_storage else {
-                unreachable!("matmul_fast_2d always allocates CPU output")
-            };
-            let out_data = Arc::make_mut(&mut cpu_storage.data);
-
-            let a_ptr = self.data_ptr_f32();
-            let b_ptr = other.data_ptr_f32();
-            let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
-            let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, m * k) };
-            let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k * n) };
-            let out_slice = unsafe { std::slice::from_raw_parts_mut(out_ptr, m * n) };
-
-            crate::kernels::blas::matmul_blas_into(a_slice, b_slice, out_slice, m, k, n);
-        }
-
-        // Attach autograd if needed
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let edges = {
-                let mut edges = autograd::make_edge(self);
-                edges.extend(autograd::make_edge(other));
-                edges
-            };
-            let backward = autograd::MatmulBackward::new();
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(std::sync::Arc::new(backward));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
-        output
     }
 
     pub fn neg(&self) -> Tensor {
