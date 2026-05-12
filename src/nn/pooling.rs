@@ -1,5 +1,5 @@
 use crate::autograd::{self, AutogradMeta, AvgPool2dBackward, MaxPool2dBackward};
-use crate::dispatcher::{dispatch, DispatchKey};
+use crate::dispatcher::{DispatchKey, dispatch};
 use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::sync::Arc;
@@ -55,15 +55,7 @@ impl Module for MaxPool2d {
             let argmax_data = result[1].as_f32_slice();
             let argmax_indices: Vec<usize> = argmax_data.iter().map(|&v| v as usize).collect();
 
-            let backward = MaxPool2dBackward::new(
-                x.clone(),
-                self.kernel_size,
-                self.stride,
-                self.padding,
-                self.dilation,
-                autograd::make_edge(x),
-                argmax_indices,
-            );
+            let backward = MaxPool2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =
@@ -258,13 +250,7 @@ impl Module for AvgPool2d {
         let mut output = result[0].clone();
 
         if x.requires_grad() {
-            let backward = AvgPool2dBackward::new(
-                x.clone(),
-                self.kernel_size,
-                self.stride,
-                self.padding,
-                autograd::make_edge(x),
-            );
+            let backward = AvgPool2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =

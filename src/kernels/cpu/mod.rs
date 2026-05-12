@@ -52,7 +52,6 @@ impl AlignedBuffer {
 }
 
 use crate::autograd::{AutogradMeta, Edge, Node};
-use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
     matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
@@ -865,6 +864,8 @@ impl Node for EmbeddingBackward {
 
 #[ctor::ctor]
 fn register_kernels() {
+    use crate::dispatcher::{register, DispatchKey, KernelFn};
+
     register("add", DispatchKey::Cpu, add_kernel as KernelFn);
     register("sub", DispatchKey::Cpu, sub_kernel as KernelFn);
     register("mul", DispatchKey::Cpu, mul_kernel as KernelFn);
@@ -1089,6 +1090,7 @@ fn register_kernels() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatcher::{DispatchKey, dispatch};
     use crate::tensor::Tensor;
 
     #[test]
@@ -1140,7 +1142,6 @@ mod tests {
     /// This test prints timing data and verifies correctness of both paths.
     #[test]
     fn bench_fused_linear_relu_vs_matmul() {
-        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
         use std::time::Instant;
 
         let configs: Vec<(usize, usize, usize)> = vec![
@@ -1584,7 +1585,6 @@ mod tests {
     /// Benchmark conv2d_im2col to verify optimization impact.
     #[test]
     fn bench_conv2d_im2col() {
-        use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
         use std::time::Instant;
 
         let configs: Vec<(usize, usize, usize, usize, usize, usize, usize)> = vec![

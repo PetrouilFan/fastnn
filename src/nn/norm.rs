@@ -2,7 +2,7 @@ use crate::autograd::{
     self, AutogradMeta, BatchNorm1dBackward, BatchNorm2dBackward, GroupNormBackward,
     RMSNormBackward,
 };
-use crate::dispatcher::{dispatch, DispatchKey};
+use crate::dispatcher::{DispatchKey, dispatch};
 use crate::tensor::Tensor;
 use crate::{
     impl_training_state,
@@ -69,16 +69,7 @@ impl Module for LayerNorm {
                 edges.extend(crate::autograd::make_edge(bias));
                 edges
             };
-            let backward = crate::autograd::LayerNormBackward::new(
-                x.clone(),
-                weight.clone(),
-                bias.clone(),
-                x_hat,
-                mean,
-                variance,
-                self.eps as f32,
-                edges,
-            );
+            let backward = crate::autograd::LayerNormBackward::new();
             let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             let mut output = output.clone();
@@ -280,19 +271,7 @@ impl Module for BatchNorm1d {
                 }
                 edges
             };
-            let backward = BatchNorm1dBackward::new(
-                x.clone(),
-                self.weight
-                    .clone()
-                    .unwrap_or_else(|| Tensor::from_scalar(1.0)),
-                self.bias
-                    .clone()
-                    .unwrap_or_else(|| Tensor::from_scalar(0.0)),
-                batch_mean,
-                batch_var,
-                self.eps as f32,
-                edges,
-            );
+            let backward = BatchNorm1dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =
@@ -378,13 +357,7 @@ impl Module for RMSNorm {
                 edges.extend(autograd::make_edge(&self.weight));
                 edges
             };
-            let backward = RMSNormBackward::new(
-                x.clone(),
-                self.weight.clone(),
-                self.eps,
-                self.normalized_shape,
-                edges,
-            );
+            let backward = RMSNormBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =
@@ -493,14 +466,7 @@ impl Module for GroupNorm {
                 edges.extend(autograd::make_edge(&self.bias));
                 edges
             };
-            let backward = GroupNormBackward::new(
-                x.clone(),
-                self.weight.clone(),
-                self.bias.clone(),
-                self.num_groups,
-                self.eps,
-                edges,
-            );
+            let backward = GroupNormBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =
@@ -681,15 +647,7 @@ impl Module for BatchNorm2d {
                 edges.extend(autograd::make_edge(&self.bias));
                 edges
             };
-            let backward = BatchNorm2dBackward::new(
-                x.clone(),
-                self.weight.clone(),
-                self.bias.clone(),
-                batch_mean,
-                batch_var,
-                self.eps,
-                edges,
-            );
+            let backward = BatchNorm2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =

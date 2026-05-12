@@ -1,7 +1,5 @@
 #![allow(clippy::needless_range_loop)]
 
-pub mod autograd;
-pub mod dispatcher;
 pub mod error;
 pub mod io;
 pub mod iterator;
@@ -17,6 +15,9 @@ pub mod tensor;
 pub use error::{FastnnError, FastnnResult};
 pub use storage_quantized::QuantizedTensor;
 
+// Runtime dispatch table (v1.x backward compat)
+pub mod dispatcher;
+
 // Re-export core types
 pub use storage::{DType, Device};
 pub use tensor::Tensor;
@@ -29,6 +30,15 @@ pub mod packed_layer;
 pub mod packed_tensor;
 pub mod packed_train;
 pub mod swar;
+
+// v2.0.0 AOT compiler infrastructure
+pub mod ir;
+pub mod backend;
+pub mod compiler;
+pub mod autograd;
+
+// Re-export the graph builder API for convenience
+pub use ir::builder::{GraphBuilder, GraphTensor};
 
 // Re-export packed precision public API
 pub use dtypes::{F16x2, F32x1, PackedWord, U4x8, U8x4};

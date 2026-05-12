@@ -1,13 +1,12 @@
 #![allow(clippy::too_many_arguments)]
 use crate::autograd::{no_grad_enter, no_grad_exit};
-use crate::dispatcher::list_registered_ops as dispatcher_list_ops;
 use crate::dtypes::{F16x2, F32x1, U4x8, U8x4};
 use crate::nn::{self as core_nn, Module};
 use crate::optim::{self as core_optim, Optimizer};
 use crate::storage::allocator_stats as storage_allocator_stats;
 use crate::storage::{DType, Device};
 use crate::tensor::{self as core_tensor, Tensor};
-use crate::{autograd, dispatcher, residual, set_seeded_rng};
+use crate::{autograd, residual, set_seeded_rng};
 use parking_lot::RwLock;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -180,7 +179,6 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_set_default_device, py)?)?;
     m.add_function(wrap_pyfunction!(allocator_stats, py)?)?;
     m.add_function(wrap_pyfunction!(clear_storage_pool, py)?)?;
-    m.add_function(wrap_pyfunction!(list_registered_ops, py)?)?;
     m.add_function(wrap_pyfunction!(save_model, py)?)?;
     m.add_function(wrap_pyfunction!(load_model, py)?)?;
 
