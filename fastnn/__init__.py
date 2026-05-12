@@ -544,7 +544,7 @@ def load_state_dict(model, state_dict):
 from fastnn.schedulers import LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau  # noqa: F401
 
 allocator_stats = _core.allocator_stats
-list_registered_ops = _core.list_registered_ops
+list_registered_ops = getattr(_core, 'list_registered_ops', lambda: [])
 batched_mlp_forward = _core.batched_mlp_forward
 
 

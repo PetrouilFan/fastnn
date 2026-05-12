@@ -111,22 +111,22 @@ def conv2d(x: Tensor, weight: Tensor, bias=None, stride=1, padding=0, dilation=1
         weight.shape[1] * groups, weight.shape[0],
         weight.shape[2], stride, padding, dilation, groups, False
     )
-    conv.weight = weight
+    conv.set_weight(weight)
     if bias is not None:
-        conv.bias = bias
-    return conv.forward(x)
+        conv.set_bias(bias)
+    return conv(x)
 
 
 def conv1d(x: Tensor, weight: Tensor, bias=None, stride=1, padding=0, dilation=1, groups=1) -> Tensor:
     """Applies a 1D convolution over an input signal."""
     conv = fastnn.Conv1d(
         weight.shape[1] * groups, weight.shape[0],
-        weight.shape[2], stride, padding, dilation, groups, False
+        weight.shape[2], stride, padding, dilation, groups, bias is not None
     )
-    conv.weight = weight
+    conv.set_weight(weight)
     if bias is not None:
-        conv.bias = bias
-    return conv.forward(x)
+        conv.set_bias(bias)
+    return conv(x)
 
 
 # --- Pooling ---
@@ -136,7 +136,7 @@ def max_pool2d(x: Tensor, kernel_size, stride=None, padding=0, dilation=1) -> Te
     if stride is None:
         stride = kernel_size
     pool = fastnn.MaxPool2d(kernel_size, stride, padding, dilation)
-    return pool.forward(x)
+    return pool(x)
 
 
 def avg_pool2d(x: Tensor, kernel_size, stride=None, padding=0) -> Tensor:
@@ -144,7 +144,7 @@ def avg_pool2d(x: Tensor, kernel_size, stride=None, padding=0) -> Tensor:
     if stride is None:
         stride = kernel_size
     pool = fastnn.AvgPool2d(kernel_size, stride, padding)
-    return pool.forward(x)
+    return pool(x)
 
 
 def adaptive_avg_pool2d(x: Tensor, output_size) -> Tensor:
@@ -152,7 +152,7 @@ def adaptive_avg_pool2d(x: Tensor, output_size) -> Tensor:
     if isinstance(output_size, int):
         output_size = (output_size, output_size)
     pool = fastnn.AdaptiveAvgPool2d(output_size)
-    return pool.forward(x)
+    return pool(x)
 
 
 # --- Normalization ---
@@ -170,15 +170,15 @@ def batch_norm(x: Tensor, running_mean=None, running_var=None, weight=None, bias
     if bias is None:
         bias = fastnn.zeros([channels])
     bn = fastnn.BatchNorm2d(channels, eps, momentum)
-    bn.weight = weight
-    bn.bias = bias
-    bn.running_mean = running_mean
-    bn.running_var = running_var
+    bn.set_weight(weight)
+    bn.set_bias(bias)
+    bn.set_running_mean(running_mean)
+    bn.set_running_var(running_var)
     if training:
         bn.train()
     else:
         bn.eval()
-    return bn.forward(x)
+    return bn(x)
 
 
 def layer_norm(x: Tensor, normalized_shape, weight=None, bias=None, eps=1e-5) -> Tensor:
@@ -190,9 +190,9 @@ def layer_norm(x: Tensor, normalized_shape, weight=None, bias=None, eps=1e-5) ->
     if bias is None:
         bias = fastnn.zeros(normalized_shape)
     ln = fastnn.LayerNorm(normalized_shape[-1], eps)
-    ln.weight = weight
-    ln.bias = bias
-    return ln.forward(x)
+    ln.set_weight(weight)
+    ln.set_bias(bias)
+    return ln(x)
 
 
 # --- Loss functions ---
@@ -226,7 +226,7 @@ def dropout(x: Tensor, p: float = 0.5, training: bool = True) -> Tensor:
         d.train()
     else:
         d.eval()
-    return d.forward(x)
+    return d(x)
 
 
 # --- Linear ---
@@ -234,10 +234,10 @@ def dropout(x: Tensor, p: float = 0.5, training: bool = True) -> Tensor:
 def linear(x: Tensor, weight: Tensor, bias=None) -> Tensor:
     """Applies a linear transformation."""
     lin = fastnn.Linear(weight.shape[1], weight.shape[0], bias is not None)
-    lin.weight = weight
+    lin.set_weight(weight)
     if bias is not None:
-        lin.bias = bias
-    return lin.forward(x)
+        lin.set_bias(bias)
+    return lin(x)
 
 
 # --- Interpolate ---
@@ -253,7 +253,7 @@ def interpolate(x: Tensor, size=None, scale_factor=None, mode='nearest') -> Tens
             raise ValueError("Aspect ratio change not supported")
         scale_factor = scale_h
     upsample = fastnn.Upsample(scale_factor, mode)
-    return upsample.forward(x)
+    return upsample(x)
 
 
 # --- Padding ---

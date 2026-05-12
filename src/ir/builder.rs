@@ -274,7 +274,10 @@ impl GraphBuilder {
     pub fn matmul(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
         let a_shape = a.shape();
         let b_shape = b.shape();
-        let m = a_shape.first().cloned().unwrap_or(DimExpr::Known(0));
+        // m = second-to-last dim of a (the "M" in MxK @ KxN).
+        // a_shape.first() would be the batch dim, not M.
+        let m = a_shape.get(a_shape.len().saturating_sub(2))
+            .cloned().unwrap_or(DimExpr::Known(0));
         let k_a = a_shape.get(a_shape.len().saturating_sub(1))
             .cloned().unwrap_or(DimExpr::Known(0));
         let k_b = b_shape.get(b_shape.len().saturating_sub(2))
