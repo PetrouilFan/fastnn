@@ -174,6 +174,12 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_valid_for_blas = a.is_contiguous() || a_is_transposed;
     let b_valid_for_blas = b.is_contiguous() || b_is_transposed;
 
+    // Normalise batch strides for broadcast semantics: when an operand has
+    // a single batch (e.g. [1, k, n]), its stride to the next batch should
+    // be 0 so that indexing repeats the same data across all output batches.
+    let a_batch_stride = if a_batch_stride != 0 && batch_a == 1 { 0 } else { a_batch_stride };
+    let b_batch_stride = if b_batch_stride != 0 && batch_b == 1 { 0 } else { b_batch_stride };
+
     // Reshape trick: For batched A [batch, m, k] @ 2D B [k, n], flatten to [batch*m, k] @ [k, n]
     // This enables a single BLAS call instead of looping over batch dimension
     let can_reshape_trick = batch > 1
@@ -224,12 +230,15 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             );
         } else if can_batch_blas {
             // Batched 3D BLAS loop: process each batch element separately
+            // The slice spans are based on the *actual* batch per operand, not
+            // the max() broadcast batch, to avoid out-of-bounds access when
+            // one side has batch=1 (broadcast semantics).
             let a_slice =
                 // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
-                unsafe { std::slice::from_raw_parts(a_ptr, batch * m as usize * k as usize) };
+                unsafe { std::slice::from_raw_parts(a_ptr, batch_a * m as usize * k as usize) };
             let b_slice =
                 // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
-                unsafe { std::slice::from_raw_parts(b_ptr, batch * k as usize * n as usize) };
+                unsafe { std::slice::from_raw_parts(b_ptr, batch_b * k as usize * n as usize) };
             let out_slice =
                 // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, batch * m as usize * n as usize) };
@@ -248,8 +257,8 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                     .par_chunks_mut(out_batch_elems)
                     .enumerate()
                     .for_each(|(bat, out_chunk)| {
-                        let a_offset = bat * a_batch_elems;
-                        let b_offset = bat * b_batch_elems;
+                        let a_offset = if batch_a == 1 { 0 } else { bat * a_batch_elems };
+                        let b_offset = if batch_b == 1 { 0 } else { bat * b_batch_elems };
                         matmul_blas_with_transpose_into(
                             &a_slice[a_offset..],
                             &b_slice[b_offset..],
@@ -265,8 +274,8 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             #[cfg(not(feature = "parallel"))]
             {
                 for bat in 0..batch {
-                    let a_offset = bat * a_batch_elems;
-                    let b_offset = bat * b_batch_elems;
+                    let a_offset = if batch_a == 1 { 0 } else { bat * a_batch_elems };
+                    let b_offset = if batch_b == 1 { 0 } else { bat * b_batch_elems };
                     let out_offset = bat * out_batch_elems;
                     matmul_blas_with_transpose_into(
                         &a_slice[a_offset..],

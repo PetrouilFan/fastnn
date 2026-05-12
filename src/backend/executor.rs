@@ -140,14 +140,13 @@ impl<B: Backend> GraphExecutor<B> {
 
             // Re-evaluate output size with shape_env to handle symbolic dims.
             // Error if the resolved size exceeds the allocated slot (would read
-            // past the end of valid data).
+            // past the end of valid data) or if any dim is unresolved.
             let actual_size = if let Some(node) = graph.get_node(output_node_id) {
-                let actual_numel: usize = node
-                    .output_type
-                    .shape
-                    .iter()
-                    .map(|d| d.evaluate_with_env(&shape_env).unwrap_or(1) as usize)
-                    .product();
+                let resolved_shape = resolve_shape(&node.output_type.shape, &shape_env)
+                    .map_err(|e| BackendError::Dispatch(format!(
+                        "output node {}: {e}", output_node_id
+                    )))?;
+                let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
                 let elem_size = node.output_type.dtype.byte_size();
                 let computed = actual_numel * elem_size;
                 if computed > slot.size {
@@ -197,10 +196,14 @@ pub fn tensor_byte_size(shape: &[DimExpr], elem_byte_size: usize) -> usize {
 }
 
 /// Resolve a shape to concrete values using a runtime ShapeEnv.
-fn resolve_shape(shape: &[DimExpr], env: &ShapeEnv) -> Vec<u64> {
+/// Returns an error if any symbolic dimension cannot be resolved.
+fn resolve_shape(shape: &[DimExpr], env: &ShapeEnv) -> Result<Vec<u64>, String> {
     shape
         .iter()
-        .map(|d| d.evaluate_with_env(env).unwrap_or(1))
+        .map(|d| {
+            d.evaluate_with_env(env)
+                .map_err(|e| format!("resolve_shape: {e}"))
+        })
         .collect()
 }
 
@@ -218,7 +221,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             .iter()
             .filter_map(|&id| graph.get_node(id))
             .map(|n| resolve_shape(&n.output_type.shape, shape_env))
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("node {}: {e}", node_id))?;
 
         match &node.opcode {
             Opcode::MatMul => {
@@ -306,21 +310,25 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 }
             }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
-                if input_shapes.len() >= 2 {
-                    let a = &input_shapes[0];
-                    let b = &input_shapes[1];
-                    // Check broadcast compatibility: for each trailing dim,
-                    // they must match or one must be 1.
-                    let max_len = a.len().max(b.len());
-                    for i in 0..max_len {
-                        let da = if i < a.len() { a[a.len() - 1 - i] } else { 1 };
-                        let db = if i < b.len() { b[b.len() - 1 - i] } else { 1 };
-                        if da != 1 && db != 1 && da != db {
-                            return Err(format!(
-                                "Broadcast mismatch node {}: dim {} values {} vs {} (shapes {:?} vs {:?})",
-                                node_id, i, da, db, a, b
-                            ));
-                        }
+                if input_shapes.len() < 2 {
+                    return Err(format!(
+                        "Elementwise node {}: expected at least 2 inputs, got {}",
+                        node_id, input_shapes.len()
+                    ));
+                }
+                let a = &input_shapes[0];
+                let b = &input_shapes[1];
+                // Check broadcast compatibility: for each trailing dim,
+                // they must match or one must be 1.
+                let max_len = a.len().max(b.len());
+                for i in 0..max_len {
+                    let da = if i < a.len() { a[a.len() - 1 - i] } else { 1 };
+                    let db = if i < b.len() { b[b.len() - 1 - i] } else { 1 };
+                    if da != 1 && db != 1 && da != db {
+                        return Err(format!(
+                            "Broadcast mismatch node {}: dim {} values {} vs {} (shapes {:?} vs {:?})",
+                            node_id, i, da, db, a, b
+                        ));
                     }
                 }
             }
@@ -343,6 +351,35 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             Opcode::Transpose => {
                 if input_shapes.is_empty() || input_shapes[0].len() < 2 {
                     return Err(format!("Transpose node {}: input must have at least 2 dims, got {:?}", node_id, input_shapes.first()));
+                }
+                // Validate optional permutation attribute
+                if let Some(perm_str) = node.attrs.get("perm") {
+                    let perm: Vec<usize> = perm_str.trim_matches(|c| c == '[' || c == ']')
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect();
+                    if perm.len() != input_shapes[0].len() {
+                        return Err(format!(
+                            "Transpose node {}: permutation length {} != rank {}",
+                            node_id, perm.len(), input_shapes[0].len()
+                        ));
+                    }
+                    let mut seen = vec![false; perm.len()];
+                    for &p in &perm {
+                        if p >= perm.len() {
+                            return Err(format!(
+                                "Transpose node {}: permutation axis {} out of bounds for rank {}",
+                                node_id, p, perm.len()
+                            ));
+                        }
+                        if seen[p] {
+                            return Err(format!(
+                                "Transpose node {}: duplicate axis {} in permutation {:?}",
+                                node_id, p, perm
+                            ));
+                        }
+                        seen[p] = true;
+                    }
                 }
             }
             Opcode::Reshape | Opcode::Flatten => {
@@ -431,6 +468,45 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 let max_rank = input_shapes.first().map(|s| s.len() + 1).unwrap_or(1);
                 if dim > max_rank {
                     return Err(format!("Unsqueeze node {}: dim {} out of bounds for rank {}", node_id, dim, max_rank));
+                }
+            }
+            Opcode::Gather => {
+                if input_shapes.len() < 2 {
+                    return Err(format!("Gather node {}: expected at least 2 inputs (data + indices), got {}", node_id, input_shapes.len()));
+                }
+                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let rank = input_shapes[0].len();
+                if axis >= rank {
+                    return Err(format!(
+                        "Gather node {}: axis {} out of bounds for data rank {}",
+                        node_id, axis, rank
+                    ));
+                }
+            }
+            Opcode::Pad => {
+                if input_shapes.is_empty() { continue; }
+                let rank = input_shapes[0].len();
+                if let Some(pads) = node.attrs.get("pads") {
+                    let parsed: Vec<i64> = pads.trim_matches(|c| c == '[' || c == ']')
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect();
+                    if parsed.len() != 2 * rank {
+                        return Err(format!(
+                            "Pad node {}: pads length {} != 2*rank {}",
+                            node_id, parsed.len(), 2 * rank
+                        ));
+                    }
+                }
+            }
+            Opcode::Neg | Opcode::Abs | Opcode::Exp | Opcode::Log
+            | Opcode::Sqrt | Opcode::Relu | Opcode::Gelu | Opcode::Silu
+            | Opcode::Sigmoid | Opcode::Tanh => {
+                if input_shapes.len() != 1 {
+                    return Err(format!(
+                        "Unary op {:?} node {}: expected 1 input, got {}",
+                        node.opcode, node_id, input_shapes.len()
+                    ));
                 }
             }
             _ => {}
