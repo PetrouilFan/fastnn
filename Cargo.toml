@@ -33,7 +33,7 @@ rustc-hash  = "2.0"
 ndarray      = { version = "0.16", features = ["blas"] }
 
 [features]
-default = ["simd", "parallel", "simd_avx512", "blas", "openblas"]
+default = ["simd", "parallel", "simd_avx512"]
 openblas = ["blas-src/openblas-src"]
 blas = []
 parallel = []
