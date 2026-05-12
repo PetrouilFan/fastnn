@@ -321,6 +321,115 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     }
                 }
             }
+            Opcode::Conv2d => {
+                if input_shapes.len() < 2 {
+                    return Err(format!("Conv2d node {}: expected 2 inputs, got {}", node_id, input_shapes.len()));
+                }
+                let inp = &input_shapes[0];
+                let weight = &input_shapes[1];
+                if inp.len() < 4 {
+                    return Err(format!("Conv2d node {}: input must have 4 dims [N,C,H,W], got {:?}", node_id, inp));
+                }
+                if weight.len() < 4 {
+                    return Err(format!("Conv2d node {}: weight must have 4 dims [F,C,KH,KW], got {:?}", node_id, weight));
+                }
+                if inp[1] != weight[1] {
+                    return Err(format!("Conv2d node {}: input channels {} != weight channels {}", node_id, inp[1], weight[1]));
+                }
+            }
+            Opcode::Transpose => {
+                if input_shapes.is_empty() || input_shapes[0].len() < 2 {
+                    return Err(format!("Transpose node {}: input must have at least 2 dims, got {:?}", node_id, input_shapes.first()));
+                }
+            }
+            Opcode::Reshape | Opcode::Flatten => {
+                if input_shapes.is_empty() { continue; }
+                let in_numel: u64 = input_shapes[0].iter().product();
+                // For reshape, compute expected numel from attrs or output shape
+                if let Some(out_shape) = node.attrs.get("shape") {
+                    let parsed: Vec<u64> = out_shape.trim_matches(|c| c == '[' || c == ']')
+                        .split(',')
+                        .filter_map(|s| s.trim().parse().ok())
+                        .collect();
+                    let out_numel: u64 = parsed.iter().product();
+                    if in_numel != out_numel {
+                        return Err(format!(
+                            "Reshape node {}: element count mismatch {} vs {} (in {:?} -> {:?})",
+                            node_id, in_numel, out_numel, input_shapes[0], parsed
+                        ));
+                    }
+                }
+            }
+            Opcode::Softmax => {
+                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                if !input_shapes.is_empty() && axis >= input_shapes[0].len() {
+                    return Err(format!(
+                        "Softmax node {}: axis {} out of bounds for rank {}",
+                        node_id, axis, input_shapes[0].len()
+                    ));
+                }
+            }
+            Opcode::BatchNorm | Opcode::LayerNorm => {
+                if input_shapes.len() < 2 {
+                    return Err(format!("Norm node {}: expected at least 2 inputs (data + weight)", node_id));
+                }
+                // Channel dim must match between data and weight for 1D/2D norm
+                let data = &input_shapes[0];
+                let w = &input_shapes[1];
+                if data.len() >= 2 && w.len() >= 1 && data[1] != w[0] {
+                    return Err(format!(
+                        "Norm node {}: data channels {} != weight features {}",
+                        node_id, data[1], w[0]
+                    ));
+                }
+            }
+            Opcode::Slice => {
+                if input_shapes.is_empty() { continue; }
+                let dim: usize = node.attrs.get("dim").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let start: i64 = node.attrs.get("start").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let end: i64 = node.attrs.get("end").and_then(|a| a.parse().ok()).unwrap_or(-1);
+                let rank = input_shapes[0].len();
+                if dim >= rank {
+                    return Err(format!("Slice node {}: dim {} out of bounds for rank {}", node_id, dim, rank));
+                }
+                let dim_size = input_shapes[0][dim] as i64;
+                let adjusted_end = if end < 0 { dim_size + end + 1 } else { end };
+                if start >= dim_size || adjusted_end > dim_size || start >= adjusted_end {
+                    return Err(format!(
+                        "Slice node {}: invalid range [{}, {}) on dim {} with size {}",
+                        node_id, start, adjusted_end, dim, dim_size
+                    ));
+                }
+            }
+            Opcode::MaxPool | Opcode::AvgPool => {
+                if input_shapes.is_empty() { continue; }
+                if input_shapes[0].len() < 4 {
+                    return Err(format!("Pool node {}: input must have 4 dims [N,C,H,W], got {:?}", node_id, input_shapes[0]));
+                }
+                let k: u64 = node.attrs.get("kernel_size").and_then(|a| a.parse().ok()).unwrap_or(2);
+                let s: u64 = node.attrs.get("stride").and_then(|a| a.parse().ok()).unwrap_or(2);
+                if k == 0 || s == 0 {
+                    return Err(format!("Pool node {}: kernel_size={} and stride={} must be >0", node_id, k, s));
+                }
+            }
+            Opcode::Squeeze => {
+                if input_shapes.is_empty() { continue; }
+                let dim: usize = node.attrs.get("dim").and_then(|a| a.parse().ok()).unwrap_or(0);
+                if dim >= input_shapes[0].len() {
+                    return Err(format!("Squeeze node {}: dim {} out of bounds for rank {}", node_id, dim, input_shapes[0].len()));
+                }
+                if input_shapes[0][dim] != 1 {
+                    return Err(format!("Squeeze node {}: dim {} has size {} (must be 1 to squeeze)", node_id, dim, input_shapes[0][dim]));
+                }
+            }
+            Opcode::Unsqueeze => {
+                // Unsqueeze attrs store the output dim; just check it's reasonable
+                let dim: usize = node.attrs.get("dim").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let max_rank = input_shapes.first().map(|s| s.len() + 1).unwrap_or(1);
+                if dim > max_rank {
+                    return Err(format!("Unsqueeze node {}: dim {} out of bounds for rank {}", node_id, dim, max_rank));
+                }
+            }
             _ => {}
         }
     }

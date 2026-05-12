@@ -291,7 +291,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::BatchNorm | Opcode::LayerNorm => {
                     instructions.push(Instruction::CallKernel {
-                        kernel_name: "conv2d".to_string(),
+                        kernel_name: "norm_f32".to_string(),
                         input_slices,
                         output_slice,
                         params: vec![],
@@ -302,26 +302,6 @@ impl Backend for CpuBackend {
                 Opcode::Softmax | Opcode::BiasAdd => {
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "softmax".to_string(),
-                        input_slices,
-                        output_slice,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
-                }
-                Opcode::BatchNorm | Opcode::LayerNorm => {
-                    instructions.push(Instruction::CallKernel {
-                        kernel_name: "norm_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
-                }
-                Opcode::Softmax => {
-                    instructions.push(Instruction::CallKernel {
-                        kernel_name: "softmax_f32".to_string(),
                         input_slices,
                         output_slice,
                         params: vec![],
