@@ -1325,16 +1325,24 @@ impl Tensor {
     }
 
     pub fn pow(&self, exponent: f32) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("pow", dispatch_key, &[self, &Tensor::from_scalar(exponent)])
-            .expect("Tensor::pow: dispatch failed");
-        let result = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            let exp = Tensor::from_scalar(exponent);
+            Tensor::exec_aot(&[self, &exp], |g, ins| vec![g.pow(&ins[0], &ins[1])])
+                .expect("Tensor::pow: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("pow", dispatch_key, &[self, &Tensor::from_scalar(exponent)])
+                .expect("Tensor::pow: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::PowBackward::new());
-            Self::attach_grad_fn(result, backward)
+            Self::attach_grad_fn(output, backward)
         } else {
-            result
+            output
         }
     }
 
