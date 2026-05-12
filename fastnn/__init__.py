@@ -2,7 +2,7 @@ import numpy as np
 import fastnn._core as _core
 import fastnn.precision as precision
 
-__version__ = "1.3.0"
+__version__ = "2.0.0"
 
 # Exception hierarchy - imported from _core (Rust side)
 FastnnError = _core.FastnnError

@@ -276,11 +276,11 @@ impl GraphBuilder {
         let b_shape = b.shape();
         // m = second-to-last dim of a (the "M" in MxK @ KxN).
         // a_shape.first() would be the batch dim, not M.
-        let m = a_shape.get(a_shape.len().saturating_sub(2))
+                    let m = a_shape.get(a_shape.len().saturating_sub(2))
             .cloned().unwrap_or(DimExpr::Known(0));
-        let k_a = a_shape.get(a_shape.len().saturating_sub(1))
+        let _k_a = a_shape.get(a_shape.len().saturating_sub(1))
             .cloned().unwrap_or(DimExpr::Known(0));
-        let k_b = b_shape.get(b_shape.len().saturating_sub(2))
+        let _k_b = b_shape.get(b_shape.len().saturating_sub(2))
             .cloned().unwrap_or(DimExpr::Known(0));
         let n = b_shape.last().cloned().unwrap_or(DimExpr::Known(0));
 
@@ -1109,7 +1109,7 @@ impl GraphBuilder {
         let h_out = if a_shape.len() > 2 && w_shape.len() > 2 {
             match (&a_shape[2], &w_shape[2]) {
                 (DimExpr::Known(h), DimExpr::Known(kh)) => {
-                    DimExpr::Known(((h - 1) * stride as u64 + kh - 2 * padding as u64))
+                    DimExpr::Known((h - 1) * stride as u64 + kh - 2 * padding as u64)
                 }
                 _ => {
                     let h_val = a_shape[2].evaluate().unwrap_or(0);
@@ -1127,7 +1127,7 @@ impl GraphBuilder {
         let w_out = if a_shape.len() > 3 && w_shape.len() > 3 {
             match (&a_shape[3], &w_shape[3]) {
                 (DimExpr::Known(w), DimExpr::Known(kw)) => {
-                    DimExpr::Known(((w - 1) * stride as u64 + kw - 2 * padding as u64))
+                    DimExpr::Known((w - 1) * stride as u64 + kw - 2 * padding as u64)
                 }
                 _ => {
                     let w_val = a_shape[3].evaluate().unwrap_or(0);

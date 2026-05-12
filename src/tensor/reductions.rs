@@ -24,7 +24,7 @@ impl Tensor {
                 let output = crate::kernels::cpu::sum_last_dim_contiguous(self, dim_size, num_rows);
                 if autograd::is_grad_enabled() && self.requires_grad() {
                     let mut output = output;
-                    let edges = autograd::make_edge(self);
+                    let _edges = autograd::make_edge(self);
                     let backward =
                         autograd::SumBackward::new();
                     let mut meta = autograd::AutogradMeta::new_non_leaf(true);
@@ -47,7 +47,7 @@ impl Tensor {
         .next()
         .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::SumBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
@@ -78,8 +78,8 @@ impl Tensor {
         .next()
         .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let dim_size = self.shape()[dim as usize];
-            let edges = autograd::make_edge(self);
+            let _dim_size = self.shape()[dim as usize];
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::MeanBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {

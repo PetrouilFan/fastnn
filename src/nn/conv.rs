@@ -22,9 +22,13 @@ pub struct Conv2d {
     pub padding_mode: String,
     training: TrainingState,
     // Pre-allocated scalar tensors to avoid per-forward allocation
+    #[allow(dead_code)]
     stride_scalar: Tensor,
+    #[allow(dead_code)]
     padding_scalar: Tensor,
+    #[allow(dead_code)]
     dilation_scalar: Tensor,
+    #[allow(dead_code)]
     groups_scalar: Tensor,
     #[allow(dead_code)]
     default_bias: Tensor,
@@ -85,7 +89,7 @@ impl Conv2d {
 
 impl Module for Conv2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let (input, pad_scalar) = if self.padding_mode == "same" {
+        let (input, _pad_scalar) = if self.padding_mode == "same" {
             let x_shape = x.shape_ref();
             let h_in = x_shape[2];
             let w_in = x_shape[3];
@@ -144,10 +148,10 @@ impl Module for Conv2d {
         };
 
         if x.requires_grad() || self.weight.requires_grad() {
-            let edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges
+            let _edges = {
+                let mut _edges = autograd::make_edge(x);
+                _edges.extend(autograd::make_edge(&self.weight));
+                _edges
             };
             let backward = Conv2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
@@ -262,11 +266,11 @@ impl Module for ConvTranspose2d {
 
         // Set up autograd for ConvTranspose2d
         if x.requires_grad() || self.weight.requires_grad() {
-            let mut edges = autograd::make_edge(x);
-            edges.extend(autograd::make_edge(&self.weight));
+            let mut _edges = autograd::make_edge(x);
+            _edges.extend(autograd::make_edge(&self.weight));
             if let Some(ref b) = self.bias {
                 if b.requires_grad() {
-                    edges.extend(autograd::make_edge(b));
+                    _edges.extend(autograd::make_edge(b));
                 }
             }
             let backward = autograd::ConvTranspose2dBackward::new();
@@ -439,8 +443,11 @@ pub struct Conv3d {
     pub kernel_size: i64,
     training: TrainingState,
     // Pre-allocated scalars
+    #[allow(dead_code)]
     stride_scalar: Tensor,
+    #[allow(dead_code)]
     padding_scalar: Tensor,
+    #[allow(dead_code)]
     dilation_scalar: Tensor,
 }
 

@@ -9,7 +9,7 @@
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
-/// Thread-local gradient enable/disable (kept for backward compat).
+// Thread-local gradient enable/disable (kept for backward compat).
 thread_local! {
     static NO_GRAD_TLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -118,7 +118,7 @@ macro_rules! stub_backward {
             pub fn new() -> Self { $name }
         }
         impl Node for $name {
-            fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+            fn apply(&self, _grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
                 vec![None; self.num_inputs()]
             }
             fn next_edges(&self) -> &[Edge] { &[] }
@@ -133,7 +133,7 @@ macro_rules! stub_backward {
             pub fn new() -> Self { $name }
         }
         impl Node for $name {
-            fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+            fn apply(&self, _grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
                 vec![None; $ninputs]
             }
             fn next_edges(&self) -> &[Edge] { &[] }
@@ -274,7 +274,7 @@ pub fn build_backward_graph(
                         vec![grad_id, node_id],
                         input_type,
                     );
-                    if let Some(mut n) = grad_graph.get_node_mut(grad_input) {
+                    if let Some(n) = grad_graph.get_node_mut(grad_input) {
                         n.attrs = attrs;
                     }
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
@@ -333,7 +333,7 @@ pub fn build_backward_graph(
                     vec![grad_id, node_id],
                     forward_graph.get_node(node.inputs[0]).map(|n| n.output_type.clone()).unwrap(),
                 );
-                if let Some(mut n) = grad_graph.get_node_mut(grad_input) {
+                if let Some(n) = grad_graph.get_node_mut(grad_input) {
                     n.attrs = attrs;
                 }
                 if let Some(&input_id) = node.inputs.first() {
@@ -492,12 +492,9 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
-            Opcode::Gelu | Opcode::LeakyRelu | Opcode::Elu | Opcode::Softplus
+            Opcode::LeakyRelu | Opcode::Elu | Opcode::Softplus
             | Opcode::Hardswish | Opcode::Mish | Opcode::Clamp | Opcode::Sign
-            | Opcode::LogicalNot | Opcode::LogSoftmax | Opcode::Sigmoid
-            | Opcode::Tanh | Opcode::Exp | Opcode::Log | Opcode::Sqrt
-            | Opcode::Neg | Opcode::Abs | Opcode::Relu | Opcode::Softmax
-            | Opcode::Silu => {
+            | Opcode::LogicalNot | Opcode::LogSoftmax | Opcode::Softmax => {
                 if let Some(&input_id) = node.inputs.first() {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }

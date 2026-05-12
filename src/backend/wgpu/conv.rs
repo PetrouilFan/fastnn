@@ -54,6 +54,7 @@ pub(super) fn dispatch_conv_gpu(
 
         #[repr(C)]
         #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        #[allow(non_snake_case)]
         struct ConvParams {
             N: u32,
             C: u32,

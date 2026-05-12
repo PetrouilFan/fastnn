@@ -43,6 +43,7 @@ pub(super) fn dispatch_matmul_gpu(
 
         #[repr(C)]
         #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        #[allow(non_snake_case)]
         struct MatMulParams {
             M: u32,
             K: u32,

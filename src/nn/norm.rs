@@ -17,6 +17,7 @@ pub struct LayerNorm {
     pub bias: Tensor,
     pub eps: f64,
     training: TrainingState,
+    #[allow(dead_code)]
     eps_scalar: Tensor,
 }
 
@@ -58,11 +59,11 @@ impl Module for LayerNorm {
 
         // Set up gradient tracking for layer norm
         if x.requires_grad() || weight.requires_grad() || bias.requires_grad() {
-            let edges = {
-                let mut edges = crate::autograd::make_edge(x);
-                edges.extend(crate::autograd::make_edge(weight));
-                edges.extend(crate::autograd::make_edge(bias));
-                edges
+            let _edges = {
+                let mut _edges = crate::autograd::make_edge(x);
+                _edges.extend(crate::autograd::make_edge(weight));
+                _edges.extend(crate::autograd::make_edge(bias));
+                _edges
             };
             let backward = crate::autograd::LayerNormBackward::new();
             let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
@@ -240,15 +241,15 @@ impl Module for BatchNorm1d {
 
         // Attach autograd
         if grads_needed {
-            let edges = {
-                let mut edges = autograd::make_edge(x);
+            let _edges = {
+                let mut _edges = autograd::make_edge(x);
                 if let Some(w) = &self.weight {
-                    edges.extend(autograd::make_edge(w));
+                    _edges.extend(autograd::make_edge(w));
                 }
                 if let Some(b) = &self.bias {
-                    edges.extend(autograd::make_edge(b));
+                    _edges.extend(autograd::make_edge(b));
                 }
-                edges
+                _edges
             };
             let backward = BatchNorm1dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
@@ -298,6 +299,7 @@ pub struct RMSNorm {
     pub weight: Tensor,
     pub eps: f32,
     pub normalized_shape: i64,
+    #[allow(dead_code)]
     eps_scalar: Tensor,
 }
 
@@ -328,10 +330,10 @@ impl Module for RMSNorm {
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() || self.weight.requires_grad() {
-            let edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges
+            let _edges = {
+                let mut _edges = autograd::make_edge(x);
+                _edges.extend(autograd::make_edge(&self.weight));
+                _edges
             };
             let backward = RMSNormBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
@@ -436,11 +438,11 @@ impl Module for GroupNorm {
         };
 
         if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
-            let edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges.extend(autograd::make_edge(&self.bias));
-                edges
+            let _edges = {
+                let mut _edges = autograd::make_edge(x);
+                _edges.extend(autograd::make_edge(&self.weight));
+                _edges.extend(autograd::make_edge(&self.bias));
+                _edges
             };
             let backward = GroupNormBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
@@ -600,11 +602,11 @@ impl Module for BatchNorm2d {
 
         // Attach autograd
         if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
-            let edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges.extend(autograd::make_edge(&self.bias));
-                edges
+            let _edges = {
+                let mut _edges = autograd::make_edge(x);
+                _edges.extend(autograd::make_edge(&self.weight));
+                _edges.extend(autograd::make_edge(&self.bias));
+                _edges
             };
             let backward = BatchNorm2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
