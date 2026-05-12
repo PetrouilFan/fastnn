@@ -1,5 +1,5 @@
 use crate::autograd::{self, AutogradMeta, Conv2dBackward};
-use crate::dispatcher::{DispatchKey, dispatch};
+use crate::storage::Device;
 use crate::tensor::Tensor;
 use crate::{
     impl_nn_named_params, impl_nn_params, impl_training_state, impl_zero_grad,
@@ -122,22 +122,45 @@ impl Module for Conv2d {
         };
         let bias_ref = self.bias.as_ref().unwrap_or(&self.default_bias);
 
-        let result = dispatch(
-            "conv2d",
-            DispatchKey::Cpu,
-            &[
-                &input,
-                &self.weight,
-                bias_ref,
-                &self.stride_scalar,
-                &pad_scalar,
-                &self.dilation_scalar,
-                &self.groups_scalar,
-            ],
-        )
-        .expect("Conv2d::forward: dispatch failed");
-
-        let output = result.into_iter().next().unwrap();
+        let output = if input.device() == Device::Cpu {
+            let conv = Tensor::exec_aot(&[&input, &self.weight], |g, ins| {
+                vec![g.conv2d_with_params(
+                    &ins[0],
+                    &ins[1],
+                    self.stride as usize,
+                    self.padding as usize,
+                    self.dilation as usize,
+                    self.groups as usize,
+                )]
+            })
+            .expect("Conv2d::forward: AOT failed")
+            .into_iter()
+            .next()
+            .unwrap();
+            if let Some(bias) = &self.bias {
+                let bias_shape = vec![1, self.out_channels, 1, 1];
+                conv.add(&bias.reshape(bias_shape))
+            } else {
+                conv
+            }
+        } else {
+            let dispatch_key = crate::dispatcher::device_to_dispatch_key(input.device());
+            let result = crate::dispatcher::dispatch(
+                "conv2d",
+                dispatch_key,
+                &[
+                    &input,
+                    &self.weight,
+                    bias_ref,
+                    &self.stride_scalar,
+                    &pad_scalar,
+                    &self.dilation_scalar,
+                    &self.groups_scalar,
+                ],
+            )
+            .expect("Conv2d::forward: dispatch failed");
+            result.into_iter().next().unwrap()
+        };
 
         if x.requires_grad() || self.weight.requires_grad() {
             let edges = {
@@ -233,14 +256,29 @@ impl Module for ConvTranspose2d {
         let _h_out = (h_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
         let _w_out = (w_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
 
-        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
-        let result = crate::dispatcher::dispatch(
-            "conv_transpose2d",
-            dispatch_key,
-            &[x, &self.weight, &self.stride_scalar, &self.padding_scalar],
-        )
-        .expect("ConvTranspose2d::forward: dispatch failed");
-        let mut output = result[0].clone();
+        let mut output = if x.device() == Device::Cpu {
+            Tensor::exec_aot(&[x, &self.weight], |g, ins| {
+                vec![g.conv_transpose2d(
+                    &ins[0],
+                    &ins[1],
+                    self.stride as usize,
+                    self.padding as usize,
+                )]
+            })
+            .expect("ConvTranspose2d::forward: AOT failed")
+            .into_iter()
+            .next()
+            .unwrap()
+        } else {
+            let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+            let result = crate::dispatcher::dispatch(
+                "conv_transpose2d",
+                dispatch_key,
+                &[x, &self.weight, &self.stride_scalar, &self.padding_scalar],
+            )
+            .expect("ConvTranspose2d::forward: dispatch failed");
+            result[0].clone()
+        };
 
         if let Some(ref bias) = self.bias {
             let mut bias_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
@@ -385,23 +423,45 @@ impl Module for Conv1d {
         // Use conv2d with padding=0 (since we pre-padded) and the user's stride/dilation
         let zero_pad = Tensor::from_scalar(0.0);
         let bias_ref = self.bias.as_ref().unwrap_or(&self.default_bias);
-        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
-        let result = crate::dispatcher::dispatch(
-            "conv2d",
-            dispatch_key,
-            &[
-                &x_4d,
-                &w_4d,
-                bias_ref,
-                &self.stride_scalar,
-                &zero_pad, // padding=0 (already pre-padded)
-                &self.dilation_scalar,
-                &Tensor::from_scalar(1.0), // groups
-            ],
-        )
-        .expect("Conv1d::forward: dispatch failed");
-
-        let output = result.into_iter().next().unwrap();
+        let output = if x.device() == Device::Cpu {
+            let conv = Tensor::exec_aot(&[&x_4d, &w_4d], |g, ins| {
+                vec![g.conv2d_with_params(
+                    &ins[0],
+                    &ins[1],
+                    self.stride as usize,
+                    0,
+                    self.dilation as usize,
+                    1,
+                )]
+            })
+            .expect("Conv1d::forward: AOT failed")
+            .into_iter()
+            .next()
+            .unwrap();
+            if let Some(bias) = &self.bias {
+                let bias_shape = vec![1, self.out_channels, 1, 1];
+                conv.add(&bias.reshape(bias_shape))
+            } else {
+                conv
+            }
+        } else {
+            let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+            let result = crate::dispatcher::dispatch(
+                "conv2d",
+                dispatch_key,
+                &[
+                    &x_4d,
+                    &w_4d,
+                    bias_ref,
+                    &self.stride_scalar,
+                    &zero_pad,
+                    &self.dilation_scalar,
+                    &Tensor::from_scalar(1.0),
+                ],
+            )
+            .expect("Conv1d::forward: dispatch failed");
+            result.into_iter().next().unwrap()
+        };
 
         // Reshape back to 3D: [B, C_out, 1, L_out] -> [B, C_out, L_out]
         let out_shape = output.shape_ref();
@@ -489,20 +549,35 @@ impl Conv3d {
 impl Module for Conv3d {
     fn forward(&self, x: &Tensor) -> Tensor {
         // Dispatch to dedicated conv3d kernel
-        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
-        let result = crate::dispatcher::dispatch(
-            "conv3d",
-            dispatch_key,
-            &[
-                x,
-                &self.weight,
-                &self.stride_scalar,
-                &self.padding_scalar,
-                &self.dilation_scalar,
-            ],
-        )
-        .expect("Conv3d::forward: dispatch failed");
-        let mut output = result.into_iter().next().unwrap();
+        let mut output = if x.device() == Device::Cpu {
+            Tensor::exec_aot(&[x, &self.weight], |g, ins| {
+                vec![g.conv3d(
+                    &ins[0],
+                    &ins[1],
+                    self.stride as usize,
+                    self.padding as usize,
+                )]
+            })
+            .expect("Conv3d::forward: AOT failed")
+            .into_iter()
+            .next()
+            .unwrap()
+        } else {
+            let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+            let result = crate::dispatcher::dispatch(
+                "conv3d",
+                dispatch_key,
+                &[
+                    x,
+                    &self.weight,
+                    &self.stride_scalar,
+                    &self.padding_scalar,
+                    &self.dilation_scalar,
+                ],
+            )
+            .expect("Conv3d::forward: dispatch failed");
+            result.into_iter().next().unwrap()
+        };
 
         // Add bias
         if let Some(ref bias) = self.bias {

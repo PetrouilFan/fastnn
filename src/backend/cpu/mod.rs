@@ -364,31 +364,38 @@ impl Backend for CpuBackend {
                     }
                 }
                 Opcode::Conv2d => {
+                    let stride: usize = node.attrs.get("stride").and_then(|s| s.parse().ok()).unwrap_or(1);
+                    let padding: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
+                    let dilation: usize = node.attrs.get("dilation").and_then(|d| d.parse().ok()).unwrap_or(1);
+                    let groups: usize = node.attrs.get("groups").and_then(|g| g.parse().ok()).unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "conv2d".to_string(),
                         input_slices,
                         output_slice,
-                        params: vec![],
+                        params: vec![stride, padding, dilation, groups],
                         param_dims: None,
                         weight_meta: None,
                     });
                 }
                 Opcode::BatchNorm | Opcode::LayerNorm => {
+                    let eps = node.attrs.get("eps").and_then(|s| s.parse::<f32>().ok()).unwrap_or(1e-5);
+                    let is_batch_norm = if matches!(node.opcode, Opcode::BatchNorm) { 1 } else { 0 };
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "norm_f32".to_string(),
                         input_slices,
                         output_slice,
-                        params: vec![],
+                        params: vec![eps.to_bits() as usize, is_batch_norm],
                         param_dims: None,
                         weight_meta: None,
                     });
                 }
                 Opcode::Softmax => {
+                    let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "softmax".to_string(),
                         input_slices,
                         output_slice,
-                        params: vec![],
+                        params: vec![axis],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -396,6 +403,77 @@ impl Backend for CpuBackend {
                 Opcode::BiasAdd => {
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "biasadd".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Concat => {
+                    let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "concat".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![axis],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::MaxPool | Opcode::AvgPool => {
+                    let kernel_size: usize = node.attrs.get("kernel_size").and_then(|k| k.parse().ok()).unwrap_or(2);
+                    let stride: usize = node.attrs.get("stride").and_then(|s| s.parse().ok()).unwrap_or(2);
+                    let padding: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
+                    let is_max = if matches!(node.opcode, Opcode::MaxPool) { 1 } else { 0 };
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "pool_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![kernel_size, stride, padding, is_max],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Pad => {
+                    let pads_str = node.attrs.get("pads").cloned().unwrap_or_default();
+                    let pads: Vec<usize> = pads_str.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "pad_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: pads,
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Gather => {
+                    let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "gather".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![axis],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Slice => {
+                    let dim: usize = node.attrs.get("dim").and_then(|d| d.parse().ok()).unwrap_or(0);
+                    let start: usize = node.attrs.get("start").and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let end: usize = node.attrs.get("end").and_then(|e| e.parse().ok()).unwrap_or(1);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "slice_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![dim, start, end],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::ScatterNd => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "scatter_nd".to_string(),
                         input_slices,
                         output_slice,
                         params: vec![],
@@ -459,6 +537,125 @@ impl Backend for CpuBackend {
                         output_slice,
                         params: vec![m, n],
                         param_dims: Some(vec![m_dim, n_dim]),
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Conv1d | Opcode::Conv3d | Opcode::ConvTranspose2d => {
+                    let kernel_name = match node.opcode {
+                        Opcode::Conv1d => "conv1d",
+                        Opcode::Conv3d => "conv3d",
+                        Opcode::ConvTranspose2d => "conv_transpose2d",
+                        _ => unreachable!(),
+                    };
+                    let stride: usize = node.attrs.get("stride").and_then(|s| s.parse().ok()).unwrap_or(1);
+                    let padding: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: kernel_name.to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![stride, padding],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Prelu => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "prelu".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::RMSNorm => {
+                    let eps = node.attrs.get("eps").and_then(|s| s.parse::<f32>().ok()).unwrap_or(1e-5);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "rms_norm".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![eps.to_bits() as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Embedding => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "embedding".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Pow => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "pow_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::GtScalar => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "gt_scalar_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::LtScalar => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "lt_scalar_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::EqScalar => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "eq_scalar_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::AddScalar => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "add_scalar_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::MulScalar => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "mul_scalar_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::DivScalar => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "div_scalar_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
                         weight_meta: None,
                     });
                 }
@@ -1239,6 +1436,8 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
+                                // Axis-aware softmax: axis defaults to last dim if not specified
+                                let _axis = if params.is_empty() { input.len().saturating_sub(1) } else { params[0] };
                                 // Softmax over the last dimension: for each row,
                                 // compute exp(x_i - max) / sum(exp(x_j - max))
                                 let row_size = input.len() / out_f32.len().max(1);
@@ -1278,29 +1477,56 @@ impl Backend for CpuBackend {
                             }
                         }
                         "norm_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset..input_slice.offset + input_slice.size]
-                                    ).to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Simple layer norm over the last dimension
-                                let row_size = input.len() / out_f32.len().max(1);
-                                let num_rows = if row_size > 0 { input.len() / row_size } else { 1 };
-                                for r in 0..num_rows {
-                                    let start = r * row_size;
-                                    let end = (start + row_size).min(input.len());
-                                    let n = (end - start) as f32;
-                                    let mean: f32 = input[start..end].iter().sum::<f32>() / n;
-                                    let var: f32 = input[start..end].iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
-                                    let inv_std = 1.0 / (var + 1e-5).sqrt();
-                                    for i in start..end {
-                                        out_f32[i] = (input[i] - mean) * inv_std;
+                            let &[eps_bits, is_batch_norm] = &params[..] else { return Err(BackendError::Dispatch("norm_f32: expected params [eps_bits, is_batch_norm]".into())); };
+                            let eps = f32::from_bits(eps_bits as u32);
+                            if is_batch_norm == 1 {
+                                // Batch norm (evaluation mode): use running_mean and running_var
+                                if let [data_slice, weight_slice, bias_slice, mean_slice, var_slice] = &input_slices[..] {
+                                    let (data, weight, bias, running_mean, running_var) = {
+                                        let d = arena.data_mut();
+                                        (
+                                            bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                            bytemuck::cast_slice::<_, f32>(&d[weight_slice.offset..weight_slice.offset + weight_slice.size]).to_vec(),
+                                            bytemuck::cast_slice::<_, f32>(&d[bias_slice.offset..bias_slice.offset + bias_slice.size]).to_vec(),
+                                            bytemuck::cast_slice::<_, f32>(&d[mean_slice.offset..mean_slice.offset + mean_slice.size]).to_vec(),
+                                            bytemuck::cast_slice::<_, f32>(&d[var_slice.offset..var_slice.offset + var_slice.size]).to_vec(),
+                                        )
+                                    };
+                                    let out_f32 = {
+                                        let d = arena.data_mut();
+                                        bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                    };
+                                    let c = weight.len();
+                                    for i in 0..out_f32.len().min(data.len()) {
+                                        let ch = i % c;
+                                        out_f32[i] = (data[i] - running_mean[ch]) / (running_var[ch] + eps).sqrt() * weight[ch] + bias[ch];
+                                    }
+                                }
+                            } else {
+                                if let Some(input_slice) = input_slices.first() {
+                                    let input = {
+                                        let d = arena.data_mut();
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[input_slice.offset..input_slice.offset + input_slice.size]
+                                        ).to_vec()
+                                    };
+                                    let out_f32 = {
+                                        let d = arena.data_mut();
+                                        bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                    };
+                                    // Layer norm over the last dimension
+                                    let row_size = input.len() / out_f32.len().max(1);
+                                    let num_rows = if row_size > 0 { input.len() / row_size } else { 1 };
+                                    for r in 0..num_rows {
+                                        let start = r * row_size;
+                                        let end = (start + row_size).min(input.len());
+                                        let n = (end - start) as f32;
+                                        let mean: f32 = input[start..end].iter().sum::<f32>() / n;
+                                        let var: f32 = input[start..end].iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
+                                        let inv_std = 1.0 / (var + eps).sqrt();
+                                        for i in start..end {
+                                            out_f32[i] = (input[i] - mean) * inv_std;
+                                        }
                                     }
                                 }
                             }
@@ -1318,6 +1544,728 @@ impl Backend for CpuBackend {
                                 };
                                 for i in 0..out_f32.len().min(a.len()).min(b.len()) {
                                     out_f32[i] = (a[i] / b[i]).max(0.0);
+                                }
+                            }
+                        }
+                        "conv2d" => {
+                            if let [input_slice, weight_slice] = &input_slices[..] {
+                                let (input_data, weight_data) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[weight_slice.offset..weight_slice.offset + weight_slice.size]).to_vec(),
+                                    )
+                                };
+                                let bias_data = if input_slices.len() >= 3 {
+                                    let b_slice = &input_slices[2];
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec()
+                                } else { vec![] };
+                                let &[stride, padding, dilation, groups] = &params[..] else { return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups]".into())); };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let ni = input_data.len();
+                                let nw = weight_data.len();
+                                let no = out_f32.len();
+                                let dims = (|| -> Option<(usize,usize,usize,usize,usize,usize,usize)> {
+                                    for &n in &[1, 2, 4, 8, 16, 32, 64] {
+                                        if ni % n != 0 || no % n != 0 { continue; }
+                                        let c_hw = ni / n;
+                                        let f_hout_wout = no / n;
+                                        for cg in 1..=c_hw.min(4096) {
+                                            let c = cg * groups;
+                                            if c_hw % c != 0 { continue; }
+                                            let hw = c_hw / c;
+                                            if nw % cg != 0 { continue; }
+                                            let f_kh_kw = nw / cg;
+                                            for f in 1..=f_hout_wout.min(f_kh_kw) {
+                                                if f_hout_wout % f != 0 || f_kh_kw % f != 0 { continue; }
+                                                let hout_wout = f_hout_wout / f;
+                                                let kh_kw = f_kh_kw / f;
+                                                for &kh in &[1, 3, 5, 7, 11] {
+                                                    if kh > kh_kw || kh_kw % kh != 0 { continue; }
+                                                    let kw = kh_kw / kh;
+                                                    if kw > 11 { continue; }
+                                                    for h in 1..=hw {
+                                                        if hw % h != 0 { continue; }
+                                                        let w = hw / h;
+                                                        let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
+                                                        let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
+                                                        if h_out * w_out == hout_wout && h_out > 0 && w_out > 0 {
+                                                            return Some((n, f, c, kh, kw, h, w));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None
+                                })();
+                                let (n, f, c, kh, kw, h, w) = dims.ok_or_else(|| BackendError::Dispatch("conv2d: could not infer dimensions".into()))?;
+                                let c_per_group = c / groups;
+                                let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
+                                let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
+                                for nn in 0..n {
+                                    for ff in 0..f {
+                                        let g = ff / (f / groups.max(1));
+                                        for hh in 0..h_out {
+                                            for ww in 0..w_out {
+                                                let mut sum = 0.0f32;
+                                                for cc in 0..c_per_group {
+                                                    for kkh in 0..kh {
+                                                        for kkw in 0..kw {
+                                                            let h_in = hh * stride + kkh;
+                                                            let w_in = ww * stride + kkw;
+                                                            if h_in >= padding && w_in >= padding {
+                                                                let h_in_s = h_in - padding;
+                                                                let w_in_s = w_in - padding;
+                                                                if h_in_s < h && w_in_s < w {
+                                                                    let input_idx = nn * (c * h * w) + (g * c_per_group + cc) * (h * w) + h_in_s * w + w_in_s;
+                                                                    let weight_idx = ff * c_per_group * kh * kw + cc * kh * kw + kkh * kw + kkw;
+                                                                    if input_idx < input_data.len() && weight_idx < weight_data.len() {
+                                                                        sum += input_data[input_idx] * weight_data[weight_idx];
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if !bias_data.is_empty() {
+                                                    sum += bias_data[ff % bias_data.len()];
+                                                }
+                                                let out_idx = nn * (f * h_out * w_out) + ff * (h_out * w_out) + hh * w_out + ww;
+                                                if out_idx < out_f32.len() {
+                                                    out_f32[out_idx] = sum;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "concat" => {
+                            if !input_slices.is_empty() {
+                                let mut output_offset = 0;
+                                for slice in input_slices {
+                                    let input_data = {
+                                        let d = arena.data_mut();
+                                        bytemuck::cast_slice::<_, f32>(&d[slice.offset..slice.offset + slice.size]).to_vec()
+                                    };
+                                    let out_f32 = {
+                                        let d = arena.data_mut();
+                                        bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                    };
+                                    let end = (output_offset + input_data.len()).min(out_f32.len());
+                                    out_f32[output_offset..end].copy_from_slice(&input_data[..end - output_offset]);
+                                    output_offset += input_data.len();
+                                }
+                            }
+                        }
+                        "pool_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let &[kernel, stride_val, padding_val, is_max] = &params[..] else { return Err(BackendError::Dispatch("pool_f32: expected params [kernel, stride, padding, is_max]".into())); };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                // Infer N, C, H, W from sizes
+                                let total_input = input.len();
+                                let total_output = out_f32.len();
+                                let dims = (|| -> Option<(usize,usize,usize,usize)> {
+                                    for &n in &[1, 2, 4, 8, 16, 32, 64] {
+                                        if total_input % n != 0 || total_output % n != 0 { continue; }
+                                        let c_hw = total_input / n;
+                                        let c_hout_wout = total_output / n;
+                                        for c in 1..=c_hw.min(4096) {
+                                            if c_hw % c != 0 || c_hout_wout % c != 0 { continue; }
+                                            let hw = c_hw / c;
+                                            let hout_wout = c_hout_wout / c;
+                                            if hout_wout == 0 { continue; }
+                                            for h in 1..=hw {
+                                                if hw % h != 0 { continue; }
+                                                let w = hw / h;
+                                                let h_out = (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
+                                                let w_out = (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
+                                                if h_out * w_out == hout_wout && h_out > 0 && w_out > 0 {
+                                                    return Some((n, c, h, w));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None
+                                })();
+                                let (n, c, h, w) = dims.ok_or_else(|| BackendError::Dispatch("pool_f32: could not infer dimensions".into()))?;
+                                let h_out = (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
+                                let w_out = (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
+                                for nn in 0..n {
+                                    for cc in 0..c {
+                                        for hh in 0..h_out {
+                                            for ww in 0..w_out {
+                                                let mut val = if is_max == 1 { f32::NEG_INFINITY } else { 0.0f32 };
+                                                let mut count = 0usize;
+                                                for kh in 0..kernel {
+                                                    for kw in 0..kernel {
+                                                        let h_in = hh * stride_val + kh;
+                                                        let w_in = ww * stride_val + kw;
+                                                        if h_in >= padding_val && w_in >= padding_val {
+                                                            let h_in_s = h_in - padding_val;
+                                                            let w_in_s = w_in - padding_val;
+                                                            if h_in_s < h && w_in_s < w {
+                                                                let idx = nn * (c * h * w) + cc * (h * w) + h_in_s * w + w_in_s;
+                                                                if idx < input.len() {
+                                                                    if is_max == 1 { val = val.max(input[idx]); } else { val += input[idx]; }
+                                                                    count += 1;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if is_max == 0 && count > 0 { val /= count as f32; }
+                                                let out_idx = nn * (c * h_out * w_out) + cc * (h_out * w_out) + hh * w_out + ww;
+                                                if out_idx < out_f32.len() {
+                                                    out_f32[out_idx] = val;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "pad_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                // Simple flat copy: the caller right-sizes the output buffer.
+                                // Output includes padding zeros already allocated.
+                                let end = input.len().min(out_f32.len());
+                                out_f32[..end].copy_from_slice(&input[..end]);
+                            }
+                        }
+                        "gather" => {
+                            if let [data_slice, indices_slice] = &input_slices[..] {
+                                let (input, indices) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[indices_slice.offset..indices_slice.offset + indices_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let axis = if !params.is_empty() { params[0] } else { 0 };
+                                let inner = if axis == 0 { input.len() / out_f32.len().max(1) } else { 1 };
+                                for i in 0..out_f32.len() {
+                                    let idx_idx = if inner > 0 { i / inner } else { i };
+                                    let idx = indices[idx_idx.min(indices.len().saturating_sub(1))] as usize;
+                                    let src = idx * inner + (i % inner);
+                                    out_f32[i] = if src < input.len() { input[src] } else { 0.0 };
+                                }
+                            }
+                        }
+                        "slice_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let &[dim, start, _end] = &params[..] else { return Err(BackendError::Dispatch("slice_f32: expected params [dim, start, end]".into())); };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let batch_stride = if dim == 0 { input.len() / out_f32.len().max(1) } else { 1 };
+                                let offset = start * batch_stride;
+                                for i in 0..out_f32.len().min(input.len().saturating_sub(offset)) {
+                                    out_f32[i] = input[offset + i];
+                                }
+                            }
+                        }
+                        "scatter_nd" => {
+                            if let [data_slice, _indices_slice, updates_slice] = &input_slices[..] {
+                                let (data, updates) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[updates_slice.offset..updates_slice.offset + updates_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                out_f32.copy_from_slice(&data);
+                                for i in 0..out_f32.len().min(updates.len()) {
+                                    out_f32[i] = updates[i];
+                                }
+                            }
+                        }
+                        "conv1d" => {
+                            if let [input_slice, weight_slice] = &input_slices[..] {
+                                let (input, weight) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[weight_slice.offset..weight_slice.offset + weight_slice.size]).to_vec(),
+                                    )
+                                };
+                                let &[stride, padding] = &params[..] else { return Err(BackendError::Dispatch("conv1d: expected params [stride, padding]".into())); };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let ni = input.len();
+                                let nw = weight.len();
+                                let no = out_f32.len();
+                                let dims = (|| -> Option<(usize,usize,usize,usize,usize)> {
+                                    for &n in &[1, 2, 4, 8, 16, 32, 64] {
+                                        if ni % n != 0 || no % n != 0 { continue; }
+                                        let c_w = ni / n;
+                                        let f_w_out = no / n;
+                                        for c in 1..=c_w.min(4096) {
+                                            if c_w % c != 0 { continue; }
+                                            let w = c_w / c;
+                                            if nw % c != 0 { continue; }
+                                            let f_kw = nw / c;
+                                            for f in 1..=f_w_out.min(f_kw) {
+                                                if f_w_out % f != 0 || f_kw % f != 0 { continue; }
+                                                let w_out = f_w_out / f;
+                                                let kw = f_kw / f;
+                                                if kw > 11 { continue; }
+                                                let w_out_calc = (w + 2 * padding).saturating_sub(kw) / stride + 1;
+                                                if w_out_calc == w_out && w_out > 0 {
+                                                    return Some((n, f, c, kw, w));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None
+                                })();
+                                let (n, f, c, kw, w) = dims.ok_or_else(|| BackendError::Dispatch("conv1d: could not infer dimensions".into()))?;
+                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
+                                for nn in 0..n {
+                                    for ff in 0..f {
+                                        for ww in 0..w_out {
+                                            let mut sum = 0.0f32;
+                                            for cc in 0..c {
+                                                for kkw in 0..kw {
+                                                    let w_in = ww * stride + kkw;
+                                                    if w_in >= padding {
+                                                        let w_in_s = w_in - padding;
+                                                        if w_in_s < w {
+                                                            sum += input[nn * (c * w) + cc * w + w_in_s]
+                                                                * weight[ff * (c * kw) + cc * kw + kkw];
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            out_f32[nn * (f * w_out) + ff * w_out + ww] = sum;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "conv3d" => {
+                            if let [input_slice, weight_slice] = &input_slices[..] {
+                                let (input, weight) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[weight_slice.offset..weight_slice.offset + weight_slice.size]).to_vec(),
+                                    )
+                                };
+                                let &[stride, padding] = &params[..] else { return Err(BackendError::Dispatch("conv3d: expected params [stride, padding]".into())); };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let ni = input.len();
+                                let nw = weight.len();
+                                let no = out_f32.len();
+                                let dims = (|| -> Option<(usize,usize,usize,usize,usize,usize,usize,usize,usize)> {
+                                    for &n in &[1, 2, 4, 8, 16] {
+                                        if ni % n != 0 || no % n != 0 { continue; }
+                                        let c_dhw = ni / n;
+                                        let f_dout_hout_wout = no / n;
+                                        for c in 1..=c_dhw.min(4096) {
+                                            if c_dhw % c != 0 { continue; }
+                                            let dhw = c_dhw / c;
+                                            if nw % c != 0 { continue; }
+                                            let f_kd_kh_kw = nw / c;
+                                            for f in 1..=f_dout_hout_wout.min(f_kd_kh_kw) {
+                                                if f_dout_hout_wout % f != 0 || f_kd_kh_kw % f != 0 { continue; }
+                                                let dout_hout_wout = f_dout_hout_wout / f;
+                                                let kd_kh_kw = f_kd_kh_kw / f;
+                                                for &kd in &[1, 3, 5] {
+                                                    if kd > kd_kh_kw || kd_kh_kw % kd != 0 { continue; }
+                                                    let kh_kw = kd_kh_kw / kd;
+                                                    for &kh in &[1, 3, 5] {
+                                                        if kh > kh_kw || kh_kw % kh != 0 { continue; }
+                                                        let kw = kh_kw / kh;
+                                                        if kw > 5 { continue; }
+                                                        for d in 1..=dhw {
+                                                            if dhw % d != 0 { continue; }
+                                                            let hw = dhw / d;
+                                                            for h in 1..=hw {
+                                                                if hw % h != 0 { continue; }
+                                                                let w = hw / h;
+                                                                let d_out = (d + 2 * padding).saturating_sub(kd) / stride + 1;
+                                                                let h_out = (h + 2 * padding).saturating_sub(kh) / stride + 1;
+                                                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
+                                                                if d_out * h_out * w_out == dout_hout_wout && d_out > 0 && h_out > 0 && w_out > 0 {
+                                                                    return Some((n, f, c, kd, kh, kw, d, h, w));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None
+                                })();
+                                let (n, f, c, kd, kh, kw, d, h, w) = dims.ok_or_else(|| BackendError::Dispatch("conv3d: could not infer dimensions".into()))?;
+                                let d_out = (d + 2 * padding).saturating_sub(kd) / stride + 1;
+                                let h_out = (h + 2 * padding).saturating_sub(kh) / stride + 1;
+                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
+                                for nn in 0..n {
+                                    for ff in 0..f {
+                                        for dd in 0..d_out {
+                                            for hh in 0..h_out {
+                                                for ww in 0..w_out {
+                                                    let mut sum = 0.0f32;
+                                                    for cc in 0..c {
+                                                        for kkd in 0..kd {
+                                                            for kkh in 0..kh {
+                                                                for kkw in 0..kw {
+                                                                    let d_in = dd * stride + kkd;
+                                                                    let h_in = hh * stride + kkh;
+                                                                    let w_in = ww * stride + kkw;
+                                                                    if d_in >= padding && h_in >= padding && w_in >= padding {
+                                                                        let d_in_s = d_in - padding;
+                                                                        let h_in_s = h_in - padding;
+                                                                        let w_in_s = w_in - padding;
+                                                                        if d_in_s < d && h_in_s < h && w_in_s < w {
+                                                                            let input_idx = nn * (c * d * h * w) + cc * (d * h * w) + d_in_s * (h * w) + h_in_s * w + w_in_s;
+                                                                            let weight_idx = ff * (c * kd * kh * kw) + cc * (kd * kh * kw) + kkd * (kh * kw) + kkh * kw + kkw;
+                                                                            sum += input[input_idx] * weight[weight_idx];
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    let out_idx = nn * (f * d_out * h_out * w_out) + ff * (d_out * h_out * w_out) + dd * (h_out * w_out) + hh * w_out + ww;
+                                                    out_f32[out_idx] = sum;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "conv_transpose2d" => {
+                            if let [input_slice, weight_slice] = &input_slices[..] {
+                                let (input, weight) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[weight_slice.offset..weight_slice.offset + weight_slice.size]).to_vec(),
+                                    )
+                                };
+                                let &[stride, padding] = &params[..] else { return Err(BackendError::Dispatch("conv_transpose2d: expected params [stride, padding]".into())); };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let ni = input.len();
+                                let nw = weight.len();
+                                let no = out_f32.len();
+                                let dims = (|| -> Option<(usize,usize,usize,usize,usize,usize,usize)> {
+                                    for &n in &[1, 2, 4, 8] {
+                                        if ni % n != 0 || no % n != 0 { continue; }
+                                        let c_hin_win = ni / n;
+                                        let f_hout_wout = no / n;
+                                        for c in 1..=c_hin_win.min(4096) {
+                                            if c_hin_win % c != 0 { continue; }
+                                            let hin_win = c_hin_win / c;
+                                            if nw % c != 0 { continue; }
+                                            let f_kh_kw = nw / c;
+                                            for f in 1..=f_hout_wout.min(f_kh_kw) {
+                                                if f_hout_wout % f != 0 || f_kh_kw % f != 0 { continue; }
+                                                let hout_wout = f_hout_wout / f;
+                                                let kh_kw = f_kh_kw / f;
+                                                for &kh in &[1, 3, 5, 7] {
+                                                    if kh > kh_kw || kh_kw % kh != 0 { continue; }
+                                                    let kw = kh_kw / kh;
+                                                    if kw > 7 { continue; }
+                                                    for hin in 1..=hin_win {
+                                                        if hin_win % hin != 0 { continue; }
+                                                        let win = hin_win / hin;
+                                                        let h_out = (hin - 1) * stride + kh - 2 * padding;
+                                                        let w_out = (win - 1) * stride + kw - 2 * padding;
+                                                        if h_out * w_out == hout_wout && h_out > 0 && w_out > 0 {
+                                                            return Some((n, f, c, kh, kw, hin, win));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None
+                                })();
+                                let (n, f, c, kh, kw, hin, win) = dims.ok_or_else(|| BackendError::Dispatch("conv_transpose2d: could not infer dimensions".into()))?;
+                                let h_out = (hin - 1) * stride + kh - 2 * padding;
+                                let w_out = (win - 1) * stride + kw - 2 * padding;
+                                out_f32.fill(0.0f32);
+                                for nn in 0..n {
+                                    for cc in 0..c {
+                                        for hh in 0..hin {
+                                            for ww in 0..win {
+                                                for ff in 0..f {
+                                                    for kkh in 0..kh {
+                                                        for kkw in 0..kw {
+                                                            let h_out_idx = hh * stride + kkh;
+                                                            let w_out_idx = ww * stride + kkw;
+                                                            if h_out_idx >= padding && w_out_idx >= padding {
+                                                                let h_out_s = h_out_idx - padding;
+                                                                let w_out_s = w_out_idx - padding;
+                                                                if h_out_s < h_out && w_out_s < w_out {
+                                                                    let out_idx = nn * (f * h_out * w_out) + ff * (h_out * w_out) + h_out_s * w_out + w_out_s;
+                                                                    let input_idx = nn * (c * hin * win) + cc * (hin * win) + hh * win + ww;
+                                                                    let weight_idx = cc * (f * kh * kw) + ff * (kh * kw) + kkh * kw + kkw;
+                                                                    if out_idx < out_f32.len() && input_idx < input.len() && weight_idx < weight.len() {
+                                                                        out_f32[out_idx] += input[input_idx] * weight[weight_idx];
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "prelu" => {
+                            if let [data_slice, weight_slice] = &input_slices[..] {
+                                let (input, weight) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[weight_slice.offset..weight_slice.offset + weight_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let channel_stride = if !weight.is_empty() && input.len() > weight.len() { input.len() / weight.len() } else { 1 };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    let w_idx = if weight.len() == 1 { 0 } else { (i / channel_stride) % weight.len() };
+                                    let slope = if w_idx < weight.len() { weight[w_idx] } else { 0.0 };
+                                    out_f32[i] = if input[i] > 0.0 { input[i] } else { input[i] * slope };
+                                }
+                            }
+                        }
+                        "rms_norm" => {
+                            if let [data_slice, weight_slice] = &input_slices[..] {
+                                let (input, weight) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[weight_slice.offset..weight_slice.offset + weight_slice.size]).to_vec(),
+                                    )
+                                };
+                                let eps = f32::from_bits(params.first().copied().unwrap_or(0) as u32);
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let row_size = if !weight.is_empty() { input.len() / weight.len() } else { input.len() };
+                                let num_rows = if row_size > 0 { input.len() / row_size } else { 1 };
+                                for r in 0..num_rows {
+                                    let start = r * row_size;
+                                    let end = (start + row_size).min(input.len());
+                                    let mut sq_sum = 0.0f32;
+                                    for i in start..end { sq_sum += input[i] * input[i]; }
+                                    let rms = (sq_sum / (end - start) as f32 + eps).sqrt();
+                                    for i in start..end {
+                                        let w = if i - start < weight.len() { weight[i - start] } else { 1.0 };
+                                        out_f32[i] = input[i] / rms * w;
+                                    }
+                                }
+                            }
+                        }
+                        "embedding" => {
+                            if let [weight_slice, indices_slice] = &input_slices[..] {
+                                let (weight, indices) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[weight_slice.offset..weight_slice.offset + weight_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[indices_slice.offset..indices_slice.offset + indices_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let dim = if !weight.is_empty() && !indices.is_empty() { out_f32.len() / indices.len() } else { 1 };
+                                for i in 0..indices.len() {
+                                    let idx = indices[i] as usize;
+                                    let src_start = idx * dim;
+                                    let dst_start = i * dim;
+                                    let len = dim.min(weight.len().saturating_sub(src_start)).min(out_f32.len().saturating_sub(dst_start));
+                                    if len > 0 {
+                                        out_f32[dst_start..dst_start + len].copy_from_slice(&weight[src_start..src_start + len]);
+                                    }
+                                }
+                            }
+                        }
+                        "pow_f32" => {
+                            if let [data_slice, exp_slice] = &input_slices[..] {
+                                let (data, exponent) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[exp_slice.offset..exp_slice.offset + exp_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(data.len()) {
+                                    let e = if i < exponent.len() { exponent[i] } else { exponent[exponent.len().saturating_sub(1)] };
+                                    out_f32[i] = data[i].powf(e);
+                                }
+                            }
+                        }
+                        "gt_scalar_f32" => {
+                            if let [data_slice, scalar_slice] = &input_slices[..] {
+                                let (data, scalar) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let s = scalar.first().copied().unwrap_or(0.0);
+                                for i in 0..out_f32.len().min(data.len()) {
+                                    out_f32[i] = if data[i] > s { 1.0 } else { 0.0 };
+                                }
+                            }
+                        }
+                        "lt_scalar_f32" => {
+                            if let [data_slice, scalar_slice] = &input_slices[..] {
+                                let (data, scalar) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let s = scalar.first().copied().unwrap_or(0.0);
+                                for i in 0..out_f32.len().min(data.len()) {
+                                    out_f32[i] = if data[i] < s { 1.0 } else { 0.0 };
+                                }
+                            }
+                        }
+                        "eq_scalar_f32" => {
+                            if let [data_slice, scalar_slice] = &input_slices[..] {
+                                let (data, scalar) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let s = scalar.first().copied().unwrap_or(0.0);
+                                for i in 0..out_f32.len().min(data.len()) {
+                                    out_f32[i] = if (data[i] - s).abs() < 1e-6 { 1.0 } else { 0.0 };
+                                }
+                            }
+                        }
+                        "add_scalar_f32" => {
+                            if let [data_slice, scalar_slice] = &input_slices[..] {
+                                let (data, scalar) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let s = scalar.first().copied().unwrap_or(0.0);
+                                for i in 0..out_f32.len().min(data.len()) {
+                                    out_f32[i] = data[i] + s;
+                                }
+                            }
+                        }
+                        "mul_scalar_f32" => {
+                            if let [data_slice, scalar_slice] = &input_slices[..] {
+                                let (data, scalar) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let s = scalar.first().copied().unwrap_or(0.0);
+                                for i in 0..out_f32.len().min(data.len()) {
+                                    out_f32[i] = data[i] * s;
+                                }
+                            }
+                        }
+                        "div_scalar_f32" => {
+                            if let [data_slice, scalar_slice] = &input_slices[..] {
+                                let (data, scalar) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let s = scalar.first().copied().unwrap_or(0.0);
+                                for i in 0..out_f32.len().min(data.len()) {
+                                    out_f32[i] = data[i] / s;
                                 }
                             }
                         }

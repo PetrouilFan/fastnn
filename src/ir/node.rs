@@ -54,9 +54,21 @@ pub enum Opcode {
     Gather,
     ScatterNd,
     Constant(TensorValue),
-    /// Placeholder for graph inputs — data provided at execution time.
-    /// No producer instruction; the executor writes data into the arena slot.
     Input,
+    // ── v2.1 additions (new ops added to complete the AOT pipeline) ────────
+    Conv1d,
+    Conv3d,
+    ConvTranspose2d,
+    Prelu,
+    RMSNorm,
+    Embedding,
+    Pow,
+    GtScalar,
+    LtScalar,
+    EqScalar,
+    AddScalar,
+    MulScalar,
+    DivScalar,
 }
 
 /// Default maximum extent assumed for a purely symbolic dimension (no Bounded bound).
