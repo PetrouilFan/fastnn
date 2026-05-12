@@ -35,8 +35,8 @@
 //!   - `T = U8x4`  → 8-bit integer weights, 4× memory compression
 //!   - `T = U4x8`  → 4-bit integer weights, 8× compression
 //!   - `T = F16x2` → 16-bit float weights, 2× compression
-//! The SIMD GEMV kernels in `backends/packed_simd.rs` handle the
-//! type-specific dequantization (int8→f32, nibble→f32, f16→f32).
+//!     The SIMD GEMV kernels in `backends/packed_simd.rs` handle the
+//!     type-specific dequantization (int8→f32, nibble→f32, f16→f32).
 //!
 //! Future: full integer path (VNNI `_mm256_dpbusd_epi32`)
 //! These kernels support f32 activations + packed weights.  A future
@@ -77,6 +77,12 @@ fn compute_out_dim(in_dim: usize, kernel: usize, stride: usize, padding: usize, 
 /// - `weight`: packed weight matrix [OC, C]
 /// - `bias`: optional f32 bias [OC]
 /// - `n, c, h, w, oc`: dimension sizes
+///
+/// # Safety
+/// - `x` must be a valid f32 tensor with shape [N, C, H, W]
+/// - `weight` must be a valid packed tensor with shape [OC, C]
+/// - The caller must ensure that all dimension arguments match the actual tensor shapes
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn quantized_conv2d_1x1<T: PackedWord>(
     x: &Tensor,
     weight: &PackedTensor<T>,
@@ -147,6 +153,12 @@ pub unsafe fn quantized_conv2d_1x1<T: PackedWord>(
 /// TODO: Replace im2col with a true direct kernel that processes 8 OC at
 /// once using the same S_BUF + WT_TRANS_BUF pattern as `conv2d_3x3_direct`.
 /// That will eliminate the temporary im2col buffer allocation.
+///
+/// # Safety
+/// - `x` must be a valid f32 tensor with shape [N, C, H, W]
+/// - `weight` must be a valid packed tensor with shape [OC, C * 9]
+/// - The caller must ensure that all dimension arguments match the actual tensor shapes
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn quantized_conv2d_3x3<T: PackedWord>(
     x: &Tensor,
     weight: &PackedTensor<T>,
@@ -227,6 +239,12 @@ pub unsafe fn quantized_conv2d_3x3<T: PackedWord>(
 
 /// Quantized depthwise convolution (groups == in_channels == out_channels).
 /// Each input channel is convolved with its own kernel (1 output channel).
+///
+/// # Safety
+/// - `x` must be a valid f32 tensor with shape [N, C, H, W]
+/// - `weight` must be a valid packed tensor with shape [OC, C * KH * KW]
+/// - The caller must ensure that all dimension arguments match the actual tensor shapes
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn quantized_conv2d_depthwise<T: PackedWord>(
     x: &Tensor,
     weight: &PackedTensor<T>,
@@ -238,7 +256,7 @@ pub unsafe fn quantized_conv2d_depthwise<T: PackedWord>(
     kernel_size: usize,
     stride: usize,
     pad: usize,
-    dilation: usize,
+    _dilation: usize,
     oh: usize,
     ow: usize,
 ) -> Tensor {
@@ -355,6 +373,12 @@ pub unsafe fn quantized_conv2d_depthwise<T: PackedWord>(
 /// Supports arbitrary kernel sizes, strides, padding, dilation, and groups.
 /// For groups > 1 (but not full depthwise), processes each group independently
 /// with its own im2col + GEMM call.
+///
+/// # Safety
+/// - `x` must be a valid f32 tensor with shape [N, C, H, W]
+/// - `weight` must be a valid packed tensor with shape [OC, C * KH * KW]
+/// - The caller must ensure that all dimension arguments match the actual tensor shapes
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn quantized_conv2d_im2col<T: PackedWord>(
     x: &Tensor,
     weight: &PackedTensor<T>,
@@ -504,6 +528,13 @@ pub unsafe fn quantized_conv2d_im2col<T: PackedWord>(
 ///
 /// # Returns
 /// f32 output tensor [N, OC, OH, OW]
+///
+/// # Safety
+/// - `x` must be a valid f32 tensor with shape [N, C, H, W]
+/// - `weight` must be a valid packed tensor with shape [OC, C * KH * KW]
+/// - The caller must ensure that `kernel_size`, `stride`, `padding`, `dilation`, and `groups`
+///   are consistent with the input and weight tensor shapes
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn dispatch_quantized_conv2d<T: PackedWord>(
     x: &Tensor,
     weight: &PackedTensor<T>,

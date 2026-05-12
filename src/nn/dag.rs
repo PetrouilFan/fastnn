@@ -2049,10 +2049,8 @@ impl DAGExecutor {
                     if let Some(id) = self.name_to_id.get(in_name) {
                         if let Some(count) = self.consumer_counts.get(id) {
                             let prev = count.fetch_sub(1, Ordering::Relaxed);
-                            if prev == 1 && !self.output_indices.contains(id) {
-                                if buffer[*id].is_some() {
-                                    buffer[*id] = None;
-                                }
+                            if prev == 1 && !self.output_indices.contains(id) && buffer[*id].is_some() {
+                                buffer[*id] = None;
                             }
                         }
                     }
