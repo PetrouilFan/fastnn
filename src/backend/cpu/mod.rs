@@ -7,6 +7,7 @@ use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorVa
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use std::cell::UnsafeCell;
+use std::sync::atomic::Ordering;
 
 pub mod microkernels;
 
@@ -101,7 +102,10 @@ impl Backend for CpuBackend {
                 })
                 .collect();
 
-            // Collect input shapes for dimension-dependent kernels
+            // Collect input shapes for dimension-dependent kernels.
+            // Symbolic dims that can't be resolved at compile time are
+            // replaced with SYMBOL_DIM_MAX to preserve shape rank.
+            let symbol_max = crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed);
             let input_shapes: Vec<Vec<u64>> = node
                 .inputs
                 .iter()
@@ -110,7 +114,7 @@ impl Backend for CpuBackend {
                     n.output_type
                         .shape
                         .iter()
-                        .filter_map(|d| d.evaluate())
+                        .map(|d| d.evaluate().unwrap_or(symbol_max))
                         .collect()
                 })
                 .collect();
@@ -126,19 +130,35 @@ impl Backend for CpuBackend {
                 .slots
                 .get(&node_id)
                 .map(|slot| BufferSlice::new(slot.offset, slot.size))
-                .unwrap_or(BufferSlice::new(0, 0));
+                .ok_or_else(|| {
+                    BackendError::Compilation(format!(
+                        "node {} ({:?}) has no memory slot",
+                        node_id, node.opcode
+                    ))
+                })?;
 
             match &node.opcode {
                 Opcode::Constant(val) => {
-                    let fill_value = match val {
-                        TensorValue::Float(v) => *v,
-                        TensorValue::Int(v) => *v as f32,
-                        TensorValue::Data { .. } => 0.0, // will be zero-initialized
-                    };
-                    instructions.push(Instruction::Fill {
-                        dst: output_slice,
-                        value: fill_value,
-                    });
+                    match val {
+                        TensorValue::Float(v) => {
+                            instructions.push(Instruction::Fill {
+                                dst: output_slice,
+                                value: *v,
+                            });
+                        }
+                        TensorValue::Int(v) => {
+                            instructions.push(Instruction::Fill {
+                                dst: output_slice,
+                                value: *v as f32,
+                            });
+                        }
+                        TensorValue::Data { bytes, .. } => {
+                            instructions.push(Instruction::WriteConst {
+                                dst: output_slice,
+                                data: bytes.clone(),
+                            });
+                        }
+                    }
                 }
                 Opcode::MatMul => {
                     // Detect quantized dtypes from input nodes to select the right kernel
@@ -194,8 +214,7 @@ impl Backend for CpuBackend {
                                     _ => (1.0, 0.0),
                                 };
                                 let w_shape: Vec<usize> = wn.output_type.shape.iter()
-                                    .filter_map(|d| d.evaluate())
-                                    .map(|v| v as usize)
+                                    .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
                                     .collect();
                                 (scale, zp, w_shape)
                             })
@@ -341,7 +360,11 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(axis).cloned())
                         .unwrap_or(DimExpr::Known(1));
                     let is_mean = if matches!(node.opcode, Opcode::ReduceMean) { 1 } else { 0 };
-                    let group_size = group_size_dim.evaluate().unwrap_or(1) as usize;
+                    let group_size = group_size_dim.evaluate().unwrap_or_else(|| {
+                        // Symbolic dim — use SYMBOL_DIM_MAX as compile-time
+                        // estimate; runtime resolves via param_dims.
+                        crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
+                    }) as usize;
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "reduce_f32".to_string(),
                         input_slices,
@@ -1088,6 +1111,11 @@ impl Backend for CpuBackend {
                     let bytes = &mut data[start..end];
                     let f32_slice = bytemuck::cast_slice_mut::<_, f32>(bytes);
                     f32_slice.fill(*value);
+                }
+                Instruction::WriteConst { dst, data } => {
+                    let arena_data = arena.data_mut();
+                    let end = (dst.offset + data.len()).min(arena_data.len());
+                    arena_data[dst.offset..end].copy_from_slice(&data[..end - dst.offset]);
                 }
             }
         }
