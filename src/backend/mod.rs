@@ -51,6 +51,10 @@ pub enum Instruction {
         /// any [`DimExpr::Symbol`](crate::ir::node::DimExpr::Symbol) dims
         /// that were not known at compile time.
         param_dims: Option<Vec<DimExpr>>,
+        /// Optional weight metadata for quantized matmul kernels.
+        /// Stores (scale, zero_point, shape) from the weight's IrDType::U4/U8
+        /// so dispatch can construct a [`PackedTensor`] for SIMD microkernels.
+        weight_meta: Option<(f32, f32, Vec<usize>)>,
     },
     MemCopy {
         dst: BufferSlice,
