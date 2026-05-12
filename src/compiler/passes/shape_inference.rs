@@ -15,7 +15,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             .collect();
 
         let inferred = match node.opcode {
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
+            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
+            | Opcode::Maximum | Opcode::Minimum => {
                 if inputs.len() >= 2 {
                     Some(broadcast_shapes(
                         &inputs[0].output_type.shape,
@@ -36,7 +37,15 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             | Opcode::Log
             | Opcode::Sqrt
             | Opcode::Neg
-            | Opcode::Abs => inputs.first().map(|i| i.output_type.shape.clone()),
+            | Opcode::Abs
+            | Opcode::LeakyRelu
+            | Opcode::Elu
+            | Opcode::Softplus
+            | Opcode::Hardswish
+            | Opcode::Clamp
+            | Opcode::Sign
+            | Opcode::LogicalNot
+            | Opcode::LogSoftmax => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::MatMul => {
                 if inputs.len() >= 2 {
                     Some(matmul_output_shape(
@@ -81,7 +90,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     shape.clone()
                 }
             }),
-            Opcode::ReduceSum | Opcode::ReduceMean => inputs.first().map(|i| {
+            Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => inputs.first().map(|i| {
                 let mut s = i.output_type.shape.clone();
                 if let Some(axis_str) = node.attrs.get("axis") {
                     if let Ok(axis) = axis_str.parse::<usize>() {

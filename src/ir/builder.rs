@@ -473,6 +473,167 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    // =========================================================================
+    // Activations added for PPO / control / RL pipelines
+    // =========================================================================
+
+    /// Leaky ReLU activation.
+    pub fn leaky_relu(&self, input: &GraphTensor, negative_slope: f32) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("negative_slope".to_string(), negative_slope.to_string());
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::LeakyRelu,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// ELU activation.
+    pub fn elu(&self, input: &GraphTensor, alpha: f32) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("alpha".to_string(), alpha.to_string());
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Elu,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Softplus activation.
+    pub fn softplus(&self, input: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Softplus,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Hardswish activation.
+    pub fn hardswish(&self, input: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Hardswish,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Clamp (clip) tensor values to [min, max].
+    pub fn clamp(&self, input: &GraphTensor, min: f32, max: f32) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("min".to_string(), min.to_string());
+        attrs.insert("max".to_string(), max.to_string());
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Clamp,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Sign function: -1 for negative, 0 for zero, 1 for positive.
+    pub fn sign(&self, input: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Sign,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Logical NOT (binary mask inversion).
+    pub fn logical_not(&self, input: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::LogicalNot,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Log softmax activation.
+    pub fn log_softmax(&self, input: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::LogSoftmax,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Binary element-wise ops for RL / control
+    // =========================================================================
+
+    /// Element-wise maximum.
+    pub fn maximum(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
+        let output_type = a.tensor_type.clone(); // broadcast shapes are validated at compile/runtime
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Maximum,
+            vec![a.node_id, b.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Element-wise minimum.
+    pub fn minimum(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
+        let output_type = a.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Minimum,
+            vec![a.node_id, b.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Reductions
+    // =========================================================================
+
+    /// Max reduction along a dimension.
+    pub fn reduce_max(&self, input: &GraphTensor, axis: usize, keepdim: bool) -> GraphTensor {
+        let mut output_type = input.tensor_type.clone();
+        if axis < output_type.shape.len() {
+            output_type.shape.remove(axis);
+        }
+        let mut inner = self.inner.borrow_mut();
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("axis".to_string(), axis.to_string());
+        attrs.insert("keepdim".to_string(), if keepdim { "1" } else { "0" }.to_string());
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::ReduceMax,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Reshape tensor.
     pub fn reshape(&self, input: &GraphTensor, shape: &[DimExpr]) -> GraphTensor {
         let output_type = TensorType::new(shape.to_vec(), input.dtype());
