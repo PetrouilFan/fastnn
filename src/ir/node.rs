@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type NodeId = usize;
 
@@ -51,7 +52,16 @@ pub enum Opcode {
 /// Used by the memory planner to allocate sufficient arena space for graphs that
 /// contain unbounded Symbol dims.  Callers that know tighter bounds should use
 /// [`DimExpr::Bounded`] instead.
-pub const SYMBOL_DIM_MAX: u64 = 4096;
+///
+/// This is an atomic so it can be adjusted at runtime (e.g. from a config file
+/// or by [`set_symbol_dim_max`]).
+pub static SYMBOL_DIM_MAX: AtomicU64 = AtomicU64::new(4096);
+
+/// Override the global [`SYMBOL_DIM_MAX`] value.  Call before constructing
+/// graphs whose unbounded Symbol dims may exceed 4096.
+pub fn set_symbol_dim_max(val: u64) {
+    SYMBOL_DIM_MAX.store(val, Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DimExpr {
@@ -96,10 +106,13 @@ impl DimExpr {
                 }
             }
             // Same symbol squared → canonical "N^2" instead of stringy "(N*N)"
-            (DimExpr::Symbol(s), DimExpr::Symbol(t)) if s == t => DimExpr::Bounded {
-                sym: format!("{}^2", s),
-                max: SYMBOL_DIM_MAX * SYMBOL_DIM_MAX,
-            },
+            (DimExpr::Symbol(s), DimExpr::Symbol(t)) if s == t => {
+                let m = SYMBOL_DIM_MAX.load(Ordering::Relaxed);
+                DimExpr::Bounded {
+                    sym: format!("{}^2", s),
+                    max: m * m,
+                }
+            }
             (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
                 DimExpr::Symbol(format!("({}*{})", s, t))
             }
@@ -140,10 +153,13 @@ impl DimExpr {
                 }
             }
             // Same symbol + itself → canonical "2*N" instead of stringy "(N+N)"
-            (DimExpr::Symbol(s), DimExpr::Symbol(t)) if s == t => DimExpr::Bounded {
-                sym: format!("2*{}", s),
-                max: 2 * SYMBOL_DIM_MAX,
-            },
+            (DimExpr::Symbol(s), DimExpr::Symbol(t)) if s == t => {
+                let max = SYMBOL_DIM_MAX.load(Ordering::Relaxed);
+                DimExpr::Bounded {
+                    sym: format!("2*{}", s),
+                    max: 2 * max,
+                }
+            }
             (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
                 DimExpr::Symbol(format!("({}+{})", s, t))
             }
@@ -154,6 +170,40 @@ impl DimExpr {
                     max: *max,
                 }
             }
+        }
+    }
+}
+
+// =============================================================================
+// DimExpr arithmetic helpers
+// =============================================================================
+
+impl DimExpr {
+    /// Symbolic floor division (affine expression support, e.g. `T/2`).
+    ///
+    /// Only division by a [`Known`](DimExpr::Known) divisor is supported;
+    /// division by a [`Symbol`](DimExpr::Symbol) or
+    /// [`Bounded`](DimExpr::Bounded) returns a [`Known`](DimExpr::Known) 1
+    /// fallback since the result is rarely affine in a useful way.
+    pub fn floordiv(&self, divisor: &DimExpr) -> DimExpr {
+        match (self, divisor) {
+            (DimExpr::Known(va), DimExpr::Known(vb)) if *vb > 0 => {
+                DimExpr::Known(va / vb)
+            }
+            (DimExpr::Symbol(s), DimExpr::Known(v)) if *v > 0 => {
+                let max = SYMBOL_DIM_MAX.load(Ordering::Relaxed);
+                DimExpr::Bounded {
+                    sym: format!("{}/{}", s, v),
+                    max: max / v,
+                }
+            }
+            (DimExpr::Bounded { sym, max }, DimExpr::Known(v)) if *v > 0 => {
+                DimExpr::Bounded {
+                    sym: format!("{}/{}", sym, v),
+                    max: max / v,
+                }
+            }
+            _ => DimExpr::Known(1),
         }
     }
 }
@@ -412,6 +462,7 @@ impl TensorType {
     /// Pure [`DimExpr::Symbol`] dimensions (not [`DimExpr::Bounded`]) still
     /// fall back to `SYMBOL_DIM_MAX`.
     pub fn byte_size_with_env(&self, env: Option<&ShapeEnv>) -> usize {
+        let symbol_max = SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize;
         let numel: usize = self
             .shape
             .iter()
@@ -419,8 +470,8 @@ impl TensorType {
                 DimExpr::Known(v) => *v as usize,
                 DimExpr::Bounded { max, .. } => *max as usize,
                 DimExpr::Symbol(_) => match env {
-                    Some(e) => d.evaluate_with_env(e).unwrap_or(SYMBOL_DIM_MAX) as usize,
-                    None => SYMBOL_DIM_MAX as usize,
+                    Some(e) => d.evaluate_with_env(e).unwrap_or(symbol_max as u64) as usize,
+                    None => symbol_max,
                 },
             })
             .product();

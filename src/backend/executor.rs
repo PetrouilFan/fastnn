@@ -18,6 +18,7 @@
 use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
 use crate::compiler::passes::{memory_planning, operator_fusion, shape_inference};
 use crate::ir::node::{ComputeGraph, DimExpr, NodeId, Opcode, ShapeEnv};
+use std::sync::atomic::Ordering;
 
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
@@ -98,8 +99,10 @@ impl<B: Backend> GraphExecutor<B> {
         validate_shapes(graph, &shape_env).map_err(|e| {
             BackendError::Dispatch(format!("shape validation: {e}"))
         })?;
-        // Allocate arena — must use the original plan arena_size because
-        // compiled instructions reference the original (max-estimate) slot sizes.
+        // Allocate arena — instructions reference the original (max-estimate)
+        // slot sizes, so we must use the original arena_size.
+        // MemoryPlan::tighten() is available for users who recompile with a
+        // fully-resolved ShapeEnv.
         let arena = self.backend.allocate_arena(plan.arena_size);
 
         // Write input data into the arena at the slots for graph input nodes
@@ -153,7 +156,7 @@ impl<B: Backend> GraphExecutor<B> {
                          (shape {:?}, env may have overflowed SYMBOL_DIM_MAX={})",
                         output_node_id, computed, slot.size,
                         node.output_type.shape,
-                        crate::ir::node::SYMBOL_DIM_MAX,
+                        crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed),
                     )));
                 }
                 computed
@@ -187,7 +190,7 @@ pub fn tensor_byte_size(shape: &[DimExpr], elem_byte_size: usize) -> usize {
         .map(|d| match d {
             DimExpr::Known(v) => *v as usize,
             DimExpr::Bounded { max, .. } => *max as usize,
-            DimExpr::Symbol(_) => crate::ir::node::SYMBOL_DIM_MAX as usize,
+            DimExpr::Symbol(_) => crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize,
         })
         .product();
     numel * elem_byte_size

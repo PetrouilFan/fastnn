@@ -27,6 +27,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 
 use crate::backend::{Backend, BackendError, ExecutablePlan};
 use crate::backend::executor::GraphExecutor;
@@ -779,7 +780,7 @@ fn conv_spatial_dim(input_dim: &DimExpr, kernel_dim: &DimExpr, stride: usize, pa
                 }
                 _ => {
                     // Cannot fully evaluate — produce a Bounded expression with provenance
-                    let h_eval = input_dim.evaluate().unwrap_or(SYMBOL_DIM_MAX);
+                    let h_eval = input_dim.evaluate().unwrap_or(SYMBOL_DIM_MAX.load(Ordering::Relaxed));
                     let k_eval = kernel_dim.evaluate().unwrap_or(1);
                     let estimated = ((h_eval + 2 * p).saturating_sub(k_eval)) / s + 1;
                     let sym_name = match (input_dim, kernel_dim) {
