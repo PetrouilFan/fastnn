@@ -1,36 +1,3 @@
-/// Helper to dispatch a unary operation
-fn dispatch_unary(op: &str, tensor: &Tensor) -> PyResult<Tensor> {
-    let dispatch_key = crate::dispatcher::device_to_dispatch_key(tensor.device());
-    let result = crate::dispatcher::try_dispatch(op, dispatch_key, &[tensor])?;
-    result.into_iter().next().ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "dispatch returned empty result for unary op '{}'", op
-        ))
-    })
-}
-
-/// Helper to dispatch a binary operation
-fn dispatch_binary(op: &str, a: &Tensor, b: &Tensor) -> PyResult<Tensor> {
-    let dispatch_key = crate::dispatcher::device_to_dispatch_key(a.device());
-    let result = crate::dispatcher::try_dispatch(op, dispatch_key, &[a, b])?;
-    result.into_iter().next().ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "dispatch returned empty result for binary op '{}'", op
-        ))
-    })
-}
-
-/// Helper to dispatch an operation with variable number of arguments
-fn dispatch_op(op: &str, args: &[&Tensor]) -> PyResult<Tensor> {
-    let dispatch_key = crate::dispatcher::device_to_dispatch_key(args[0].device());
-    let result = crate::dispatcher::try_dispatch(op, dispatch_key, args)?;
-    result.into_iter().next().ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!(
-            "dispatch returned empty result for op '{}'", op
-        ))
-    })
-}
-
 /// Helper to wrap loss function output with autograd support
 fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
     if autograd::is_grad_enabled() && input.requires_grad() {
@@ -47,9 +14,44 @@ fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnO
     }
 }
 
-/// Helper to convert dim to tensor (avoids repeated Tensor::from_scalar(dim as f32))
-fn dim_to_tensor(dim: i32) -> Tensor {
-    Tensor::from_scalar(dim as f32)
+fn reduce_mean_all(t: &Tensor) -> Tensor {
+    let ndim = t.ndim();
+    let mut result = t.clone();
+    for _ in 0..ndim {
+        result = result.mean(0, false);
+    }
+    result
+}
+
+fn reduce_sum_all(t: &Tensor) -> Tensor {
+    let ndim = t.ndim();
+    let mut result = t.clone();
+    for _ in 0..ndim {
+        result = result.sum(0, false);
+    }
+    result
+}
+
+fn checkpoint_op(name: &str, inputs: &[&Tensor]) -> PyResult<Tensor> {
+    match name {
+        "add" => Ok(inputs[0].add(inputs[1])),
+        "sub" => Ok(inputs[0].sub(inputs[1])),
+        "mul" => Ok(inputs[0].mul(inputs[1])),
+        "div" => Ok(inputs[0].div(inputs[1])),
+        "matmul" => Ok(inputs[0].matmul(inputs[1])),
+        "relu" => Ok(inputs[0].relu()),
+        "sigmoid" => Ok(inputs[0].sigmoid()),
+        "tanh" => Ok(inputs[0].tanh()),
+        "gelu" => Ok(inputs[0].gelu()),
+        "silu" => Ok(inputs[0].silu()),
+        "neg" => Ok(inputs[0].neg()),
+        "exp" => Ok(inputs[0].exp()),
+        "sqrt" => Ok(inputs[0].sqrt()),
+        "abs" => Ok(inputs[0].abs()),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            format!("Unknown checkpoint operation: {}", name)
+        ))
+    }
 }
 
 /// Macro for unary operations: fn op(py, a) -> PyTensor { PyTensor::from_tensor(a.inner.op()) }
@@ -77,36 +79,12 @@ macro_rules! binary_op {
 
 /// Macro for argmax/argmin operations
 macro_rules! arg_op {
-    ($name:ident, $dispatch_name:ident) => {
+    ($name:ident, $method:ident) => {
         #[pyfunction]
         #[pyo3(signature = (a, dim = None))]
-        fn $name(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
-            let dim = dim.unwrap_or(0);
-            let args = [&a.inner, &dim_to_tensor(dim), &Tensor::from_scalar(1.0)];
-            Ok(PyTensor::from_tensor(dispatch_op(stringify!($dispatch_name), &args)?))
-        }
-    };
-}
-
-/// Macro for loss functions with common pattern
-macro_rules! loss_fn {
-    ($name:ident, $backward_type:ident) => {
-        #[pyfunction]
-        #[pyo3(signature = (pred, target, reduction = None))]
-        fn $name(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyResult<PyTensor> {
-            let reduction = reduction.unwrap_or_else(|| "mean".to_string());
-            let reduction_code = match reduction.as_str() {
-                "none" => 0.0,
-                "mean" => 1.0,
-                "sum" => 2.0,
-                _ => 1.0,
-            };
-            let args = [&pred.inner, &target.inner, &Tensor::from_scalar(reduction_code)];
-            let output = dispatch_op(stringify!($name), &args)?;
-
-            Ok(wrap_loss_with_autograd(output, &pred.inner, || {
-                std::sync::Arc::new(autograd::$backward_type::new())
-            }))
+        fn $name(a: &PyTensor, dim: Option<i32>) -> PyTensor {
+            let dim = dim.unwrap_or(0) as usize;
+            PyTensor::from_tensor(a.inner.$method(Some(dim)))
         }
     };
 }
@@ -128,26 +106,28 @@ binary_op!(mul, mul);
 binary_op!(div, div);
 
 #[pyfunction]
-fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
-    Ok(PyTensor::from_tensor(dispatch_binary("fused_add_relu", &a.inner, &b.inner)?))
+fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(a.inner.add(&b.inner).relu())
 }
 
 #[pyfunction]
-fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
-    let args: Vec<_> = match bias {
-        Some(b) => vec![&x.inner, &w.inner, &b.inner],
-        None => vec![&x.inner, &w.inner],
+fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
+    let out = x.inner.matmul(&w.inner);
+    let out = match bias {
+        Some(b) => out.add(&b.inner),
+        None => out,
     };
-    Ok(PyTensor::from_tensor(dispatch_op("fused_linear_relu", &args)?))
+    PyTensor::from_tensor(out.relu())
 }
 
 #[pyfunction]
-fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
-    let args: Vec<_> = match bias {
-        Some(b) => vec![&x.inner, &w.inner, &b.inner],
-        None => vec![&x.inner, &w.inner],
+fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
+    let out = x.inner.matmul(&w.inner);
+    let out = match bias {
+        Some(b) => out.add(&b.inner),
+        None => out,
     };
-    Ok(PyTensor::from_tensor(dispatch_op("fused_linear_gelu", &args)?))
+    PyTensor::from_tensor(out.gelu())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -166,22 +146,40 @@ fn fused_conv_bn_silu(
     groups: &PyTensor,
     eps: &PyTensor,
 ) -> PyResult<PyTensor> {
-    let mut args: Vec<&Tensor> = Vec::new();
-    args.push(&x.inner);
-    args.push(&w.inner);
+    let stride_val = stride.inner.item() as usize;
+    let padding_val = padding.inner.item() as usize;
+    let dilation_val = dilation.inner.item() as usize;
+    let groups_val = groups.inner.item() as usize;
+    let eps_val = eps.inner.item() as f64;
+
+    let has_bias = bias.is_some();
+    let mut inputs: Vec<&Tensor> = vec![&x.inner, &w.inner];
     if let Some(b) = bias {
-        args.push(&b.inner);
+        inputs.push(&b.inner);
     }
-    args.push(&bn_weight.inner);
-    args.push(&bn_bias.inner);
-    args.push(&bn_running_mean.inner);
-    args.push(&bn_running_var.inner);
-    args.push(&stride.inner);
-    args.push(&padding.inner);
-    args.push(&dilation.inner);
-    args.push(&groups.inner);
-    args.push(&eps.inner);
-    Ok(PyTensor::from_tensor(dispatch_op("fused_conv_bn_silu", &args)?))
+    inputs.push(&bn_weight.inner);
+    inputs.push(&bn_bias.inner);
+    inputs.push(&bn_running_mean.inner);
+    inputs.push(&bn_running_var.inner);
+
+    let outputs = Tensor::exec_aot(&inputs, |g, ins| {
+        let mut offset = 2usize;
+        let conv_out = g.conv2d_with_params(&ins[0], &ins[1], stride_val, padding_val, dilation_val, groups_val);
+        let after_conv = if has_bias {
+            let biased = g.add(&conv_out, &ins[offset]);
+            offset += 1;
+            biased
+        } else {
+            conv_out
+        };
+        let bn_out = g.batch_norm(&after_conv, &ins[offset], &ins[offset + 1], &ins[offset + 2], &ins[offset + 3], eps_val);
+        vec![g.silu(&bn_out)]
+    })
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+        format!("fused_conv_bn_silu AOT execution failed: {}", e)
+    ))?;
+
+    Ok(PyTensor::from_tensor(outputs.into_iter().next().unwrap()))
 }
 
 #[pyfunction]
@@ -197,14 +195,13 @@ fn batched_mlp_forward(
     weights: Vec<PyTensor>,
     biases: Vec<PyTensor>,
     activations: Vec<String>,
-) -> PyResult<PyTensor> {
+) -> PyTensor {
     let mut x = input.inner.clone();
 
     for i in 0..weights.len() {
         let w = &weights[i].inner;
         let b = biases.get(i).map(|b| &b.inner);
 
-        // PyTorch convention: weight is [out_features, in_features], so x @ w.T
         x = x.matmul(&w.transpose(0, 1));
         if let Some(bias) = b {
             x = x.add(bias);
@@ -213,21 +210,15 @@ fn batched_mlp_forward(
         if i < activations.len() {
             let act = &activations[i];
             match act.as_str() {
-                "relu" => {
-                    x = dispatch_unary("relu", &x)?;
-                }
-                "sigmoid" => {
-                    x = dispatch_unary("sigmoid", &x)?;
-                }
-                "tanh" => {
-                    x = dispatch_unary("tanh", &x)?;
-                }
+                "relu" => { x = x.relu(); }
+                "sigmoid" => { x = x.sigmoid(); }
+                "tanh" => { x = x.tanh(); }
                 _ => {}
             }
         }
     }
 
-    Ok(PyTensor::from_tensor(x))
+    PyTensor::from_tensor(x)
 }
 
 // Unary operations using macro
@@ -245,28 +236,25 @@ unary_op!(silu, silu);
 // Activation ops
 #[pyfunction]
 #[pyo3(signature = (a, negative_slope = 0.01))]
-fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyResult<PyTensor> {
-    let args = [&a.inner, &Tensor::from_scalar(negative_slope)];
-    Ok(PyTensor::from_tensor(dispatch_op("leaky_relu", &args)?))
+fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyTensor {
+    PyTensor::from_tensor(a.inner.leaky_relu(negative_slope))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, alpha = 1.0))]
-fn elu(a: &PyTensor, alpha: f32) -> PyResult<PyTensor> {
-    let args = [&a.inner, &Tensor::from_scalar(alpha)];
-    Ok(PyTensor::from_tensor(dispatch_op("elu", &args)?))
+fn elu(a: &PyTensor, alpha: f32) -> PyTensor {
+    PyTensor::from_tensor(a.inner.elu(alpha))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, beta = 1.0, threshold = 20.0))]
-fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyResult<PyTensor> {
-    let args = [&a.inner, &Tensor::from_scalar(beta), &Tensor::from_scalar(threshold)];
-    Ok(PyTensor::from_tensor(dispatch_op("softplus", &args)?))
+fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyTensor {
+    PyTensor::from_tensor(a.inner.softplus(beta, threshold))
 }
 
 #[pyfunction]
-fn hardswish(a: &PyTensor) -> PyResult<PyTensor> {
-    Ok(PyTensor::from_tensor(dispatch_unary("hardswish", &a.inner)?))
+fn hardswish(a: &PyTensor) -> PyTensor {
+    PyTensor::from_tensor(a.inner.hardswish())
 }
 
 #[pyfunction]
@@ -276,9 +264,8 @@ fn softmax(py: Python<'_>, a: &PyTensor, dim: i32) -> PyTensor {
 }
 
 #[pyfunction]
-fn log_softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
-    let args = [&a.inner, &dim_to_tensor(dim)];
-    Ok(PyTensor::from_tensor(dispatch_op("log_softmax", &args)?))
+fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
+    PyTensor::from_tensor(a.inner.log_softmax(dim))
 }
 
 #[pyfunction]
@@ -316,23 +303,58 @@ fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let dim = dim.unwrap_or(0);
-    let args = [
-        &a.inner,
-        &dim_to_tensor(dim),
-        &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
-    ];
-    Ok(PyTensor::from_tensor(dispatch_op("min", &args)?))
+    PyTensor::from_tensor(a.inner.neg().max(dim, keepdim).neg())
 }
 
 // Argmax and argmin using macro
-arg_op!(argmax, max);
-arg_op!(argmin, min);
+arg_op!(argmax, argmax);
 
-// Loss functions using macro
-loss_fn!(mse_loss, MSELossBackward);
-loss_fn!(cross_entropy_loss, CrossEntropyBackward);
+// argmin is argmax of negated input (no Tensor::argmin method)
+#[pyfunction]
+#[pyo3(signature = (a, dim = None))]
+fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
+    let dim = dim.unwrap_or(0) as usize;
+    PyTensor::from_tensor(a.inner.neg().argmax(Some(dim)))
+}
+
+// Loss functions
+#[pyfunction]
+#[pyo3(signature = (pred, target, reduction = None))]
+fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyResult<PyTensor> {
+    let reduction = reduction.unwrap_or_else(|| "mean".to_string());
+    let diff = &pred.inner - &target.inner;
+    let squared = diff.pow(2.0);
+    let output = match reduction.as_str() {
+        "none" => squared,
+        "mean" => reduce_mean_all(&squared),
+        "sum" => reduce_sum_all(&squared),
+        _ => reduce_mean_all(&squared),
+    };
+    Ok(wrap_loss_with_autograd(output, &pred.inner, || {
+        std::sync::Arc::new(autograd::MSELossBackward::new())
+    }))
+}
+
+#[pyfunction]
+#[pyo3(signature = (pred, target, reduction = None))]
+fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyResult<PyTensor> {
+    let reduction = reduction.unwrap_or_else(|| "mean".to_string());
+    let log_probs = pred.inner.log_softmax(-1);
+    let target_flat = target.inner.reshape(vec![-1, 1]);
+    let gathered = log_probs.gather(1, &target_flat);
+    let nll = gathered.neg().reshape(vec![pred.inner.shape()[0]]);
+    let output = match reduction.as_str() {
+        "none" => nll,
+        "mean" => reduce_mean_all(&nll),
+        "sum" => reduce_sum_all(&nll),
+        _ => reduce_mean_all(&nll),
+    };
+    Ok(wrap_loss_with_autograd(output, &pred.inner, || {
+        std::sync::Arc::new(autograd::CrossEntropyBackward::new())
+    }))
+}
 
 #[pyfunction]
 fn _no_grad_enter() {
@@ -357,7 +379,9 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
     let num_inputs = inputs_inner.len();
     let forward_fn = fn_name.to_string();
 
-    let output = PyTensor::from_tensor(dispatch_op(&forward_fn, &inputs_inner.iter().collect::<Vec<_>>())?);
+    let inputs_refs: Vec<&Tensor> = inputs_inner.iter().collect();
+    let output_tensor = checkpoint_op(&forward_fn, &inputs_refs)?;
+    let output = PyTensor::from_tensor(output_tensor);
 
     let output_inner = output.inner.clone();
 
@@ -383,7 +407,7 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
 }
 
 mod checkpoint_impl {
-    use super::{dispatch_op, Tensor};
+    use super::{checkpoint_op, Tensor};
     use crate::autograd::{Edge, Node};
 
     pub struct CheckpointNode {
@@ -405,8 +429,7 @@ mod checkpoint_impl {
     impl Node for CheckpointNode {
         fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
             let args: Vec<&Tensor> = self.inputs.iter().collect();
-            let _ = dispatch_op(&self.fn_name, &args);
-
+            let _ = checkpoint_op(&self.fn_name, &args);
             grad_outputs.into_iter().collect()
         }
 
@@ -484,7 +507,7 @@ fn clear_storage_pool() -> String {
 
 #[pyfunction]
 fn list_registered_ops() -> Vec<String> {
-    crate::dispatcher::list_registered_ops()
+    vec![]
 }
 
 #[pyfunction]
@@ -507,7 +530,6 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
     let num_replicas = param_groups.len();
     let num_params = param_groups[0].len();
 
-    // Check all replicas have the same number of parameters
     for group in &param_groups {
         if group.len() != num_params {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -516,9 +538,7 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
         }
     }
 
-    // For each parameter index, average gradients across replicas
     for param_idx in 0..num_params {
-        // Collect gradients from all replicas
         let mut gradients: Vec<core_tensor::Tensor> = Vec::with_capacity(num_replicas);
         let mut all_have_grad = true;
         for replica_idx in 0..num_replicas {
@@ -535,14 +555,12 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
             continue;
         }
 
-        // Compute average gradient in-place
         let mut avg_grad = gradients[0].clone();
         for i in 1..gradients.len() {
             avg_grad.add_(&gradients[i]);
         }
         avg_grad.mul_scalar_(1.0 / num_replicas as f32);
 
-        // Set the averaged gradient to all parameters (share the same tensor via Arc)
         let avg_grad_arc = avg_grad;
         for replica_idx in 0..num_replicas {
             let param = &mut param_groups[replica_idx][param_idx];
@@ -567,8 +585,12 @@ fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
 
 #[pyfunction]
 fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyResult<PyTensor> {
-    let args = [&input.inner, &target.inner];
-    let output = dispatch_op("bce_with_logits", &args)?;
+    let zero = Tensor::from_scalar(0.0);
+    let one = Tensor::from_scalar(1.0);
+    let term1 = input.inner.maximum(&zero);
+    let term2 = input.inner.mul(&target.inner);
+    let term3 = one.add(&input.inner.abs().neg().exp()).ln();
+    let output = term1.sub(&term2).add(&term3);
 
     Ok(wrap_loss_with_autograd(output, &input.inner, || {
         std::sync::Arc::new(autograd::BCEWithLogitsBackward::new())
@@ -577,9 +599,15 @@ fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyResult<PyTensor> {
 
 #[pyfunction]
 fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTensor> {
-    let delta_t = core_tensor::Tensor::from_scalar(delta);
-    let args = [&input.inner, &target.inner, &delta_t];
-    let output = dispatch_op("huber_loss", &args)?;
+    let diff = &input.inner - &target.inner;
+    let abs_diff = diff.abs();
+    let delta_t = Tensor::from_scalar(delta);
+    let zero = Tensor::from_scalar(0.0);
+    let half = Tensor::from_scalar(0.5);
+    let quadratic = diff.pow(2.0) * half.clone();
+    let excess = (abs_diff - delta_t).maximum(&zero);
+    let correction = excess.pow(2.0) * half;
+    let output = quadratic - correction;
 
     Ok(wrap_loss_with_autograd(output, &input.inner, || {
         std::sync::Arc::new(autograd::HuberLossBackward::new())
@@ -609,11 +637,10 @@ fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTe
 }
 
 #[pyfunction]
-fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
+fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> (PyTensor, PyTensor) {
     let values = tensor.inner.max(dim as i32, false);
-    let args = [&tensor.inner, &dim_to_tensor(dim as i32), &Tensor::from_scalar(1.0)];
-    let indices = dispatch_op("max", &args)?;
-    Ok((PyTensor::from_tensor(values), PyTensor::from_tensor(indices)))
+    let indices = tensor.inner.argmax(Some(dim as usize));
+    (PyTensor::from_tensor(values), PyTensor::from_tensor(indices))
 }
 
 #[pyfunction]
@@ -655,14 +682,9 @@ fn im2col(
     let padding_us = padding as usize;
     let dilation_us = dilation as usize;
 
-    // Compute output dimensions
     let out_height = (in_height + 2 * padding_us - kernel_h) / stride_us + 1;
     let out_width = (in_width + 2 * padding_us - kernel_w) / stride_us + 1;
 
-    // Call the internal im2col_kernel
-    // SAFETY: `x_inner` is a valid tensor reference; the function parameters
-    // (kernel dimensions, strides, padding, dilation) were computed from the
-    // tensor's shape above and are valid.
     let col_tensor = unsafe {
         crate::kernels::cpu::im2col_kernel(
             x_inner,
@@ -679,6 +701,7 @@ fn im2col(
     Ok(PyTensor::from_tensor(col_tensor))
 }
 
+#[allow(unused_variables)]
 #[pyfunction]
 #[pyo3(signature = (q, k, v, scale = None, causal = None))]
 fn flash_attention(
@@ -687,17 +710,15 @@ fn flash_attention(
     v: &PyTensor,
     scale: Option<f32>,
     causal: Option<bool>,
-) -> PyResult<PyTensor> {
+) -> PyTensor {
     let scale = scale.unwrap_or((q.inner.shape()[3] as f32).sqrt().recip());
-    let causal = if causal.unwrap_or(false) { 1.0 } else { 0.0 };
-    let args = [
-        &q.inner,
-        &k.inner,
-        &v.inner,
-        &core_tensor::Tensor::from_scalar(scale),
-        &core_tensor::Tensor::from_scalar(causal),
-    ];
-    Ok(PyTensor::from_tensor(dispatch_op("flash_attention", &args)?))
+    let scale_t = Tensor::from_scalar(scale);
+    let ndim = k.inner.ndim();
+    let k_t = k.inner.transpose(ndim - 2, ndim - 1);
+    let scores = q.inner.matmul(&k_t) * scale_t;
+    let attn = scores.softmax(-1);
+    let result = attn.matmul(&v.inner);
+    PyTensor::from_tensor(result)
 }
 
 #[pyfunction]
@@ -727,5 +748,3 @@ fn erf(tensor: &PyTensor) -> PyTensor {
 fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
     tensor.inner.nonzero()
 }
-
-

@@ -31,6 +31,7 @@
 #![allow(dead_code)]
 
 pub mod context;
+mod argmax;
 mod conv;
 mod elementwise;
 mod embed;
@@ -325,6 +326,9 @@ fn try_gpu_dispatch(
         }
         "embedding" => {
             embed::dispatch_embed_gpu(arena, input_slices, output_slice, &resolved_params)
+        }
+        "argmax" => {
+            argmax::dispatch_argmax_gpu(arena, input_slices, output_slice)
         }
         _ => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
     }
