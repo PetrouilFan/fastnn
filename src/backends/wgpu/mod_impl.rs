@@ -12,9 +12,9 @@ pub struct WgpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     /// Pipeline cache keyed by type name
-    pipelines: HashMap<String, wgpu::ComputePipeline>,
+    pub pipelines: HashMap<String, wgpu::ComputePipeline>,
     /// Bind group layout (reused across pipelines)
-    bind_group_layout: wgpu::BindGroupLayout,
+    pub bind_group_layout: wgpu::BindGroupLayout,
     /// Cached staging buffer for GPU readback (avoids re-allocation per call)
     pub staging_buffer: Option<wgpu::Buffer>,
     /// Size of the cached staging buffer in bytes
