@@ -91,7 +91,10 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
         // Build runtime shape env from input sizes, validate shapes.
-        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs);
+        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs).map_err(|e| {
+            BackendError::Dispatch(format!("shape env: {e}"))
+        })?;
+        // Validate shape constraints using the resolved environment
         validate_shapes(graph, &shape_env).map_err(|e| {
             BackendError::Dispatch(format!("shape validation: {e}"))
         })?;
@@ -132,7 +135,9 @@ impl<B: Backend> GraphExecutor<B> {
                 ))
             })?;
 
-            // Re-evaluate output size with shape_env to handle symbolic dims
+            // Re-evaluate output size with shape_env to handle symbolic dims.
+            // Error if the resolved size exceeds the allocated slot (would read
+            // past the end of valid data).
             let actual_size = if let Some(node) = graph.get_node(output_node_id) {
                 let actual_numel: usize = node
                     .output_type
@@ -141,7 +146,17 @@ impl<B: Backend> GraphExecutor<B> {
                     .map(|d| d.evaluate_with_env(&shape_env).unwrap_or(1) as usize)
                     .product();
                 let elem_size = node.output_type.dtype.byte_size();
-                (actual_numel * elem_size).min(slot.size)
+                let computed = actual_numel * elem_size;
+                if computed > slot.size {
+                    return Err(BackendError::Dispatch(format!(
+                        "output node {}: resolved size {} exceeds allocated slot size {} \
+                         (shape {:?}, env may have overflowed SYMBOL_DIM_MAX={})",
+                        output_node_id, computed, slot.size,
+                        node.output_type.shape,
+                        crate::ir::node::SYMBOL_DIM_MAX,
+                    )));
+                }
+                computed
             } else {
                 slot.size
             };
