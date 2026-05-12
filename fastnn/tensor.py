@@ -42,6 +42,11 @@ def tensor(data, shape, device=None, dtype=None):
         data = _ensure_tensor_ready(data)
         shape = shape if shape is not None else list(data.shape)
         return _core.tensor_from_data(data.flatten().tolist(), shape, device)
+    if isinstance(data, Tensor):
+        # Already a fastnn tensor — return as-is (or reshape if needed)
+        if shape is not None and list(data.shape) != list(shape):
+            raise ValueError(f"Cannot convert tensor of shape {data.shape} to shape {shape}")
+        return data
     flat_data = _flatten(data)
     expected_size = math.prod(shape) if shape else len(flat_data)
     if len(flat_data) != expected_size:

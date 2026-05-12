@@ -78,12 +78,14 @@ class Quantizer:
         precision: Union[Precision, str],
         scheme: str = "per_channel",
         block_size: Optional[int] = None,
+        asymmetric: bool = False,
     ):
         if isinstance(precision, str):
             precision = Precision.from_string(precision)
         self.precision = precision
         self.scheme = scheme
         self.block_size = block_size
+        self.asymmetric = asymmetric
 
         if self.scheme not in (QuantizationScheme.PER_TENSOR,
                                 QuantizationScheme.PER_CHANNEL,
@@ -113,6 +115,8 @@ class Quantizer:
             return np.array([scale]), np.array([0.0])
 
         elif self.scheme == QuantizationScheme.PER_CHANNEL:
+            if self.asymmetric:
+                return self.quantize_asymmetric(f32_weights)
             assert f32_weights.ndim >= 2, (
                 f"Per-channel requires 2D+ weights, got shape {f32_weights.shape}"
             )
@@ -151,6 +155,41 @@ class Quantizer:
             end = min(start + block_size, n)
             scales[b] = self._compute_scale(flat[start:end])
         return scales, np.zeros(n_blocks, dtype=np.float64)
+
+    def quantize_asymmetric(
+        self, f32_weights: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Asymmetric min-max quantization per channel.
+
+        Computes scale and zero_point from per-channel min/max
+        instead of max-abs.
+
+        Returns:
+            Tuple of (scales, zeros) as ndarrays.
+        """
+        if self.precision == Precision.F32:
+            return np.array([1.0]), np.array([0.0])
+
+        assert f32_weights.ndim >= 2, "Asymmetric quantization requires 2D+ weights"
+        m = f32_weights.shape[0]
+        unsigned_max = float((1 << self.precision.bit_width) - 1)
+        signed_bias = float(1 << (self.precision.bit_width - 1))
+
+        scales = np.zeros(m, dtype=np.float64)
+        zeros = np.zeros(m, dtype=np.float64)
+
+        for i in range(m):
+            row = f32_weights[i].ravel()
+            row_min, row_max = row.min(), row.max()
+            rng = row_max - row_min
+            if rng == 0:
+                scales[i] = 1.0
+                zeros[i] = 0.0
+            else:
+                scales[i] = rng / unsigned_max
+                zeros[i] = row_min + signed_bias * scales[i]
+
+        return scales, zeros
 
     def dequantize(
         self,

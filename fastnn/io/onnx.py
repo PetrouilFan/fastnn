@@ -159,10 +159,10 @@ def import_onnx(
             if trans_b:
                 weight = weight.T
 
-            weight = weight * alpha
-
             in_features = weight.shape[0]
             out_features = weight.shape[1]
+
+            weight = weight * alpha
 
             layer_info["type"] = "Linear"
             layer_info["in_features"] = in_features
@@ -719,6 +719,12 @@ def import_onnx(
                     gn[k] = v
         graph_nodes.append(gn)
 
+    # Fuse Conv+BatchNormalization patterns before QDQ folding
+    # (BN must be fused into clean f32 weights before any quantization)
+    graph_nodes, layers, params = _fuse_conv_bn_patterns(
+        graph_nodes, layers, params, initializer_map
+    )
+
     # Fold QuantizeLinear/DequantizeLinear patterns
     graph_nodes, layers, params = _fold_qdq_patterns(
         graph_nodes, layers, params, initializer_map
@@ -743,14 +749,18 @@ def import_onnx(
         "total_parameters": len(params),
     }
 
-    is_quantized = config is not None and config.default.should_quantize()
+    has_quantized_params = any(
+        hasattr(arr, 'dtype') and arr.dtype.kind in ('i', 'u')
+        for _, arr in params
+    )
+    is_quantized = (config is not None and config.default.should_quantize()) or has_quantized_params
 
     if is_quantized:
         # v3 format: quantize weights per config, non-weights stay F32
         params_v3 = []
         for name, arr in params:
             quantizer = config.get_quantizer(name)
-            is_weight = any(name.endswith(s) for s in [".weight", ".gamma", ".beta"])
+            is_weight = name.endswith(".weight")
 
             if is_weight and quantizer.should_quantize():
                 # Quantize this weight
@@ -781,6 +791,7 @@ def import_onnx(
                         }[bit_width],
                         packed.scales(),
                         packed.zeros(),
+                        shape,
                     ))
                 else:
                     # Per-tensor quantization
@@ -806,10 +817,12 @@ def import_onnx(
                         }[bit_width],
                         packed.scales(),
                         packed.zeros(),
+                        shape,
                     ))
             else:
                 # Store as-is (F32)
-                params_v3.append((name, arr, DTYPE_F32, [], []))
+                shape = list(arr.shape) if hasattr(arr, 'shape') else []
+                params_v3.append((name, arr, DTYPE_F32, [], [], shape))
 
         header["precision"] = config.to_dict()
         with open(fnn_path, "wb") as f:
@@ -839,6 +852,160 @@ def import_onnx(
         "output_shape": output_shape,
     }
     return result
+
+
+def _fuse_conv_bn_patterns(
+    graph_nodes: list,
+    layers: list,
+    params: list,
+    initializer_map: dict,
+):
+    """Fuse Conv -> BatchNormalization patterns before QDQ folding.
+
+    Absorbs BN parameters (gamma, beta, mean, var) into the preceding
+    Conv layer's weight and bias. Must run before QDQ folding so that
+    BN fusion operates on clean f32 weights.
+
+    Returns:
+        Tuple of (modified_graph_nodes, modified_layers, modified_params).
+    """
+    if not graph_nodes:
+        return graph_nodes, layers, params
+
+    # Build consumer map: output_name -> list of consuming node indices
+    output_to_consumers = {}
+    for i, gn in enumerate(graph_nodes):
+        for inp in gn.get("inputs", []):
+            output_to_consumers.setdefault(inp, []).append(i)
+
+    bn_indices_to_remove = set()
+    param_updates = []
+    param_additions = []
+    bn_param_names_to_remove = set()
+    layers_to_remove_names = set()
+    fused_count = 0
+
+    for i, gn in enumerate(graph_nodes):
+        if i in bn_indices_to_remove:
+            continue
+        if gn["op_type"] != "Conv":
+            continue
+
+        conv_name = gn["name"]
+        conv_outputs = gn.get("outputs", [])
+        if not conv_outputs:
+            continue
+
+        conv_output = conv_outputs[0]
+        consumer_idxs = output_to_consumers.get(conv_output, [])
+
+        bn_idx = None
+        for ci in consumer_idxs:
+            if graph_nodes[ci]["op_type"] == "BatchNormalization":
+                bn_idx = ci
+                break
+
+        if bn_idx is None or bn_idx in bn_indices_to_remove:
+            continue
+
+        bn_node = graph_nodes[bn_idx]
+        bn_name = bn_node["name"]
+
+        bn_inputs = bn_node.get("inputs", [])
+        if len(bn_inputs) < 5:
+            continue
+
+        scale = initializer_map.get(bn_inputs[1])
+        beta_arr = initializer_map.get(bn_inputs[2])
+        mean = initializer_map.get(bn_inputs[3])
+        var = initializer_map.get(bn_inputs[4])
+        if scale is None or beta_arr is None or mean is None or var is None:
+            continue
+
+        epsilon = bn_node.get("epsilon", bn_node.get("eps", 1e-5))
+
+        w_name = f"{conv_name}.weight"
+        b_name = f"{conv_name}.bias"
+
+        w = None
+        b = None
+        for pn, pa in params:
+            if pn == w_name:
+                w = pa
+            if pn == b_name:
+                b = pa
+
+        if w is None:
+            continue
+
+        # BN fusion math:
+        #   w_fused = w * gamma / sqrt(var + epsilon)
+        #   b_fused = (b - mean) * gamma / sqrt(var + epsilon) + beta
+        scale_r = scale.reshape([-1] + [1] * (w.ndim - 1))
+        var_r = var.reshape([-1] + [1] * (w.ndim - 1))
+        sf = scale_r / np.sqrt(var_r + epsilon)
+
+        w_fused = w * sf
+        param_updates.append((w_name, w_fused.astype(w.dtype)))
+
+        if b is not None:
+            mean_r = mean.reshape([-1] + [1] * (w.ndim - 1))
+            b_fused = (b - mean_r.squeeze()) * sf.squeeze() + beta_arr
+            param_updates.append((b_name, b_fused.astype(b.dtype)))
+        else:
+            sf_1d = scale / np.sqrt(var + epsilon)
+            b_fused = -mean * sf_1d + beta_arr
+            param_additions.append((b_name, b_fused.astype(np.float32)))
+            for li in layers:
+                if li["name"] == conv_name:
+                    li["bias"] = True
+                    break
+
+        # Reroute BN's consumers to Conv's output
+        bn_outputs = bn_node.get("outputs", [])
+        if bn_outputs:
+            bn_output = bn_outputs[0]
+            for ci in output_to_consumers.get(bn_output, []):
+                if ci in bn_indices_to_remove:
+                    continue
+                cnode = graph_nodes[ci]
+                cnode["inputs"] = [
+                    conv_output if inp == bn_output else inp
+                    for inp in cnode.get("inputs", [])
+                ]
+
+        bn_indices_to_remove.add(bn_idx)
+        layers_to_remove_names.add(bn_name)
+        bn_param_names_to_remove.update([
+            f"{bn_name}.weight", f"{bn_name}.bias",
+            f"{bn_name}.running_mean", f"{bn_name}.running_var",
+        ])
+        fused_count += 1
+
+    if fused_count == 0:
+        return graph_nodes, layers, params
+
+    # Apply deferred param updates
+    for pname, pval in param_updates:
+        for j, (pn, _) in enumerate(params):
+            if pn == pname:
+                params[j] = (pname, pval)
+                break
+
+    params.extend(param_additions)
+
+    # Remove BN params
+    params = [(pn, pa) for pn, pa in params if pn not in bn_param_names_to_remove]
+
+    # Remove BN graph nodes
+    graph_nodes = [gn for j, gn in enumerate(graph_nodes) if j not in bn_indices_to_remove]
+
+    # Remove BN layers
+    layers = [li for li in layers if li["name"] not in layers_to_remove_names]
+
+    logger.info("Conv+BN fusion: fused %d pairs during import", fused_count)
+
+    return graph_nodes, layers, params
 
 
 def _fold_qdq_patterns(
@@ -926,14 +1093,15 @@ def _fold_qdq_patterns(
             dq_zp = float(initializer_map[dq_node["inputs"][2]].flatten()[0])
 
         # Rewire: mid_node takes Q's input and its output goes to DQ's consumers
-        mid_node["inputs"][0] = q_input
-        mid_node["outputs"] = list(dq_node["outputs"])
-
-        # Store Q/DQ metadata on the mid node for weight quantization
-        mid_node["qdq_scale"] = q_scale
-        mid_node["qdq_zp"] = q_zp
-        mid_node["qdq_dq_scale"] = dq_scale
-        mid_node["qdq_dq_zp"] = dq_zp
+        new_mid_node = dict(mid_node)
+        new_mid_node["inputs"] = [q_input] + mid_node["inputs"][1:]
+        new_mid_node["outputs"] = list(dq_node["outputs"])
+        new_mid_node["qdq_scale"] = q_scale
+        new_mid_node["qdq_zp"] = q_zp
+        new_mid_node["qdq_dq_scale"] = dq_scale
+        new_mid_node["qdq_dq_zp"] = dq_zp
+        idx = graph_nodes.index(mid_node)
+        graph_nodes[idx] = new_mid_node
 
         nodes_to_remove.add(q_name)
         nodes_to_remove.add(dq_node["name"])
@@ -959,9 +1127,10 @@ def _fold_qdq_patterns(
         if len(node["inputs"]) > 2 and node["inputs"][2] in initializer_map:
             q_zp = float(initializer_map[node["inputs"][2]].flatten()[0])
 
-        # Store as packed U8 with given scales
-        quantized = np.round(weight_arr / q_scale + q_zp).astype(np.int8)
-        params.append((q_input, quantized.astype(np.uint8)))
+        # Dequantize back to f32 (the normal quantization pipeline will re-quantize)
+        quantized = np.round(weight_arr / q_scale + q_zp)
+        dequantized = (quantized - q_zp) * q_scale
+        params.append((q_input, dequantized.astype(np.float32)))
         nodes_to_remove.add(node["name"])
 
     # Pass 3: Handle standalone DequantizeLinear on weight initializers

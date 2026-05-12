@@ -69,7 +69,8 @@ impl<T: PackedWord> PackedTensor<T> {
         };
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
-        let mut packed = vec![T::default(); packed_len];
+        const SIMD_MARGIN: usize = 16;
+        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
         if scale != 1.0 || zero != 0.0 {
             let inv_scale = 1.0 / scale;
@@ -124,10 +125,11 @@ impl<T: PackedWord> PackedTensor<T> {
         let is_per_row = self.scales.len() > 1;
 
         // Per-row packing: word `i` = (row * k_packed + word_in_row)
+        let k_packed = inner_stride.div_ceil(items);
         let m = if self.shape.len() >= 2 { self.shape[0] } else { 1 };
-        let k_packed = self.data.len().checked_div(m).unwrap_or(0);
+        let actual_words = m * k_packed;
 
-        for (i, word) in self.data.iter().enumerate() {
+        for (i, word) in self.data[..actual_words].iter().enumerate() {
             let unpacked = word.unpack_to_f32();
             let arr = unpacked.as_ref();
             let row = i.checked_div(k_packed).unwrap_or(0);
@@ -143,17 +145,18 @@ impl<T: PackedWord> PackedTensor<T> {
             } else {
                 self.zeros[0]
             };
+            let row_end = (row + 1) * inner_stride;
             if s != 1.0 || z != 0.0 {
                 for j in 0..items {
                     let elem_idx = elem_idx_base + j;
-                    if elem_idx < numel {
+                    if elem_idx < numel && elem_idx < row_end {
                         result.push(arr[j] * s + z);
                     }
                 }
             } else {
                 for j in 0..items {
                     let elem_idx = elem_idx_base + j;
-                    if elem_idx < numel {
+                    if elem_idx < numel && elem_idx < row_end {
                         result.push(arr[j]);
                     }
                 }
@@ -349,36 +352,28 @@ impl<T: PackedWord> PackedTensor<T> {
             numel
         };
 
-        let packed_len = numel.div_ceil(T::ITEMS);
-        let mut packed = vec![T::default(); packed_len];
+        // Use per-row packing (same layout as from_f32_slice) for GEMV compatibility.
+        // Each row has its own scale and occupies k_packed packed words.
+        let k_packed = inner_stride.div_ceil(T::ITEMS);
+        let packed_len = m * k_packed;
+        const SIMD_MARGIN: usize = 16;
+        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
-        for chunk_idx in 0..packed_len {
-            let mut arr = T::Array::default();
-            let arr_ref = arr.as_mut();
-            let elem_idx_base = chunk_idx * T::ITEMS;
-            let row = elem_idx_base / inner_stride;
-            let s = if scales.len() == 1 {
-                scales[0]
-            } else {
-                scales[row]
-            };
-            if s != 1.0 {
-                let inv_s = 1.0 / s;
+        for row in 0..m {
+            let row_scale = if scales.len() == 1 { scales[0] } else { scales[row] };
+            let inv_s = if row_scale != 1.0 { 1.0 / row_scale } else { 1.0 };
+            for word in 0..k_packed {
+                let chunk_idx = row * k_packed + word;
+                let mut arr = T::Array::default();
+                let arr_ref = arr.as_mut();
                 for i in 0..T::ITEMS {
-                    let elem_idx = elem_idx_base + i;
-                    if elem_idx < numel {
+                    let elem_idx = row * inner_stride + word * T::ITEMS + i;
+                    if elem_idx < (row + 1) * inner_stride && elem_idx < numel {
                         arr_ref[i] = data[elem_idx] * inv_s;
                     }
                 }
-            } else {
-                for i in 0..T::ITEMS {
-                    let elem_idx = elem_idx_base + i;
-                    if elem_idx < numel {
-                        arr_ref[i] = data[elem_idx];
-                    }
-                }
+                packed[chunk_idx] = T::pack_from_f32(arr);
             }
-            packed[chunk_idx] = T::pack_from_f32(arr);
         }
 
         PackedTensor {
@@ -386,6 +381,82 @@ impl<T: PackedWord> PackedTensor<T> {
             shape: shape.to_vec(),
             scales,
             zeros: vec![0.0; m],
+        }
+    }
+
+    pub fn from_f32_per_channel_asymmetric(data: &[f32], shape: &[usize]) -> Self {
+        let numel: usize = shape.iter().product();
+        assert_eq!(data.len(), numel);
+
+        let m = if shape.len() >= 2 { shape[0] } else { 1 };
+        let inner_stride = if shape.len() >= 2 {
+            shape[1..].iter().product()
+        } else {
+            numel
+        };
+
+        let mut mins = vec![f32::MAX; m];
+        let mut maxs = vec![f32::MIN; m];
+        for row in 0..m {
+            for i in 0..inner_stride {
+                let idx = row * inner_stride + i;
+                if idx < numel {
+                    let v = data[idx];
+                    mins[row] = mins[row].min(v);
+                    maxs[row] = maxs[row].max(v);
+                }
+            }
+        }
+
+        // Asymmetric quantization for signed types:
+        //   scale = (max - min) / (2^n - 1)
+        //   zero_point = min + 2^(n-1) * scale
+        // This maps q = -2^(n-1) → x = min  and  q = 2^(n-1)-1 → x = max.
+        let unsigned_max = ((1u32 << T::BIT_WIDTH) - 1) as f32;
+        let signed_bias = (1u32 << (T::BIT_WIDTH - 1)) as f32;
+
+        let mut scales = Vec::with_capacity(m);
+        let mut zeros = Vec::with_capacity(m);
+        for row in 0..m {
+            let range = maxs[row] - mins[row];
+            if range == 0.0 || unsigned_max == 0.0 {
+                scales.push(1.0);
+                zeros.push(0.0);
+            } else {
+                let scale = range / unsigned_max;
+                let zp = mins[row] + signed_bias * scale;
+                scales.push(scale);
+                zeros.push(zp);
+            }
+        }
+
+        let k_packed = inner_stride.div_ceil(T::ITEMS);
+        let packed_len = m * k_packed;
+        const SIMD_MARGIN: usize = 16;
+        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+
+        for row in 0..m {
+            let inv_scale = if scales[row] != 0.0 { 1.0 / scales[row] } else { 1.0 };
+            let zp = zeros[row];
+            for word in 0..k_packed {
+                let chunk_idx = row * k_packed + word;
+                let mut arr = T::Array::default();
+                let arr_ref = arr.as_mut();
+                for i in 0..T::ITEMS {
+                    let elem_idx = row * inner_stride + word * T::ITEMS + i;
+                    if elem_idx < (row + 1) * inner_stride && elem_idx < numel {
+                        arr_ref[i] = (data[elem_idx] - zp) * inv_scale;
+                    }
+                }
+                packed[chunk_idx] = T::pack_from_f32(arr);
+            }
+        }
+
+        PackedTensor {
+            data: packed,
+            shape: shape.to_vec(),
+            scales,
+            zeros,
         }
     }
 }

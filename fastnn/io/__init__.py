@@ -163,14 +163,17 @@ def write_fnn_file_v3(f, header, params_v3, magic=MODEL_MAGIC, version=3):
     f.write(header_bytes)
     f.write(_pack_u64(len(params_v3)))
     for item in params_v3:
-        if len(item) == 5:
+        if len(item) == 6:
+            name, data, dtype, scales, zeros, shape = item
+        elif len(item) == 5:
             name, data, dtype, scales, zeros = item
+            shape = None
         elif len(item) == 2:
             name, data = item
-            dtype, scales, zeros = DTYPE_F32, [], []
+            dtype, scales, zeros, shape = DTYPE_F32, [], [], None
         else:
             raise ValueError(f"Invalid param tuple length: {len(item)}")
-        write_tensor_v3(f, name, data, dtype, scales, zeros)
+        write_tensor_v3(f, name, data, dtype, scales, zeros, shape)
 
 
 def read_fnn_header(f):
@@ -214,20 +217,20 @@ def read_fnn_parameters_v3(f, num_params):
     """Read v3 parameters, returning with dtype/scales/zeros metadata.
 
     Returns:
-        dict of {name: (data, dtype, scales, zeros)}
-        - For F32: data is ndarray, dtype=DTYPE_F32, scales=[], zeros=[]
-        - For packed: data is bytes, dtype is tag, scales/zeros are lists
+        dict of {name: (data, dtype, scales, zeros, shape)}
+        - For F32: data is ndarray, dtype=DTYPE_F32, scales=[], zeros=[], shape=list
+        - For packed: data is bytes, dtype is tag, scales/zeros are lists, shape=list
     """
     params = {}
     for _ in range(num_params):
-        name, data, dtype, scales, zeros = read_tensor_v3(f)
-        params[name] = (data, dtype, scales, zeros)
+        name, data, dtype, scales, zeros, shape = read_tensor_v3(f)
+        params[name] = (data, dtype, scales, zeros, shape)
     return params
 
 
 # ---- v3 serialization (dtype-tagged) ----
 
-def write_tensor_v3(f, name: str, data, dtype: int = DTYPE_F32, scales=None, zeros=None) -> None:
+def write_tensor_v3(f, name: str, data, dtype: int = DTYPE_F32, scales=None, zeros=None, shape=None) -> None:
     """Write a dtype-tagged tensor to file (v3 format).
 
     Args:
@@ -237,16 +240,18 @@ def write_tensor_v3(f, name: str, data, dtype: int = DTYPE_F32, scales=None, zer
         dtype: Dtype tag (DTYPE_F32/DTYPE_U4/DTYPE_U8/DTYPE_F16).
         scales: Optional list of per-channel scales (float).
         zeros: Optional list of per-channel zeros (float).
+        shape: Optional explicit shape list (required for packed bytes data).
     """
     name_bytes = name.encode("utf-8")
     f.write(_pack_u64(len(name_bytes)))
     f.write(name_bytes)
 
     if isinstance(data, np.ndarray):
-        shape = list(data.shape)
+        shape = list(data.shape) if shape is None else shape
         data_bytes = data.astype(np.float32, copy=False).ravel().tobytes()
     elif isinstance(data, bytes):
-        shape = data.shape if hasattr(data, 'shape') else []
+        if shape is None:
+            shape = []
         data_bytes = data
     else:
         raise TypeError(f"Expected ndarray or bytes, got {type(data)}")
@@ -283,11 +288,12 @@ def read_tensor_v3(f) -> tuple:
     """Read a dtype-tagged tensor from file (v3 format).
 
     Returns:
-        Tuple of (name, data, dtype, scales, zeros) where:
+        Tuple of (name, data, dtype, scales, zeros, shape) where:
         - data is bytes for quantized, numpy array for F32
         - dtype is int tag
         - scales is list of float
         - zeros is list of float
+        - shape is list of int (the logical tensor shape)
     """
     name_len = _unpack_u64(f.read(8))
     name = f.read(name_len).decode("utf-8")
@@ -311,7 +317,7 @@ def read_tensor_v3(f) -> tuple:
         # Packed: data is raw bytes
         data = f.read(data_len)
 
-    return name, data, dtype, scales, zeros
+    return name, data, dtype, scales, zeros, shape
 
 
 def read_tensor_auto(f, version: int) -> tuple:
