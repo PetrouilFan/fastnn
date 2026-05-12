@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 use crate::backends::cpu;
-use crate::dispatcher::{dispatch, DispatchKey};
-
+use crate::dispatcher::{DispatchKey, dispatch};
 use crate::nn::Module;
 use crate::packed_conv::PackedConv2d;
 use crate::packed_tensor::PackedTensor;

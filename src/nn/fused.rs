@@ -1,5 +1,5 @@
 use crate::autograd::{make_edge, AutogradMeta, BatchNorm2dBackward, Conv2dBackward};
-use crate::dispatcher::{dispatch, DispatchKey};
+use crate::dispatcher::{DispatchKey, dispatch};
 use crate::dtypes::PackedWord;
 use crate::nn::Module;
 use crate::packed_tensor::PackedTensor;
@@ -192,16 +192,7 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
                 edges.extend(make_edge(&self.conv_weight));
                 edges
             };
-            let backward = Conv2dBackward::new(
-                x.clone(),
-                self.conv_weight.clone(),
-                self.conv_bias.is_some(),
-                self.stride,
-                self.padding,
-                self.dilation,
-                self.groups,
-                edges,
-            );
+            let backward = Conv2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             let mut output = conv_raw;
@@ -250,15 +241,7 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
                 edges.extend(make_edge(&self.bn_bias));
                 edges
             };
-            let backward = BatchNorm2dBackward::new(
-                conv_out.clone(),
-                self.bn_weight.clone(),
-                self.bn_bias.clone(),
-                b_mean,
-                b_var,
-                self.eps as f32,
-                edges,
-            );
+            let backward = BatchNorm2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             let mut output = bn_raw;

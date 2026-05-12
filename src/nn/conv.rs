@@ -1,5 +1,5 @@
 use crate::autograd::{self, AutogradMeta, Conv2dBackward};
-use crate::dispatcher::{dispatch, DispatchKey};
+use crate::dispatcher::{DispatchKey, dispatch};
 use crate::tensor::Tensor;
 use crate::{
     impl_nn_named_params, impl_nn_params, impl_training_state, impl_zero_grad,
@@ -145,16 +145,7 @@ impl Module for Conv2d {
                 edges.extend(autograd::make_edge(&self.weight));
                 edges
             };
-            let backward = Conv2dBackward::new(
-                x.clone(),
-                self.weight.clone(),
-                self.bias.is_some(),
-                self.stride,
-                self.padding,
-                self.dilation,
-                self.groups,
-                edges,
-            );
+            let backward = Conv2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             let mut output = output.clone();
@@ -270,15 +261,7 @@ impl Module for ConvTranspose2d {
                     edges.extend(autograd::make_edge(b));
                 }
             }
-            let backward = autograd::ConvTranspose2dBackward::new(
-                x.clone(),
-                self.weight.clone(),
-                self.bias.clone(),
-                self.stride,
-                self.padding,
-                self.kernel_size,
-                edges,
-            );
+            let backward = autograd::ConvTranspose2dBackward::new();
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =
