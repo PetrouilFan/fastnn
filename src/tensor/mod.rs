@@ -2,7 +2,7 @@ use crate::autograd::{self, AutogradMeta};
 use crate::backend::cpu::CpuBackend;
 use crate::backend::BackendError;
 use crate::ir::builder::GraphBuilder;
-use crate::ir::node::{DimExpr, IrDType, TensorType};
+use crate::ir::node::{DimExpr, IrDType};
 use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
 use smallvec::smallvec;

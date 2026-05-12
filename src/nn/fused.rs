@@ -59,10 +59,15 @@ pub struct FusedConvBn<A: Activation = NoAct> {
     pub in_channels: i64,
     pub out_channels: i64,
     pub kernel_size: i64,
+    #[allow(dead_code)]
     eps_scalar: Tensor,
+    #[allow(dead_code)]
     stride_scalar: Tensor,
+    #[allow(dead_code)]
     padding_scalar: Tensor,
+    #[allow(dead_code)]
     dilation_scalar: Tensor,
+    #[allow(dead_code)]
     groups_scalar: Tensor,
     _act: std::marker::PhantomData<A>,
 }

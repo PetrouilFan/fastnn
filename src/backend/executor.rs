@@ -17,7 +17,7 @@
 
 use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
 use crate::compiler::passes::{memory_planning, operator_fusion, shape_inference};
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId, Opcode, ShapeEnv};
+use crate::ir::node::{ComputeGraph, DimExpr, Opcode, ShapeEnv};
 use std::sync::atomic::Ordering;
 
 /// An ahead-of-time graph executor that compiles and dispatches
@@ -104,7 +104,7 @@ impl<B: Backend> GraphExecutor<B> {
         // intermediate-tensor overruns before any kernel writes to the arena.
         for (&node_id, slot) in &memory_plan.slots {
             if let Some(node) = graph.get_node(node_id) {
-                let resolved = tensor_byte_size(&node.output_type.shape, node.output_type.dtype.byte_size());
+                let _resolved = tensor_byte_size(&node.output_type.shape, node.output_type.dtype.byte_size());
                 // Use compile-time max estimate for Symbol dims (already the
                 // slot size), but check that resolved Known/Bounded dims fit.
                 let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
@@ -305,7 +305,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     ));
                 }
                 let rank = input_shapes[0].len();
-                let axis = resolve_axis(&node.attrs, "axis", rank)
+                let _axis = resolve_axis(&node.attrs, "axis", rank)
                     .map_err(|e| format!("Reduce node {}: {e}", node_id))?;
             }
             Opcode::Concat => {
@@ -499,7 +499,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     return Err(format!("Gather node {}: expected at least 2 inputs (data + indices), got {}", node_id, input_shapes.len()));
                 }
                 let rank = input_shapes[0].len();
-                let axis = resolve_axis(&node.attrs, "axis", rank)
+                let _axis = resolve_axis(&node.attrs, "axis", rank)
                     .map_err(|e| format!("Gather node {}: {e}", node_id))?;
             }
             Opcode::Pad => {

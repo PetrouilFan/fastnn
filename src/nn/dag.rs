@@ -1,3 +1,11 @@
+//! ⚠️ DEPRECATED: Legacy ONNX graph executor (v1.x).
+//!
+//! All new code should use [`GraphBuilder`](crate::ir::builder::GraphBuilder)
+//! + [`Tensor::exec_aot`](crate::tensor::Tensor::exec_aot) instead.
+//! This module is kept for backward compatibility with existing ONNX models
+//! loaded via Python's `DAGExecutor`. It will be removed in a future release
+//! once an ONNX-to-IR converter is built.
+
 #![allow(dead_code)]
 use crate::backends::cpu;
 use crate::dispatcher::{DispatchKey, dispatch};

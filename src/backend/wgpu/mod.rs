@@ -43,12 +43,11 @@ mod reduce;
 mod softmax;
 mod transpose;
 
-use crate::backend::cpu::{CpuBackend, CpuBuffer};
+use crate::backend::cpu::CpuBackend;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction, MemoryPlan};
 use crate::ir::node::{ComputeGraph, DimExpr, ShapeEnv};
 use bytemuck;
 use std::cell::UnsafeCell;
-use std::sync::atomic::Ordering;
 
 // ─============================================================================
 // Buffer type
@@ -124,10 +123,10 @@ impl Backend for WgpuBackend {
                     weight_meta,
                 } => {
                     let out_start = output_slice.offset;
-                    let out_end = output_slice.offset + output_slice.size;
+                    let _out_end = output_slice.offset + output_slice.size;
 
                     // Try GPU dispatch first; fall back to CPU if unsupported.
-                    if let Err(err) = try_gpu_dispatch(
+                    if let Err(_err) = try_gpu_dispatch(
                         arena,
                         kernel_name,
                         input_slices,
@@ -210,6 +209,7 @@ impl Backend for WgpuBackend {
 
 /// Try to dispatch a kernel on GPU.  Returns `Err` if the kernel is not
 /// supported (caller will fall back to CPU).
+#[allow(unused_variables)]
 fn try_gpu_dispatch(
     arena: &WgpuBuffer,
     kernel_name: &str,

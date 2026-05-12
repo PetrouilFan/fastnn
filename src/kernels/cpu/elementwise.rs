@@ -148,7 +148,7 @@ macro_rules! unary_kernel {
             let input = args[0];
             let shape = input.shape_ref().to_vec();
             let mut out = output_tensor_like(input, &shape);
-            let n = out.numel() as usize;
+            let _n = out.numel() as usize;
             let in_data = input.as_f32_slice();
             let out_data = out.as_f32_slice_mut();
             $f32_fn(in_data, out_data);
@@ -177,7 +177,7 @@ macro_rules! binary_kernel {
             let b = args[1];
             let shape: Vec<i64> = broadcast_shape(a.shape_ref(), b.shape_ref());
             let mut out = output_tensor_like(a, &shape);
-            let n = out.numel() as usize;
+            let _n = out.numel() as usize;
             let a_data = a.as_f32_slice();
             let b_data = b.as_f32_slice();
             let out_data = out.as_f32_slice_mut();
@@ -254,18 +254,18 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let input = args[1];
     let shape = input.shape_ref().to_vec();
     let mut out = output_tensor_like(input, &shape);
-    let n = out.numel() as usize;
+    let _n = out.numel() as usize;
     let g = grad.as_f32_slice();
     let x = input.as_f32_slice();
     let o = out.as_f32_slice_mut();
-    for i in 0..n {
+    for i in 0.._n {
         let xi = x[i];
         let x3 = xi * xi * xi;
         let tanh_arg = GELU_SQRT_2_OVER_PI * (xi + GELU_COEFF * x3);
         let t = tanh_arg.tanh();
         let sech2 = 1.0 - t * t;
         let dtanh = sech2 * GELU_SQRT_2_OVER_PI * (1.0 + 3.0 * GELU_COEFF * xi * xi);
-        let gelu = 0.5 * xi * (1.0 + t);
+        let _gelu = 0.5 * xi * (1.0 + t);
         o[i] = g[i] * (0.5 * (1.0 + t) + xi * dtanh);
     }
     vec![out]
@@ -276,11 +276,11 @@ pub unsafe fn silu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let input = args[1];
     let shape = input.shape_ref().to_vec();
     let mut out = output_tensor_like(input, &shape);
-    let n = out.numel() as usize;
+    let _n = out.numel() as usize;
     let g = grad.as_f32_slice();
     let x = input.as_f32_slice();
     let o = out.as_f32_slice_mut();
-    for i in 0..n {
+    for i in 0.._n {
         let sig = 1.0 / (1.0 + (-x[i]).exp());
         o[i] = g[i] * (sig * (1.0 + x[i] * (1.0 - sig)));
     }

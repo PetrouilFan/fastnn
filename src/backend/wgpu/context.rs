@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::dtypes::PackedWord;
-use crate::packed_tensor::PackedTensor;
 
 /// Global wgpu context — lazily initialized.
 static WGPU_CONTEXT: OnceLock<Arc<Mutex<WgpuContext>>> = OnceLock::new();

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv, TensorType};
+use crate::ir::node::{ComputeGraph, NodeId, ShapeEnv, TensorType};
 use std::collections::HashMap;
 
 /// A single allocation slot in the arena
@@ -207,7 +207,7 @@ pub fn plan_memory_with_env(
         let mut i = 0;
         while i < active.len() {
             if active[i].0 < info.live_range.0 {
-                let (_, expired_id, expired_size) = active.swap_remove(i);
+                let (_, expired_id, _expired_size) = active.swap_remove(i);
                 if let Some(slot) = slots.get(&expired_id) {
                     add_to_free_list(&mut free_list, slot.offset, slot.size);
                 }

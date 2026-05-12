@@ -1,4 +1,4 @@
-use crate::autograd::{self, AutogradMeta, AvgPool2dBackward, MaxPool2dBackward};
+use crate::autograd::{AutogradMeta, AvgPool2dBackward, MaxPool2dBackward};
 use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::sync::Arc;
@@ -13,9 +13,13 @@ pub struct MaxPool2d {
     #[allow(dead_code)]
     dilation: i64,
     // Pre-allocated scalar tensors
+    #[allow(dead_code)]
     kernel_size_scalar: Tensor,
+    #[allow(dead_code)]
     stride_scalar: Tensor,
+    #[allow(dead_code)]
     padding_scalar: Tensor,
+    #[allow(dead_code)]
     dilation_scalar: Tensor,
 }
 
@@ -85,8 +89,11 @@ pub struct AvgPool1d {
     stride: i64,
     #[allow(dead_code)]
     padding: i64,
+    #[allow(dead_code)]
     kernel_size_scalar: Tensor,
+    #[allow(dead_code)]
     stride_scalar: Tensor,
+    #[allow(dead_code)]
     padding_scalar: Tensor,
 }
 
@@ -139,9 +146,13 @@ pub struct MaxPool1d {
     padding: i64,
     #[allow(dead_code)]
     dilation: i64,
+    #[allow(dead_code)]
     kernel_size_scalar: Tensor,
+    #[allow(dead_code)]
     stride_scalar: Tensor,
+    #[allow(dead_code)]
     padding_scalar: Tensor,
+    #[allow(dead_code)]
     dilation_scalar: Tensor,
 }
 
@@ -201,8 +212,11 @@ pub struct AvgPool2d {
     #[allow(dead_code)]
     padding: i64,
     // Pre-allocated scalar tensors
+    #[allow(dead_code)]
     kernel_size_scalar: Tensor,
+    #[allow(dead_code)]
     stride_scalar: Tensor,
+    #[allow(dead_code)]
     padding_scalar: Tensor,
 }
 

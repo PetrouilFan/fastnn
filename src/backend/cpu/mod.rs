@@ -9,7 +9,6 @@ use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use std::cell::UnsafeCell;
 use std::sync::atomic::Ordering;
-use std::sync::Mutex;
 
 pub mod blas;
 pub mod microkernels;
@@ -705,6 +704,7 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                #[allow(unreachable_patterns)]
                 _ => {
                     if let Some(&input_id) = node.inputs.first() {
                         if let Some(in_slot) = memory_plan.slots.get(&input_id) {
@@ -1057,7 +1057,7 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 for i in 0..out_f32.len().min(input.len()) {
-                                    out_f32[i] = if input[i] > 0.0 { input[i] } else { (input[i].exp() - 1.0) };
+                                    out_f32[i] = if input[i] > 0.0 { input[i] } else { input[i].exp() - 1.0 };
                                 }
                             }
                         }
@@ -1320,7 +1320,7 @@ impl Backend for CpuBackend {
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u4: expected params [M,K,N]".into())); };
                                 let (scale, zp, w_shape) = weight_meta.clone().unwrap_or((1.0, 0.0, vec![m, k]));
                                 // Construct PackedTensor from arena data and call SIMD gemm
-                                let num_words = weights.len();
+                                let _num_words = weights.len();
                                 let u4x8_data: Vec<U4x8> = bytemuck::cast_slice(&weights).to_vec();
                                 let pt = PackedTensor::from_raw(u4x8_data, w_shape.clone(), vec![scale], vec![zp]);
                                 let out_f32 = {
@@ -1328,11 +1328,11 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 // Slice activations and outputs per batch item
-                                let mut batch_inputs: Vec<Vec<f32>> = (0..m)
+                                let batch_inputs: Vec<Vec<f32>> = (0..m)
                                     .map(|i| activations[i * k..(i + 1) * k].to_vec())
                                     .collect();
                                 let mut batch_outputs: Vec<Vec<f32>> = (0..m)
-                                    .map(|i| vec![0.0f32; n])
+                                    .map(|_i| vec![0.0f32; n])
                                     .collect();
                                 crate::backend::cpu::microkernels::gemm_cpu::<U4x8>(&pt, &batch_inputs, &mut batch_outputs);
                                 for i in 0..m {
@@ -1357,11 +1357,11 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let mut batch_inputs: Vec<Vec<f32>> = (0..m)
+                                let batch_inputs: Vec<Vec<f32>> = (0..m)
                                     .map(|i| activations[i * k..(i + 1) * k].to_vec())
                                     .collect();
                                 let mut batch_outputs: Vec<Vec<f32>> = (0..m)
-                                    .map(|i| vec![0.0f32; n])
+                                    .map(|_i| vec![0.0f32; n])
                                     .collect();
                                 crate::backend::cpu::microkernels::gemm_cpu::<U8x4>(&pt, &batch_inputs, &mut batch_outputs);
                                 for i in 0..m {

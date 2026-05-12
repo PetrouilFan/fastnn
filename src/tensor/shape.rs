@@ -261,7 +261,7 @@ impl TensorImpl {
         sizes.insert(dim, 1);
         strides.insert(dim, if dim == ndim { 1 } else { self.strides[dim] });
 
-        let input_tensor = Tensor::new(self.clone());
+        let _input_tensor = Tensor::new(self.clone());
 
         let mut tensor = self.new_view_from(sizes, strides, self.storage_offset);
 
@@ -385,7 +385,7 @@ impl Tensor {
         let output: Tensor = self.inner.view(sizes).into();
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::ViewBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
@@ -398,7 +398,7 @@ impl Tensor {
         let output = self.inner.reshape(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::ViewBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
@@ -411,7 +411,7 @@ impl Tensor {
         let output = reshaped.permute(perm);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::ViewBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
@@ -423,7 +423,7 @@ impl Tensor {
         let output = self.inner.transpose(dim0, dim1);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::TransposeBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
@@ -436,7 +436,7 @@ impl Tensor {
         let output = self.inner.permute(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::PermuteBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
@@ -448,7 +448,7 @@ impl Tensor {
         let output = self.inner.squeeze(dim);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::ViewBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
@@ -465,7 +465,7 @@ impl Tensor {
         let output = self.inner.expand(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
+            let _edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::ExpandBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {

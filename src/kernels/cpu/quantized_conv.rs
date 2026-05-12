@@ -238,7 +238,7 @@ pub unsafe fn quantized_conv2d_depthwise<T: PackedWord>(
     kernel_size: usize,
     stride: usize,
     pad: usize,
-    dilation: usize,
+    _dilation: usize,
     oh: usize,
     ow: usize,
 ) -> Tensor {
