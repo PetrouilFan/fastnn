@@ -14,6 +14,13 @@ fn packed_words_per_row(shape: &[usize], items_per_word: usize) -> usize {
     }
 }
 
+/// Return only the meaningful packed words from the data Vec, trimming any
+/// trailing SIMD margin that was allocated by the constructors.
+fn trim_packed_bytes<'a, T: PackedWord>(data: &'a [T], shape: &'a [usize]) -> &'a [T] {
+    let actual_words = packed_words_per_row(shape, T::ITEMS);
+    &data[..actual_words.min(data.len())]
+}
+
 // ---- PyPackedTensor4 (4-bit, U4x8) ----
 
 #[pyclass]
@@ -61,10 +68,18 @@ impl PyPackedTensor4 {
         let packed_len = packed_words_per_row(&shape, <U4x8 as PackedWord>::ITEMS);
         let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
         let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
-        assert_eq!(data_bytes.len(), packed_len * 4, "from_bytes: data length mismatch");
-        let data: Vec<U4x8> = bytemuck::cast_slice(&data_bytes).to_vec();
+        // Data bytes may include SIMD margin from Python-side constructors;
+        // accept any size >= packed_len * element_size and take what we need.
+        let data_words = data_bytes.len() / 4;
+        assert!(data_words >= packed_len, "from_bytes: data too short (got {} words, need {})", data_words, packed_len);
+        let data: Vec<U4x8> = bytemuck::cast_slice(&data_bytes[..packed_len * 4]).to_vec();
         let inner = PackedTensor::from_raw(data, shape, scales_f32, zeros_f32);
         PyPackedTensor4 { inner }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let trimmed = trim_packed_bytes(&self.inner.data, &self.inner.shape);
+        bytemuck::cast_slice(trimmed).to_vec()
     }
 
     fn to_f32_vec(&self) -> Vec<f64> {
@@ -76,10 +91,6 @@ impl PyPackedTensor4 {
         let shape: Vec<i64> = self.inner.shape().iter().map(|&s| s as i64).collect();
         let t = Tensor::from_vec(data, shape);
         PyTensor::from_tensor(t)
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        self.inner.as_bytes().to_vec()
     }
 
     fn scales(&self) -> Vec<f64> {
@@ -167,8 +178,9 @@ impl PyPackedTensor8 {
         let packed_len = packed_words_per_row(&shape, <U8x4 as PackedWord>::ITEMS);
         let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
         let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
-        assert_eq!(data_bytes.len(), packed_len * 4, "from_bytes: data length mismatch");
-        let data: Vec<U8x4> = bytemuck::cast_slice(&data_bytes).to_vec();
+        let data_words = data_bytes.len() / 4;
+        assert!(data_words >= packed_len, "from_bytes: data too short (got {} words, need {})", data_words, packed_len);
+        let data: Vec<U8x4> = bytemuck::cast_slice(&data_bytes[..packed_len * 4]).to_vec();
         let inner = PackedTensor::from_raw(data, shape, scales_f32, zeros_f32);
         PyPackedTensor8 { inner }
     }
@@ -185,7 +197,8 @@ impl PyPackedTensor8 {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        self.inner.as_bytes().to_vec()
+        let trimmed = trim_packed_bytes(&self.inner.data, &self.inner.shape);
+        bytemuck::cast_slice(trimmed).to_vec()
     }
 
     fn scales(&self) -> Vec<f64> {
@@ -273,8 +286,9 @@ impl PyPackedTensor16 {
         let packed_len = packed_words_per_row(&shape, <F16x2 as PackedWord>::ITEMS);
         let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
         let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
-        assert_eq!(data_bytes.len(), packed_len * 4, "from_bytes: data length mismatch");
-        let data: Vec<F16x2> = bytemuck::cast_slice(&data_bytes).to_vec();
+        let data_words = data_bytes.len() / 4;
+        assert!(data_words >= packed_len, "from_bytes: data too short (got {} words, need {})", data_words, packed_len);
+        let data: Vec<F16x2> = bytemuck::cast_slice(&data_bytes[..packed_len * 4]).to_vec();
         let inner = PackedTensor::from_raw(data, shape, scales_f32, zeros_f32);
         PyPackedTensor16 { inner }
     }
@@ -291,7 +305,8 @@ impl PyPackedTensor16 {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        self.inner.as_bytes().to_vec()
+        let trimmed = trim_packed_bytes(&self.inner.data, &self.inner.shape);
+        bytemuck::cast_slice(trimmed).to_vec()
     }
 
     fn scales(&self) -> Vec<f64> {
@@ -379,8 +394,9 @@ impl PyPackedTensor32 {
         let packed_len = packed_words_per_row(&shape, <F32x1 as PackedWord>::ITEMS);
         let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
         let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
-        assert_eq!(data_bytes.len(), packed_len * 4, "from_bytes: data length mismatch");
-        let data: Vec<F32x1> = bytemuck::cast_slice(&data_bytes).to_vec();
+        let data_words = data_bytes.len() / 4;
+        assert!(data_words >= packed_len, "from_bytes: data too short (got {} words, need {})", data_words, packed_len);
+        let data: Vec<F32x1> = bytemuck::cast_slice(&data_bytes[..packed_len * 4]).to_vec();
         let inner = PackedTensor::from_raw(data, shape, scales_f32, zeros_f32);
         PyPackedTensor32 { inner }
     }
@@ -397,7 +413,8 @@ impl PyPackedTensor32 {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        self.inner.as_bytes().to_vec()
+        let trimmed = trim_packed_bytes(&self.inner.data, &self.inner.shape);
+        bytemuck::cast_slice(trimmed).to_vec()
     }
 
     fn scales(&self) -> Vec<f64> {
