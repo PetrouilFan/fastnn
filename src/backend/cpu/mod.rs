@@ -299,9 +299,19 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
-                Opcode::Softmax | Opcode::BiasAdd => {
+                Opcode::Softmax => {
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "softmax".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::BiasAdd => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "biasadd".to_string(),
                         input_slices,
                         output_slice,
                         params: vec![],
@@ -951,6 +961,84 @@ impl Backend for CpuBackend {
                                 };
                                 for i in 0..out_f32.len().min(a.len()).min(b.len()) {
                                     out_f32[i] = (a[i] * b[i]).max(0.0);
+                                }
+                            }
+                        }
+                        "softmax" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d[input_slice.offset..input_slice.offset + input_slice.size]
+                                    ).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                // Softmax over the last dimension: for each row,
+                                // compute exp(x_i - max) / sum(exp(x_j - max))
+                                let row_size = input.len() / out_f32.len().max(1);
+                                let num_rows = if row_size > 0 { input.len() / row_size } else { 1 };
+                                for r in 0..num_rows {
+                                    let start = r * row_size;
+                                    let end = (start + row_size).min(input.len());
+                                    let max_val = input[start..end].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                                    let mut sum = 0.0f32;
+                                    for i in start..end {
+                                        let e = (input[i] - max_val).exp();
+                                        out_f32[i] = e;
+                                        sum += e;
+                                    }
+                                    if sum > 0.0 {
+                                        for i in start..end {
+                                            out_f32[i] /= sum;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "biasadd" => {
+                            if let [data_slice, bias_slice] = &input_slices[..] {
+                                let (data, bias) = {
+                                    let d = arena.data_mut();
+                                    (bytemuck::cast_slice::<_, f32>(&d[data_slice.offset..data_slice.offset + data_slice.size]).to_vec(),
+                                     bytemuck::cast_slice::<_, f32>(&d[bias_slice.offset..bias_slice.offset + bias_slice.size]).to_vec())
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(data.len()) {
+                                    out_f32[i] = data[i] + bias[i % bias.len()];
+                                }
+                            }
+                        }
+                        "norm_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d[input_slice.offset..input_slice.offset + input_slice.size]
+                                    ).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                // Simple layer norm over the last dimension
+                                let row_size = input.len() / out_f32.len().max(1);
+                                let num_rows = if row_size > 0 { input.len() / row_size } else { 1 };
+                                for r in 0..num_rows {
+                                    let start = r * row_size;
+                                    let end = (start + row_size).min(input.len());
+                                    let n = (end - start) as f32;
+                                    let mean: f32 = input[start..end].iter().sum::<f32>() / n;
+                                    let var: f32 = input[start..end].iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
+                                    let inv_std = 1.0 / (var + 1e-5).sqrt();
+                                    for i in start..end {
+                                        out_f32[i] = (input[i] - mean) * inv_std;
+                                    }
                                 }
                             }
                         }
