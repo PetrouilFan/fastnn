@@ -53,6 +53,86 @@ fn with_scratch<R>(size: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
 }
 
 // ============================================================
+// Thread-local Vec pool — reuse allocations across calls
+// ============================================================
+
+thread_local! {
+    static TLS_VEC_POOL: std::cell::RefCell<Vec<Vec<f32>>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+/// A Vec<f32> borrowed from the thread-local pool.
+/// Automatically returned to the pool when dropped.
+pub struct ScopedVec {
+    inner: Option<Vec<f32>>,
+}
+
+impl std::ops::Deref for ScopedVec {
+    type Target = Vec<f32>;
+    fn deref(&self) -> &Vec<f32> {
+        self.inner.as_ref().expect("ScopedVec already consumed")
+    }
+}
+
+impl std::ops::DerefMut for ScopedVec {
+    fn deref_mut(&mut self) -> &mut Vec<f32> {
+        self.inner.as_mut().expect("ScopedVec already consumed")
+    }
+}
+
+impl ScopedVec {
+    /// Take ownership of the inner Vec, preventing it from returning to the pool.
+    /// Use this when the Vec must outlive the `ScopedVec` (e.g. passed to `Tensor::from_vec`).
+    pub fn take(mut self) -> Vec<f32> {
+        self.inner
+            .take()
+            .expect("ScopedVec::take called on already-consumed ScopedVec")
+    }
+}
+
+impl Drop for ScopedVec {
+    fn drop(&mut self) {
+        if let Some(v) = self.inner.take() {
+            // Cap pool entries to avoid memory bloat
+            if v.capacity() <= 100_000_000 {
+                TLS_VEC_POOL.with(|pool| {
+                    pool.borrow_mut().push(v);
+                });
+            }
+        }
+    }
+}
+
+/// Thread-local arena for reusing Vec<f32> allocations across calls.
+///
+/// Use `alloc` or `alloc_zeroed` to get a `ScopedVec` with at least the
+/// requested capacity. The Vec is returned to the pool on drop, avoiding
+/// repeated allocation/deallocation overhead in hot paths.
+pub struct TlsVecPool;
+
+impl TlsVecPool {
+    /// Acquire a Vec with at least `min_capacity` capacity.
+    /// The Vec may contain stale data (NOT zero-initialized).
+    pub fn alloc(min_capacity: usize) -> ScopedVec {
+        let mut v = TLS_VEC_POOL
+            .with(|pool| pool.borrow_mut().pop())
+            .unwrap_or_default();
+        if v.capacity() < min_capacity {
+            v.reserve(min_capacity - v.capacity());
+        }
+        ScopedVec { inner: Some(v) }
+    }
+
+    /// Acquire a Vec with exactly `len` elements, all zeroed.
+    pub fn alloc_zeroed(len: usize) -> ScopedVec {
+        let mut v = Self::alloc(len);
+        v.resize(len, 0.0);
+        v
+    }
+}
+
+// ============================================================
 // Main entry point — type-dispatched
 // ============================================================
 
@@ -1327,6 +1407,155 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
 }
 
 // ============================================================
+// Block-major batch GEMM
+// ============================================================
+
+/// Block-major batch GEMM for packed types.
+///
+/// Processes `block_size` output channels (rows) at once, reusing
+/// activation data across the block. The weights must be in block-major
+/// layout (see `PackedTensor::to_block_major`).
+///
+/// Layout (two zones):
+///   1. Full blocks (rows 0..m_aligned): block-major interleaved
+///   2. Tail rows (m_aligned..m): standard per-row
+///
+/// For each K-tile in the block-major zone:
+///   1. Unpack B weight rows' tile into a contiguous f32 buffer
+///   2. For each of N batch positions: compute B dot products with the
+///      same activation slice, writing into B output positions
+///
+/// This reduces loop overhead by M/B× and improves weight-cache locality
+/// because B consecutive rows share the same packed-word neighborhood.
+#[inline(always)]
+pub fn gemm_batch_packed_block_major<T: PackedWord>(
+    weights: &PackedTensor<T>,
+    activation: &[f32],
+    output: &mut [f32],
+    n: usize,
+    k: usize,
+    m: usize,
+) {
+    let block_size = weights.block_size();
+    debug_assert!(block_size > 1, "gemm_batch_packed_block_major requires block_size > 1");
+    let k_packed = k.div_ceil(T::ITEMS);
+    let m_aligned = (m / block_size) * block_size;
+    let full_blocks = m_aligned / block_size;
+    let tail_rows = m - m_aligned;
+
+    // Zero output accumulators
+    for o in output.iter_mut() {
+        *o = 0.0;
+    }
+
+    // Tile K dimension for L2 cache reuse
+    let mut k_start = 0;
+    while k_start < k {
+        let k_end = (k_start + K_BLOCK_SIZE).min(k);
+        let k_len = k_end - k_start;
+        let packed_start = k_start / T::ITEMS;
+        let packed_end = k_end.div_ceil(T::ITEMS);
+        let k_tile_words = packed_end - packed_start;
+
+        // --- Zone 1: Block-major (full blocks) ---
+        // Scratch buffer: block_size × k_len f32 values
+        let buf_words = block_size * k_len;
+        with_scratch(buf_words, |unpack_buf| {
+            for block in 0..full_blocks {
+                let block_offset = block * block_size * k_packed;
+
+                // Unpack B weight rows' K-tile into unpack_buf.
+                // Block-major layout: word (k, local_row) at block_offset + k * block_size + local_row.
+                for w in 0..k_tile_words {
+                    let packed_k = packed_start + w;
+                    for local_row in 0..block_size {
+                        let packed_idx = block_offset + packed_k * block_size + local_row;
+                        let word = weights.as_packed()[packed_idx];
+                        let unpacked = word.unpack_to_f32();
+                        let base = packed_k * T::ITEMS;
+                        let unpack_base = local_row * k_len;
+                        for j in 0..T::ITEMS {
+                            let idx = base + j;
+                            if idx >= k_start && idx < k_end {
+                                unpack_buf[unpack_base + (idx - k_start)] = unpacked.as_ref()[j];
+                            }
+                        }
+                    }
+                }
+
+                // Dot products with all N batch activation rows.
+                for bi in 0..n {
+                    let act_slice = &activation[bi * k + k_start..bi * k + k_end];
+                    for local_row in 0..block_size {
+                        let global_row = block * block_size + local_row;
+                        let unpack_row =
+                            &unpack_buf[local_row * k_len..(local_row + 1) * k_len];
+                        let acc = fma_f32_slice(unpack_row, act_slice);
+                        output[bi * m + global_row] += acc;
+                    }
+                }
+            }
+        });
+
+        // --- Zone 2: Row-major tail (rows m_aligned .. m) ---
+        let tail_base_words = m_aligned * k_packed;
+        with_scratch(k_len, |unpack_buf| {
+            for local_row in 0..tail_rows {
+                let global_row = m_aligned + local_row;
+                let row_offset = tail_base_words + local_row * k_packed;
+
+                // Unpack this tail row's K-tile
+                for p in packed_start..packed_end {
+                    let word = weights.as_packed()[row_offset + p];
+                    let unpacked = word.unpack_to_f32();
+                    let base = p * T::ITEMS;
+                    for j in 0..T::ITEMS {
+                        let idx = base + j;
+                        if idx >= k_start && idx < k_end {
+                            unpack_buf[idx - k_start] = unpacked.as_ref()[j];
+                        }
+                    }
+                }
+
+                // Dot products with all N batch positions
+                for bi in 0..n {
+                    let act_slice = &activation[bi * k + k_start..bi * k + k_end];
+                    let acc = fma_f32_slice(unpack_buf, act_slice);
+                    output[bi * m + global_row] += acc;
+                }
+            }
+        });
+
+        k_start += K_BLOCK_SIZE;
+    }
+
+    // Apply per-row quantization scale/zero to final accumulated output
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        output
+            .par_chunks_mut(m)
+            .for_each(|out_row| {
+                for row in 0..m {
+                    let scale = weights.scale_for_row(row);
+                    let zero = weights.zero_for_row(row);
+                    out_row[row] = out_row[row] * scale + zero;
+                }
+            });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for bi in 0..n {
+            for row in 0..m {
+                let scale = weights.scale_for_row(row);
+                let zero = weights.zero_for_row(row);
+                output[bi * m + row] = output[bi * m + row] * scale + zero;
+            }
+        }
+    }
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -1407,6 +1636,94 @@ mod tests {
         // F32x1 should be exact
         for v in &out {
             assert!(v.is_finite(), "Output should be finite");
+        }
+    }
+
+    #[test]
+    fn test_gemm_batch_block_major_u8x4() {
+        let k = 16;
+        let m = 8;
+        let n = 4;
+        let data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.1).sin() * 30.0).collect();
+        let activation: Vec<f32> = (0..n * k).map(|i| (i as f32 * 0.2).cos()).collect();
+
+        // Row-major reference
+        let w_row = PackedTensor::<U8x4>::from_f32_per_channel(&data, &[m, k]);
+        let mut ref_out = vec![0.0f32; n * m];
+        gemm_batch_packed_simd(&w_row, &activation, &mut ref_out, n, k, m);
+
+        // Block-major (block_size=4)
+        let w_block = w_row.to_block_major(4);
+        let mut block_out = vec![0.0f32; n * m];
+        gemm_batch_packed_block_major(&w_block, &activation, &mut block_out, n, k, m);
+
+        // Compare
+        let tol = 0.01;
+        for i in 0..n * m {
+            assert!(
+                (ref_out[i] - block_out[i]).abs() < tol,
+                "Mismatch at {}: ref={} block={}",
+                i,
+                ref_out[i],
+                block_out[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemm_batch_block_major_f16x2() {
+        let k = 8;
+        let m = 8;
+        let n = 3;
+        let data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.3).cos()).collect();
+        let activation: Vec<f32> = (0..n * k).map(|i| (i as f32 * 0.7).sin()).collect();
+
+        let w_row = PackedTensor::<F16x2>::from_f32_per_channel(&data, &[m, k]);
+        let mut ref_out = vec![0.0f32; n * m];
+        gemm_batch_packed_simd(&w_row, &activation, &mut ref_out, n, k, m);
+
+        let w_block = w_row.to_block_major(4);
+        let mut block_out = vec![0.0f32; n * m];
+        gemm_batch_packed_block_major(&w_block, &activation, &mut block_out, n, k, m);
+
+        let tol = 0.05;
+        for i in 0..n * m {
+            assert!(
+                (ref_out[i] - block_out[i]).abs() < tol,
+                "Mismatch at {}: ref={} block={}",
+                i,
+                ref_out[i],
+                block_out[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemm_batch_block_major_non_multiple_rows() {
+        // m=6 (not a multiple of block_size=4), k=16, n=2
+        let k = 16;
+        let m = 6;
+        let n = 2;
+        let data: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.5).collect();
+        let activation: Vec<f32> = (0..n * k).map(|i| (i as f32) * 0.3 + 1.0).collect();
+
+        let w_row = PackedTensor::<U8x4>::from_f32_per_channel(&data, &[m, k]);
+        let mut ref_out = vec![0.0f32; n * m];
+        gemm_batch_packed_simd(&w_row, &activation, &mut ref_out, n, k, m);
+
+        let w_block = w_row.to_block_major(4);
+        let mut block_out = vec![0.0f32; n * m];
+        gemm_batch_packed_block_major(&w_block, &activation, &mut block_out, n, k, m);
+
+        let tol = 0.01;
+        for i in 0..n * m {
+            assert!(
+                (ref_out[i] - block_out[i]).abs() < tol,
+                "Mismatch at {}: ref={} block={}",
+                i,
+                ref_out[i],
+                block_out[i]
+            );
         }
     }
 }

@@ -105,6 +105,16 @@ impl PyPackedTensor4 {
     #[getter]
     fn is_per_channel(&self) -> bool { self.inner.is_per_channel() }
 
+    #[getter]
+    fn block_size(&self) -> usize { self.inner.block_size() }
+
+    #[getter]
+    fn is_block_major(&self) -> bool { self.inner.is_block_major() }
+
+    fn to_block_major(&self, block_size: usize) -> Self {
+        PyPackedTensor4 { inner: self.inner.to_block_major(block_size) }
+    }
+
     fn get(&self, idx: usize) -> f64 { self.inner.get(idx) as f64 }
 
     fn set(&mut self, idx: usize, val: f64) { self.inner.set(idx, val as f32); }
@@ -200,6 +210,16 @@ impl PyPackedTensor8 {
 
     #[getter]
     fn is_per_channel(&self) -> bool { self.inner.is_per_channel() }
+
+    #[getter]
+    fn block_size(&self) -> usize { self.inner.block_size() }
+
+    #[getter]
+    fn is_block_major(&self) -> bool { self.inner.is_block_major() }
+
+    fn to_block_major(&self, block_size: usize) -> Self {
+        PyPackedTensor8 { inner: self.inner.to_block_major(block_size) }
+    }
 
     fn get(&self, idx: usize) -> f64 { self.inner.get(idx) as f64 }
 
@@ -297,6 +317,16 @@ impl PyPackedTensor16 {
     #[getter]
     fn is_per_channel(&self) -> bool { self.inner.is_per_channel() }
 
+    #[getter]
+    fn block_size(&self) -> usize { self.inner.block_size() }
+
+    #[getter]
+    fn is_block_major(&self) -> bool { self.inner.is_block_major() }
+
+    fn to_block_major(&self, block_size: usize) -> Self {
+        PyPackedTensor16 { inner: self.inner.to_block_major(block_size) }
+    }
+
     fn get(&self, idx: usize) -> f64 { self.inner.get(idx) as f64 }
 
     fn set(&mut self, idx: usize, val: f64) { self.inner.set(idx, val as f32); }
@@ -392,6 +422,16 @@ impl PyPackedTensor32 {
 
     #[getter]
     fn is_per_channel(&self) -> bool { self.inner.is_per_channel() }
+
+    #[getter]
+    fn block_size(&self) -> usize { self.inner.block_size() }
+
+    #[getter]
+    fn is_block_major(&self) -> bool { self.inner.is_block_major() }
+
+    fn to_block_major(&self, block_size: usize) -> Self {
+        PyPackedTensor32 { inner: self.inner.to_block_major(block_size) }
+    }
 
     fn get(&self, idx: usize) -> f64 { self.inner.get(idx) as f64 }
 
