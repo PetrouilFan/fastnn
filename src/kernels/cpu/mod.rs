@@ -1,4 +1,13 @@
 #![allow(unused_imports)]
+//! CPU kernel implementations (v1.x eager dispatch) — **DEPRECATED**.
+//!
+//! These kernels are registered via `#[ctor::ctor]` and called through the
+//! [`dispatcher`](crate::dispatcher) runtime dispatch table. The v2.0 AOT pipeline
+//! (`GraphBuilder` → `CpuBackend::compile` → `CpuBackend::dispatch`) handles
+//! operations inline without going through this kernel registry.
+//!
+//! New operations should be added as opcodes + backend compile/dispatch handlers,
+//! NOT as registered kernels here.
 pub mod arm_neon;
 mod conv;
 mod elementwise;
