@@ -179,9 +179,11 @@ use wide::f32x4;
 use wide::f32x8;
 
 // Memory-bound elementwise ops: 128KB working set (L2 cache friendly)
+#[allow(dead_code)]
 const CHUNK_MEMBOUND: usize = 1024 * 32; // 32K f32 = 128KB
 
 // Compute-bound transcendental ops: 32KB for better load balancing
+#[allow(dead_code)]
 const CHUNK_TRANSCENDENTAL: usize = 1024 * 8; // 8K f32 = 32KB
 
 // Rayon parallel threshold: only parallelize above this size
@@ -198,6 +200,7 @@ const SIMD_THRESHOLD: usize = 256;
 // Runtime SIMD level detection
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum SimdLevel {
     Scalar,
     Avx2,
@@ -205,9 +208,11 @@ enum SimdLevel {
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[allow(dead_code)]
 static SIMD_LEVEL: OnceLock<SimdLevel> = OnceLock::new();
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[allow(dead_code)]
 fn detect_simd_level() -> SimdLevel {
     #[cfg(target_arch = "x86_64")]
     {

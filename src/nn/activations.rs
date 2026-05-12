@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::autograd::{self, AdaptiveAvgPool2dBackward, AutogradMeta};
+use crate::autograd::{AdaptiveAvgPool2dBackward, AutogradMeta};
 use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::sync::Arc;

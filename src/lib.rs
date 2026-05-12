@@ -3,6 +3,7 @@
 pub mod error;
 pub mod io;
 pub mod iterator;
+// DEPRECATED: legacy v1.x kernel implementations — kept for dag.rs backward compat
 pub mod kernels;
 pub mod nn;
 pub mod optim;
@@ -15,7 +16,7 @@ pub mod tensor;
 pub use error::{FastnnError, FastnnResult};
 pub use storage_quantized::QuantizedTensor;
 
-// Runtime dispatch table (v1.x backward compat)
+// DEPRECATED: legacy v1.x runtime dispatch table — kept for dag.rs backward compat
 pub mod dispatcher;
 
 // Re-export core types

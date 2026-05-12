@@ -3,13 +3,14 @@
 //! In v2.0.0 the dispatch table is replaced by the AOT compiler
 //! (`ComputeGraph` → `GraphBuilder` → compiler passes → `Backend::compile` → `Backend::dispatch`).
 //!
-//! All CPU tensor operations now go through [`Tensor::exec_aot`](crate::tensor::Tensor::exec_aot)
-//! which builds a `ComputeGraph`, compiles it with the AOT pipeline, and executes it.
-//! Only GPU fallback and a handful of ops without GraphBuilder equivalents (pow, scalar ops)
-//! still route through this dispatcher.
+//! ALL tensor operations and nn modules now use [`Tensor::exec_aot`](crate::tensor::Tensor::exec_aot)
+//! which auto-detects CPU vs GPU and routes to the appropriate backend.
 //!
-//! This module will be removed once all GPU fallbacks are migrated to the AOT pipeline.
-//! New code MUST NOT add new registrations here.
+//! This module is kept solely because [`dag.rs`](crate::nn::dag) (the legacy ONNX executor)
+//! still references it. Once dag.rs is migrated or removed, this file and the entire
+//! `kernels/` directory can be deleted.
+//!
+//! New code MUST NOT use this module.
 
 #![allow(dead_code)]
 

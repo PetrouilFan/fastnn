@@ -505,6 +505,7 @@ fn clear_storage_pool() -> String {
     "pool_cleared".to_string()
 }
 
+#[allow(dead_code)]
 #[pyfunction]
 fn list_registered_ops() -> Vec<String> {
     vec![]

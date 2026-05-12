@@ -51,6 +51,7 @@ pub(super) fn memcpy_f32(src: *const f32, dst: *mut f32, len: usize) {
 
 /// Cached scalar tensors for common dimension values (0-7)
 /// Avoids heap allocation on every softmax/sum/mean/max call
+#[allow(dead_code)]
 pub(super) fn dim_scalar(dim: i32) -> Tensor {
     use std::sync::OnceLock;
     static DIM_SCALARS: OnceLock<[Tensor; 8]> = OnceLock::new();
