@@ -822,33 +822,10 @@ pub unsafe fn conv2d_3x3_direct(
     let use_pre_t = w_pre_t.is_some_and(|wt| wt.numel() as usize == needed);
 
     let wt_trans_ptr: *const f32 = if use_pre_t {
-        // Use pre-transposed weight from DAG executor
-
-        let wt_ptr = w_pre_t.unwrap().data_ptr() as *const f32;
-
-        // SAFETY: wt has shape [k, oc_count] and needed elements (verified above).
-
-        let wt_data = unsafe { std::slice::from_raw_parts(wt_ptr, needed) };
-
-        WT_TRANS_BUF.with(|buf| {
-            let mut b = buf.borrow_mut();
-
-            let v = if let Some(ref mut vec) = &mut *b {
-                vec
-            } else {
-                let new_vec = vec![0.0f32; needed];
-
-                *b = Some(new_vec);
-
-                b.as_mut().unwrap()
-            };
-
-            v.resize(needed, 0.0);
-
-            v.copy_from_slice(wt_data);
-
-            v.as_ptr()
-        })
+        // Use pre-transposed weight from DAG executor directly — zero copy.
+        // The w_pre_t tensor is already in [k, oc_count] layout, matching
+        // what the SIMD kernel expects. No need to copy into WT_TRANS_BUF.
+        w_pre_t.unwrap().data_ptr() as *const f32
     } else {
         // Fill WT_TRANS_BUF from original weight (fallback for grouped convs or missing pre-transposed weight)
 
