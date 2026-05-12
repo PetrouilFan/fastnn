@@ -200,6 +200,22 @@ impl Tensor {
         output
     }
 
+    pub fn eq_scalar(&self, threshold: f32) -> Tensor {
+        let output = if self.device() == Device::Cpu {
+            let scalar = Tensor::from_scalar(threshold);
+            Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.eq_scalar(&ins[0], &ins[1])])
+                .expect("Tensor::eq_scalar: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("eq_scalar", dispatch_key, &[self, &Tensor::from_scalar(threshold)])
+                .expect("Tensor::eq_scalar: dispatch failed")[0].clone()
+        };
+        output
+    }
+
     pub fn add_scalar(&self, scalar: f32) -> Tensor {
         let output = if self.device() == Device::Cpu {
             let s = Tensor::from_scalar(scalar);

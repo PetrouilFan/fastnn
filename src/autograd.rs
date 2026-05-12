@@ -167,6 +167,7 @@ stub_backward!(LeakyReLUBackward, 1);
 stub_backward!(EluBackward, 1);
 stub_backward!(SoftplusBackward, 1);
 stub_backward!(HardswishBackward, 1);
+stub_backward!(MishBackward, 1);
 stub_backward!(SoftmaxBackward, 1);
 stub_backward!(LogSoftmaxBackward, 1);
 stub_backward!(SumBackward, 1);
@@ -492,7 +493,7 @@ pub fn build_backward_graph(
                 }
             }
             Opcode::Gelu | Opcode::LeakyRelu | Opcode::Elu | Opcode::Softplus
-            | Opcode::Hardswish | Opcode::Clamp | Opcode::Sign
+            | Opcode::Hardswish | Opcode::Mish | Opcode::Clamp | Opcode::Sign
             | Opcode::LogicalNot | Opcode::LogSoftmax | Opcode::Sigmoid
             | Opcode::Tanh | Opcode::Exp | Opcode::Log | Opcode::Sqrt
             | Opcode::Neg | Opcode::Abs | Opcode::Relu | Opcode::Softmax
