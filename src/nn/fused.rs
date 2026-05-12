@@ -1,10 +1,7 @@
-use crate::autograd::{make_edge, AutogradMeta, BatchNorm2dBackward, Conv2dBackward};
-use crate::dispatcher::{DispatchKey, dispatch};
 use crate::dtypes::PackedWord;
 use crate::nn::Module;
 use crate::packed_tensor::PackedTensor;
 use crate::tensor::Tensor;
-use std::sync::Arc;
 
 /// Trait for fused activation types, providing dispatch names and backward metadata.
 pub trait Activation {
@@ -168,98 +165,48 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
     fn forward(&self, x: &Tensor) -> Tensor {
         let default_bias = Tensor::from_scalar(0.0);
         let bias_ref = self.conv_bias.as_ref().unwrap_or(&default_bias);
+        let bias_reshaped = bias_ref.reshape(vec![1, self.out_channels, 1, 1]);
 
-        // Step 1: Conv2d dispatch + manually attach Conv2dBackward
-        let conv_raw = dispatch(
-            "conv2d",
-            DispatchKey::Cpu,
+        let results = Tensor::exec_aot(
             &[
                 x,
                 &self.conv_weight,
-                bias_ref,
-                &self.stride_scalar,
-                &self.padding_scalar,
-                &self.dilation_scalar,
-                &self.groups_scalar,
-            ],
-        )
-        .expect("FusedConvBn::conv2d: dispatch failed")[0]
-            .clone();
-
-        let conv_out = if x.requires_grad() || self.conv_weight.requires_grad() {
-            let edges = {
-                let mut edges = make_edge(x);
-                edges.extend(make_edge(&self.conv_weight));
-                edges
-            };
-            let backward = Conv2dBackward::new();
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
-            let mut output = conv_raw;
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            conv_raw
-        };
-
-        // Step 2: BatchNorm2d — compute batch stats, dispatch, attach BatchNorm2dBackward
-        let x_shape = conv_out.shape_ref();
-        let batch = x_shape[0];
-        let channels = x_shape[1];
-        let spatial: i64 = x_shape[2..].iter().product();
-
-        let x_reshaped = conv_out.reshape(vec![batch, channels, spatial]);
-        let b_mean = x_reshaped.mean(2, false).mean(0, false);
-        let centered = x_reshaped.sub(&b_mean.reshape(vec![1, channels, 1]));
-        let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
-
-        let training_false = Tensor::from_scalar(0.0_f32);
-        let bn_raw = dispatch(
-            "batch_norm",
-            DispatchKey::Cpu,
-            &[
-                &conv_out,
+                &bias_reshaped,
                 &self.bn_weight,
                 &self.bn_bias,
                 &self.bn_running_mean,
                 &self.bn_running_var,
-                &training_false,
-                &self.eps_scalar,
             ],
+            |g, ins| {
+                let conv = g.conv2d_with_params(
+                    &ins[0],
+                    &ins[1],
+                    self.stride as usize,
+                    self.padding as usize,
+                    self.dilation as usize,
+                    self.groups as usize,
+                );
+                let biased = g.bias_add(&conv, &ins[2]);
+                let bn = g.batch_norm(
+                    &biased,
+                    &ins[3],
+                    &ins[4],
+                    &ins[5],
+                    &ins[6],
+                    self.eps,
+                );
+                let result = match A::DISPATCH_NAME {
+                    "fused_conv_bn_relu" => g.relu(&bn),
+                    "fused_conv_bn_gelu" => g.gelu(&bn),
+                    "fused_conv_bn_silu" => g.silu(&bn),
+                    _ => bn,
+                };
+                vec![result]
+            },
         )
-        .expect("FusedConvBn::batch_norm: dispatch failed")[0]
-            .clone();
+        .expect("FusedConvBn::forward: AOT failed");
 
-        let bn_out = if conv_out.requires_grad()
-            || self.bn_weight.requires_grad()
-            || self.bn_bias.requires_grad()
-        {
-            let edges = {
-                let mut edges = make_edge(&conv_out);
-                edges.extend(make_edge(&self.bn_weight));
-                edges.extend(make_edge(&self.bn_bias));
-                edges
-            };
-            let backward = BatchNorm2dBackward::new();
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
-            let mut output = bn_raw;
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-            output
-        } else {
-            bn_raw
-        };
-
-        // Step 3: Activation (built-in ops handle their own autograd automatically)
-        match A::DISPATCH_NAME {
-            "fused_conv_bn" => bn_out,
-            "fused_conv_bn_relu" => bn_out.relu(),
-            "fused_conv_bn_gelu" => bn_out.gelu(),
-            "fused_conv_bn_silu" => bn_out.silu(),
-            _ => bn_out,
-        }
+        results.into_iter().next().unwrap()
     }
 
     fn parameters(&self) -> Vec<Tensor> {

@@ -657,6 +657,23 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// ArgMax along an optional axis. Returns indices as I64.
+    pub fn argmax(&self, input: &GraphTensor, axis: Option<DimExpr>) -> GraphTensor {
+        let output_type = TensorType::new(input.shape().to_vec(), IrDType::I64);
+        let mut attrs = std::collections::HashMap::new();
+        if let Some(ax) = &axis {
+            attrs.insert("axis".to_string(), ax.to_string());
+        }
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::ArgMax,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Reshape tensor.
     pub fn reshape(&self, input: &GraphTensor, shape: &[DimExpr]) -> GraphTensor {
         let output_type = TensorType::new(shape.to_vec(), input.dtype());

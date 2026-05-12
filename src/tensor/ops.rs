@@ -1295,25 +1295,13 @@ impl Tensor {
     }
 
     pub fn fused_linear_gelu(&self, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
-        let device = match (self.device(), weight.device()) {
-            (Device::Wgpu(id), _) => Device::Wgpu(id),
-            (_, Device::Wgpu(id)) => Device::Wgpu(id),
-            _ => {
-                if let Some(b) = bias {
-                    b.device()
-                } else {
-                    Device::Cpu
-                }
-            }
+        let out = self.matmul(weight);
+        let out = if let Some(b) = bias {
+            Tensor::add(&out, b)
+        } else {
+            out
         };
-        let dispatch_key = device_to_dispatch_key(device);
-        let args: Vec<&Tensor> = match bias {
-            Some(b) => vec![self, weight, b],
-            None => vec![self, weight],
-        };
-        let result = dispatch("fused_linear_gelu", dispatch_key, &args)
-            .expect("Tensor::fused_linear_gelu: dispatch failed");
-        result[0].clone()
+        out.gelu()
     }
 
     pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {

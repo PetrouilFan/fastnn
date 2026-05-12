@@ -2,7 +2,7 @@ use crate::autograd::{
     self, AutogradMeta, BatchNorm1dBackward, BatchNorm2dBackward, GroupNormBackward,
     RMSNormBackward,
 };
-use crate::dispatcher::{DispatchKey, dispatch};
+use crate::dispatcher::dispatch;
 use crate::storage::Device;
 use crate::tensor::Tensor;
 use crate::{
@@ -59,9 +59,10 @@ impl Module for LayerNorm {
             .next()
             .unwrap()
         } else {
+            let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
             let result = dispatch(
                 "layer_norm",
-                DispatchKey::Cpu,
+                dispatch_key,
                 &[x, x, weight, bias, &self.eps_scalar],
             )
             .expect("LayerNorm::forward: dispatch failed");
@@ -121,10 +122,6 @@ pub struct BatchNorm1d {
     training: TrainingState,
     #[allow(dead_code)]
     pub track_running_stats: bool,
-    // Pre-allocated scalar tensors
-    eps_scalar: Tensor,
-    training_true_scalar: Tensor,
-    training_false_scalar: Tensor,
 }
 
 impl BatchNorm1d {
@@ -151,9 +148,6 @@ impl BatchNorm1d {
             running_var: Arc::new(RwLock::new(running_var)),
             training: TrainingState::new(),
             track_running_stats: true,
-            eps_scalar: Tensor::from_scalar(eps as f32),
-            training_true_scalar: Tensor::from_scalar(1.0),
-            training_false_scalar: Tensor::from_scalar(0.0),
         }
     }
 }
@@ -179,12 +173,6 @@ impl Module for BatchNorm1d {
         };
 
         let is_training = self.training.is_training();
-
-        let training_flag = if is_training {
-            &self.training_true_scalar
-        } else {
-            &self.training_false_scalar
-        };
 
         // Read current running stats - clone tensors so guards are dropped before dispatch
         let running_mean = self.running_mean.read().clone();
@@ -214,23 +202,19 @@ impl Module for BatchNorm1d {
             (running_mean.clone(), running_var.clone())
         };
 
-        // TODO(migration): Replace dispatch with AOT when batch_norm graph op supports training mode
-        let result = dispatch(
-            "batch_norm",
-            DispatchKey::Cpu,
-            &[
-                x,
-                weight_ref,
-                bias_ref,
-                &running_mean,
-                &running_var,
-                training_flag,
-                &self.eps_scalar,
-            ],
-        )
-        .expect("BatchNorm1d::forward: dispatch failed");
+        let (mean, var) = if is_training {
+            (&batch_mean, &batch_var)
+        } else {
+            (&running_mean, &running_var)
+        };
 
-        let mut output = result[0].clone();
+        let result = Tensor::exec_aot(
+            &[x, weight_ref, bias_ref, mean, var],
+            |g, ins| vec![g.batch_norm(&ins[0], &ins[1], &ins[2], &ins[3], &ins[4], self.eps)],
+        )
+        .expect("BatchNorm1d::forward: AOT failed");
+
+        let mut output = result.into_iter().next().unwrap();
 
         // In training mode, update the running stats
         if is_training {
@@ -530,9 +514,6 @@ pub struct BatchNorm2d {
     pub momentum: f32,
     pub num_features: i64,
     training: TrainingState,
-    eps_scalar: Tensor,
-    training_true_scalar: Tensor,
-    training_false_scalar: Tensor,
 }
 
 impl BatchNorm2d {
@@ -570,9 +551,6 @@ impl BatchNorm2d {
             momentum,
             num_features,
             training: TrainingState::new(),
-            eps_scalar: Tensor::from_scalar(eps),
-            training_true_scalar: Tensor::from_scalar(1.0),
-            training_false_scalar: Tensor::from_scalar(0.0),
         }
     }
 }
@@ -581,50 +559,38 @@ impl Module for BatchNorm2d {
     fn forward(&self, x: &Tensor) -> Tensor {
         let is_training = self.training.is_training();
 
-        let training_flag = if is_training {
-            &self.training_true_scalar
-        } else {
-            &self.training_false_scalar
-        };
-
         // Read current running stats - clone tensors so guards are dropped before dispatch
         let running_mean = self.running_mean.read().clone();
         let running_var = self.running_var.read().clone();
 
-        // Compute batch stats (used for backward in training mode, or empty tensors as placeholders)
-        let (batch_mean, batch_var) =
-            if is_training && (x.requires_grad() || self.weight.requires_grad()) {
-                let x_shape = x.shape_ref();
-                let batch = x_shape[0];
-                let channels = x_shape[1];
-                let spatial: i64 = x_shape[2..].iter().product();
-                let x_reshaped = x.reshape(vec![batch, channels, spatial]);
-                let b_mean = x_reshaped.mean(2, false).mean(0, false);
-                let centered = x_reshaped.sub(&b_mean.reshape(vec![1, channels, 1]));
-                let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
-                (b_mean, b_var)
-            } else {
-                (running_mean.clone(), running_var.clone())
-            };
+        // Compute batch stats in training mode
+        let (batch_mean, batch_var) = if is_training {
+            let x_shape = x.shape_ref();
+            let batch = x_shape[0];
+            let channels = x_shape[1];
+            let spatial: i64 = x_shape[2..].iter().product();
+            let x_reshaped = x.reshape(vec![batch, channels, spatial]);
+            let b_mean = x_reshaped.mean(2, false).mean(0, false);
+            let centered = x_reshaped.sub(&b_mean.reshape(vec![1, channels, 1]));
+            let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
+            (b_mean, b_var)
+        } else {
+            (running_mean.clone(), running_var.clone())
+        };
 
-        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
-        // TODO(migration): Replace dispatch with AOT when batch_norm graph op supports training mode
-        let result = crate::dispatcher::dispatch(
-            "batch_norm",
-            dispatch_key,
-            &[
-                x,
-                &self.weight,
-                &self.bias,
-                &running_mean,
-                &running_var,
-                training_flag,
-                &self.eps_scalar,
-            ],
+        let (mean, var) = if is_training {
+            (&batch_mean, &batch_var)
+        } else {
+            (&running_mean, &running_var)
+        };
+
+        let result = Tensor::exec_aot(
+            &[x, &self.weight, &self.bias, mean, var],
+            |g, ins| vec![g.batch_norm(&ins[0], &ins[1], &ins[2], &ins[3], &ins[4], self.eps as f64)],
         )
-        .expect("BatchNorm2d::forward: dispatch failed");
+        .expect("BatchNorm2d::forward: AOT failed");
 
-        let mut output = result[0].clone();
+        let mut output = result.into_iter().next().unwrap();
 
         // In training mode, update the running stats
         if is_training {
