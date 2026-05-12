@@ -120,7 +120,10 @@ impl TlsVecPool {
             .with(|pool| pool.borrow_mut().pop())
             .unwrap_or_default();
         if v.capacity() < min_capacity {
-            v.reserve(min_capacity - v.capacity());
+            // Use v.len() not v.capacity(): a recycled Vec may have len < capacity,
+            // and reserve(additional) guarantees capacity >= len + additional.
+            // Using capacity() would under-shoot when len < capacity.
+            v.reserve(min_capacity - v.len());
         }
         // SAFETY: The caller promises to write all min_capacity elements
         // before any read. This avoids the cost of zero-initialization.

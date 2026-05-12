@@ -7,7 +7,8 @@ use crate::packed_conv::PackedConv2d;
 use crate::packed_tensor::PackedTensor;
 use crate::storage::{DType, Device};
 use crate::tensor::Tensor;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpCode {
@@ -84,6 +85,7 @@ pub enum OpCode {
     FusedConvBn,
     FusedConvBnRelu,
     FusedConvBnGelu,
+    FusedConvBnSilu,
     Identity,
     Shape,
     Cast,
@@ -190,6 +192,7 @@ pub fn op_type_to_code(op_type: &str) -> OpCode {
         "fusedconvbn" | "fused_conv_bn" => OpCode::FusedConvBn,
         "fusedconvbnrelu" | "fused_conv_bn_relu" => OpCode::FusedConvBnRelu,
         "fusedconvbngelu" | "fused_conv_bn_gelu" => OpCode::FusedConvBnGelu,
+        "fusedconvbnsilu" | "fused_conv_bn_silu" => OpCode::FusedConvBnSilu,
         "identity" | "identityop" | "dropout" => OpCode::Identity,
         "shape" | "shapeop" => OpCode::Shape,
         "cast" | "castop" => OpCode::Cast,
@@ -253,6 +256,8 @@ pub struct DAGExecutor {
     output_names: Vec<String>,
     name_to_id: HashMap<String, usize>,
     total_tensors: usize,
+    consumer_counts: HashMap<usize, AtomicUsize>,
+    output_indices: HashSet<usize>,
 }
 
 fn parse_int_list(s: &str) -> Vec<i64> {
@@ -262,6 +267,80 @@ fn parse_int_list(s: &str) -> Vec<i64> {
         .collect()
 }
 
+/// Scan node list for Conv->BatchNorm->SiLU triplets and fuse them into a single
+/// FusedConvBnSilu node. Only fuses when the Conv uses a 3x3 kernel with
+/// stride=1, padding=1, dilation=1, groups=1 (the only configuration supported
+/// by the fused kernel).
+fn fuse_conv_bn_silu_patterns(nodes: &mut Vec<DAGNode>, params: &HashMap<String, Tensor>) {
+    let mut i = 0;
+    while i + 2 < nodes.len() {
+        let is_conv = nodes[i].op_code == OpCode::Conv;
+        let is_bn = nodes[i + 1].op_code == OpCode::BatchNorm;
+        let is_silu = nodes[i + 2].op_code == OpCode::Silu;
+
+        if is_conv && is_bn && is_silu {
+            let conv_out = nodes[i].outputs.first().map(|s| s.as_str()).unwrap_or("");
+            let bn_in = nodes[i + 1].inputs.first().map(|s| s.as_str()).unwrap_or("");
+            let bn_out = nodes[i + 1].outputs.first().map(|s| s.as_str()).unwrap_or("");
+            let silu_in = nodes[i + 2].inputs.first().map(|s| s.as_str()).unwrap_or("");
+
+            if conv_out == bn_in && bn_out == silu_in {
+                let stride = nodes[i]
+                    .attrs
+                    .get("stride")
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(1);
+                let padding = nodes[i]
+                    .attrs
+                    .get("padding")
+                    .and_then(|p| p.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let dilation = nodes[i]
+                    .attrs
+                    .get("dilation")
+                    .and_then(|d| d.parse::<i64>().ok())
+                    .unwrap_or(1);
+                let groups = nodes[i]
+                    .attrs
+                    .get("groups")
+                    .and_then(|g| g.parse::<i64>().ok())
+                    .unwrap_or(1);
+
+                if stride == 1 && padding == 1 && dilation == 1 && groups == 1 {
+                    let weight_name = format!("{}.weight", nodes[i].name);
+                    let is_3x3 = params
+                        .get(&weight_name)
+                        .map(|w| {
+                            let shape = w.shape_ref();
+                            shape.len() >= 4 && shape[2] == 3 && shape[3] == 3
+                        })
+                        .unwrap_or(false);
+
+                    if is_3x3 {
+                        let bn_name = nodes[i + 1].name.clone();
+                        let mut attrs = nodes[i].attrs.clone();
+                        attrs.insert("bn_name".to_string(), bn_name);
+
+                        let fused_node = DAGNode {
+                            name: nodes[i].name.clone(),
+                            op_type: "fused_conv_bn_silu".to_string(),
+                            op_code: OpCode::FusedConvBnSilu,
+                            inputs: nodes[i].inputs.clone(),
+                            outputs: nodes[i + 2].outputs.clone(),
+                            attrs,
+                        };
+
+                        nodes.splice(i..i + 3, vec![fused_node]);
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
 impl DAGExecutor {
     pub fn new(
         nodes: Vec<DAGNode>,
@@ -269,6 +348,8 @@ impl DAGExecutor {
         input_names: Vec<String>,
         output_names: Vec<String>,
     ) -> Self {
+        let mut nodes = nodes;
+        fuse_conv_bn_silu_patterns(&mut nodes, &params);
         let mut name_to_id = HashMap::new();
         let mut next_id = 0;
 
@@ -299,6 +380,28 @@ impl DAGExecutor {
             }
         }
         let total_tensors = next_id;
+
+        let mut consumer_counts: HashMap<usize, AtomicUsize> = HashMap::new();
+        let mut output_indices: HashSet<usize> = HashSet::new();
+        for name in &output_names {
+            if let Some(id) = name_to_id.get(name) {
+                output_indices.insert(*id);
+            }
+        }
+        for node in &nodes {
+            for in_name in &node.inputs {
+                if !in_name.is_empty() {
+                    if let Some(id) = name_to_id.get(in_name) {
+                        if !params.contains_key(in_name) {
+                            let entry = consumer_counts
+                                .entry(*id)
+                                .or_insert(AtomicUsize::new(0));
+                            entry.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
 
         let mut scalar_cache = HashMap::new();
         for i in 0..=32i64 {
@@ -357,6 +460,8 @@ impl DAGExecutor {
             output_names,
             name_to_id,
             total_tensors,
+            consumer_counts,
+            output_indices,
         }
     }
 
@@ -368,6 +473,8 @@ impl DAGExecutor {
         input_names: Vec<String>,
         output_names: Vec<String>,
     ) -> Self {
+        let mut nodes = nodes;
+        fuse_conv_bn_silu_patterns(&mut nodes, &params);
         let mut name_to_id = HashMap::new();
         let mut next_id = 0;
 
@@ -404,6 +511,28 @@ impl DAGExecutor {
             }
         }
         let total_tensors = next_id;
+
+        let mut consumer_counts: HashMap<usize, AtomicUsize> = HashMap::new();
+        let mut output_indices: HashSet<usize> = HashSet::new();
+        for name in &output_names {
+            if let Some(id) = name_to_id.get(name) {
+                output_indices.insert(*id);
+            }
+        }
+        for node in &nodes {
+            for in_name in &node.inputs {
+                if !in_name.is_empty() {
+                    if let Some(id) = name_to_id.get(in_name) {
+                        if !params.contains_key(in_name) {
+                            let entry = consumer_counts
+                                .entry(*id)
+                                .or_insert(AtomicUsize::new(0));
+                            entry.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
 
         // Convert Conv weight tensors to block-major layout for SIMD throughput.
         // This interleaves block_size=4 output channels' weight words so that
@@ -445,6 +574,8 @@ impl DAGExecutor {
             output_names,
             name_to_id,
             total_tensors,
+            consumer_counts,
+            output_indices,
         }
     }
 
@@ -1029,6 +1160,9 @@ impl DAGExecutor {
                     } else {
                         Some(vec![args[0].clone()])
                     }
+                }
+                OpCode::FusedConvBnSilu => {
+                    self.dispatch_fused_conv_bn_silu(node, &args)
                 }
                 OpCode::Clip => {
                     let x = &args[0];
@@ -1908,6 +2042,22 @@ impl DAGExecutor {
                     }
                 }
             }
+
+            // Clear input tensors that have been consumed by all consumers
+            for in_name in &node.inputs {
+                if !in_name.is_empty() {
+                    if let Some(id) = self.name_to_id.get(in_name) {
+                        if let Some(count) = self.consumer_counts.get(id) {
+                            let prev = count.fetch_sub(1, Ordering::Relaxed);
+                            if prev == 1 && !self.output_indices.contains(id) {
+                                if buffer[*id].is_some() {
+                                    buffer[*id] = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         let mut outputs = HashMap::new();
@@ -2567,6 +2717,70 @@ impl DAGExecutor {
             &[x, weight, bias, mean, var],
         )
         .ok()
+    }
+
+    fn dispatch_fused_conv_bn_silu(&self, node: &DAGNode, args: &[Tensor]) -> Option<Vec<Tensor>> {
+        let x = &args[0];
+        let weight_name = format!("{}.weight", node.name);
+        let weight = self.params.get(&weight_name)?;
+
+        let has_bias = self.params.contains_key(&format!("{}.bias", node.name));
+        let bias = if has_bias {
+            self.params.get(&format!("{}.bias", node.name))
+        } else {
+            None
+        };
+
+        let bn_name = node.attrs.get("bn_name")?;
+        let bn_weight = self.params.get(&format!("{}.weight", bn_name))?;
+        let bn_bias = self.params.get(&format!("{}.bias", bn_name))?;
+        let bn_mean = self.params.get(&format!("{}.running_mean", bn_name))?;
+        let bn_var = self.params.get(&format!("{}.running_var", bn_name))?;
+
+        let stride = node
+            .attrs
+            .get("stride")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(1);
+        let padding = node
+            .attrs
+            .get("padding")
+            .and_then(|p| p.parse::<i64>().ok())
+            .unwrap_or(0);
+        let dilation = node
+            .attrs
+            .get("dilation")
+            .and_then(|d| d.parse::<i64>().ok())
+            .unwrap_or(1);
+        let groups = node
+            .attrs
+            .get("groups")
+            .and_then(|g| g.parse::<i64>().ok())
+            .unwrap_or(1);
+
+        let stride_t = Tensor::from_scalar(stride as f32);
+        let pad_t = Tensor::from_scalar(padding as f32);
+        let dilation_t = Tensor::from_scalar(dilation as f32);
+        let groups_t = Tensor::from_scalar(groups as f32);
+        let eps_t = Tensor::from_scalar(1e-5f32);
+
+        let mut dispatch_args: Vec<&Tensor> = Vec::with_capacity(12);
+        dispatch_args.push(x);
+        dispatch_args.push(weight);
+        if let Some(b) = bias {
+            dispatch_args.push(b);
+        }
+        dispatch_args.push(bn_weight);
+        dispatch_args.push(bn_bias);
+        dispatch_args.push(bn_mean);
+        dispatch_args.push(bn_var);
+        dispatch_args.push(&stride_t);
+        dispatch_args.push(&pad_t);
+        dispatch_args.push(&dilation_t);
+        dispatch_args.push(&groups_t);
+        dispatch_args.push(&eps_t);
+
+        dispatch("fused_conv_bn_silu", DispatchKey::Cpu, &dispatch_args).ok()
     }
 
     fn dispatch_max_pool(&self, node: &DAGNode, args: &[Tensor]) -> Option<Vec<Tensor>> {
