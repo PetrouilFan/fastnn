@@ -8,6 +8,25 @@ use std::cell::UnsafeCell;
 
 pub mod microkernels;
 
+/// Resolve kernel dimension params at dispatch time using the runtime shape
+/// environment. Returns `params` unchanged if no symbolic dims are present.
+fn resolve_params(
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    expected: usize,
+) -> Vec<usize> {
+    if let Some(dims) = param_dims {
+        if dims.len() >= expected {
+            return dims[..expected]
+                .iter()
+                .map(|d| d.evaluate_with_env(shape_env).unwrap_or(1) as usize)
+                .collect();
+        }
+    }
+    params.to_vec()
+}
+
 /// CPU memory arena with interior mutability for zero-allocation dispatch.
 pub struct CpuBuffer(UnsafeCell<Vec<u8>>);
 
@@ -273,24 +292,30 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::ReduceSum | Opcode::ReduceMean => {
-                    // For reduce, compute group size from input/output element counts
-                    let input_elems = input_slices
+                    // Group size = product of dims being reduced over.
+                    // For a single-axis reduce this is just input_shape[axis],
+                    // which is typically Known (e.g. reduce over dim 1 of [N,4]
+                    // has group_size=Known(4)).
+                    let axis: usize = node
+                        .attrs
+                        .get("axis")
+                        .and_then(|a| a.parse().ok())
+                        .unwrap_or(0);
+                    let group_size_dim = input_shape_dims
                         .first()
-                        .map(|s| s.size / 4)
-                        .unwrap_or(1);
-                    let output_elems = output_slice.size / 4;
-                    let group_size = if output_elems > 0 {
-                        input_elems / output_elems
-                    } else {
-                        1
-                    };
+                        .and_then(|s| s.get(axis).cloned())
+                        .unwrap_or(DimExpr::Known(1));
                     let is_mean = if matches!(node.opcode, Opcode::ReduceMean) { 1 } else { 0 };
+                    let group_size = group_size_dim.evaluate().unwrap_or(1) as usize;
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "reduce_f32".to_string(),
                         input_slices,
                         output_slice,
                         params: vec![group_size, is_mean],
-                        param_dims: None,
+                        // Pass the group_size as a symbolic DimExpr so dispatch
+                        // can re-evaluate it when shape_env is available (e.g.
+                        // reduce over symbolic batch dim N).
+                        param_dims: Some(vec![group_size_dim]),
                     });
                 }
                 Opcode::Transpose => {
@@ -358,16 +383,6 @@ impl Backend for CpuBackend {
                     params,
                     param_dims,
                 } => {
-                    // Resolve params using shape_env if param_dims provided.
-                    // This allows symbolic DimExprs (e.g. batch size "N") to be
-                    // evaluated at dispatch time with concrete values from inputs.
-                    let params: Vec<usize> = if let Some(dims) = param_dims {
-                        dims.iter()
-                            .map(|d| d.evaluate_with_env(shape_env).unwrap_or(1) as usize)
-                            .collect()
-                    } else {
-                        params.clone()
-                    };
                     let out_start = output_slice.offset;
                     let out_end = output_slice.offset + output_slice.size;
 
@@ -669,7 +684,8 @@ impl Backend for CpuBackend {
                                     ).to_vec();
                                     (a_f32, b_f32)
                                 };
-                                let &[m, _k, n] = &params[..] else { return Err(BackendError::Dispatch("matmul: expected params [M,K,N]".into())); };
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let &[m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul: expected params [M,K,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(
@@ -703,7 +719,8 @@ impl Backend for CpuBackend {
                                     ).to_vec();
                                     (a_f32, b_f32, bias_f32)
                                 };
-                                let &[m, _k, n] = &params[..] else { return Err(BackendError::Dispatch("fused_matmul_add_relu: expected params [M,K,N]".into())); };
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let &[m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("fused_matmul_add_relu: expected params [M,K,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(
@@ -729,7 +746,8 @@ impl Backend for CpuBackend {
                                     (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
                                      bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec())
                                 };
-                                let &[m, _k, n] = &params[..] else { return Err(BackendError::Dispatch("matmul_relu: expected params [M,K,N]".into())); };
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let &[m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_relu: expected params [M,K,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -752,7 +770,8 @@ impl Backend for CpuBackend {
                                     (bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec(),
                                      bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec())
                                 };
-                                let &[m, k, n] = &params[..] else { return Err(BackendError::Dispatch("matmul_u4: expected params [M,K,N]".into())); };
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u4: expected params [M,K,N]".into())); };
                                 let k_packed = k.div_ceil(8);
                                 let out_f32 = {
                                     let d = arena.data_mut();
@@ -788,7 +807,8 @@ impl Backend for CpuBackend {
                                     (bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec(),
                                      bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec())
                                 };
-                                let &[m, k, n] = &params[..] else { return Err(BackendError::Dispatch("matmul_u8: expected params [M,K,N]".into())); };
+                                let matmul_params = resolve_params(params, param_dims, shape_env, 3);
+                                let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u8: expected params [M,K,N]".into())); };
                                 let k_packed = k.div_ceil(4);
                                 let out_f32 = {
                                     let d = arena.data_mut();
@@ -821,6 +841,15 @@ impl Backend for CpuBackend {
                                     ).to_vec()
                                 };
                                 let &[group_size, is_mean] = &params[..] else { return Err(BackendError::Dispatch("reduce_f32: expected params [group_size, is_mean]".into())); };
+                                // Resolve actual group size from param_dims using shape_env.
+                                // param_dims[0] is the reduced-axis dim (e.g., Symbol("N") when
+                                // reducing over the batch dimension).
+                                let effective_group_size = match param_dims {
+                                    Some(dims) if dims.len() >= 1 => {
+                                        dims[0].evaluate_with_env(shape_env).unwrap_or(group_size as u64) as usize
+                                    }
+                                    _ => group_size,
+                                };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(
@@ -830,13 +859,13 @@ impl Backend for CpuBackend {
                                 let num_groups = out_f32.len();
                                 for g in 0..num_groups {
                                     let mut sum = 0.0f32;
-                                    let start = g * group_size;
-                                    let end = (start + group_size).min(input.len());
+                                    let start = g * effective_group_size;
+                                    let end = (start + effective_group_size).min(input.len());
                                     for i in start..end {
                                         sum += input[i];
                                     }
                                     if is_mean == 1 {
-                                        sum /= (end - start) as f32;
+                                        sum /= effective_group_size as f32;
                                     }
                                     out_f32[g] = sum;
                                 }
@@ -850,7 +879,8 @@ impl Backend for CpuBackend {
                                         &d[input_slice.offset..input_slice.offset + input_slice.size]
                                     ).to_vec()
                                 };
-                                let &[m, n] = &params[..] else { return Err(BackendError::Dispatch("transpose_f32: expected params [M,N]".into())); };
+                                let transpose_params = resolve_params(params, param_dims, shape_env, 2);
+                                let &[m, n] = &transpose_params[..] else { return Err(BackendError::Dispatch("transpose_f32: expected params [M,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(
