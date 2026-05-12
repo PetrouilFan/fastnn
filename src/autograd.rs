@@ -517,6 +517,7 @@ pub fn build_backward_graph(
             }
             Opcode::Pad | Opcode::Slice | Opcode::Concat | Opcode::Gather | Opcode::ScatterNd
             | Opcode::Transpose | Opcode::Maximum | Opcode::Minimum | Opcode::ReduceMax
+            | Opcode::ArgMax
             | Opcode::Prelu | Opcode::Embedding | Opcode::Pow
             | Opcode::AddScalar | Opcode::MulScalar | Opcode::DivScalar => {
                 for &input_id in &node.inputs {

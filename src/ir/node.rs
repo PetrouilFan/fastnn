@@ -67,6 +67,7 @@ pub enum Opcode {
     LtScalar,
     EqScalar,
     AddScalar,
+    ArgMax,
     MulScalar,
     DivScalar,
     /// Mish activation: x * tanh(softplus(x))

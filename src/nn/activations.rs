@@ -28,29 +28,6 @@ macro_rules! impl_stateless_activation {
     ($name:ident, "mish") => {
         impl_activation_via_tensor!($name, mish);
     };
-    // Fallback for ops without Tensor methods — use dispatcher
-    ($name:ident, $dispatch_name:expr) => {
-        #[allow(dead_code)]
-        pub struct $name;
-
-        impl $name {
-            pub fn new() -> Self { $name }
-        }
-
-        impl Default for $name {
-            fn default() -> Self { Self::new() }
-        }
-
-        impl Module for $name {
-            fn forward(&self, x: &Tensor) -> Tensor {
-                let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x]).expect(concat!(
-                    "Activation::forward: ", $dispatch_name, " dispatch failed"
-                ));
-                result[0].clone()
-            }
-            impl_stateless_activation_methods!();
-        }
-    };
 }
 
 /// Dispatch-safe activation via Tensor method (→ AOT pipeline).
