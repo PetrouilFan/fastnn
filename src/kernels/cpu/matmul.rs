@@ -264,8 +264,11 @@ pub fn matmul_kernel(args: &[&Tensor]) -> Result<Vec<Tensor>, FastnnError> {
                     .par_chunks_mut(out_batch_elems)
                     .enumerate()
                     .for_each(|(bat, out_chunk)| {
-                        let a_offset = if batch_a == 1 { 0 } else { bat * a_batch_elems };
-                        let b_offset = if batch_b == 1 { 0 } else { bat * b_batch_elems };
+                        // Use modulo indexing for broadcast: when batch_a < batch
+                        // (or batch_b < batch), the operand is re-read from its
+                        // first batch element(s) as if broadcast along that axis.
+                        let a_offset = (bat % batch_a) * a_batch_elems;
+                        let b_offset = (bat % batch_b) * b_batch_elems;
                         matmul_blas_with_transpose_into(
                             &a_slice[a_offset..],
                             &b_slice[b_offset..],
@@ -281,8 +284,8 @@ pub fn matmul_kernel(args: &[&Tensor]) -> Result<Vec<Tensor>, FastnnError> {
             #[cfg(not(feature = "parallel"))]
             {
                 for bat in 0..batch {
-                    let a_offset = if batch_a == 1 { 0 } else { bat * a_batch_elems };
-                    let b_offset = if batch_b == 1 { 0 } else { bat * b_batch_elems };
+                    let a_offset = (bat % batch_a) * a_batch_elems;
+                    let b_offset = (bat % batch_b) * b_batch_elems;
                     let out_offset = bat * out_batch_elems;
                     matmul_blas_with_transpose_into(
                         &a_slice[a_offset..],

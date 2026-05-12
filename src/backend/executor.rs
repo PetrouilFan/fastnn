@@ -99,6 +99,30 @@ impl<B: Backend> GraphExecutor<B> {
         validate_shapes(graph, &shape_env).map_err(|e| {
             BackendError::Dispatch(format!("shape validation: {e}"))
         })?;
+        // Pre-dispatch slot overflow check: ensure every node's resolved output
+        // byte size fits within its allocated memory slot. This catches
+        // intermediate-tensor overruns before any kernel writes to the arena.
+        for (&node_id, slot) in &memory_plan.slots {
+            if let Some(node) = graph.get_node(node_id) {
+                let resolved = tensor_byte_size(&node.output_type.shape, node.output_type.dtype.byte_size());
+                // Use compile-time max estimate for Symbol dims (already the
+                // slot size), but check that resolved Known/Bounded dims fit.
+                let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
+                    let numel: u64 = shape.iter().product();
+                    numel as usize * node.output_type.dtype.byte_size()
+                } else {
+                    // Cannot resolve – skip runtime check (compile-time
+                    // slot sizing is the safety net).
+                    continue;
+                };
+                if needed > slot.size {
+                    return Err(BackendError::Dispatch(format!(
+                        "node {}: resolved output size {} exceeds slot size {} (shape {:?})",
+                        node_id, needed, slot.size, node.output_type.shape
+                    )));
+                }
+            }
+        }
         // Allocate arena — instructions reference the original (max-estimate)
         // slot sizes, so we must use the original arena_size.
         // MemoryPlan::tighten() is available for users who recompile with a
@@ -207,6 +231,27 @@ fn resolve_shape(shape: &[DimExpr], env: &ShapeEnv) -> Result<Vec<u64>, String> 
         .collect()
 }
 
+/// Parse an axis attribute, supporting negative values (ONNX-style).
+/// Returns a 0-based positive axis, or an error if out of range.
+fn resolve_axis(attrs: &std::collections::HashMap<String, String>, key: &str, rank: usize) -> Result<usize, String> {
+    let raw: i64 = attrs.get(key)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let axis = if raw < 0 {
+        let r = rank as i64;
+        if raw < -r {
+            return Err(format!("axis {} out of bounds for rank {}", raw, rank));
+        }
+        (r + raw) as usize
+    } else {
+        raw as usize
+    };
+    if axis >= rank {
+        return Err(format!("axis {} out of bounds for rank {}", axis, rank));
+    }
+    Ok(axis)
+}
+
 /// Validate shape constraints for all ops in the graph at runtime.
 /// Called after ShapeEnv is built, before dispatch.
 fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), String> {
@@ -259,18 +304,9 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                         node_id
                     ));
                 }
-                let axis: usize = node
-                    .attrs
-                    .get("axis")
-                    .and_then(|a| a.parse().ok())
-                    .unwrap_or(0);
                 let rank = input_shapes[0].len();
-                if axis >= rank {
-                    return Err(format!(
-                        "Reduce node {}: axis {} out of bounds for rank {} (shape {:?})",
-                        node_id, axis, rank, input_shapes[0]
-                    ));
-                }
+                let axis = resolve_axis(&node.attrs, "axis", rank)
+                    .map_err(|e| format!("Reduce node {}: {e}", node_id))?;
             }
             Opcode::Concat => {
                 if input_shapes.len() < 2 {
@@ -280,18 +316,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                         input_shapes.len()
                     ));
                 }
-                let axis: usize = node
-                    .attrs
-                    .get("axis")
-                    .and_then(|a| a.parse().ok())
-                    .unwrap_or(0);
                 let rank = input_shapes[0].len();
-                if axis >= rank {
-                    return Err(format!(
-                        "Concat node {}: axis {} out of bounds for rank {}",
-                        node_id, axis, rank
-                    ));
-                }
+                let axis = resolve_axis(&node.attrs, "axis", rank)?;
                 for (i, s) in input_shapes.iter().enumerate().skip(1) {
                     if s.len() != rank {
                         return Err(format!(
@@ -401,12 +427,10 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 }
             }
             Opcode::Softmax => {
-                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
-                if !input_shapes.is_empty() && axis >= input_shapes[0].len() {
-                    return Err(format!(
-                        "Softmax node {}: axis {} out of bounds for rank {}",
-                        node_id, axis, input_shapes[0].len()
-                    ));
+                if !input_shapes.is_empty() {
+                    let rank = input_shapes[0].len();
+                    let _ = resolve_axis(&node.attrs, "axis", rank)
+                        .map_err(|e| format!("Softmax node {}: {e}", node_id))?;
                 }
             }
             Opcode::BatchNorm | Opcode::LayerNorm => {
@@ -474,14 +498,9 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 if input_shapes.len() < 2 {
                     return Err(format!("Gather node {}: expected at least 2 inputs (data + indices), got {}", node_id, input_shapes.len()));
                 }
-                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
                 let rank = input_shapes[0].len();
-                if axis >= rank {
-                    return Err(format!(
-                        "Gather node {}: axis {} out of bounds for data rank {}",
-                        node_id, axis, rank
-                    ));
-                }
+                let axis = resolve_axis(&node.attrs, "axis", rank)
+                    .map_err(|e| format!("Gather node {}: {e}", node_id))?;
             }
             Opcode::Pad => {
                 if input_shapes.is_empty() { continue; }
