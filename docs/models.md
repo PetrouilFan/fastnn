@@ -40,6 +40,22 @@ model.train()  # Enables dropout and batch norm training mode
 model.eval()   # Disables dropout, uses batch norm running stats
 ```
 
+### Using `create_mlp` Builder
+
+```python
+from fastnn.models.builder import create_mlp
+
+model = create_mlp(
+    input_dim=784,
+    hidden_dims=[256, 128],
+    output_dim=10,
+    activation="relu",
+    dropout=0.2,
+    batch_norm=True
+)
+# Returns a PySequential container
+```
+
 ## Transformer
 
 A full transformer encoder for sequence classification.
@@ -76,6 +92,74 @@ print(logits.shape)  # [32, 10]
 | `num_classes` | Number of output classes | Required |
 | `dropout_p` | Dropout probability | 0.1 |
 
+## YOLO Object Detection
+
+FastNN can load YOLO models (v5/v8/v10/v11) exported to ONNX format and run object detection:
+
+```python
+import fastnn as fnn
+
+# Load YOLO model from ONNX
+model = fnn.YOLO("yolov8n.onnx")
+
+# Run inference on image
+detections = model("image.jpg")
+# Returns list of [N, 6] arrays: [x1, y1, x2, y2, confidence, class_id]
+
+# With custom thresholds
+model = fnn.YOLO("yolov8n.onnx", conf_threshold=0.5, iou_threshold=0.5)
+
+# Per-inference overrides
+detections = model("image.jpg", conf_threshold=0.3)
+```
+
+### NMS Utilities
+
+```python
+from fastnn import nms, yolo_decode, yolo_dfl_decode, xywh2xyxy, scale_boxes
+
+# Standard NMS
+keep = nms(boxes, scores, iou_threshold=0.5)
+
+# YOLO format conversion
+boxes_xyxy = xywh2xyxy(boxes_xywh)
+
+# Scale boxes back to original image
+boxes_scaled = scale_boxes((640, 640), boxes_xyxy, (1080, 1920))
+
+# Full YOLO output decoding
+detections = yolo_decode(model_output, conf_threshold=0.25)
+detections = yolo_dfl_decode(model_output, conf_threshold=0.25)  # YOLOv8/v10/v11
+```
+
+## BaseModel
+
+All built-in models inherit from `BaseModel`, which provides `save()` and `load()` methods with automatic metadata serialization:
+
+```python
+# Save model (includes class name and config metadata)
+model.save("model.fnn")
+
+# Load model (auto-reconstructs from metadata)
+loaded = fnn.models.MLP.load("model.fnn")
+```
+
+## BasicBlock (PySequential)
+
+A simple sequential wrapper for Python-side layer composition:
+
+```python
+from fastnn.layers import BasicBlock
+
+model = BasicBlock([
+    fnn.Linear(784, 256),
+    fnn.ReLU(),
+    fnn.Linear(256, 128),
+    fnn.ReLU(),
+    fnn.Linear(128, 10),
+])
+```
+
 ## Creating Custom Models
 
 Use `fnn.Sequential` directly for custom architectures:
@@ -108,6 +192,15 @@ block = fnn.ResidualBlock(
     downsample=None  # Or (ds_in, ds_out, ds_k, ds_s, ds_p, ds_bn) for stride > 1
 )
 ```
+
+## Pre-Built Model Summary
+
+| Model | Constructor | Description |
+|-------|-------------|-------------|
+| `MLP` | `fnn.models.MLP(...)` | Multi-layer perceptron |
+| `Transformer` | `fnn.models.Transformer(...)` | Transformer encoder for classification |
+| `YOLO` | `fnn.YOLO("model.onnx")` | YOLO object detection (v5/v8/v10/v11) |
+| `create_mlp` | `fnn.models.create_mlp(...)` | Builder for sequential MLP |
 
 ## Complete Training Example
 
@@ -195,6 +288,10 @@ fnn.io.save(model, 'model.fnn')
 
 # Load model
 loaded_model = fnn.io.load('model.fnn')
+
+# Save/Load with metadata (BaseModel subclasses)
+model.save('model.fnn')
+loaded = fnn.models.MLP.load('model.fnn')
 ```
 
 ## ONNX Import
