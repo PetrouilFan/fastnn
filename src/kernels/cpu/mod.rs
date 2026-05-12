@@ -7,6 +7,7 @@ mod losses;
 mod matmul;
 mod norm;
 mod pooling;
+mod quantized_conv;
 mod reductions;
 mod simd;
 pub use conv::*;
@@ -16,6 +17,7 @@ pub use losses::*;
 pub use matmul::*;
 pub use norm::*;
 pub use pooling::*;
+pub use quantized_conv::*;
 pub use reductions::*;
 pub use simd::*;
 

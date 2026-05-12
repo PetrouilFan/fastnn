@@ -338,7 +338,16 @@ impl PyTensor {
             Ok(PyTensor::from_tensor(sliced))
         } else {
             // Assume it's an integer index
-            let idx_val: usize = idx.extract()?;
+            let idx_val: isize = idx.extract()?;
+            let dim_size = self.inner.shape()[0] as isize;
+            // Handle negative indices (Python convention: -1 is last element)
+            let idx_val = if idx_val < 0 { dim_size + idx_val } else { idx_val };
+            if idx_val < 0 || idx_val >= dim_size {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "index {} is out of bounds for dimension 0 of size {}",
+                    idx_val, dim_size
+                )));
+            }
             // For 2D tensor [N, D], t[idx] returns [D] (the row)
             // For 1D tensor [N], t[idx] returns scalar (0-dim)
             // Implementation: slice(0, idx, idx+1, 1).squeeze(0)

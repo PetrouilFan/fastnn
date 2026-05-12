@@ -1907,8 +1907,8 @@ impl DAGExecutor {
     }
 
     fn dispatch_conv(&self, node: &DAGNode, args: &[Tensor]) -> Option<Vec<Tensor>> {
-        // Try packed CONV first if packed weights are available
-        if let Some(result) = self.dispatch_conv_packed(node, args) {
+        // Try quantized CONV first if packed weights are available
+        if let Some(result) = self.dispatch_quantized_conv(node, args) {
             return Some(result);
         }
         let x = &args[0];
@@ -2357,6 +2357,11 @@ impl DAGExecutor {
             .and_then(|g| g.parse::<usize>().ok())
             .unwrap_or(1);
 
+        // PackedConv2d kernel only supports groups=1; fall through to f32 for grouped/depthwise
+        if groups != 1 {
+            return None;
+        }
+
         let kernel_size = if let Some(ks) = node.attrs.get("kernel_shape") {
             let dims: Vec<usize> = ks
                 .trim_matches(|c| c == '[' || c == ']')
@@ -2400,15 +2405,86 @@ impl DAGExecutor {
         Some(vec![output])
     }
 
-    fn dispatch_conv_packed(&self, node: &DAGNode, args: &[Tensor]) -> Option<Vec<Tensor>> {
+    fn dispatch_quantized_conv(&self, node: &DAGNode, args: &[Tensor]) -> Option<Vec<Tensor>> {
         let weight_name = format!("{}.weight", node.name);
         let storage = self.packed_params.get(&weight_name)?;
 
+        // Parse conv params
+        let stride = node
+            .attrs
+            .get("stride")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
+        let padding = node
+            .attrs
+            .get("padding")
+            .and_then(|p| p.parse::<usize>().ok())
+            .unwrap_or(0);
+        let dilation = node
+            .attrs
+            .get("dilation")
+            .and_then(|d| d.parse::<usize>().ok())
+            .unwrap_or(1);
+        let groups = node
+            .attrs
+            .get("groups")
+            .and_then(|g| g.parse::<usize>().ok())
+            .unwrap_or(1);
+        let kernel_size = if let Some(ks) = node.attrs.get("kernel_shape") {
+            let dims: Vec<usize> = ks
+                .trim_matches(|c| c == '[' || c == ']')
+                .split(',')
+                .filter_map(|s| s.trim().parse::<usize>().ok())
+                .collect();
+            dims[0]
+        } else {
+            node.attrs
+                .get("kernel_size")
+                .and_then(|k| k.parse::<usize>().ok())
+                .unwrap_or(3)
+        };
+
+        // Get bias (stored as f32 in params)
+        let bias_name = format!("{}.bias", node.name);
+        let bias = self
+            .params
+            .get(&bias_name)
+            .map(|t| t.as_f32_slice().to_vec());
+
+        let x = args[0].contiguous();
+
+        // SAFETY: The quantized conv kernel handles the dispatch internally.
+        // The packed weight tensor is valid, and all conv parameters are
+        // validated by node attribute parsing.
         match storage {
+            WeightStorage::U8(p) => {
+                let result = unsafe {
+                    crate::kernels::cpu::dispatch_quantized_conv2d::<crate::dtypes::U8x4>(
+                        &x, p, bias.as_deref(),
+                        kernel_size, stride, padding, dilation, groups,
+                    )
+                };
+                Some(vec![result])
+            }
+            WeightStorage::U4(p) => {
+                let result = unsafe {
+                    crate::kernels::cpu::dispatch_quantized_conv2d::<crate::dtypes::U4x8>(
+                        &x, p, bias.as_deref(),
+                        kernel_size, stride, padding, dilation, groups,
+                    )
+                };
+                Some(vec![result])
+            }
+            WeightStorage::F16(p) => {
+                let result = unsafe {
+                    crate::kernels::cpu::dispatch_quantized_conv2d::<crate::dtypes::F16x2>(
+                        &x, p, bias.as_deref(),
+                        kernel_size, stride, padding, dilation, groups,
+                    )
+                };
+                Some(vec![result])
+            }
             WeightStorage::F32 => None,
-            WeightStorage::U4(p) => self.conv_packed_from(node, args, p),
-            WeightStorage::U8(p) => self.conv_packed_from(node, args, p),
-            WeightStorage::F16(p) => self.conv_packed_from(node, args, p),
         }
     }
 

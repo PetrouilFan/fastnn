@@ -230,10 +230,12 @@ def convert_precision(
                     params_v3.append((
                         name, bytes(packed.to_bytes()),
                         {4: DTYPE_U4, 8: DTYPE_U8, 16: DTYPE_F16}[bit_width],
-                        packed.scales(), packed.zeros()
+                        packed.scales(), packed.zeros(),
+                        shape,
                     ))
                 else:
-                    params_v3.append((name, arr, DTYPE_F32, [], []))
+                    shape = list(arr.shape) if hasattr(arr, 'shape') else []
+                    params_v3.append((name, arr, DTYPE_F32, [], [], shape))
 
         header["precision"] = config.to_dict()
         with open(output_path, "wb") as f:
