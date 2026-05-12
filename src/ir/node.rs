@@ -69,6 +69,8 @@ pub enum Opcode {
     AddScalar,
     MulScalar,
     DivScalar,
+    /// Mish activation: x * tanh(softplus(x))
+    Mish,
 }
 
 /// Default maximum extent assumed for a purely symbolic dimension (no Bounded bound).

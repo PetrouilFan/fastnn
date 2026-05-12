@@ -346,6 +346,7 @@ fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
         "sub_relu_f32" => Some(32),
         "mul_relu_f32" => Some(33),
         "div_relu_f32" => Some(34),
+        "mish_f32" => Some(35),
         _ => None,
     }
 }
@@ -732,6 +733,7 @@ fn apply_op(a: f32, b: f32, op: u32, e0: f32, e1: f32) -> f32 {
         case 32u: { return max(a - b, 0.0); } // sub_relu
         case 33u: { return max(a * b, 0.0); } // mul_relu
         case 34u: { return max(a / b, 0.0); } // div_relu
+        case 35u: { let sp = log(1.0 + exp(a)); return a * tanh(sp); } // mish
         default: { return a; }
     }
 }

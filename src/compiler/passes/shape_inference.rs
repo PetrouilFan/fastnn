@@ -45,7 +45,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             | Opcode::Clamp
             | Opcode::Sign
             | Opcode::LogicalNot
-            | Opcode::LogSoftmax => inputs.first().map(|i| i.output_type.shape.clone()),
+            | Opcode::LogSoftmax
+            | Opcode::Mish => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::MatMul => {
                 if inputs.len() >= 2 {
                     Some(matmul_output_shape(
