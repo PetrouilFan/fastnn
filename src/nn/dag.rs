@@ -364,7 +364,7 @@ impl DAGExecutor {
     pub fn with_packed(
         nodes: Vec<DAGNode>,
         params: HashMap<String, Tensor>,
-        packed_params: HashMap<String, WeightStorage>,
+        mut packed_params: HashMap<String, WeightStorage>,
         input_names: Vec<String>,
         output_names: Vec<String>,
     ) -> Self {
@@ -404,6 +404,31 @@ impl DAGExecutor {
             }
         }
         let total_tensors = next_id;
+
+        // Convert Conv weight tensors to block-major layout for SIMD throughput.
+        // This interleaves block_size=4 output channels' weight words so that
+        // gemm_batch_packed_block_major can process 4 OC at once with one
+        // activation load, improving cache reuse and reducing loop overhead.
+        for node in &nodes {
+            if node.op_code == OpCode::Conv {
+                let weight_name = format!("{}.weight", node.name);
+                if let Some(storage) = packed_params.get_mut(&weight_name) {
+                    let replacement = match storage {
+                        WeightStorage::U8(p) => {
+                            WeightStorage::U8(p.to_block_major(4))
+                        }
+                        WeightStorage::U4(p) => {
+                            WeightStorage::U4(p.to_block_major(4))
+                        }
+                        WeightStorage::F16(p) => {
+                            WeightStorage::F16(p.to_block_major(4))
+                        }
+                        WeightStorage::F32 => continue,
+                    };
+                    *storage = replacement;
+                }
+            }
+        }
 
         let mut scalar_cache = HashMap::new();
         for i in 0..=32i64 {

@@ -138,6 +138,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
             shape: self.shape.clone(),
             scales: vec![global_scale],
             zeros: vec![0.0],
+            block_size: 1,
         }
     }
 
