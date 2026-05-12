@@ -252,12 +252,15 @@ impl Backend for CpuBackend {
                         weight_meta,
                     });
                 }
-                Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
+                Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
+                | Opcode::Maximum | Opcode::Minimum => {
                     let mut kernel = match node.opcode {
                         Opcode::Add => "add_f32",
                         Opcode::Sub => "sub_f32",
                         Opcode::Mul => "mul_f32",
                         Opcode::Div => "div_f32",
+                        Opcode::Maximum => "max_f32",
+                        Opcode::Minimum => "min_f32",
                         _ => unreachable!(),
                     };
                     // Op+Relu fusion: if fused_op is "OpRelu", use the fused kernel name
@@ -288,7 +291,15 @@ impl Backend for CpuBackend {
                 | Opcode::Log
                 | Opcode::Sqrt
                 | Opcode::Neg
-                | Opcode::Abs => {
+                | Opcode::Abs
+                | Opcode::LeakyRelu
+                | Opcode::Elu
+                | Opcode::Softplus
+                | Opcode::Hardswish
+                | Opcode::Clamp
+                | Opcode::Sign
+                | Opcode::LogicalNot
+                | Opcode::LogSoftmax => {
                     let kernel = match node.opcode {
                         Opcode::Relu => "relu_f32",
                         Opcode::Gelu => "gelu_f32",
@@ -300,13 +311,38 @@ impl Backend for CpuBackend {
                         Opcode::Sqrt => "sqrt_f32",
                         Opcode::Neg => "neg_f32",
                         Opcode::Abs => "abs_f32",
+                        Opcode::LeakyRelu => "leaky_relu_f32",
+                        Opcode::Elu => "elu_f32",
+                        Opcode::Softplus => "softplus_f32",
+                        Opcode::Hardswish => "hardswish_f32",
+                        Opcode::Clamp => "clamp_f32",
+                        Opcode::Sign => "sign_f32",
+                        Opcode::LogicalNot => "logical_not_f32",
+                        Opcode::LogSoftmax => "log_softmax_f32",
                         _ => unreachable!(),
                     };
+                    let mut extra_params: Vec<usize> = Vec::new();
+                    if let Opcode::LeakyRelu = node.opcode {
+                        let slope: f32 = node.attrs.get("negative_slope")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.01);
+                        extra_params.push(slope.to_bits() as usize);
+                    }
+                    if let Opcode::Clamp = node.opcode {
+                        let min: f32 = node.attrs.get("min")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                        let max: f32 = node.attrs.get("max")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(1.0);
+                        extra_params.push(min.to_bits() as usize);
+                        extra_params.push(max.to_bits() as usize);
+                    }
                     instructions.push(Instruction::CallKernel {
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
-                        params: vec![],
+                        params: extra_params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -366,7 +402,7 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
-                Opcode::ReduceSum | Opcode::ReduceMean => {
+                Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => {
                     // Group size = product of dims being reduced over.
                     // For a single-axis reduce this is just input_shape[axis],
                     // which is typically Known (e.g. reduce over dim 1 of [N,4]
@@ -751,6 +787,173 @@ impl Backend for CpuBackend {
                                 };
                                 for i in 0..out_f32.len().min(input.len()) {
                                     out_f32[i] = input[i].tanh();
+                                }
+                            }
+                        }
+                        // --- New activation kernels for PPO/control/RL (AOT pipeline) ---
+                        "leaky_relu_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let slope = if !params.is_empty() { f32::from_bits(params[0] as u32) } else { 0.01 };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    out_f32[i] = if input[i] > 0.0 { input[i] } else { input[i] * slope };
+                                }
+                            }
+                        }
+                        "elu_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    out_f32[i] = if input[i] > 0.0 { input[i] } else { (input[i].exp() - 1.0) };
+                                }
+                            }
+                        }
+                        "softplus_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    out_f32[i] = (1.0 + input[i].exp()).ln();
+                                }
+                            }
+                        }
+                        "hardswish_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    let v = input[i];
+                                    out_f32[i] = v * (v + 3.0).max(0.0).min(6.0) / 6.0;
+                                }
+                            }
+                        }
+                        "clamp_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let min_val = if params.len() > 0 { f32::from_bits(params[0] as u32) } else { 0.0 };
+                                let max_val = if params.len() > 1 { f32::from_bits(params[1] as u32) } else { 1.0 };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    out_f32[i] = input[i].max(min_val).min(max_val);
+                                }
+                            }
+                        }
+                        "sign_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    out_f32[i] = input[i].signum();
+                                }
+                            }
+                        }
+                        "logical_not_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    out_f32[i] = if input[i] == 0.0 { 1.0 } else { 0.0 };
+                                }
+                            }
+                        }
+                        "log_softmax_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                if !input.is_empty() {
+                                    let max_val = input.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                                    let mut sum = 0.0f32;
+                                    for i in 0..input.len() {
+                                        sum += (input[i] - max_val).exp();
+                                    }
+                                    let log_sum = sum.ln();
+                                    for i in 0..out_f32.len().min(input.len()) {
+                                        out_f32[i] = (input[i] - max_val) - log_sum;
+                                    }
+                                }
+                            }
+                        }
+                        "max_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
+                                     bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec())
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let len = out_f32.len().min(a.len()).min(b.len());
+                                for i in 0..len {
+                                    out_f32[i] = a[i].max(b[i]);
+                                }
+                            }
+                        }
+                        "min_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
+                                     bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec())
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let len = out_f32.len().min(a.len()).min(b.len());
+                                for i in 0..len {
+                                    out_f32[i] = a[i].min(b[i]);
                                 }
                             }
                         }
