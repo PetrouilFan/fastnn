@@ -741,7 +741,7 @@ pub unsafe fn single_threaded_matmul(
     }
 }
 
-pub unsafe fn linear_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+pub fn linear_kernel(args: &[&Tensor]) -> Result<Vec<Tensor>, FastnnError> {
     let x = args[0];
     let w = args[1];
     let bias = if args.len() > 2 { Some(args[2]) } else { None };
@@ -777,10 +777,10 @@ pub unsafe fn linear_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         result = result.add(b);
     }
 
-    vec![result]
+    Ok(vec![result])
 }
 
-pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+pub fn fused_linear_relu_kernel(args: &[&Tensor]) -> Result<Vec<Tensor>, FastnnError> {
     let x = args[0];
     let w = args[1];
     let bias = if args.len() > 2 { Some(args[2]) } else { None };
@@ -815,7 +815,7 @@ pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
+        return Err(FastnnError::Computation("expected CPU storage".into()));
     };
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
@@ -960,10 +960,10 @@ pub unsafe fn fused_linear_relu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
 
-    vec![output]
+    Ok(vec![output])
 }
 
-pub unsafe fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+pub fn fused_linear_silu_kernel(args: &[&Tensor]) -> Result<Vec<Tensor>, FastnnError> {
     let x = args[0];
     let w = args[1];
     let bias = if args.len() > 2 { Some(args[2]) } else { None };
@@ -998,7 +998,7 @@ pub unsafe fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
+        return Err(FastnnError::Computation("expected CPU storage".into()));
     };
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
@@ -1141,10 +1141,10 @@ pub unsafe fn fused_linear_silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
 
-    vec![output]
+    Ok(vec![output])
 }
 
-pub unsafe fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+pub fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Result<Vec<Tensor>, FastnnError> {
     let x = args[0];
     let w = args[1];
     let bias = if args.len() > 2 { Some(args[2]) } else { None };
@@ -1179,7 +1179,7 @@ pub unsafe fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
+        return Err(FastnnError::Computation("expected CPU storage".into()));
     };
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
@@ -1338,7 +1338,7 @@ pub unsafe fn fused_linear_gelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         }
     }
 
-    vec![output]
+    Ok(vec![output])
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]

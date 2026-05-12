@@ -911,13 +911,13 @@ fn register_kernels() {
     }
     register("erf", DispatchKey::Cpu, erf_kernel);
     register_fallible("matmul", DispatchKey::Cpu, matmul_kernel);
-    register("linear", DispatchKey::Cpu, linear_kernel);
-    register(
+    register_fallible("linear", DispatchKey::Cpu, linear_kernel);
+    register_fallible(
         "fused_linear_relu",
         DispatchKey::Cpu,
         fused_linear_relu_kernel,
     );
-    register(
+    register_fallible(
         "fused_linear_gelu",
         DispatchKey::Cpu,
         fused_linear_gelu_kernel,
@@ -927,7 +927,7 @@ fn register_kernels() {
         DispatchKey::Cpu,
         fused_mul_add_kernel,
     );
-    register(
+    register_fallible(
         "fused_linear_silu",
         DispatchKey::Cpu,
         fused_linear_silu_kernel,
