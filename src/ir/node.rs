@@ -66,6 +66,75 @@ impl DimExpr {
             DimExpr::Symbol(_) => None,
         }
     }
+
+    /// Symbolic multiplication of two DimExpr values.
+    pub fn mul(&self, other: &DimExpr) -> DimExpr {
+        match (self, other) {
+            (DimExpr::Known(0), _) | (_, DimExpr::Known(0)) => DimExpr::Known(0),
+            (DimExpr::Known(1), other) | (other, DimExpr::Known(1)) => other.clone(),
+            (DimExpr::Known(va), DimExpr::Known(vb)) => DimExpr::Known(va * vb),
+            (DimExpr::Known(v), DimExpr::Bounded { sym, max })
+            | (DimExpr::Bounded { sym, max }, DimExpr::Known(v)) => DimExpr::Bounded {
+                sym: sym.clone(),
+                max: max * v,
+            },
+            (DimExpr::Known(v), DimExpr::Symbol(s))
+            | (DimExpr::Symbol(s), DimExpr::Known(v)) => DimExpr::Bounded {
+                sym: s.clone(),
+                max: *v,
+            },
+            (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: _, max: mb }) => {
+                DimExpr::Bounded {
+                    sym: sym.clone(),
+                    max: max * mb,
+                }
+            }
+            (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
+                DimExpr::Symbol(format!("({}*{})", s, t))
+            }
+            (DimExpr::Symbol(s), DimExpr::Bounded { sym, max })
+            | (DimExpr::Bounded { sym, max }, DimExpr::Symbol(s)) => {
+                DimExpr::Bounded {
+                    sym: format!("({}*{})", s, sym),
+                    max: *max,
+                }
+            }
+        }
+    }
+
+    /// Symbolic addition of two DimExpr values.
+    pub fn add(&self, other: &DimExpr) -> DimExpr {
+        match (self, other) {
+            (DimExpr::Known(0), other) | (other, DimExpr::Known(0)) => other.clone(),
+            (DimExpr::Known(va), DimExpr::Known(vb)) => DimExpr::Known(va + vb),
+            (DimExpr::Known(v), DimExpr::Bounded { sym, max })
+            | (DimExpr::Bounded { sym, max }, DimExpr::Known(v)) => DimExpr::Bounded {
+                sym: sym.clone(),
+                max: max + v,
+            },
+            (DimExpr::Known(v), DimExpr::Symbol(s))
+            | (DimExpr::Symbol(s), DimExpr::Known(v)) => DimExpr::Bounded {
+                sym: s.clone(),
+                max: *v,
+            },
+            (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: _, max: mb }) => {
+                DimExpr::Bounded {
+                    sym: sym.clone(),
+                    max: max + mb,
+                }
+            }
+            (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
+                DimExpr::Symbol(format!("({}+{})", s, t))
+            }
+            (DimExpr::Symbol(s), DimExpr::Bounded { sym, max })
+            | (DimExpr::Bounded { sym, max }, DimExpr::Symbol(s)) => {
+                DimExpr::Bounded {
+                    sym: format!("({}+{})", s, sym),
+                    max: *max,
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Display for DimExpr {
