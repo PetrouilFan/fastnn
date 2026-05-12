@@ -143,9 +143,15 @@ impl PReLU {
 
 impl Module for PReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("prelu", DispatchKey::Cpu, &[x, &self.weight])
-            .expect("PReLU::forward: dispatch failed");
-        result[0].clone()
+        use crate::storage::Device;
+        let result = if x.device() == Device::Cpu {
+            Tensor::exec_aot(&[x, &self.weight], |g, ins| vec![g.prelu(&ins[0], &ins[1])])
+                .expect("PReLU::forward: AOT failed")
+        } else {
+            dispatch("prelu", DispatchKey::Wgpu, &[x, &self.weight])
+                .expect("PReLU::forward: dispatch failed")
+        };
+        result.into_iter().next().unwrap()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
@@ -220,11 +226,7 @@ impl Softplus {
 
 impl Module for Softplus {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let beta_t = Tensor::from_scalar(self.beta as f32);
-        let threshold_t = Tensor::from_scalar(self.threshold as f32);
-        let result = dispatch("softplus", DispatchKey::Cpu, &[x, &beta_t, &threshold_t])
-            .expect("Softplus::forward: dispatch failed");
-        result[0].clone()
+        x.softplus(self.beta as f32, self.threshold as f32)
     }
 
     impl_stateless_activation_methods!();
@@ -242,10 +244,7 @@ impl Elu {
 
 impl Module for Elu {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let alpha_tensor = Tensor::from_scalar(self.alpha as f32);
-        let result = dispatch("elu", DispatchKey::Cpu, &[x, &alpha_tensor])
-            .expect("Elu::forward: dispatch failed");
-        result[0].clone()
+        x.elu(self.alpha as f32)
     }
 
     impl_stateless_activation_methods!();
