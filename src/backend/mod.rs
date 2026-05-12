@@ -84,6 +84,9 @@ pub mod executor;
 /// CPU backend implementation (inline f32 kernels)
 pub mod cpu;
 
+/// Wgpu (GPU) backend implementation (WGSL compute shaders)
+pub mod wgpu;
+
 /// Re-export the MemoryPlan from the compiler passes module
 pub use crate::compiler::passes::memory_planning::MemoryPlan;
 

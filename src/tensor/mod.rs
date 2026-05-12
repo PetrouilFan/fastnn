@@ -1100,11 +1100,20 @@ impl Tensor {
         let graph_outputs = build_graph(&g, &graph_inputs);
 
         let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
-        let result_bytes = g.compile_and_execute(
-            &graph_outputs.iter().collect::<Vec<_>>(),
-            CpuBackend,
-            &input_bytes,
-        )?;
+        let use_gpu = inputs.iter().any(|t| matches!(t.device(), Device::Wgpu(_)));
+        let result_bytes = if use_gpu {
+            g.compile_and_execute::<crate::backend::wgpu::WgpuBackend>(
+                &graph_outputs.iter().collect::<Vec<_>>(),
+                crate::backend::wgpu::WgpuBackend,
+                &input_bytes,
+            )?
+        } else {
+            g.compile_and_execute::<CpuBackend>(
+                &graph_outputs.iter().collect::<Vec<_>>(),
+                CpuBackend,
+                &input_bytes,
+            )?
+        };
 
         Ok(graph_outputs
             .into_iter()
