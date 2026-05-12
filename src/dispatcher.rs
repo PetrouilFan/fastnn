@@ -1,9 +1,15 @@
-//! Runtime dispatch table (v1.x backward compatibility).
+//! Runtime dispatch table (v1.x backward compatibility) — **DEPRECATED**.
 //!
 //! In v2.0.0 the dispatch table is replaced by the AOT compiler
-//! (`ComputeGraph` → compiler passes → `Backend::compile` → `Backend::dispatch`).
-//! This module is kept so that v1.x nn/ and tensor/ code compiles during
-//! the migration.  New code should use the v2.0 pipeline directly.
+//! (`ComputeGraph` → `GraphBuilder` → compiler passes → `Backend::compile` → `Backend::dispatch`).
+//!
+//! All CPU tensor operations now go through [`Tensor::exec_aot`](crate::tensor::Tensor::exec_aot)
+//! which builds a `ComputeGraph`, compiles it with the AOT pipeline, and executes it.
+//! Only GPU fallback and a handful of ops without GraphBuilder equivalents (pow, scalar ops)
+//! still route through this dispatcher.
+//!
+//! This module will be removed once all GPU fallbacks are migrated to the AOT pipeline.
+//! New code MUST NOT add new registrations here.
 
 #![allow(dead_code)]
 
