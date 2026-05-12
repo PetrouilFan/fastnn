@@ -864,116 +864,116 @@ impl Node for EmbeddingBackward {
 
 #[ctor::ctor]
 fn register_kernels() {
-    use crate::dispatcher::{register, DispatchKey, KernelFn};
+    use crate::dispatcher::{register, register_fallible, DispatchKey};
 
-    register("add", DispatchKey::Cpu, add_kernel as KernelFn);
-    register("sub", DispatchKey::Cpu, sub_kernel as KernelFn);
-    register("mul", DispatchKey::Cpu, mul_kernel as KernelFn);
-    register("div", DispatchKey::Cpu, div_kernel as KernelFn);
-    register("neg", DispatchKey::Cpu, neg_kernel as KernelFn);
-    register("abs", DispatchKey::Cpu, abs_kernel as KernelFn);
-    register("exp", DispatchKey::Cpu, exp_kernel as KernelFn);
-    register("log", DispatchKey::Cpu, log_kernel as KernelFn);
-    register("sqrt", DispatchKey::Cpu, sqrt_kernel as KernelFn);
-    register("relu", DispatchKey::Cpu, relu_kernel as KernelFn);
+    register("add", DispatchKey::Cpu, add_kernel);
+    register("sub", DispatchKey::Cpu, sub_kernel);
+    register("mul", DispatchKey::Cpu, mul_kernel);
+    register("div", DispatchKey::Cpu, div_kernel);
+    register("neg", DispatchKey::Cpu, neg_kernel);
+    register("abs", DispatchKey::Cpu, abs_kernel);
+    register("exp", DispatchKey::Cpu, exp_kernel);
+    register("log", DispatchKey::Cpu, log_kernel);
+    register("sqrt", DispatchKey::Cpu, sqrt_kernel);
+    register("relu", DispatchKey::Cpu, relu_kernel);
     register(
         "fused_add_relu",
         DispatchKey::Cpu,
-        fused_add_relu_kernel as KernelFn,
+        fused_add_relu_kernel,
     );
-    register("gelu", DispatchKey::Cpu, gelu_kernel as KernelFn);
-    register("sigmoid", DispatchKey::Cpu, sigmoid_kernel as KernelFn);
-    register("tanh", DispatchKey::Cpu, tanh_kernel as KernelFn);
-    register("silu", DispatchKey::Cpu, silu_kernel as KernelFn);
+    register("gelu", DispatchKey::Cpu, gelu_kernel);
+    register("sigmoid", DispatchKey::Cpu, sigmoid_kernel);
+    register("tanh", DispatchKey::Cpu, tanh_kernel);
+    register("silu", DispatchKey::Cpu, silu_kernel);
     register(
         "gelu_backward",
         DispatchKey::Cpu,
-        gelu_backward_kernel as KernelFn,
+        gelu_backward_kernel,
     );
     register(
         "silu_backward",
         DispatchKey::Cpu,
-        silu_backward_kernel as KernelFn,
+        silu_backward_kernel,
     );
     register(
         "leaky_relu",
         DispatchKey::Cpu,
-        leaky_relu_kernel as KernelFn,
+        leaky_relu_kernel,
     );
-    register("prelu", DispatchKey::Cpu, prelu_kernel as KernelFn);
-    register("softplus", DispatchKey::Cpu, softplus_kernel as KernelFn);
-    register("hardswish", DispatchKey::Cpu, hardswish_kernel as KernelFn);
-    register("elu", DispatchKey::Cpu, elu_kernel as KernelFn);
-    register("clamp", DispatchKey::Cpu, clamp_kernel as KernelFn);
-    register("pow", DispatchKey::Cpu, pow_kernel as KernelFn);
+    register("prelu", DispatchKey::Cpu, prelu_kernel);
+    register("softplus", DispatchKey::Cpu, softplus_kernel);
+    register("hardswish", DispatchKey::Cpu, hardswish_kernel);
+    register("elu", DispatchKey::Cpu, elu_kernel);
+    register("clamp", DispatchKey::Cpu, clamp_kernel);
+    register("pow", DispatchKey::Cpu, pow_kernel);
     fn erf_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         vec![args[0].erf()]
     }
-    register("erf", DispatchKey::Cpu, erf_kernel as KernelFn);
-    register("matmul", DispatchKey::Cpu, matmul_kernel as KernelFn);
-    register("linear", DispatchKey::Cpu, linear_kernel as KernelFn);
+    register("erf", DispatchKey::Cpu, erf_kernel);
+    register_fallible("matmul", DispatchKey::Cpu, matmul_kernel);
+    register("linear", DispatchKey::Cpu, linear_kernel);
     register(
         "fused_linear_relu",
         DispatchKey::Cpu,
-        fused_linear_relu_kernel as KernelFn,
+        fused_linear_relu_kernel,
     );
     register(
         "fused_linear_gelu",
         DispatchKey::Cpu,
-        fused_linear_gelu_kernel as KernelFn,
+        fused_linear_gelu_kernel,
     );
     register(
         "fused_mul_add",
         DispatchKey::Cpu,
-        fused_mul_add_kernel as KernelFn,
+        fused_mul_add_kernel,
     );
     register(
         "fused_linear_silu",
         DispatchKey::Cpu,
-        fused_linear_silu_kernel as KernelFn,
+        fused_linear_silu_kernel,
     );
     register(
         "fused_conv_bn_silu",
         DispatchKey::Cpu,
-        fused_conv_bn_silu_kernel as KernelFn,
+        fused_conv_bn_silu_kernel,
     );
     register(
         "fused_conv_bn",
         DispatchKey::Cpu,
-        fused_conv_bn_kernel as KernelFn,
+        fused_conv_bn_kernel,
     );
-    register("sum", DispatchKey::Cpu, sum_kernel as KernelFn);
-    register("mean", DispatchKey::Cpu, mean_kernel as KernelFn);
-    register("max", DispatchKey::Cpu, max_kernel as KernelFn);
-    register("min", DispatchKey::Cpu, min_kernel as KernelFn);
-    register("maximum", DispatchKey::Cpu, maximum_kernel as KernelFn);
-    register("minimum", DispatchKey::Cpu, minimum_kernel as KernelFn);
-    register("softmax", DispatchKey::Cpu, softmax_kernel as KernelFn);
+    register("sum", DispatchKey::Cpu, sum_kernel);
+    register("mean", DispatchKey::Cpu, mean_kernel);
+    register("max", DispatchKey::Cpu, max_kernel);
+    register("min", DispatchKey::Cpu, min_kernel);
+    register("maximum", DispatchKey::Cpu, maximum_kernel);
+    register("minimum", DispatchKey::Cpu, minimum_kernel);
+    register("softmax", DispatchKey::Cpu, softmax_kernel);
     register(
         "log_softmax",
         DispatchKey::Cpu,
-        log_softmax_kernel as KernelFn,
+        log_softmax_kernel,
     );
     register(
         "softmax_backward",
         DispatchKey::Cpu,
-        softmax_backward_kernel as KernelFn,
+        softmax_backward_kernel,
     );
-    register("mse_loss", DispatchKey::Cpu, mse_loss_kernel as KernelFn);
+    register("mse_loss", DispatchKey::Cpu, mse_loss_kernel);
     register(
         "bce_with_logits",
         DispatchKey::Cpu,
-        bce_with_logits_kernel as KernelFn,
+        bce_with_logits_kernel,
     );
     register(
         "huber_loss",
         DispatchKey::Cpu,
-        huber_loss_kernel as KernelFn,
+        huber_loss_kernel,
     );
     register(
         "cross_entropy_loss",
         DispatchKey::Cpu,
-        cross_entropy_loss_kernel as KernelFn,
+        cross_entropy_loss_kernel,
     );
 
     // GPU fallback for cross_entropy_loss (moves to CPU for computation)
@@ -988,58 +988,58 @@ fn register_kernels() {
     register(
         "cross_entropy_loss",
         DispatchKey::Wgpu,
-        cross_entropy_loss_gpu_fallback as KernelFn,
+        cross_entropy_loss_gpu_fallback,
     );
 
-    register("conv2d", DispatchKey::Cpu, conv2d_kernel as KernelFn);
-    register("conv1d", DispatchKey::Cpu, conv1d_kernel as KernelFn);
-    register("conv3d", DispatchKey::Cpu, conv3d_kernel as KernelFn);
+    register("conv2d", DispatchKey::Cpu, conv2d_kernel);
+    register("conv1d", DispatchKey::Cpu, conv1d_kernel);
+    register("conv3d", DispatchKey::Cpu, conv3d_kernel);
     register(
         "conv_transpose2d",
         DispatchKey::Cpu,
-        conv_transpose2d_kernel as KernelFn,
+        conv_transpose2d_kernel,
     );
     register(
         "layer_norm",
         DispatchKey::Cpu,
-        layer_norm_kernel as KernelFn,
+        layer_norm_kernel,
     );
     register(
         "fused_layer_norm_gelu",
         DispatchKey::Cpu,
-        fused_layer_norm_gelu_kernel as KernelFn,
+        fused_layer_norm_gelu_kernel,
     );
     register(
         "batch_norm",
         DispatchKey::Cpu,
-        batch_norm_kernel as KernelFn,
+        batch_norm_kernel,
     );
-    register("rms_norm", DispatchKey::Cpu, rms_norm_kernel as KernelFn);
+    register("rms_norm", DispatchKey::Cpu, rms_norm_kernel);
     register(
         "fused_rms_norm_gelu",
         DispatchKey::Cpu,
-        fused_rms_norm_gelu_kernel as KernelFn,
+        fused_rms_norm_gelu_kernel,
     );
     register(
         "fused_conv_bn_relu",
         DispatchKey::Cpu,
-        fused_conv_bn_relu_kernel as KernelFn,
+        fused_conv_bn_relu_kernel,
     );
     register(
         "fused_conv_bn_gelu",
         DispatchKey::Cpu,
-        fused_conv_bn_gelu_kernel as KernelFn,
+        fused_conv_bn_gelu_kernel,
     );
-    register("embedding", DispatchKey::Cpu, embedding_kernel as KernelFn);
-    register("zeros", DispatchKey::Cpu, zeros_kernel as KernelFn);
-    register("ones", DispatchKey::Cpu, ones_kernel as KernelFn);
-    register("full", DispatchKey::Cpu, full_kernel as KernelFn);
-    register("arange", DispatchKey::Cpu, arange_kernel as KernelFn);
-    register("linspace", DispatchKey::Cpu, linspace_kernel as KernelFn);
-    register("eye", DispatchKey::Cpu, eye_kernel as KernelFn);
-    register("randn", DispatchKey::Cpu, randn_kernel as KernelFn);
-    register("rand", DispatchKey::Cpu, rand_kernel as KernelFn);
-    register("gt_scalar", DispatchKey::Cpu, gt_scalar_kernel as KernelFn);
+    register("embedding", DispatchKey::Cpu, embedding_kernel);
+    register("zeros", DispatchKey::Cpu, zeros_kernel);
+    register("ones", DispatchKey::Cpu, ones_kernel);
+    register("full", DispatchKey::Cpu, full_kernel);
+    register("arange", DispatchKey::Cpu, arange_kernel);
+    register("linspace", DispatchKey::Cpu, linspace_kernel);
+    register("eye", DispatchKey::Cpu, eye_kernel);
+    register("randn", DispatchKey::Cpu, randn_kernel);
+    register("rand", DispatchKey::Cpu, rand_kernel);
+    register("gt_scalar", DispatchKey::Cpu, gt_scalar_kernel);
 
     // GPU fallback for gt_scalar (moves to CPU for computation)
     fn gt_scalar_gpu_fallback(args: &[&Tensor]) -> Vec<Tensor> {
@@ -1051,39 +1051,39 @@ fn register_kernels() {
     register(
         "gt_scalar",
         DispatchKey::Wgpu,
-        gt_scalar_gpu_fallback as KernelFn,
+        gt_scalar_gpu_fallback,
     );
     register(
         "max_pool2d",
         DispatchKey::Cpu,
-        max_pool2d_kernel as KernelFn,
+        max_pool2d_kernel,
     );
     register(
         "avg_pool2d",
         DispatchKey::Cpu,
-        avg_pool2d_kernel as KernelFn,
+        avg_pool2d_kernel,
     );
-    register("sign", DispatchKey::Cpu, sign_kernel as KernelFn);
-    register("lt_scalar", DispatchKey::Cpu, lt_scalar_kernel as KernelFn);
+    register("sign", DispatchKey::Cpu, sign_kernel);
+    register("lt_scalar", DispatchKey::Cpu, lt_scalar_kernel);
     register(
         "add_scalar",
         DispatchKey::Cpu,
-        add_scalar_kernel as KernelFn,
+        add_scalar_kernel,
     );
     register(
         "div_scalar",
         DispatchKey::Cpu,
-        div_scalar_kernel as KernelFn,
+        div_scalar_kernel,
     );
     register(
         "logical_not",
         DispatchKey::Cpu,
-        logical_not_kernel as KernelFn,
+        logical_not_kernel,
     );
     register(
         "flash_attention",
         DispatchKey::Cpu,
-        flash_attention_kernel as KernelFn,
+        flash_attention_kernel,
     );
 }
 

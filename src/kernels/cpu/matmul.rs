@@ -6,6 +6,7 @@
 use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
 use crate::iterator::TensorIterator;
+use crate::error::FastnnError;
 use crate::kernels::blas::{
     matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,
     MIN_BLAS_SIZE,
@@ -14,8 +15,14 @@ use crate::storage::{DType, Device, Storage};
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
-pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
+pub fn matmul_kernel(args: &[&Tensor]) -> Result<Vec<Tensor>, FastnnError> {
     // Removed debug file writing that was causing issues on Windows
+
+    if args.len() < 2 {
+        return Err(FastnnError::InvalidArgument(format!(
+            "matmul: expected at least 2 arguments, got {}", args.len()
+        )));
+    }
 
     let a = if args[0].is_contiguous() {
         args[0].clone()
@@ -32,7 +39,10 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let b_shape = b.shape_ref();
 
     if a_shape.len() < 2 || b_shape.len() < 2 {
-        panic!("matmul: both tensors must have at least 2 dimensions");
+        return Err(FastnnError::Shape(format!(
+            "matmul: both tensors must have at least 2 dimensions, got {} and {}",
+            a_shape.len(), b_shape.len()
+        )));
     }
 
     let m = a_shape[a_shape.len() - 2] as i32;
@@ -50,15 +60,12 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     // Both tensors are contiguous (ensured above), so B is never transposed.
     // Standard dimension compatibility check: B's second-to-last dim must equal A's last dim (k).
     if b_shape[b_shape.len() - 2] as i32 != k {
-        panic!(
+        return Err(FastnnError::Shape(format!(
             "matmul: A[{}, {}] @ B[{}, {}] - B second-to-last dim {} != k {}",
-            m,
-            k,
-            b_shape[b_shape.len() - 2],
-            b_shape[b_shape.len() - 1],
-            b_shape[b_shape.len() - 2],
-            k
-        );
+            m, k,
+            b_shape[b_shape.len() - 2], b_shape[b_shape.len() - 1],
+            b_shape[b_shape.len() - 2], k
+        )));
     }
     // Use custom tiled matmul
     let batch_a = if a_shape.len() > 2 {
@@ -107,10 +114,10 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let a_inner = a_3d_shape[a_3d_shape.len() - 1];
     let b_inner = b_3d_shape[b_3d_shape.len() - 2];
     if a_inner != b_inner {
-        panic!(
+        return Err(FastnnError::Shape(format!(
             "matmul: inner dimension mismatch: A[..{}] @ B[..{}]",
             a_inner, b_inner
-        );
+        )));
     }
 
     let a = &a_3d;
@@ -144,7 +151,7 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(cpu_storage) = output_storage else {
-        panic!("Expected CPU storage");
+        return Err(FastnnError::Computation("matmul: expected CPU storage".into()));
     };
     let out_data = Arc::make_mut(&mut cpu_storage.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
@@ -309,7 +316,7 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 b_is_transposed,
             );
         }
-    } else {
+    } else { unsafe {
         #[cfg(feature = "parallel")]
         {
             if batch > 1 || m as usize * n as usize > 10000 {
@@ -398,7 +405,7 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 );
             }
         }
-    }
+    } }
 
     // Reshape output back to original N-D shape if we flattened
     if orig_a_shape.len() > 3 {
@@ -408,7 +415,7 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         output = output.reshape(final_shape);
     }
 
-    vec![output]
+    Ok(vec![output])
 }
 
 #[cfg(feature = "parallel")]
