@@ -4,13 +4,14 @@ use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruc
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{U4x8, U8x4};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorValue};
-use crate::kernels::blas::matmul_blas_into;
+use crate::backend::cpu::blas::matmul_blas_into;
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use std::cell::UnsafeCell;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
+pub mod blas;
 pub mod microkernels;
 
 /// Resolve kernel dimension params at dispatch time using the runtime shape

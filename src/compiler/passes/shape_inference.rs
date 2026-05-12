@@ -91,7 +91,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     shape.clone()
                 }
             }),
-            Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => inputs.first().map(|i| {
+            Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => inputs.first().map(|i| {
                 let mut s = i.output_type.shape.clone();
                 if let Some(axis_str) = node.attrs.get("axis") {
                     if let Ok(axis) = axis_str.parse::<usize>() {
