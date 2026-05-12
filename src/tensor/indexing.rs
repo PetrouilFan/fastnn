@@ -58,10 +58,17 @@ impl Tensor {
     }
 
     pub fn maximum(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("maximum", dispatch_key, &[self, other])
-            .expect("Tensor::maximum: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu && other.device() == Device::Cpu {
+            Tensor::exec_aot(&[self, other], |g, ins| vec![g.maximum(&ins[0], &ins[1])])
+                .expect("Tensor::maximum: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("maximum", dispatch_key, &[self, other])
+                .expect("Tensor::maximum: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
             let backward = Arc::new(autograd::MaximumBackward::new());
@@ -83,21 +90,36 @@ impl Tensor {
     }
 
     pub fn sign(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result =
-            dispatch("sign", dispatch_key, &[self]).expect("Tensor::sign: dispatch failed");
-        result[0].clone()
+        let result = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.sign(&ins[0])])
+                .expect("Tensor::sign: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("sign", dispatch_key, &[self])
+                .expect("Tensor::sign: dispatch failed")[0].clone()
+        };
+        result
     }
 
     pub fn minimum(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
+        let output = if self.device() == Device::Cpu && other.device() == Device::Cpu {
+            Tensor::exec_aot(&[self, other], |g, ins| vec![g.minimum(&ins[0], &ins[1])])
+                .expect("Tensor::minimum: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = match (self.device(), other.device()) {
+                (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+                (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+                _ => device_to_dispatch_key(Device::Cpu),
+            };
+            dispatch("minimum", dispatch_key, &[self, other])
+                .expect("Tensor::minimum: dispatch failed")[0].clone()
         };
-        let result = dispatch("minimum", dispatch_key, &[self, other])
-            .expect("Tensor::minimum: dispatch failed");
-        let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
             let backward = Arc::new(autograd::MinimumBackward::new());
