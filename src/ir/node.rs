@@ -196,8 +196,11 @@ impl ShapeEnv {
 
     /// Build a ShapeEnv by matching input byte sizes against graph input node shapes.
     ///
-    /// For each graph input, this infers symbolic dimension values from the
-    /// input byte data.  The algorithm has two passes:
+    /// Returns an error if:
+    /// - Input byte count is not evenly divisible by the known-stride element count.
+    /// - Two inputs infer different values for the same symbol (via [`bind`](Self::bind)).
+    ///
+    /// The algorithm has two passes:
     ///
     /// 1. **Single-symbol inputs** — if an input shape has exactly one
     ///    [`DimExpr::Symbol`] or [`DimExpr::Bounded`] dimension, its value is
@@ -209,7 +212,7 @@ impl ShapeEnv {
     ///
     /// This handles the common case of `[B, T, D]` where `B` is also present
     /// in another input (e.g. a bias of shape `[B]`).
-    pub fn from_graph_inputs(graph: &ComputeGraph, inputs: &[&[u8]]) -> Self {
+    pub fn from_graph_inputs(graph: &ComputeGraph, inputs: &[&[u8]]) -> Result<Self, String> {
         let mut env = ShapeEnv::new();
         let mut input_infos: Vec<(NodeId, usize, usize, Vec<String>)> = Vec::new();
 
@@ -232,6 +235,14 @@ impl ShapeEnv {
                     .product();
                 if known_numel == 0 || node.output_type.shape.is_empty() {
                     continue;
+                }
+                let stride = elem_size * known_numel;
+                if data_bytes % stride != 0 {
+                    return Err(format!(
+                        "ShapeEnv: input {} node {}: data size {} not divisible by known-stride {} (shape {:?}, elem_size {})",
+                        i, input_id, data_bytes, stride,
+                        node.output_type.shape, elem_size
+                    ));
                 }
                 let total_numel = data_bytes / elem_size;
                 let unknown_numel = total_numel / known_numel;
@@ -270,6 +281,12 @@ impl ShapeEnv {
                 }
             }
             if unbound.len() == 1 && known_product > 0 {
+                if total_numel % known_product != 0 {
+                    return Err(format!(
+                        "ShapeEnv: multi-symbol input node {}: remaining numel {} not divisible by known_product {}",
+                        _id, total_numel, known_product
+                    ));
+                }
                 let val = total_numel / known_product;
                 if val > 0 {
                     env.bind(unbound[0], val as u64);
@@ -277,18 +294,31 @@ impl ShapeEnv {
             }
         }
 
-        env
+        Ok(env)
     }
 }
 
 impl DimExpr {
     /// Evaluate with runtime shape environment.  Bounded dims try resolving
     /// their symbol name first, falling back to the compile-time max bound.
-    /// Symbol dims resolve from the environment.
+    ///
+    /// # Panics
+    /// If a [`DimExpr::Bounded`] symbol resolves but the value exceeds `max`,
+    /// indicating the runtime shape overflows the compile-time bound contract.
     pub fn evaluate_with_env(&self, env: &ShapeEnv) -> Option<u64> {
         match self {
             DimExpr::Known(v) => Some(*v),
-            DimExpr::Bounded { sym, max } => env.resolve(sym).or(Some(*max)),
+            DimExpr::Bounded { sym, max } => match env.resolve(sym) {
+                Some(v) => {
+                    assert!(
+                        v <= *max,
+                        "DimExpr::Bounded: symbol '{}' resolved to {}, exceeds bound {}",
+                        sym, v, max
+                    );
+                    Some(v)
+                }
+                None => Some(*max),
+            },
             DimExpr::Symbol(s) => env.resolve(s),
         }
     }

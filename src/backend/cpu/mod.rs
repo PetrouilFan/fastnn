@@ -12,6 +12,10 @@ pub mod microkernels;
 
 /// Resolve kernel dimension params at dispatch time using the runtime shape
 /// environment. Returns `params` unchanged if no symbolic dims are present.
+///
+/// # Panics
+/// If `param_dims` is `Some` but has fewer than `expected` elements, which
+/// indicates a lowering bug in the backend compiler pass.
 fn resolve_params(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
@@ -19,12 +23,17 @@ fn resolve_params(
     expected: usize,
 ) -> Vec<usize> {
     if let Some(dims) = param_dims {
-        if dims.len() >= expected {
-            return dims[..expected]
-                .iter()
-                .map(|d| d.evaluate_with_env(shape_env).unwrap_or(1) as usize)
-                .collect();
-        }
+        assert!(
+            dims.len() >= expected,
+            "resolve_params: param_dims has {} elements but expected {} (params={:?})",
+            dims.len(),
+            expected,
+            params
+        );
+        return dims[..expected]
+            .iter()
+            .map(|d| d.evaluate_with_env(shape_env).unwrap_or(1) as usize)
+            .collect();
     }
     params.to_vec()
 }
