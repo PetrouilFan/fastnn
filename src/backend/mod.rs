@@ -64,6 +64,13 @@ pub enum Instruction {
         dst: BufferSlice,
         value: f32,
     },
+    /// Materialise arbitrary byte payloads into the arena at dispatch time.
+    /// Used for [`Opcode::Constant`](crate::ir::node::Opcode::Constant) nodes
+    /// that carry [`TensorValue::Data`](crate::ir::node::TensorValue::Data).
+    WriteConst {
+        dst: BufferSlice,
+        data: Vec<u8>,
+    },
 }
 
 pub struct ExecutablePlan {
