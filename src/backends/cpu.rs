@@ -73,7 +73,13 @@ pub fn gemm_batch_packed<T: PackedWord>(
     k: usize,            // inner dim
     m: usize,            // outer dim (output features)
 ) {
-    super::packed_simd::gemm_batch_packed_simd(weight, activations, output, n, k, m);
+    if weight.is_block_major() {
+        super::packed_simd::gemm_batch_packed_block_major(
+            weight, activations, output, n, k, m,
+        );
+    } else {
+        super::packed_simd::gemm_batch_packed_simd(weight, activations, output, n, k, m);
+    }
 }
 
 /// Element-wise ReLU on a packed tensor using SWAR for ALL types.

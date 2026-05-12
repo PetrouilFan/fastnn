@@ -509,13 +509,15 @@ pub unsafe fn blocked_row_matmul(
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
     let use_simd = false;
 
-    // Only zero output if we're NOT using SIMD (SIMD path uses local accumulators)
-    if !use_simd {
-        for j in 0..n {
-            // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
-            unsafe {
-                *out_ptr.add(out_off + j) = 0.0;
-            }
+    // Zero output before accumulating. Both SIMD and scalar paths accumulate
+    // across K-tiles (the outer `ko` loop), so the output must start at zero.
+    // Previously the SIMD path skipped this, causing accumulation into
+    // uninitialized/garbage memory when Tensor::empty was used (or into stale
+    // values when the same buffer was reused across iterations as in the test).
+    for j in 0..n {
+        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
+        unsafe {
+            *out_ptr.add(out_off + j) = 0.0;
         }
     }
 

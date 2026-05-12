@@ -44,6 +44,7 @@
 //! dot products for zero-dequantization inference.
 
 use crate::backends::cpu::gemm_batch_packed;
+use crate::backends::TlsVecPool;
 use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 use crate::tensor::Tensor;
@@ -59,35 +60,6 @@ fn compute_out_dim(in_dim: usize, kernel: usize, stride: usize, padding: usize, 
         0
     } else {
         (in_dim + 2 * padding - dk) / stride + 1
-    }
-}
-
-/// Gather a 3×3 input patch into a flat f32 buffer, handling zero-padding.
-/// `s_buf` must have length at least `in_channels * 9`.
-unsafe fn gather_patch_3x3(
-    x: &[f32],
-    in_channels: usize,
-    in_h: usize,
-    in_w: usize,
-    in_y: i64,
-    in_x: i64,
-    s_buf: &mut [f32],
-) {
-    for ic in 0..in_channels {
-        let ch_base = ic * in_h * in_w;
-        let out_base = ic * 9;
-        for ky in 0..3i64 {
-            for kx in 0..3i64 {
-                let py = in_y + ky;
-                let px = in_x + kx;
-                let val = if py >= 0 && py < in_h as i64 && px >= 0 && px < in_w as i64 {
-                    *x.get_unchecked(ch_base + (py as usize) * in_w + (px as usize))
-                } else {
-                    0.0
-                };
-                *s_buf.get_unchecked_mut(out_base + (ky as usize) * 3 + (kx as usize)) = val;
-            }
-        }
     }
 }
 
@@ -117,13 +89,13 @@ pub unsafe fn quantized_conv2d_1x1<T: PackedWord>(
 ) -> Tensor {
     let spatial = n * h * w;
     let x_data = x.as_f32_slice();
-    let mut output = vec![0.0f32; spatial * oc];
+    let mut output = TlsVecPool::alloc_zeroed(spatial * oc);
 
     // Transpose activations from NCHW to NHWC for the GEMM.
     // x_data is NCHW flat:  x[n, c, h, w] at n*C*H*W + c*H*W + h*W + w
     // gemm_batch_packed expects NHWC row-major: x[n, h, w, c] at (n*H*W + h*W + w)*C + c
     // This is only needed for 1×1; the 3×3 and im2col paths build their own column buffers.
-    let mut x_nhwc = vec![0.0f32; spatial * c];
+    let mut x_nhwc = TlsVecPool::alloc_zeroed(spatial * c);
     for n_idx in 0..n {
         let nchw_batch = n_idx * c * h * w;
         let nhwc_batch = n_idx * h * w * c;
@@ -145,7 +117,7 @@ pub unsafe fn quantized_conv2d_1x1<T: PackedWord>(
 
     // output is [spatial, OC] in NHWC-interleaved layout from gemm_batch_packed.
     // Permute to NCHW and add bias in one fused pass.
-    let mut nchw = vec![0.0f32; n * oc * h * w];
+    let mut nchw = TlsVecPool::alloc_zeroed(n * oc * h * w);
     for n_idx in 0..n {
         for oc_idx in 0..oc {
             let b = bias.map(|b| b[oc_idx]).unwrap_or(0.0);
@@ -159,7 +131,7 @@ pub unsafe fn quantized_conv2d_1x1<T: PackedWord>(
             }
         }
     }
-    Tensor::from_vec(nchw, vec![n as i64, oc as i64, h as i64, w as i64])
+    Tensor::from_vec(nchw.take(), vec![n as i64, oc as i64, h as i64, w as i64])
 }
 
 // ---------------------------------------------------------------------------
@@ -192,11 +164,12 @@ pub unsafe fn quantized_conv2d_3x3<T: PackedWord>(
     let k = c * 9; // inner dimension for 3×3
     let spatial = n * oh * ow;
     let x_data = x.as_f32_slice();
-    let mut output = vec![0.0f32; spatial * oc];
+    let mut output = TlsVecPool::alloc(spatial * oc);
 
     // Build im2col column matrix: [spatial, k]
     // Each row is the flattened 3×3 patch for one output position.
-    let mut col = vec![0.0f32; spatial * k];
+    // Every element is written by the im2col loop below (no zero-init needed).
+    let mut col = TlsVecPool::alloc(spatial * k);
 
     for batch in 0..n {
         for oy in 0..oh {
@@ -231,7 +204,7 @@ pub unsafe fn quantized_conv2d_3x3<T: PackedWord>(
 
     // output is [spatial, OC] in NHWC-interleaved layout from gemm_batch_packed.
     // Permute to NCHW and add bias in one fused pass.
-    let mut nchw = vec![0.0f32; n * oc * oh * ow];
+    let mut nchw = TlsVecPool::alloc_zeroed(n * oc * oh * ow);
     for n_idx in 0..n {
         for oc_idx in 0..oc {
             let b = bias.map(|b| b[oc_idx]).unwrap_or(0.0);
@@ -245,7 +218,7 @@ pub unsafe fn quantized_conv2d_3x3<T: PackedWord>(
             }
         }
     }
-    Tensor::from_vec(nchw, vec![n as i64, oc as i64, oh as i64, ow as i64])
+    Tensor::from_vec(nchw.take(), vec![n as i64, oc as i64, oh as i64, ow as i64])
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +245,7 @@ pub unsafe fn quantized_conv2d_depthwise<T: PackedWord>(
     let x_data = x.as_f32_slice();
     let oc = c; // depthwise: out_channels == in_channels
     let spatial = n * oh * ow;
-    let mut output = vec![0.0f32; spatial * oc];
+    let mut output = TlsVecPool::alloc(spatial * oc);
 
     // For depthwise, each output channel depends on exactly one input channel.
     // The weight shape is [C, 1*kh*kw] (packed per-row).
@@ -370,7 +343,7 @@ pub unsafe fn quantized_conv2d_depthwise<T: PackedWord>(
         }
     }
 
-    Tensor::from_vec(output, vec![n as i64, oc as i64, oh as i64, ow as i64])
+    Tensor::from_vec(output.take(), vec![n as i64, oc as i64, oh as i64, ow as i64])
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +379,7 @@ pub unsafe fn quantized_conv2d_im2col<T: PackedWord>(
     let k_per_group = c_per_group * kh * kw;
     let spatial = n * oh * ow;
     let x_data = x.as_f32_slice();
-    let mut output = vec![0.0f32; spatial * oc];
+    let mut output = TlsVecPool::alloc(spatial * oc);
 
     for g in 0..groups {
         let c_start = g * c_per_group;
@@ -422,7 +395,9 @@ pub unsafe fn quantized_conv2d_im2col<T: PackedWord>(
             let tile_end = (tile_start + TILE_SIZE).min(total_positions);
             let cur_tile = tile_end - tile_start;
 
-            let mut col_tile = vec![0.0f32; cur_tile * k_per_group];
+            // col_tile is fully written by the im2col loop below (no zero-init needed).
+            // Using the pool here means the tile buffer is recycled across iterations.
+            let mut col_tile = TlsVecPool::alloc(cur_tile * k_per_group);
 
             // Fill this tile's im2col rows
             for local_pos in 0..cur_tile {
@@ -509,7 +484,7 @@ pub unsafe fn quantized_conv2d_im2col<T: PackedWord>(
         }
     }
 
-    Tensor::from_vec(output, vec![n as i64, oc as i64, oh as i64, ow as i64])
+    Tensor::from_vec(output.take(), vec![n as i64, oc as i64, oh as i64, ow as i64])
 }
 
 // ---------------------------------------------------------------------------
