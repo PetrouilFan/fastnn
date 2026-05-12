@@ -27,11 +27,14 @@ pub fn device_to_dispatch_key(device: Device) -> DispatchKey {
     }
 }
 
-/// # Safety
-/// The function pointer must accept the given tensor arguments and return
-/// valid tensors. The caller is responsible for upholding the safety contract
-/// of the specific kernel implementation.
-pub type KernelFn = unsafe fn(&[&Tensor]) -> Vec<Tensor>;
+/// A kernel takes tensor arguments and returns either a result vector or an error.
+/// Previously returned `Vec<Tensor>` and panicked on failure.
+/// A kernel takes tensor arguments and returns either a result vector or an error.
+/// Previously returned `Vec<Tensor>` and panicked on failure.
+///
+/// Uses `Box<dyn Fn>` so both safe function pointers and wrapping closures
+/// can be stored in the dispatch table.
+pub type KernelFn = Box<dyn Fn(&[&Tensor]) -> FastnnResult<Vec<Tensor>> + Send + Sync>;
 
 struct DispatcherInner {
     ops: HashMap<(&'static str, DispatchKey), KernelFn>,
@@ -51,10 +54,23 @@ fn get_dispatcher() -> &'static RwLock<DispatcherInner> {
     DISPATCHER.get_or_init(|| RwLock::new(DispatcherInner::new()))
 }
 
-pub fn register(op: &'static str, key: DispatchKey, kernel: KernelFn) {
+/// Register an infallible kernel (returns `Vec<Tensor>`).
+/// The kernel is automatically wrapped in `Ok(...)`.
+///
+/// Most kernels are infallible (they return `Vec<Tensor>` and don't have
+/// error paths).  For fallible kernels use [`register_fallible`].
+pub fn register(op: &'static str, key: DispatchKey, kernel: unsafe fn(&[&Tensor]) -> Vec<Tensor>) {
     let dispatcher = get_dispatcher();
     let mut guard = dispatcher.write();
-    guard.ops.insert((op, key), kernel);
+    guard.ops.insert((op, key), Box::new(move |args| Ok(unsafe { kernel(args) })));
+}
+
+/// Register a fallible kernel (returns `FastnnResult<Vec<Tensor>>`).
+/// Use this for kernels that have proper error paths instead of panicking.
+pub fn register_fallible(op: &'static str, key: DispatchKey, kernel: fn(&[&Tensor]) -> FastnnResult<Vec<Tensor>>) {
+    let dispatcher = get_dispatcher();
+    let mut guard = dispatcher.write();
+    guard.ops.insert((op, key), Box::new(kernel));
 }
 
 pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> FastnnResult<Vec<Tensor>> {
@@ -68,9 +84,7 @@ pub fn try_dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> FastnnResul
         ))
     })?;
 
-    // SAFETY: The kernel was registered for this dispatch key and is
-    // trusted to handle the given tensor arguments correctly.
-    Ok(unsafe { kernel(args) })
+    kernel(args)
 }
 
 pub fn dispatch(op: &str, key: DispatchKey, args: &[&Tensor]) -> FastnnResult<Vec<Tensor>> {
