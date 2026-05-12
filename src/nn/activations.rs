@@ -5,33 +5,69 @@ use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
+/// Stateless activation macro — routes through the AOT pipeline via Tensor methods.
 macro_rules! impl_stateless_activation {
+    ($name:ident, "relu") => {
+        impl_activation_via_tensor!($name, relu);
+    };
+    ($name:ident, "gelu") => {
+        impl_activation_via_tensor!($name, gelu);
+    };
+    ($name:ident, "sigmoid") => {
+        impl_activation_via_tensor!($name, sigmoid);
+    };
+    ($name:ident, "tanh") => {
+        impl_activation_via_tensor!($name, tanh);
+    };
+    ($name:ident, "silu") => {
+        impl_activation_via_tensor!($name, silu);
+    };
+    ($name:ident, "hardswish") => {
+        impl_activation_via_tensor!($name, hardswish);
+    };
+    // Fallback for ops without Tensor methods — use dispatcher
     ($name:ident, $dispatch_name:expr) => {
         #[allow(dead_code)]
         pub struct $name;
 
         impl $name {
-            pub fn new() -> Self {
-                $name
-            }
+            pub fn new() -> Self { $name }
         }
 
         impl Default for $name {
-            fn default() -> Self {
-                Self::new()
-            }
+            fn default() -> Self { Self::new() }
         }
 
         impl Module for $name {
             fn forward(&self, x: &Tensor) -> Tensor {
                 let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x]).expect(concat!(
-                    "Activation::forward: ",
-                    $dispatch_name,
-                    " dispatch failed"
+                    "Activation::forward: ", $dispatch_name, " dispatch failed"
                 ));
                 result[0].clone()
             }
+            impl_stateless_activation_methods!();
+        }
+    };
+}
 
+/// Dispatch-safe activation via Tensor method (→ AOT pipeline).
+macro_rules! impl_activation_via_tensor {
+    ($name:ident, $method:ident) => {
+        #[allow(dead_code)]
+        pub struct $name;
+
+        impl $name {
+            pub fn new() -> Self { $name }
+        }
+
+        impl Default for $name {
+            fn default() -> Self { Self::new() }
+        }
+
+        impl Module for $name {
+            fn forward(&self, x: &Tensor) -> Tensor {
+                x.$method()
+            }
             impl_stateless_activation_methods!();
         }
     };
@@ -81,10 +117,7 @@ impl LeakyReLU {
 
 impl Module for LeakyReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let slope_tensor = Tensor::from_scalar(self.negative_slope as f32);
-        let result = dispatch("leaky_relu", DispatchKey::Cpu, &[x, &slope_tensor])
-            .expect("LeakyReLU::forward: dispatch failed");
-        result[0].clone()
+        x.leaky_relu(self.negative_slope as f32)
     }
 
     impl_stateless_activation_methods!();
