@@ -196,7 +196,12 @@ def _extract_attrs(onnx_node) -> Dict[str, Any]:
             attrs["reverse"] = bool(attrs["reverse"])
     if op == "ConstantOfShape" and "value" in attrs:
         v = attrs["value"]
-        attrs["value"] = float(v.flatten()[0]) if isinstance(v, np.ndarray) else float(v)
+        if isinstance(v, np.ndarray):
+            attrs["value"] = float(v.flatten()[0])
+        elif isinstance(v, (list, tuple)):
+            attrs["value"] = float(np.asarray(v).flatten()[0])
+        else:
+            attrs["value"] = float(v)
     if op in ("MaxPool", "AveragePool"):
         cfg = get_pooling_config(onnx_node)
         attrs["kernel_size"] = cfg["kernel_size"]
@@ -226,10 +231,23 @@ def _extract_attrs(onnx_node) -> Dict[str, Any]:
 def _resolve_input_ids(
     names: List[str], out_to_nid: Dict[str, int], gin_to_nid: Dict[str, int], init_names: set,
 ) -> List[int]:
-    return [
-        out_to_nid[n] if n in out_to_nid else gin_to_nid[n]
-        for n in names if n and n not in init_names and (n in out_to_nid or n in gin_to_nid)
-    ]
+    """Resolve input names to node ids. Returns encoded ids.
+
+    Encoded format: id | (slot << 20) for multi-output ops (e.g. Split).
+    """
+    result = []
+    for n in names:
+        if n and (n in out_to_nid or n in gin_to_nid):
+            nid = out_to_nid[n] if n in out_to_nid else gin_to_nid[n]
+            slot = 0
+            # Extract slot from output name like Split_output_2
+            if '_output_' in n:
+                try:
+                    slot = int(n.rsplit('_output_', 1)[1])
+                except (ValueError, IndexError):
+                    slot = 0
+            result.append((slot << 20) | nid if slot else nid)
+    return result
 
 
 def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -> Dict[str, Any]:

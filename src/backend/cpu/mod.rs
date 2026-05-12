@@ -392,13 +392,38 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Softmax => {
-                    let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                    // Read and normalize the axis attribute.
+                    let axis: i64 = node
+                        .attrs
+                        .get("axis")
+                        .and_then(|a| a.parse().ok())
+                        .unwrap_or(0);
+                    let rank = input_shapes.first().map(|s| s.len()).unwrap_or(1);
+                    let normalized_axis = if axis < 0 {
+                        (rank as i64 + axis) as usize
+                    } else {
+                        axis as usize
+                    };
+                    // Capture the axis-dimension size for the dispatch handler,
+                    // which needs to know how many elements comprise a single
+                    // softmax "row" (all elements along the reduction axis).
+                    // Using the dimension size rather than the axis index avoids
+                    // needing shape information at dispatch time.
+                    let axis_dim = input_shapes
+                        .first()
+                        .and_then(|s| s.get(normalized_axis).copied())
+                        .unwrap_or(1) as usize;
+                    let axis_dim_dim = input_shape_dims
+                        .first()
+                        .and_then(|s| s.get(normalized_axis).cloned())
+                        .unwrap_or(DimExpr::Known(1));
+
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "softmax".to_string(),
                         input_slices,
                         output_slice,
-                        params: vec![axis],
-                        param_dims: None,
+                        params: vec![axis_dim],
+                        param_dims: Some(vec![axis_dim_dim]),
                         weight_meta: None,
                     });
                 }
@@ -1455,15 +1480,17 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Axis-aware softmax: axis defaults to last dim if not specified
-                                let _axis = if params.is_empty() { input.len().saturating_sub(1) } else { params[0] };
-                                // Softmax over the last dimension: for each row,
-                                // compute exp(x_i - max) / sum(exp(x_j - max))
-                                let row_size = input.len() / out_f32.len().max(1);
-                                let num_rows = if row_size > 0 { input.len() / row_size } else { 1 };
+                                // Resolve the axis-dimension size from params
+                                // (compile-time) or param_dims (runtime symbolic).
+                                // The axis dim size tells us how many elements form
+                                // a single softmax "row" along the reduction axis.
+                                let softmax_params = resolve_params(params, param_dims, shape_env, 1)
+                                    .unwrap_or_else(|_| vec![input.len()]);
+                                let axis_dim_size = softmax_params[0].max(1);
+                                let num_rows = input.len() / axis_dim_size;
                                 for r in 0..num_rows {
-                                    let start = r * row_size;
-                                    let end = (start + row_size).min(input.len());
+                                    let start = r * axis_dim_size;
+                                    let end = (start + axis_dim_size).min(input.len());
                                     let max_val = input[start..end].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                                     let mut sum = 0.0f32;
                                     for i in start..end {
