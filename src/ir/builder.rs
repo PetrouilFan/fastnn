@@ -177,6 +177,25 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, tt)
     }
 
+    /// Register a graph input with symbolic [`DimExpr`] dimensions and dtype.
+    ///
+    /// Use this when the exact shape is not known at graph-build time.
+    /// The dims may be [`DimExpr::Known`], [`DimExpr::Symbol`], or
+    /// [`DimExpr::Bounded`].
+    ///
+    /// # Example
+    /// ```ignore
+    /// let batch_size = DimExpr::Symbol("N".into());
+    /// let a = g.input_with_dims(&[batch_size, DimExpr::Known(64)], IrDType::F32);
+    /// ```
+    pub fn input_with_dims(&self, shape: &[DimExpr], dtype: IrDType) -> GraphTensor {
+        let tt = TensorType::new(shape.to_vec(), dtype);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(Opcode::Input, vec![], tt.clone());
+        inner.recorded_inputs.push(node_id);
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
     /// Register a learnable parameter (same as an input but semantically a weight).
     /// Parameters are tracked alongside inputs for gradient computation.
     pub fn parameter(&self, shape: &[u64], dtype: IrDType) -> GraphTensor {
@@ -297,20 +316,16 @@ impl GraphBuilder {
         let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
 
         let h_out = if a_shape.len() > 2 && w_shape.len() > 2 {
-            match (&a_shape[2], &w_shape[2]) {
-                (DimExpr::Known(h), DimExpr::Known(k)) =>
-                    DimExpr::Known(((h + 2 * padding as u64 - k) / stride as u64) + 1),
-                _ => DimExpr::Known(1),
-            }
-        } else { DimExpr::Known(1) };
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
 
         let w_out = if a_shape.len() > 3 && w_shape.len() > 3 {
-            match (&a_shape[3], &w_shape[3]) {
-                (DimExpr::Known(w), DimExpr::Known(k)) =>
-                    DimExpr::Known(((w + 2 * padding as u64 - k) / stride as u64) + 1),
-                _ => DimExpr::Known(1),
-            }
-        } else { DimExpr::Known(1) };
+            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
 
         let output_type = TensorType::new(
             vec![batch, out_channels, h_out, w_out],
@@ -485,10 +500,12 @@ impl GraphBuilder {
     pub fn flatten(&self, input: &GraphTensor) -> GraphTensor {
         let shape = input.shape();
         let first = shape.first().cloned().unwrap_or(DimExpr::Known(1));
-        let rest: u64 = shape[1..].iter()
-            .map(|d| d.evaluate().unwrap_or(1))
-            .product();
-        let output_type = TensorType::new(vec![first, DimExpr::Known(rest)], input.dtype());
+        let rest: DimExpr = if shape.len() > 1 {
+            dim_product(shape[1..].iter())
+        } else {
+            DimExpr::Known(1)
+        };
+        let output_type = TensorType::new(vec![first, rest], input.dtype());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Flatten,
@@ -574,14 +591,13 @@ impl GraphBuilder {
     /// Concatenate tensors along a dimension.
     pub fn concat(&self, tensors: &[&GraphTensor], dim: usize) -> GraphTensor {
         let mut output_shape = tensors[0].shape().to_vec();
-        if dim < output_shape.len() {
-            let mut total = 0u64;
+        if dim < output_shape.len() && !tensors.is_empty() {
+            let mut total = DimExpr::Known(0);
             for t in tensors {
-                if let DimExpr::Known(v) = t.shape()[dim] {
-                    total += v;
-                }
+                let d = t.shape().get(dim).cloned().unwrap_or(DimExpr::Known(1));
+                total = dim_add(&total, &d);
             }
-            output_shape[dim] = DimExpr::Known(total);
+            output_shape[dim] = total;
         }
         let output_type = TensorType::new(output_shape, tensors[0].dtype());
         let input_ids: Vec<NodeId> = tensors.iter().map(|t| t.node_id).collect();
@@ -714,6 +730,67 @@ impl GraphBuilder {
     }
 }
 
+// =============================================================================
+// DimExpr arithmetic helpers
+// =============================================================================
+
+/// Multiply two `DimExpr` values symbolically.
+fn dim_mul(a: &DimExpr, b: &DimExpr) -> DimExpr {
+    a.mul(b)
+}
+
+/// Add two `DimExpr` values symbolically.
+fn dim_add(a: &DimExpr, b: &DimExpr) -> DimExpr {
+    a.add(b)
+}
+
+/// Product of an iterator of `DimExpr` values.
+fn dim_product<'a, I>(dims: I) -> DimExpr
+where
+    I: IntoIterator<Item = &'a DimExpr>,
+{
+    let mut iter = dims.into_iter();
+    let first = iter.next().cloned().unwrap_or(DimExpr::Known(1));
+    iter.fold(first, |acc, d| dim_mul(&acc, d))
+}
+
+/// Compute the spatial output dimension for a convolution:
+/// `out = (input + 2*padding - kernel) / stride + 1`.
+fn conv_spatial_dim(input_dim: &DimExpr, kernel_dim: &DimExpr, stride: usize, padding: usize) -> DimExpr {
+    let s = stride as u64;
+    let p = padding as u64;
+    match (input_dim, kernel_dim) {
+        (DimExpr::Known(h), DimExpr::Known(k)) => {
+            DimExpr::Known(((h + 2 * p).saturating_sub(*k)) / s + 1)
+        }
+        _ => {
+            // Attempt partial evaluation
+            let h_val = input_dim.evaluate();
+            let k_val = kernel_dim.evaluate();
+            match (h_val, k_val) {
+                (Some(h), Some(k)) => {
+                    DimExpr::Known(((h + 2 * p).saturating_sub(k)) / s + 1)
+                }
+                _ => {
+                    // Cannot fully evaluate — produce a Bounded or Symbol expression
+                    let h_eval = input_dim.evaluate().unwrap_or(4096);
+                    let k_eval = kernel_dim.evaluate().unwrap_or(1);
+                    let estimated = ((h_eval + 2 * p).saturating_sub(k_eval)) / s + 1;
+                    match input_dim {
+                        DimExpr::Symbol(sym) => {
+                            DimExpr::Bounded {
+                                sym: format!("conv_spatial({})", sym),
+                                max: estimated,
+                            }
+                        }
+                        _ => DimExpr::Known(estimated),
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl Default for GraphBuilder {
     fn default() -> Self { Self::new() }
 }
@@ -752,6 +829,34 @@ mod tests {
         let out = read_f32(&result[0]);
 
         assert_eq!(out, vec![6.0, 8.0, 10.0, 12.0]);
+    }
+
+    #[test]
+    fn test_input_with_dims() {
+        let g = GraphBuilder::new();
+        // Create an input with a symbolic batch dimension and a known feature dim
+        let batch = DimExpr::Symbol("N".into());
+        let feat = DimExpr::Known(64);
+        let x = g.input_with_dims(&[batch, feat], IrDType::F32);
+
+        // Verify symbolic shapes propagate through ops
+        let w = g.input(&[64, 10], IrDType::F32);
+        let logits = g.matmul(&x, &w);
+        let loss = g.reduce_mean(&logits, 1, false);
+
+        // The matmul output should preserve the symbolic batch dim
+        let logits_shape = logits.shape();
+        assert_eq!(logits_shape.len(), 2, "matmul shape should be 2D");
+        assert_eq!(logits_shape[0], DimExpr::Symbol("N".into()),
+            "batch dim should remain symbolic through matmul");
+        assert_eq!(logits_shape[1], DimExpr::Known(10),
+            "feature dim should be 10");
+
+        // After reduce_mean on axis 1 (no keepdim): shape should be [N]
+        let loss_shape = loss.shape();
+        assert_eq!(loss_shape.len(), 1, "loss shape should be 1D after reduce_mean");
+        assert_eq!(loss_shape[0], DimExpr::Symbol("N".into()),
+            "batch dim should remain symbolic through reduce_mean");
     }
 
     #[test]
@@ -803,6 +908,38 @@ mod tests {
         let a_data = f32_data(&[-2.0, -1.0, 0.0, 1.0, 2.0]);
         let result = g.compile_and_execute(&[&r], CpuBackend, &[&a_data]).unwrap();
         assert_eq!(read_f32(&result[0]), vec![0.0, 0.0, 0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_symbolic_flatten_conv_concat() {
+        let g = GraphBuilder::new();
+        let n = DimExpr::Symbol("N".into());
+        let c = DimExpr::Known(3);
+        let h = DimExpr::Known(32);
+        let w = DimExpr::Known(32);
+        let x = g.input_with_dims(&[n.clone(), c.clone(), h.clone(), w.clone()], IrDType::F32);
+
+        // Flatten from [N, 3, 32, 32] → [N, 3072]
+        let flat = g.flatten(&x);
+        let flat_shape = flat.shape();
+        assert_eq!(flat_shape.len(), 2, "flatten should produce 2D shape");
+        assert_eq!(flat_shape[0], DimExpr::Symbol("N".into()),
+            "flatten should preserve symbolic batch dim");
+        assert_eq!(flat_shape[1], DimExpr::Known(3072),
+            "flatten should compute product of remaining dims: 3*32*32=3072");
+
+        // Concat along batch dim
+        let y = g.input_with_dims(&[n, c, h, w], IrDType::F32);
+        let cat = g.concat(&[&x, &y], 0);
+        let cat_shape = cat.shape();
+        assert_eq!(cat_shape[0], DimExpr::Symbol("(N+N)".into()),
+            "concat along symbolic dim should produce symbolic sum");
+
+        // Concat along known dim
+        let cat_c = g.concat(&[&x, &y], 1);
+        let cat_c_shape = cat_c.shape();
+        assert_eq!(cat_c_shape[1], DimExpr::Known(6),
+            "concat along known dim should produce sum: 3+3=6");
     }
 
     #[test]

@@ -71,12 +71,11 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     if let Some(first) = shape.first() {
                         dims.push(first.clone());
                     }
-                    let product: u64 = shape
-                        .iter()
-                        .skip(1)
-                        .filter_map(|d| d.evaluate())
-                        .product();
-                    dims.push(DimExpr::Known(product));
+                    let product: DimExpr = shape[1..].iter()
+                        .cloned()
+                        .reduce(|a, b| a.mul(&b))
+                        .unwrap_or(DimExpr::Known(1));
+                    dims.push(product);
                     dims
                 } else {
                     shape.clone()
@@ -105,7 +104,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                         let mut total = DimExpr::Known(0);
                         for inp in &inputs {
                             if axis < inp.output_type.shape.len() {
-                                total = add_dim_exprs(total, inp.output_type.shape[axis].clone());
+                                total = total.add(&inp.output_type.shape[axis]);
                             }
                         }
                         shape[axis] = total;
@@ -366,32 +365,7 @@ fn parse_shape_attr(s: &str) -> Vec<DimExpr> {
 }
 
 fn add_dim_exprs(a: DimExpr, b: DimExpr) -> DimExpr {
-    match (a, b) {
-        (DimExpr::Known(va), DimExpr::Known(vb)) => DimExpr::Known(va + vb),
-        (DimExpr::Bounded { sym, max }, DimExpr::Known(v))
-        | (DimExpr::Known(v), DimExpr::Bounded { sym, max }) => DimExpr::Bounded {
-            sym,
-            max: max + v,
-        },
-        (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: _, max: mb}) => DimExpr::Bounded {
-            sym,
-            max: max + mb,
-        },
-        (DimExpr::Symbol(s), DimExpr::Known(v))
-        | (DimExpr::Known(v), DimExpr::Symbol(s)) => DimExpr::Bounded {
-            sym: s,
-            max: max_u64_for_symbol(&v),
-        },
-        (DimExpr::Symbol(sa), DimExpr::Symbol(sb)) => DimExpr::Symbol(format!("{}+{}", sa, sb)),
-        (DimExpr::Symbol(s), DimExpr::Bounded { sym: _, max: mb }) => DimExpr::Bounded {
-            sym: s,
-            max: max_u64_for_symbol(&mb),
-        },
-        (DimExpr::Bounded { sym, max: _ }, DimExpr::Symbol(s)) => DimExpr::Bounded {
-            sym,
-            max: max_u64_for_symbol(&0),
-        },
-    }
+    a.add(&b)
 }
 
 fn max_u64_for_symbol(_v: &u64) -> u64 {
