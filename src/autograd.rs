@@ -491,7 +491,12 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
-            Opcode::Softmax => {
+            Opcode::Gelu | Opcode::LeakyRelu | Opcode::Elu | Opcode::Softplus
+            | Opcode::Hardswish | Opcode::Clamp | Opcode::Sign
+            | Opcode::LogicalNot | Opcode::LogSoftmax | Opcode::Sigmoid
+            | Opcode::Tanh | Opcode::Exp | Opcode::Log | Opcode::Sqrt
+            | Opcode::Neg | Opcode::Abs | Opcode::Relu | Opcode::Softmax
+            | Opcode::Silu => {
                 if let Some(&input_id) = node.inputs.first() {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
@@ -509,7 +514,7 @@ pub fn build_backward_graph(
             Opcode::Constant(_) | Opcode::Input => {
             }
             Opcode::Pad | Opcode::Slice | Opcode::Concat | Opcode::Gather | Opcode::ScatterNd
-            | Opcode::Transpose => {
+            | Opcode::Transpose | Opcode::Maximum | Opcode::Minimum | Opcode::ReduceMax => {
                 for &input_id in &node.inputs {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
