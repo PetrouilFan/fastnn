@@ -129,13 +129,18 @@ impl DimExpr {
                     max: max + mb,
                 }
             }
+            // Same symbol + itself → canonical "2*N" instead of stringy "(N+N)"
+            (DimExpr::Symbol(s), DimExpr::Symbol(t)) if s == t => DimExpr::Bounded {
+                sym: format!("2*{}", s),
+                max: 2 * SYMBOL_DIM_MAX,
+            },
             (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
                 DimExpr::Symbol(format!("({}+{})", s, t))
             }
             (DimExpr::Symbol(s), DimExpr::Bounded { sym, max })
             | (DimExpr::Bounded { sym, max }, DimExpr::Symbol(s)) => {
                 DimExpr::Bounded {
-                    sym: format!("({}+{})", s, sym),
+                    sym: if s == sym { format!("2*{}", s) } else { format!("({}+{})", s, sym) },
                     max: *max,
                 }
             }
