@@ -18,17 +18,26 @@
 //! | Category | Shader |
 //! |----------|--------|
 //! | All element-wise (add, sub, mul, div, ReLU, GELU, SiLU, sigmoid, tanh, exp, log, sqrt, neg, abs, leaky_relu, ELU, softplus, hardswish, clamp, sign, logical_not, max, min, log_softmax, pow, scalar-cmp, scalar-arithmetic, fused-Op+ReLU) | `element_wise` unified WGSL shader (opcode-selector) |
-//! | MatMul (f32) | CPU fallback (GPU tiling TBD) |
+//! | MatMul (f32) | Tiled WGSL shader (16×16 workgroups) |
+//! | Conv2d | Direct convolution WGSL shader |
 //! | Softmax | Dedicated row-wise WGSL shader |
 //! | Reduce (sum, mean, max) | Simple parallel-reduction WGSL shader |
 //! | Transpose | 2D-transpose WGSL shader |
-//! | Concat, Pad, Gather, Slice, BiasAdd, Norm, Pooling, Conv | CPU fallback |
+//! | LayerNorm / RMSNorm | Dedicated (mean+var+normalize) WGSL shader |
+//! | MaxPool / AvgPool | Dedicated pooling WGSL shader |
+//! | Embedding | Gather WGSL shader |
+//! | Concat, Pad, Gather, Slice, BiasAdd, BatchNorm | CPU fallback |
 
 #![allow(dead_code)]
 
 pub mod context;
+mod conv;
 mod elementwise;
+mod embed;
+mod matmul;
+mod norm;
 mod pipeline;
+mod pool;
 mod reduce;
 mod softmax;
 mod transpose;
@@ -293,8 +302,7 @@ fn try_gpu_dispatch(
             Ok(())
         }
         "matmul" | "matmul_relu" | "fused_matmul_add_relu" => {
-            // GPU matmul TBD — fall back to CPU.
-            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+            matmul::dispatch_matmul_gpu(arena, input_slices, output_slice, &resolved_params, shape_env)
         }
         "transpose_f32" => {
             let m = resolved_params.first().copied().unwrap_or(1);
@@ -305,6 +313,18 @@ fn try_gpu_dispatch(
             let len = out_f32.len().min(result.len());
             out_f32[..len].copy_from_slice(&result[..len]);
             Ok(())
+        }
+        "conv2d" => {
+            conv::dispatch_conv_gpu(arena, input_slices, output_slice, &resolved_params, shape_env)
+        }
+        "norm_f32" | "rms_norm" => {
+            norm::dispatch_norm_gpu(arena, kernel_name, input_slices, output_slice, &resolved_params)
+        }
+        "pool_f32" => {
+            pool::dispatch_pool_gpu(arena, input_slices, output_slice, &resolved_params)
+        }
+        "embedding" => {
+            embed::dispatch_embed_gpu(arena, input_slices, output_slice, &resolved_params)
         }
         _ => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
     }
