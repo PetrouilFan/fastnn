@@ -147,6 +147,100 @@ impl fmt::Display for DimExpr {
     }
 }
 
+// =============================================================================
+// ShapeEnv — runtime shape environment that resolves Symbol → concrete value
+// =============================================================================
+
+/// Runtime mapping from symbolic dimension names to concrete integer values.
+///
+/// Created by the executor before dispatch by inspecting input buffer sizes
+/// against the shapes declared in `GraphBuilder::input_with_dims()`.
+#[derive(Debug, Clone, Default)]
+pub struct ShapeEnv {
+    symbols: HashMap<String, u64>,
+}
+
+impl ShapeEnv {
+    pub fn new() -> Self {
+        ShapeEnv {
+            symbols: HashMap::new(),
+        }
+    }
+
+    /// Bind a symbol name to a concrete value.
+    pub fn bind(&mut self, name: &str, value: u64) {
+        self.symbols.insert(name.to_string(), value);
+    }
+
+    /// Resolve a symbol name to its concrete value, if bound.
+    pub fn resolve(&self, name: &str) -> Option<u64> {
+        self.symbols.get(name).copied()
+    }
+
+    /// Build a ShapeEnv by matching input byte sizes against graph input node shapes.
+    ///
+    /// For each graph input, this computes the known-element count from the known
+    /// dimensions of its `TensorType` shape, then divides the total input byte count
+    /// by `known_numel * elem_size` to back-fill the single remaining symbolic
+    /// dimension (typically the batch size N).
+    pub fn from_graph_inputs(graph: &ComputeGraph, inputs: &[&[u8]]) -> Self {
+        let mut env = ShapeEnv::new();
+        for (i, &input_id) in graph.inputs.iter().enumerate() {
+            let data_bytes = inputs.get(i).map(|b| b.len()).unwrap_or(0);
+            if data_bytes == 0 {
+                continue;
+            }
+            if let Some(node) = graph.get_node(input_id) {
+                let elem_size = node.output_type.dtype.byte_size();
+                let known_numel: usize = node
+                    .output_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| match d {
+                        DimExpr::Known(v) => Some(*v as usize),
+                        _ => None,
+                    })
+                    .product();
+                if known_numel == 0 || node.output_type.shape.is_empty() {
+                    continue;
+                }
+                let total_numel = data_bytes / elem_size;
+                let unknown_numel = total_numel / known_numel;
+                if unknown_numel == 0 {
+                    continue;
+                }
+                // Find the single symbolic dimension and bind it
+                let symbolic: Vec<&String> = node
+                    .output_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| match d {
+                        DimExpr::Symbol(s) => Some(s),
+                        DimExpr::Bounded { sym, .. } => Some(sym),
+                        _ => None,
+                    })
+                    .collect();
+                if symbolic.len() == 1 {
+                    env.bind(symbolic[0], unknown_numel as u64);
+                }
+            }
+        }
+        env
+    }
+}
+
+impl DimExpr {
+    /// Evaluate with runtime shape environment.  Bounded dims return their max
+    /// (same as evaluate()), while Symbol dims look up in the environment.
+    pub fn evaluate_with_env(&self, env: &ShapeEnv) -> Option<u64> {
+        match self {
+            DimExpr::Known(v) => Some(*v),
+            DimExpr::Bounded { max, .. } => Some(*max),
+            DimExpr::Symbol(s) => env.resolve(s),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IrDType {
     F32,

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::ir::node::ComputeGraph;
+use crate::ir::node::{ComputeGraph, DimExpr, ShapeEnv};
 use std::fmt;
 
 #[derive(Debug)]
@@ -45,6 +45,12 @@ pub enum Instruction {
         /// Optional shape/dimension parameters for kernels that need them
         /// (e.g., matmul stores [M, K, N], transpose stores [M, N]).
         params: Vec<usize>,
+        /// Symbolic dim expressions corresponding to `params`.
+        /// When `Some`, the backend can re-evaluate these at dispatch time
+        /// using a [`ShapeEnv`](crate::ir::node::ShapeEnv) to resolve
+        /// any [`DimExpr::Symbol`](crate::ir::node::DimExpr::Symbol) dims
+        /// that were not known at compile time.
+        param_dims: Option<Vec<DimExpr>>,
     },
     MemCopy {
         dst: BufferSlice,
@@ -83,10 +89,17 @@ pub trait Backend {
         memory_plan: &MemoryPlan,
     ) -> Result<ExecutablePlan, BackendError>;
 
+    /// Execute a compiled plan against the memory arena.
+    ///
+    /// `shape_env` carries runtime concrete values for symbolic dimension names
+    /// (e.g. batch size "N"), allowing kernels to resolve their dimension-dependent
+    /// parameters at dispatch time.  The environment is built from input byte sizes
+    /// in [`GraphExecutor::execute`](crate::backend::executor::GraphExecutor::execute).
     fn dispatch(
         &self,
         plan: &ExecutablePlan,
         arena: &Self::Buffer,
+        shape_env: &ShapeEnv,
     ) -> Result<(), BackendError>;
 
     /// Write `data` into the arena at byte `offset`.
