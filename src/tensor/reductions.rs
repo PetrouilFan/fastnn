@@ -39,19 +39,31 @@ impl Tensor {
             }
         }
 
-        // Fallback: dispatch
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch(
-            "sum",
-            dispatch_key,
-            &[
-                self,
-                &dim_scalar(dim),
-                &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
-            ],
-        )
-        .expect("Tensor::sum: dispatch failed");
-        let output = result[0].clone();
+        // Fallback: dispatch or AOT
+        let output = if self.device() == Device::Cpu {
+            let ndim = self.inner.ndim() as i32;
+            let norm_dim = if dim < 0 { ndim + dim } else { dim } as usize;
+            Tensor::exec_aot(&[self], |g, ins| {
+                vec![g.reduce_sum(&ins[0], norm_dim, keepdim)]
+            })
+            .expect("Tensor::sum: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            let result = dispatch(
+                "sum",
+                dispatch_key,
+                &[
+                    self,
+                    &dim_scalar(dim),
+                    &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
+                ],
+            )
+            .expect("Tensor::sum: dispatch failed");
+            result[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::SumBackward::new());
@@ -77,18 +89,30 @@ impl Tensor {
     }
 
     pub fn mean(&self, dim: i32, keepdim: bool) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch(
-            "mean",
-            dispatch_key,
-            &[
-                self,
-                &dim_scalar(dim),
-                &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
-            ],
-        )
-        .expect("Tensor::mean: dispatch failed");
-        let output = result[0].clone();
+        let ndim = self.inner.ndim() as i32;
+        let norm_dim = if dim < 0 { ndim + dim } else { dim } as usize;
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| {
+                vec![g.reduce_mean(&ins[0], norm_dim, keepdim)]
+            })
+            .expect("Tensor::mean: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            let result = dispatch(
+                "mean",
+                dispatch_key,
+                &[
+                    self,
+                    &dim_scalar(dim),
+                    &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
+                ],
+            )
+            .expect("Tensor::mean: dispatch failed");
+            result[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let dim_size = self.shape()[dim as usize];
             let edges = autograd::make_edge(self);
