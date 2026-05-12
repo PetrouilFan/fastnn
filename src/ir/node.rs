@@ -99,9 +99,14 @@ impl DimExpr {
                 sym: s.clone(),
                 max: *v,
             },
-            (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: _, max: mb }) => {
+            (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: sym_b, max: mb }) => {
+                let sym = if sym == sym_b {
+                    format!("{}^2", sym)
+                } else {
+                    canonical_commutative("*", sym, sym_b)
+                };
                 DimExpr::Bounded {
-                    sym: sym.clone(),
+                    sym,
                     max: max * mb,
                 }
             }
@@ -114,14 +119,14 @@ impl DimExpr {
                 }
             }
             (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
-                DimExpr::Symbol(format!("({}*{})", s, t))
+                DimExpr::Symbol(canonical_commutative("*", s, t))
             }
             (DimExpr::Symbol(s), DimExpr::Bounded { sym, max })
             | (DimExpr::Bounded { sym, max }, DimExpr::Symbol(s)) => {
                 let sym = if s == sym {
                     format!("{}^2", s)
                 } else {
-                    format!("({}*{})", s, sym)
+                    canonical_commutative("*", s, sym)
                 };
                 DimExpr::Bounded {
                     sym,
@@ -146,9 +151,14 @@ impl DimExpr {
                 sym: s.clone(),
                 max: *v,
             },
-            (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: _, max: mb }) => {
+            (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: sym_b, max: mb }) => {
+                let sym = if sym == sym_b {
+                    format!("2*{}", sym)
+                } else {
+                    canonical_commutative("+", sym, sym_b)
+                };
                 DimExpr::Bounded {
-                    sym: sym.clone(),
+                    sym,
                     max: max + mb,
                 }
             }
@@ -161,12 +171,12 @@ impl DimExpr {
                 }
             }
             (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
-                DimExpr::Symbol(format!("({}+{})", s, t))
+                DimExpr::Symbol(canonical_commutative("+", s, t))
             }
             (DimExpr::Symbol(s), DimExpr::Bounded { sym, max })
             | (DimExpr::Bounded { sym, max }, DimExpr::Symbol(s)) => {
                 DimExpr::Bounded {
-                    sym: if s == sym { format!("2*{}", s) } else { format!("({}+{})", s, sym) },
+                    sym: if s == sym { format!("2*{}", s) } else { canonical_commutative("+", s, sym) },
                     max: *max,
                 }
             }
@@ -177,6 +187,14 @@ impl DimExpr {
 // =============================================================================
 // DimExpr arithmetic helpers
 // =============================================================================
+
+/// Build a canonical string for a commutative binary operation.
+/// Operands are sorted alphabetically so `N+10` and `10+N` produce the same string.
+fn canonical_commutative(op: &str, a: &str, b: &str) -> String {
+    let mut v: Vec<&str> = vec![a, b];
+    v.sort_unstable();
+    format!("({}{}{})", v[0], op, v[1])
+}
 
 impl DimExpr {
     /// Symbolic floor division (affine expression support, e.g. `T/2`).
