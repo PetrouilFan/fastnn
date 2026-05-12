@@ -60,13 +60,12 @@ class LRScheduler:
         else:
             sd = self.optimizer.state_dict()
             if 'param_groups' in sd:
-                # Handle multiple param groups in state_dict
                 for pg in sd['param_groups']:
                     pg['lr'] = lr
+                self.optimizer.load_state_dict(sd)
             else:
-                # Assume single param group, set top-level lr key
-                sd["lr"] = lr
-            self.optimizer.load_state_dict(sd)
+                sd['lr'] = lr
+                self.optimizer.load_state_dict(sd)
 
     def _get_param_groups(self) -> Optional[list]:
         if self._has_param_groups and self.optimizer.param_groups:
@@ -79,6 +78,15 @@ class LRScheduler:
 
     def get_lr(self) -> float:
         raise NotImplementedError
+
+    def get_last_lr(self) -> float:
+        return self._get_lr()
+    
+    def state_dict(self) -> dict:
+        return {"last_epoch": self.last_epoch}
+    
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.last_epoch = state_dict.get("last_epoch", -1)
     
     def step(self, **kwargs) -> float:
         """Update learning rate and return the new learning rate."""
@@ -206,7 +214,6 @@ class ReduceLROnPlateau(LRScheduler):
         if self._should_reduce:
             current_lr = self._get_lr()
             new_lr = current_lr * self.factor
-            # Clamp to min_lr
             if self.mode == "min":
                 new_lr = max(new_lr, self.min_lr)
             else:
@@ -215,8 +222,31 @@ class ReduceLROnPlateau(LRScheduler):
             return new_lr
         return self._get_lr()
 
-    def step(self, metric: float, **kwargs) -> float:
-        """Update learning rate based on metric value."""
+    def get_last_lr(self) -> float:
+        return self._get_lr()
+
+    def state_dict(self) -> dict:
+        return {
+            "last_epoch": self.last_epoch,
+            "best": self.best,
+            "wait": self.wait,
+            "_should_reduce": self._should_reduce,
+        }
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.last_epoch = state_dict.get("last_epoch", -1)
+        self.best = state_dict.get("best", float("inf") if self.mode == "min" else float("-inf"))
+        self.wait = state_dict.get("wait", 0)
+        self._should_reduce = state_dict.get("_should_reduce", False)
+
+    def step(self, metric: float | None = None, **kwargs) -> float:
+        if metric is None:
+            if self.last_epoch == -1:
+                raise ValueError(
+                    "ReduceLROnPlateau.step() requires a metric value. "
+                    "Pass metric=<value> or call step(metric_value) directly."
+                )
+            metric = self.best
         self.last_epoch += 1
         improved = (metric < self.best) if self.mode == "min" else (metric > self.best)
         if improved:

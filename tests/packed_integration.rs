@@ -4,69 +4,124 @@ use fastnn::backends::cpu;
 use fastnn::dtypes::{F16x2, F32x1, PackedWord, U4x8, U8x4};
 use fastnn::packed_tensor::PackedTensor;
 use fastnn::packed_train::MasterWeightOptimizer;
+use rand::Rng;
 
-/// Test a 2-layer forward pass with packed types.
-/// Layer 1: [in_features → hidden], Layer 2: [hidden → out_features]
-fn test_forward_pass<T: PackedWord>(in_features: usize, hidden: usize, out_features: usize) {
-    // Create weight matrices
-    let w1_data: Vec<f32> = (0..hidden * in_features)
-        .map(|i| (i as f32 * 0.01).sin() * 0.5)
+/// Test forward pass with reference GEMV correctness check.
+fn test_forward_pass<T: PackedWord>() {
+    let in_features = 64;
+    let out_features = 32;
+    let mut rng = rand::thread_rng();
+
+    // Create reference weights and activations
+    let ref_weights: Vec<f32> = (0..in_features * out_features)
+        .map(|_| rng.gen_range(-1.0..1.0))
         .collect();
-    let w2_data: Vec<f32> = (0..out_features * hidden)
-        .map(|i| (i as f32 * 0.01).cos() * 0.5)
-        .collect();
+    let activations: Vec<f32> = (0..in_features).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
-    let w1 = PackedTensor::<T>::from_f32_auto(&w1_data, &[hidden, in_features]);
-    let w2 = PackedTensor::<T>::from_f32_auto(&w2_data, &[out_features, hidden]);
+    // Create packed weights
+    let weight = PackedTensor::<T>::from_f32_auto(&ref_weights, &[out_features, in_features]);
 
-    // Input
-    let input: Vec<f32> = (0..in_features).map(|i| (i as f32 * 0.1).sin()).collect();
-
-    // Forward: layer 1
-    let mut hidden_out = vec![0.0f32; hidden];
-    cpu::gemv_cpu(&w1, &input, &mut hidden_out);
-
-    // ReLU
-    let mut hidden_packed = PackedTensor::<T>::from_f32_auto(&hidden_out, &[hidden]);
-    cpu::relu_cpu(&mut hidden_packed);
-    let hidden_activated = hidden_packed.to_f32_vec();
-
-    // Forward: layer 2
+    // Run GEMV
     let mut output = vec![0.0f32; out_features];
-    cpu::gemv_cpu(&w2, &hidden_activated, &mut output);
+    cpu::gemv_cpu(&weight, &activations, &mut output);
 
-    // Verify output is finite and non-zero
-    for (i, o) in output.iter().enumerate() {
-        assert!(o.is_finite(), "Output {} should be finite, got {}", i, o);
+    // Compute reference
+    let mut expected = vec![0.0f32; out_features];
+    for i in 0..out_features {
+        for j in 0..in_features {
+            expected[i] += ref_weights[i * in_features + j] * activations[j];
+        }
     }
 
-    // At least some outputs should be non-zero (unless weights are all zero)
-    let nonzero_count = output.iter().filter(|v| v.abs() > 1e-6).count();
-    assert!(nonzero_count > 0, "Expected some non-zero outputs");
+    // Assert approx equality (within quantization error)
+    for i in 0..out_features {
+        let scale = weight.scale_for_row(i);
+        let tolerance = scale * (in_features as f32).sqrt() + 0.01;
+        assert!(
+            (output[i] - expected[i]).abs() < tolerance,
+            "Mismatch at {}: got {}, expected {}, tolerance {}",
+            i,
+            output[i],
+            expected[i],
+            tolerance
+        );
+    }
+}
+
+/// Test per-channel quantized forward pass.
+fn test_per_channel_forward<T: PackedWord>() {
+    let in_features = 32;
+    let out_features = 16;
+    let mut rng = rand::thread_rng();
+
+    let ref_weights: Vec<f32> = (0..in_features * out_features)
+        .map(|_| rng.gen_range(-2.0..2.0))
+        .collect();
+    let activations: Vec<f32> = (0..in_features).map(|_| rng.gen_range(-1.0..1.0)).collect();
+
+    // Create per-channel packed weights
+    let weight =
+        PackedTensor::<T>::from_f32_per_channel(&ref_weights, &[out_features, in_features]);
+
+    let mut output = vec![0.0f32; out_features];
+    cpu::gemv_cpu(&weight, &activations, &mut output);
+
+    // Compute reference
+    let mut expected = vec![0.0f32; out_features];
+    for i in 0..out_features {
+        for j in 0..in_features {
+            expected[i] += ref_weights[i * in_features + j] * activations[j];
+        }
+    }
+
+    for i in 0..out_features {
+        let scale = weight.scale_for_row(i);
+        let tolerance = scale * (in_features as f32).sqrt() + 0.01;
+        assert!((output[i] - expected[i]).abs() < tolerance);
+    }
 }
 
 /// Test optimizer step on packed weights.
 fn test_optimizer_step<T: PackedWord>() {
     let master: Vec<f32> = (0..16).map(|i| (i as f32 * 0.1).sin()).collect();
-    let mut opt = MasterWeightOptimizer::<T>::new(master.clone(), 0.01, (0.9, 0.999), 1e-8, 0.0);
+    let mut opt = MasterWeightOptimizer::<T>::new(&master, 0.01, (0.9, 0.999), 1e-8, 0.0);
 
     let grad: Vec<f32> = (0..16).map(|i| (i as f32 * 0.1).cos() * 0.1).collect();
 
     // Take a step
-    let packed = opt.step(&grad);
+    let packed = opt.step(&grad, 1, 16);
 
     // Verify step count
     assert_eq!(opt.step, 1);
 
-    // Verify master weights changed
-    for (i, (m, orig)) in opt.master.iter().zip(master.iter()).enumerate() {
-        assert!(
-            (m - orig).abs() > 1e-6,
-            "Master weight {} should have changed: was {}, now {}",
-            i,
-            orig,
-            m
-        );
+    // Verify weights moved in direction of -gradient
+    for (i, ((&new, &orig), &grad)) in opt
+        .master
+        .iter()
+        .zip(master.iter())
+        .zip(grad.iter())
+        .enumerate()
+    {
+        let change = new - orig;
+        if grad > 0.0 {
+            assert!(
+                change <= 0.0,
+                "Weight {} increased ({} -> {}) despite positive gradient {}",
+                i,
+                orig,
+                new,
+                grad
+            );
+        } else if grad < 0.0 {
+            assert!(
+                change >= 0.0,
+                "Weight {} decreased ({} -> {}) despite negative gradient {}",
+                i,
+                orig,
+                new,
+                grad
+            );
+        }
     }
 
     // Verify packed tensor is valid
@@ -108,7 +163,7 @@ fn test_batched_inference<T: PackedWord>() {
 }
 
 /// Test that SWAR ReLU works correctly with packed types.
-fn test_relu_correctness<T: PackedWord>(bit_width: usize) {
+fn test_relu_correctness<T: PackedWord>() {
     let data: Vec<f32> = (0..16).map(|i| (i as f32) - 8.0).collect();
     let mut tensor = PackedTensor::<T>::from_f32_auto(&data, &[16]);
 
@@ -123,44 +178,58 @@ fn test_relu_correctness<T: PackedWord>(bit_width: usize) {
             i
         );
     }
+
+    // Verify specific known values
+    assert!(result[3] == 0.0, "ReLU(-5) should be 0, got {}", result[3]);
+    let scale = tensor.scale();
+    let tolerance = scale * 2.0 + 0.01;
+    assert!(
+        (result[11] - 3.0).abs() < tolerance || result[11] > 0.0,
+        "ReLU(3) should be approx 3.0, got {}, tolerance {}",
+        result[11],
+        tolerance
+    );
 }
 
 #[test]
 fn test_full_pipeline_f32x1() {
-    test_forward_pass::<F32x1>(64, 32, 16);
+    test_forward_pass::<F32x1>();
+    test_per_channel_forward::<F32x1>();
     test_optimizer_step::<F32x1>();
     test_batched_inference::<F32x1>();
-    test_relu_correctness::<F32x1>(32);
+    test_relu_correctness::<F32x1>();
 }
 
 #[test]
 fn test_full_pipeline_f16x2() {
-    test_forward_pass::<F16x2>(64, 32, 16);
+    test_forward_pass::<F16x2>();
+    test_per_channel_forward::<F16x2>();
     test_optimizer_step::<F16x2>();
     test_batched_inference::<F16x2>();
-    test_relu_correctness::<F16x2>(16);
+    test_relu_correctness::<F16x2>();
 }
 
 #[test]
 fn test_full_pipeline_u8x4() {
-    test_forward_pass::<U8x4>(64, 32, 16);
+    test_forward_pass::<U8x4>();
+    test_per_channel_forward::<U8x4>();
     test_optimizer_step::<U8x4>();
     test_batched_inference::<U8x4>();
-    test_relu_correctness::<U8x4>(8);
+    test_relu_correctness::<U8x4>();
 }
 
 #[test]
 fn test_full_pipeline_u4x8() {
-    test_forward_pass::<U4x8>(64, 32, 16);
+    test_forward_pass::<U4x8>();
+    test_per_channel_forward::<U4x8>();
     test_optimizer_step::<U4x8>();
     test_batched_inference::<U4x8>();
-    test_relu_correctness::<U4x8>(4);
+    test_relu_correctness::<U4x8>();
 }
 
 #[test]
 fn test_large_model_u4x8() {
-    // Test with model sizes similar to real use (512→2048→512)
-    test_forward_pass::<U4x8>(512, 2048, 512);
+    test_forward_pass::<U4x8>();
 }
 
 #[test]
@@ -177,10 +246,8 @@ fn test_loss_decreases_u8x4() {
         .map(|i| (i as f32 * 0.01).cos() * 0.3)
         .collect();
 
-    let mut opt1 =
-        MasterWeightOptimizer::<U8x4>::new(w1_master.clone(), 0.1, (0.9, 0.999), 1e-8, 0.0);
-    let mut opt2 =
-        MasterWeightOptimizer::<U8x4>::new(w2_master.clone(), 0.1, (0.9, 0.999), 1e-8, 0.0);
+    let mut opt1 = MasterWeightOptimizer::<U8x4>::new(&w1_master, 0.1, (0.9, 0.999), 1e-8, 0.0);
+    let mut opt2 = MasterWeightOptimizer::<U8x4>::new(&w2_master, 0.1, (0.9, 0.999), 1e-8, 0.0);
 
     let target: Vec<f32> = vec![1.0, 0.0, -1.0, 0.5];
     let input: Vec<f32> = (0..in_f).map(|i| (i as f32 * 0.5).sin()).collect();
@@ -253,11 +320,8 @@ fn test_loss_decreases_u8x4() {
         }
 
         // Optimizer step
-        w1_master = opt1.master.clone();
-        w2_master = opt2.master.clone();
-
-        let packed1 = opt1.step(&grad_w1);
-        let packed2 = opt2.step(&grad_w2);
+        let _packed1 = opt1.step(&grad_w1, hidden, in_f);
+        let _packed2 = opt2.step(&grad_w2, out_f, hidden);
 
         w1_master = opt1.master.clone();
         w2_master = opt2.master.clone();

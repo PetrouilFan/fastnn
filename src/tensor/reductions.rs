@@ -49,7 +49,8 @@ impl Tensor {
                 &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
-        );
+        )
+        .expect("Tensor::sum: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
@@ -75,7 +76,8 @@ impl Tensor {
                 &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
-        );
+        )
+        .expect("Tensor::max: dispatch failed");
         result[0].clone()
     }
 
@@ -89,7 +91,8 @@ impl Tensor {
                 &dim_scalar(dim),
                 &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
             ],
-        );
+        )
+        .expect("Tensor::mean: dispatch failed");
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let dim_size = self.shape()[dim as usize];
@@ -105,5 +108,59 @@ impl Tensor {
         } else {
             output
         }
+    }
+
+    pub fn cumsum(&self, dim: i64, exclusive: bool, reverse: bool) -> Tensor {
+        let data = self.as_f32_slice();
+        let shape = self.shape_ref();
+        let rank = shape.len() as i64;
+        let axis = if dim < 0 {
+            (dim + rank) as usize
+        } else {
+            dim as usize
+        };
+        let mut result_data = data.to_vec();
+
+        // Calculate strides
+        let mut stride = 1i64;
+        for i in (axis + 1)..shape.len() {
+            stride *= shape[i];
+        }
+        let outer = data.len() as i64 / (shape[axis] * stride);
+
+        if reverse {
+            for o in 0..outer {
+                for s in 0..stride {
+                    let _base = (o * shape[axis]) * stride + s;
+                    let mut running = 0.0f32;
+                    for d in (0..shape[axis]).rev() {
+                        let idx = (o * shape[axis] + d) * stride + s;
+                        running += data[idx as usize];
+                        result_data[idx as usize] = if exclusive {
+                            running - data[idx as usize]
+                        } else {
+                            running
+                        };
+                    }
+                }
+            }
+        } else {
+            for o in 0..outer {
+                for s in 0..stride {
+                    let mut running = 0.0f32;
+                    for d in 0..shape[axis] {
+                        let idx = (o * shape[axis] + d) * stride + s;
+                        running += data[idx as usize];
+                        result_data[idx as usize] = if exclusive {
+                            running - data[idx as usize]
+                        } else {
+                            running
+                        };
+                    }
+                }
+            }
+        }
+
+        Tensor::from_vec(result_data, shape.to_vec())
     }
 }

@@ -29,20 +29,24 @@ impl StoragePool {
         }
     }
 
-    /// Acquire a buffer without zeroing (caller will initialize).
+    /// Acquire a buffer without zeroing (caller MUST write every byte).
     pub fn acquire_uninit(&self, nbytes: usize, device: Device) -> Arc<Storage> {
         match device {
             Device::Cpu => {
-                // For small tensors, try thread-local cache first to avoid DashMap overhead
+                // For small tensors, try thread-local cache first
                 if nbytes < SMALL_TENSOR_THRESHOLD {
                     let cached = SMALL_CACHE.with(|cache| {
                         let mut cache = cache.borrow_mut();
-                        let storages = cache.get_mut(&nbytes)?;
-                        let storage = storages.pop()?;
-                        if storages.is_empty() {
-                            cache.remove(&nbytes);
+                        if let Some(storages) = cache.get_mut(&nbytes) {
+                            if let Some(storage) = storages.pop() {
+                                if storages.is_empty() {
+                                    cache.remove(&nbytes);
+                                }
+                                // Skip zero-fill — caller promises to write all bytes
+                                return Some(storage);
+                            }
                         }
-                        Some(storage)
+                        None
                     });
                     if let Some(storage) = cached {
                         return storage;
@@ -52,12 +56,7 @@ impl StoragePool {
                 let key = nbytes;
                 if let Some(mut storages) = self.buffers.get_mut(&key) {
                     if let Some(storage) = storages.pop() {
-                        match Arc::try_unwrap(storage) {
-                            Ok(owned_storage) => return Arc::new(owned_storage),
-                            Err(storage) => {
-                                storages.push(storage);
-                            }
-                        }
+                        return storage;
                     }
                 }
                 Arc::new(Storage::new_cpu(DType::F32, nbytes))
@@ -75,26 +74,20 @@ impl StoragePool {
                     let cached = SMALL_CACHE.with(|cache| {
                         let mut cache = cache.borrow_mut();
                         if let Some(storages) = cache.get_mut(&nbytes) {
-                            if let Some(storage) = storages.pop() {
+                            if let Some(mut storage) = storages.pop() {
                                 if storages.is_empty() {
                                     cache.remove(&nbytes);
                                 }
-                                // Zero the storage before returning
-                                match Arc::try_unwrap(storage) {
-                                    Ok(mut s) => {
-                                        match &mut s {
-                                            Storage::Cpu(cpu) => {
-                                                let data = Arc::make_mut(&mut cpu.data);
-                                                data.fill(0);
-                                            }
-                                            Storage::Wgpu(_) => {}
+                                {
+                                    let s = Arc::make_mut(&mut storage);
+                                    match s {
+                                        Storage::Cpu(cpu) => {
+                                            let data = Arc::make_mut(&mut cpu.data);
+                                            data.fill(0);
                                         }
-                                        return Some(Arc::new(s));
+                                        Storage::Wgpu(_) => {}
                                     }
-                                    Err(_) => {
-                                        // try_unwrap failed, storage is shared - skip cache
-                                        return None;
-                                    }
+                                    return Some(storage);
                                 }
                             }
                         }
@@ -107,21 +100,17 @@ impl StoragePool {
 
                 let key = nbytes;
                 if let Some(mut storages) = self.buffers.get_mut(&key) {
-                    if let Some(storage) = storages.pop() {
-                        match Arc::try_unwrap(storage) {
-                            Ok(mut owned_storage) => {
-                                match &mut owned_storage {
-                                    Storage::Cpu(cpu) => {
-                                        let data = Arc::make_mut(&mut cpu.data);
-                                        data.fill(0);
-                                    }
-                                    Storage::Wgpu(_) => {}
+                    if let Some(mut storage) = storages.pop() {
+                        {
+                            let owned_storage = Arc::make_mut(&mut storage);
+                            match owned_storage {
+                                Storage::Cpu(cpu) => {
+                                    let data = Arc::make_mut(&mut cpu.data);
+                                    data.fill(0);
                                 }
-                                return Arc::new(owned_storage);
+                                Storage::Wgpu(_) => {}
                             }
-                            Err(storage) => {
-                                storages.push(storage);
-                            }
+                            return storage;
                         }
                     }
                 }
@@ -162,7 +151,7 @@ impl StoragePool {
                 let key = nbytes;
 
                 if let Some(mut storages) = self.buffers.get_mut(&key) {
-                    if storages.len() < 64 {
+                    if storages.len() < 4 {
                         storages.push(storage);
                     }
                 } else {

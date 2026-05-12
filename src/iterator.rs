@@ -163,6 +163,9 @@ impl TensorIterator {
                 };
                 let nbytes = input.tensor.inner.dtype.size();
                 let offset = input_offsets[inp_idx] as usize * nbytes;
+                // SAFETY: The pointer is derived from a valid CPU storage allocation
+                // and offset is within bounds. The resulting slice covers exactly
+                // `nbytes` corresponding to one element of the tensor.
                 let slice = unsafe { std::slice::from_raw_parts(ptr.add(offset), nbytes) };
                 ptrs.push(slice);
             }
@@ -174,14 +177,14 @@ impl TensorIterator {
                 indices[d] += 1;
                 if indices[d] < self.output_shape[d] as usize {
                     for (inp_idx, input) in self.inputs.iter().enumerate() {
-                        if d < input.strides.len() && d < input.sizes.len() && input.sizes[d] != 1 {
+                        if d < input.strides.len() && input.strides[d] != 0 {
                             input_offsets[inp_idx] += input.strides[d];
                         }
                     }
                     break;
                 }
                 for (inp_idx, input) in self.inputs.iter().enumerate() {
-                    if d < input.strides.len() && d < input.sizes.len() && input.sizes[d] != 1 {
+                    if d < input.strides.len() && input.strides[d] != 0 {
                         input_offsets[inp_idx] -= (self.output_shape[d] - 1) * input.strides[d];
                     }
                 }
@@ -218,6 +221,7 @@ impl TensorIterator {
                 };
                 let nbytes = input.tensor.inner.dtype.size();
                 let offset = input_offsets[inp_idx] as usize * nbytes;
+                // SAFETY: Same as above — valid CPU storage pointer with in-bounds offset.
                 let slice = unsafe { std::slice::from_raw_parts(ptr.add(offset), nbytes) };
                 ptrs.push(slice);
             }
@@ -229,14 +233,14 @@ impl TensorIterator {
                 indices[d] += 1;
                 if indices[d] < self.output_shape[d] as usize {
                     for (inp_idx, input) in self.inputs.iter().enumerate() {
-                        if d < input.strides.len() && d < input.sizes.len() && input.sizes[d] != 1 {
+                        if d < input.strides.len() && input.strides[d] != 0 {
                             input_offsets[inp_idx] += input.strides[d];
                         }
                     }
                     break;
                 }
                 for (inp_idx, input) in self.inputs.iter().enumerate() {
-                    if d < input.strides.len() && d < input.sizes.len() && input.sizes[d] != 1 {
+                    if d < input.strides.len() && input.strides[d] != 0 {
                         input_offsets[inp_idx] -= (self.output_shape[d] - 1) * input.strides[d];
                     }
                 }
@@ -325,7 +329,6 @@ fn find_contiguous_inner_dim(shape: &[i64]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smallvec::smallvec;
 
     #[test]
     fn test_broadcast_shapes_same() {

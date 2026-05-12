@@ -1,7 +1,8 @@
 import numpy as np
 import fastnn._core as _core
+import fastnn.precision as precision
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 
 # Exception hierarchy - imported from _core (Rust side)
 FastnnError = _core.FastnnError
@@ -59,12 +60,17 @@ from fastnn.tensor import (  # noqa: E402
 )
 from fastnn.layers import Flatten, PySequential, BasicBlock  # noqa: F401, E402
 MaxPool2d = _core.MaxPool2d
+AvgPool1d = _core.AvgPool1d
+MaxPool1d = _core.MaxPool1d
 from fastnn.io import (  # noqa: E402
     save as io_save,
     load as io_load,
     convert_from_pytorch,
     convert_from_onnx,
+    DAGModel,
 )
+from fastnn.io.graph_builder import build_model_from_fnn  # noqa: E402
+from fastnn.precision import Precision, Quantizer, PrecisionConfig, QuantizationScheme  # noqa: E402
 
 __all__ = [
     # Context managers and utilities
@@ -133,6 +139,8 @@ __all__ = [
     "Embedding",
     "Upsample",
     "MaxPool2d",
+    "AvgPool1d",
+    "MaxPool1d",
     "AdaptiveAvgPool2d",
     "ReLU",
     "GELU",
@@ -164,6 +172,9 @@ __all__ = [
     "log_softmax",
     "fused_add_relu",
     "fused_conv_bn_silu",
+    # Packed tensor constructors (numpy interop)
+    "packed_tensor",
+    "packed_tensor_from_f32",
     # Tensor operations
     "add",
     "sub",
@@ -190,6 +201,8 @@ __all__ = [
     "minimum",
     "einsum",
     "flash_attention",
+    "cumsum",
+    "erf",
     # Loss functions
     "mse_loss",
     "cross_entropy_loss",
@@ -217,6 +230,40 @@ __all__ = [
     "io_load",
     "convert_from_pytorch",
     "convert_from_onnx",
+    "DAGModel",
+    "load_onnx_model",
+    # Phase 0 additions
+    "PReLU",
+    "AvgPool2d",
+    # Phase 1 additions
+    "DAGExecutor",
+    # Phase 3 additions
+    "where",
+    "gather",
+    "repeat",
+    "expand",
+    "fnn_slice",
+    "topk",
+    "leaky_relu",
+    "elu",
+    "softplus",
+    "hardswish",
+    # Precision system
+    "precision",
+    "Precision",
+    "Quantizer",
+    "PrecisionConfig",
+    "QuantizationScheme",
+    # YOLO model wrapper
+    "YOLO",
+    "load_yolo",
+    "build_model_from_fnn",
+    # NMS utilities
+    "nms",
+    "yolo_decode",
+    "yolo_dfl_decode",
+    "xywh2xyxy",
+    "scale_boxes",
 ]
 
 
@@ -227,6 +274,30 @@ def __getattr__(name):
     if name == "activations":
         import fastnn.activations
         return fastnn.activations
+    if name == "YOLO":
+        from fastnn.models.yolo import YOLO
+        return YOLO
+    if name == "load_yolo":
+        from fastnn.models.yolo import load_yolo
+        return load_yolo
+    if name in ("nms", "yolo_decode", "yolo_dfl_decode", "xywh2xyxy", "scale_boxes"):
+        from fastnn.utils.nms import nms, yolo_decode, yolo_dfl_decode, xywh2xyxy, scale_boxes
+        return {
+            "nms": nms,
+            "yolo_decode": yolo_decode,
+            "yolo_dfl_decode": yolo_dfl_decode,
+            "xywh2xyxy": xywh2xyxy,
+            "scale_boxes": scale_boxes,
+        }[name]
+    if name == "load_onnx_model":
+        from fastnn.io import load_onnx_model
+        return load_onnx_model
+    if name == "init":
+        import fastnn.init
+        return fastnn.init
+    if name == "functional":
+        import fastnn.functional
+        return fastnn.functional
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -328,6 +399,7 @@ SiLU = _core.SiLU
 Sequential = _core.Sequential_
 
 LeakyReLU = _core.LeakyReLU
+Softmax = _core.Softmax
 Softplus = _core.Softplus
 Hardswish = _core.Hardswish
 RMSNorm = _core.RMSNorm
@@ -345,22 +417,119 @@ Dropout2d = _core.Dropout2d
 Upsample = _core.Upsample
 RMSprop = _core.PyRMSprop
 Elu = _core.Elu
+Mish = _core.Mish
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
 
+# Packed linear
+Linear4 = _core.PyLinear4
+Linear8 = _core.PyLinear8
+Linear16 = _core.PyLinear16
+Linear32 = _core.PyLinear32
 
-def import_onnx(onnx_path: str, fnn_path: str):
+# Packed fused linear+gelu
+PackedLinearGelu4 = _core.PyPackedLinearGelu4
+PackedLinearGelu8 = _core.PyPackedLinearGelu8
+PackedLinearGelu16 = _core.PyPackedLinearGelu16
+PackedLinearGelu32 = _core.PyPackedLinearGelu32
+
+# Packed conv2d
+PackedConv2d4 = _core.PyPackedConv2d4
+PackedConv2d8 = _core.PyPackedConv2d8
+PackedConv2d16 = _core.PyPackedConv2d16
+PackedConv2d32 = _core.PyPackedConv2d32
+
+# Packed fused conv+relu
+PackedConvRelu4 = _core.PyPackedConvRelu4
+PackedConvRelu8 = _core.PyPackedConvRelu8
+PackedConvRelu16 = _core.PyPackedConvRelu16
+PackedConvRelu32 = _core.PyPackedConvRelu32
+
+# Packed tensors
+PackedTensor4 = _core.PyPackedTensor4
+PackedTensor8 = _core.PyPackedTensor8
+PackedTensor16 = _core.PyPackedTensor16
+PackedTensor32 = _core.PyPackedTensor32
+
+def packed_tensor(data, shape=None, scale=1.0, zero=0.0, dtype="u4"):
+    """Create a packed tensor from data (list or numpy array).
+
+    Args:
+        data: numpy array or list
+        shape: optional shape (auto-detected from numpy array)
+        scale: quantization scale
+        zero: quantization zero point
+        dtype: one of "u4", "u8", "f16", "f32"
+    """
+    if isinstance(data, np.ndarray):
+        if shape is None:
+            shape = list(data.shape)
+        data = data.flatten().tolist()
+    if dtype == "u4":
+        return PackedTensor4(data, shape, scale, zero)
+    elif dtype == "u8":
+        return PackedTensor8(data, shape, scale, zero)
+    elif dtype == "f16":
+        return PackedTensor16(data, shape, scale, zero)
+    elif dtype == "f32":
+        return PackedTensor32(data, shape, scale, zero)
+    else:
+        raise ValueError(f"Unknown packed dtype: {dtype}")
+
+
+def packed_tensor_from_f32(data, shape=None, dtype="u4"):
+    """Create a packed tensor with auto-computed scale from f32 data.
+
+    Args:
+        data: numpy array or list of f32 values
+        shape: optional shape (auto-detected from numpy array)
+        dtype: one of "u4", "u8", "f16", "f32"
+    """
+    if isinstance(data, np.ndarray):
+        if shape is None:
+            shape = list(data.shape)
+        data = data.flatten().tolist()
+    if dtype == "u4":
+        return PackedTensor4.from_f32_auto(data, shape)
+    elif dtype == "u8":
+        return PackedTensor8.from_f32_auto(data, shape)
+    elif dtype == "f16":
+        return PackedTensor16.from_f32_auto(data, shape)
+    elif dtype == "f32":
+        return PackedTensor32.from_f32_auto(data, shape)
+    else:
+        raise ValueError(f"Unknown packed dtype: {dtype}")
+
+
+# Quantized tensors
+QuantizedTensor = _core.PyQuantizedTensor
+
+# Master weight optimizers
+MasterWeightOptimizer4 = _core.PyMasterWeightOptimizer4
+MasterWeightOptimizer8 = _core.PyMasterWeightOptimizer8
+MasterWeightOptimizer16 = _core.PyMasterWeightOptimizer16
+MasterWeightOptimizer32 = _core.PyMasterWeightOptimizer32
+
+# Backend control
+use_wgpu = _core.use_wgpu
+use_cpu = _core.use_cpu
+is_wgpu = _core.is_wgpu
+
+
+def import_onnx(onnx_path: str, fnn_path: str, config=None):
     """Import an ONNX model and save it in fastnn format.
 
     Args:
         onnx_path: Path to .onnx file
         fnn_path: Path to output .fnn file
+        config: Optional PrecisionConfig for quantized import.
+            When set, weights are quantized per the config specification.
 
     Returns:
         Dictionary with model info (layers, input_shape, output_shape)
     """
     from fastnn.io.onnx import import_onnx as _import
 
-    return _import(onnx_path, fnn_path)
+    return _import(onnx_path, fnn_path, config=config)
 
 
 def load_state_dict(model, state_dict):
@@ -398,6 +567,27 @@ class _TensorModuleWrapper:
     def __delattr__(self, name):
         delattr(self._module, name)
 
+
+# Phase 0: New module classes
+PReLU = _core.PReLU
+AvgPool2d = _core.AvgPool2d
+
+# Phase 1: DAG executor
+DAGExecutor = _core.DAGExecutor
+
+# Phase 3: New tensor operation functions
+where = _core.where_
+gather = _core.gather
+repeat = _core.repeat
+expand = _core.expand
+fnn_slice = _core.slice
+topk = _core.topk
+leaky_relu = _core.leaky_relu
+elu = _core.elu
+softplus = _core.softplus
+hardswish = _core.hardswish
+cumsum = _core.cumsum
+erf = _core.erf
 
 import sys
 

@@ -90,6 +90,20 @@ def _save_model(model: Any, path: str, version: int = MODEL_VERSION) -> None:
                     else:
                         f.write(_pack_u8(0))
 
+            elif version == 3:
+                # Version 3: dtype-tagged packed tensors (U4, U8, F16, F32)
+                from fastnn.io import write_fnn_file
+                header = {
+                    "version": 3,
+                    "num_params": len(param_list),
+                }
+                # Convert parameters to v3 format: (name, data_f32, DTYPE_F32, [], [])
+                params_v3 = []
+                for name, tensor in param_list:
+                    data_f32 = to_numpy(tensor).astype(np.float32, copy=False)
+                    params_v3.append((name, data_f32))
+                write_fnn_file(f, header, params_v3, version=3)
+
             else:
                 raise SerializationError(f"Unsupported serialization version: {version}")
 
@@ -151,6 +165,26 @@ def _load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
                                 meta.grad = grad_tensor
                         # Also store in result dict for access
                         result[grad_name] = grad_tensor
+                return result
+
+            elif file_version >= 3:
+                # v3+: dtype-tagged packed tensors — use unified reader
+                from fastnn.io import read_fnn_header, read_fnn_parameters
+                # Seek back to start of file (read_fnn_header reads from offset 0)
+                f.seek(0)
+                _magic, _ver, _header, num_params = read_fnn_header(f)
+                raw_params = read_fnn_parameters(f, num_params, version=file_version)
+                result = {}
+                for name, val in raw_params.items():
+                    if isinstance(val, tuple):
+                        data, dtype, scales, zeros = val
+                        if isinstance(data, np.ndarray):
+                            result[name] = tensor(data, list(data.shape))
+                        else:
+                            # Packed data loaded as bytes — wrap in numpy for compatibility
+                            result[name] = tensor(np.frombuffer(data, dtype=np.float32).copy(), [0])
+                    else:
+                        result[name] = tensor(val, list(val.shape))
                 return result
 
             else:

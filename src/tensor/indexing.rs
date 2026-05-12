@@ -1,4 +1,4 @@
-use crate::autograd;
+use crate::autograd::{self, Edge};
 use crate::dispatcher::{device_to_dispatch_key, dispatch};
 use crate::storage::Device;
 use smallvec::SmallVec;
@@ -66,8 +66,19 @@ impl Tensor {
 
     pub fn maximum(&self, other: &Tensor) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("maximum", dispatch_key, &[self, other]);
-        result[0].clone()
+        let result = dispatch("maximum", dispatch_key, &[self, other])
+            .expect("Tensor::maximum: dispatch failed");
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = autograd::make_edges(self, other);
+            let backward = Arc::new(autograd::MaximumBackward::new(
+                vec![self.clone(), other.clone()],
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn gt_scalar(&self, threshold: f32) -> Tensor {
@@ -76,13 +87,15 @@ impl Tensor {
             "gt_scalar",
             dispatch_key,
             &[self, &Tensor::from_scalar(threshold)],
-        );
+        )
+        .expect("Tensor::gt_scalar: dispatch failed");
         result[0].clone()
     }
 
     pub fn sign(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("sign", dispatch_key, &[self]);
+        let result =
+            dispatch("sign", dispatch_key, &[self]).expect("Tensor::sign: dispatch failed");
         result[0].clone()
     }
 
@@ -92,14 +105,35 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result = dispatch("minimum", dispatch_key, &[self, other]);
-        result[0].clone()
+        let result = dispatch("minimum", dispatch_key, &[self, other])
+            .expect("Tensor::minimum: dispatch failed");
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = autograd::make_edges(self, other);
+            let backward = Arc::new(autograd::MinimumBackward::new(
+                vec![self.clone(), other.clone()],
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
         let numel = self.numel() as usize;
-        let self_data = self.as_f32_slice();
-        let other_data = other.as_f32_slice();
+        let self_contig = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let other_contig = if !other.is_contiguous() {
+            other.contiguous()
+        } else {
+            other.clone()
+        };
+        let self_data = self_contig.as_f32_slice();
+        let other_data = other_contig.as_f32_slice();
         let mut output_data = vec![0.0f32; numel];
         for i in 0..numel {
             output_data[i] = if self_data[i] >= other_data[i] {
@@ -113,8 +147,18 @@ impl Tensor {
 
     pub fn le_tensor(&self, other: &Tensor) -> Tensor {
         let numel = self.numel() as usize;
-        let self_data = self.as_f32_slice();
-        let other_data = other.as_f32_slice();
+        let self_contig = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let other_contig = if !other.is_contiguous() {
+            other.contiguous()
+        } else {
+            other.clone()
+        };
+        let self_data = self_contig.as_f32_slice();
+        let other_data = other_contig.as_f32_slice();
         let mut output_data = vec![0.0f32; numel];
         for i in 0..numel {
             output_data[i] = if self_data[i] <= other_data[i] {
@@ -132,7 +176,8 @@ impl Tensor {
             "lt_scalar",
             dispatch_key,
             &[self, &Tensor::from_scalar(threshold)],
-        );
+        )
+        .expect("Tensor::lt_scalar: dispatch failed");
         result[0].clone()
     }
 
@@ -142,8 +187,16 @@ impl Tensor {
             "add_scalar",
             dispatch_key,
             &[self, &Tensor::from_scalar(scalar)],
-        );
-        result[0].clone()
+        )
+        .expect("Tensor::add_scalar: dispatch failed");
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::AddScalarBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn div_scalar(&self, scalar: f32) -> Tensor {
@@ -152,13 +205,26 @@ impl Tensor {
             "div_scalar",
             dispatch_key,
             &[self, &Tensor::from_scalar(scalar)],
-        );
-        result[0].clone()
+        )
+        .expect("Tensor::div_scalar: dispatch failed");
+        let output = result[0].clone();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::DivScalarBackward::new(
+                self.clone(),
+                scalar,
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn logical_not(&self) -> Tensor {
         let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("logical_not", dispatch_key, &[self]);
+        let result = dispatch("logical_not", dispatch_key, &[self])
+            .expect("Tensor::logical_not: dispatch failed");
         result[0].clone()
     }
 
@@ -219,7 +285,29 @@ impl Tensor {
             }
             out_offset += dim_size * out_strides[dim];
         }
-        Tensor::from_vec(output_data, output_shape.into_vec())
+        let output = Tensor::from_vec(output_data, output_shape.into_vec());
+
+        if autograd::is_grad_enabled() && tensors.iter().any(|t| t.requires_grad()) {
+            let split_sizes: Vec<usize> = tensors
+                .iter()
+                .map(|t| t.inner.sizes[dim] as usize)
+                .collect();
+            let mut edges = Vec::new();
+            for (i, t) in tensors.iter().enumerate() {
+                if let Some(node) = t.grad_fn() {
+                    edges.push(Edge(node, i));
+                }
+            }
+            let backward = Arc::new(autograd::CatBackward::new(
+                tensors.to_vec(),
+                dim,
+                split_sizes,
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn stack(tensors: &[Tensor], dim: i32) -> Tensor {
@@ -266,11 +354,14 @@ impl Tensor {
             total *= orig * r;
         }
         let mut output_data = vec![0.0f32; total as usize];
-        let src = self.to_cpu();
+        let mut src = self.to_cpu();
+        if !src.is_contiguous() {
+            src = src.contiguous();
+        }
         let src_data = src.as_f32_slice();
-        let src_strides = &self.inner.strides;
-        let src_sizes = &self.inner.sizes;
-        let ndim = self.ndim();
+        let src_strides = &src.inner.strides;
+        let src_sizes = &src.inner.sizes;
+        let ndim = src.ndim();
         let offset = repeats.len() - ndim;
         let mut src_indices = vec![0i64; ndim];
         for out_idx in 0..total as usize {
@@ -285,20 +376,47 @@ impl Tensor {
             for d in 0..ndim {
                 src_indices[d] = rep_indices[d + offset] % src_sizes[d];
             }
-            let mut src_lin = self.inner.storage_offset;
+            let mut src_lin = 0i64;
             for d in 0..ndim {
                 src_lin += src_indices[d] * src_strides[d];
             }
             output_data[out_idx] = src_data[src_lin as usize];
         }
-        Tensor::from_vec(output_data, new_shape.into_vec())
+        let output = Tensor::from_vec(output_data, new_shape.into_vec());
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::RepeatBackward::new(
+                self.clone(),
+                repeats.to_vec(),
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn where_tensor(&self, condition: &Tensor, other: &Tensor) -> Tensor {
         let numel = self.numel() as usize;
-        let self_data = self.as_f32_slice();
-        let cond_data = condition.as_f32_slice();
-        let other_data = other.as_f32_slice();
+        let self_contig = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let cond_contig = if !condition.is_contiguous() {
+            condition.contiguous()
+        } else {
+            condition.clone()
+        };
+        let other_contig = if !other.is_contiguous() {
+            other.contiguous()
+        } else {
+            other.clone()
+        };
+        let self_data = self_contig.as_f32_slice();
+        let cond_data = cond_contig.as_f32_slice();
+        let other_data = other_contig.as_f32_slice();
         let mut output_data = vec![0.0f32; numel];
         for i in 0..numel {
             output_data[i] = if cond_data[i] != 0.0 {
@@ -307,6 +425,131 @@ impl Tensor {
                 other_data[i]
             };
         }
-        Tensor::from_vec(output_data, self.shape())
+        let output = Tensor::from_vec(output_data, self.shape());
+
+        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+            let edges = autograd::make_edges(self, other);
+            let backward = Arc::new(autograd::WhereBackward::new(
+                vec![self.clone(), other.clone()],
+                condition.clone(),
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
+    pub fn gather(&self, axis: i64, indices: &Tensor) -> Tensor {
+        let indices_data = indices.as_i64_slice();
+        let self_contig = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let x_data = self_contig.as_f32_slice();
+        let shape = self.shape_ref();
+        let axis = if axis < 0 {
+            shape.len() as i64 + axis
+        } else {
+            axis
+        } as usize;
+
+        // ONNX Gather semantics:
+        // - If indices is 0-D (scalar), the gathered dim is *removed*
+        //   (output rank = data.rank - 1).
+        // - If indices is 1+D, the gathered dim is *replaced* by the indices shape
+        //   (output rank = data.rank - 1 + indices.rank).
+        let indices_ndim = indices.ndim();
+        let scalar_idx = indices_ndim == 0;
+
+        let out_shape: Vec<i64> = if scalar_idx {
+            let mut s = shape.to_vec();
+            s.remove(axis);
+            s
+        } else {
+            let mut s = shape.to_vec();
+            if indices_ndim == 1 {
+                s[axis] = indices_data.len() as i64;
+            } else {
+                // N-D indices: replace gathered dim with all indices dims
+                s.remove(axis);
+                for d in (0..indices_ndim).rev() {
+                    s.insert(axis, indices.inner.sizes[d]);
+                }
+            }
+            s
+        };
+        let mut out_data = vec![0.0f32; out_shape.iter().product::<i64>() as usize];
+
+        let inner = if axis + 1 < shape.len() {
+            shape[axis + 1..].iter().product::<i64>() as usize
+        } else {
+            1
+        };
+        let outer = if axis > 0 {
+            shape[..axis].iter().product::<i64>() as usize
+        } else {
+            1
+        };
+
+        if scalar_idx {
+            let idx = indices_data[0] as usize;
+            if idx >= shape[axis] as usize {
+                panic!(
+                    "gather: index {} is out of bounds for dimension {} (size {})",
+                    idx, axis, shape[axis]
+                );
+            }
+            for o in 0..outer {
+                let src_off = (o * shape[axis] as usize + idx) * inner;
+                let dst_off = o * inner;
+                out_data[dst_off..dst_off + inner]
+                    .copy_from_slice(&x_data[src_off..src_off + inner]);
+            }
+        } else {
+            for o in 0..outer {
+                for (i, &idx) in indices_data.iter().enumerate() {
+                    if idx as usize >= shape[axis] as usize {
+                        panic!(
+                            "gather: index {} is out of bounds for dimension {} (size {})",
+                            idx, axis, shape[axis]
+                        );
+                    }
+                    let src_off = (o * shape[axis] as usize + idx as usize) * inner;
+                    let dst_off = (o * out_shape[axis] as usize + i) * inner;
+                    out_data[dst_off..dst_off + inner]
+                        .copy_from_slice(&x_data[src_off..src_off + inner]);
+                }
+            }
+        }
+
+        Tensor::from_vec(out_data, out_shape)
+    }
+
+    pub fn nonzero(&self) -> Vec<Vec<i64>> {
+        let data = self.as_f32_slice();
+        let shape = self.shape_ref();
+        let mut result = Vec::new();
+
+        if shape.is_empty() {
+            return result;
+        }
+
+        let total = data.len();
+        for i in 0..total {
+            if data[i] != 0.0 {
+                // Convert flat index to multi-dimensional index
+                let mut idx = i;
+                let mut coords = Vec::with_capacity(shape.len());
+                for &dim in shape.iter().rev() {
+                    coords.push((idx % dim as usize) as i64);
+                    idx /= dim as usize;
+                }
+                coords.reverse();
+                result.push(coords);
+            }
+        }
+        result
     }
 }

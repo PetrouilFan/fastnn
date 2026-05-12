@@ -14,6 +14,8 @@ Examples:
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import math
+import numpy as np
+import fastnn as fnn
 import fastnn._core as _core
 from fastnn.module import Module
 
@@ -95,11 +97,23 @@ class _BaseModule(Module):
         super().train_mode()
         for layer in self._train_layers:
             layer.train_mode()
+        for layer in self._param_layers:
+            if hasattr(layer, 'train'):
+                layer.train()
     
     def eval_mode(self) -> None:
         super().eval_mode()
         for layer in self._eval_layers:
             layer.eval_mode()
+        for layer in self._param_layers:
+            if hasattr(layer, 'eval'):
+                layer.eval()
+    
+    def train(self) -> None:
+        self.train_mode()
+    
+    def eval(self) -> None:
+        self.eval_mode()
     
     def to_gpu(self, device_id: int) -> None:
         for layer in self._gpu_layers:
@@ -112,15 +126,25 @@ class _BaseModule(Module):
         return result
     
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        current_state = self.state_dict()
-        for name, value in state_dict.items():
-            if name in current_state:
-                # Get the current tensor and copy data from value
-                current_tensor = current_state[name]
-                # Use numpy to copy data
-                current_tensor_numpy = current_tensor.numpy()
-                value_numpy = value.numpy() if hasattr(value, 'numpy') else value
-                current_tensor_numpy[:] = value_numpy
+        loaded_keys = set()
+        for name_prefix, layer in self._named_param_pairs:
+            for param_name, param in layer.named_parameters():
+                full_name = f"{name_prefix}.{param_name}"
+                loaded_keys.add(full_name)
+                if full_name not in state_dict:
+                    raise KeyError(f"Missing key in state_dict: {full_name}")
+                src = state_dict[full_name]
+                if hasattr(src, 'numpy'):
+                    src_arr = src.numpy()
+                else:
+                    src_arr = np.asarray(src)
+                new_param = fnn.tensor(src_arr, list(src_arr.shape))
+                setter = f"set_{param_name}"
+                if hasattr(layer, setter):
+                    getattr(layer, setter)(new_param)
+        extra_keys = set(state_dict.keys()) - loaded_keys
+        if extra_keys:
+            raise KeyError(f"Unexpected keys in state_dict: {extra_keys}")
 
 
 # Python-implemented layers (for compatibility and educational purposes)
@@ -184,7 +208,16 @@ class MaxPool2dPy(Module):
     
     def parameters(self):
         return []
-    
+
+    def named_parameters(self):
+        return []
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
     def __call__(self, x):
         return self._rust_maxpool(x)
 
@@ -212,17 +245,25 @@ class Flatten(Module):
     
     def parameters(self):
         return []
-    
+
+    def named_parameters(self):
+        return []
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
     def __call__(self, x):
         shape = x.shape
         ndim = len(shape)
         start = self.start_dim if self.start_dim >= 0 else ndim + self.start_dim
         end = self.end_dim if self.end_dim >= 0 else ndim + self.end_dim
-        end = end + 1
         new_shape = list(shape[:start])
-        flattened_size = math.prod(shape[start:end])
+        flattened_size = math.prod(shape[start:end + 1])
         new_shape.append(flattened_size)
-        new_shape.extend(shape[end:])
+        new_shape.extend(shape[end + 1:])
         return x.view(new_shape)
 
 
@@ -322,7 +363,3 @@ class BasicBlock(_BaseModule):
         out = self.relu(out)
         
         return out
-
-
-# Alias for backward compatibility
-MaxPool2dPy = MaxPool2dPy

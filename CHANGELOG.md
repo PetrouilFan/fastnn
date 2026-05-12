@@ -1,5 +1,157 @@
 # Changelog
 
+## v1.4.0 — ONNX Graph Execution, DAG Memory Optimizations & Quantized Conv Fixes
+
+### ONNX Graph Execution (DAG Runtime)
+
+- **Full ONNX import pipeline**: `onnx.py` now imports ONNX protobuf graphs into a `DAGModel` with shape inference, constant folding, and graph optimization.
+- **DAGExecutor**: Rust-native execution engine that walks a pre-built Directed Acyclic Graph of `OpCode` nodes — no Python interpreter overhead during inference.
+- **ONNX ops**: 50+ ONNX operators implemented with shape inference (Conv, Gemm, Reshape, Relu, BatchNorm, MaxPool, GlobalAvgPool, Add, Mul, Concat, Softmax, Resize, Cast, Gather, Slice, Split, Squeeze, Unsqueeze, Pad, Transpose, Flatten, and many more).
+- **YOLO model support**: End-to-end YOLO pipeline from ONNX → DAGModel → inference, matching ONNX Runtime output numerically.
+- **ONNX Q/DQ support**: QuantizeLinear/DequantizeLinear handlers for ONNX quantized format; QLinearConv and MatMulInteger for quantized inference.
+- **Q/DQ folding**: Graph pass that detects QuantizeLinear→DequantizeLinear patterns around Conv/MatMul and converts to packed weight storage during import.
+- **Constant folding**: All constant subgraphs are pre-evaluated at import time, reducing runtime computation.
+
+### Performance: DAG Memory Optimizations
+
+- **Consumer-count dead tensor clearing**: Tracks tensor consumers during DAG build and frees intermediate tensors immediately after their last use — reduces peak memory by ~70% for deep networks.
+- **Conv→BN→SiLU fusion at DAG build**: Auto-detects Conv→BatchNorm→SiLU patterns during DAG construction and dispatches to the existing fused kernel (3×3 stride=1 only).
+- **Zero-copy weight transform buffer**: `WT_TRANS_BUF` reads directly from the pre-transposed weight tensor instead of per-call `copy_from_slice` — eliminates ~2 MB/copy per conv layer.
+- **Pool-aware `from_vec`/`from_scalar`**: Tensor factory functions now use `StoragePool::acquire_uninit()` instead of fresh `Storage::new_cpu()` allocations, reusing previously released memory.
+
+### Performance: Block-Major Weight Packing
+
+- **Block-major packing for blocked GEMM**: Packed weight tensors now store weights in block-major layout (default block_size=4), enabling SIMD-friendly blocked matmul.
+- **`to_block_major()`/`as_block_major()`**: Conversion functions between row-major and block-major layouts at pack time.
+- **GEMM dispatch selects block-major path**: `gemm_batch_packed_block_major` auto-selected by the DAG for block-packed weights.
+- **Matmul SIMD fix**: Corrected SIMD accumulation path in packed matmul for small-K configurations.
+
+### Performance: Thread-Local Alloc Pool (TlsVecPool)
+
+- **Thread-local scratch buffer pool**: `TlsVecPool` provides per-thread recycled `Vec<MaybeUninit<u8>>` buffers, eliminating repeated allocation/free in hot GEMM loops.
+- **Bug fixes**: Fixed zero-length alloc (set length after reserve) and reserve miscalculation (`v.capacity()` vs `v.len()`) that caused heap corruption in quantized paths.
+
+### Bug Fixes
+
+#### Quantized Conv & Packed Tensor
+- **TlsVecPool heap corruption**: Fixed `reserve()` miscalculation (`v.capacity()` instead of `v.len()`) causing `realloc(): invalid next size` crashes — the root cause of all quantized packed type crashes (U8, U4, F16) in YOLO inference.
+- **TlsVecPool zero-length alloc**: Fixed `set_len()` on Vec with 0 reserved capacity causing index-out-of-bounds on write.
+- **Storage pool double-alloc**: Removed `Arc::try_unwrap` race condition that leaked storage allocations; reduced cache size from 64 to 4 entries.
+- **Relaxed packed tensor byte validation**: `PackedTensor::from_bytes` now accepts sizes that aren't multiples of word count, with proper remainder handling.
+- **Quantized conv accuracy**: Fixed asymmetric quantization scale application, 3×3 stride=2 convolution indexing, and v3.1 format compatibility.
+- **F32 SIMD bugs**: Corrected FMA accumulation and memory alignment in SIMD paths.
+
+#### DAG & ONNX Pipeline
+- **BatchNorm2d backward**: Fixed panic in backward pass, missing weight/bias gradient computation, and conv padding offset calculation.
+- **Reshape assertion**: Fixed assertion failure for negative dimensions.
+- **DequantizeLinear dispatch**: Corrected op code dispatch for Q/DQ nodes.
+- **RoPE shape**: Fixed rotary position embedding shape handling.
+- **5 test failures**: Fixed across Cast/Gather stubs, DAGModel pass-through ops, Conv2d params, and typed attribute parsing.
+
+#### General
+- **fast_exp polynomial**: Replaced broken Cephes polynomial with degree-7 minimax approximation (accurate to <1 ULP).
+- **Clippy/ruff lint fixes**: All Rust clippy warnings and Python ruff errors fixed; CI builds clean at `-D warnings`.
+- **v3 serialization**: Fixed version handling, per-row packing for non-multiple feature dimensions, zero-size edge case guards.
+
+### Documentation
+
+- **Comprehensive docs audit**: Added all missing API entries across the codebase, updated all documentation files.
+- **README rewrite**: Complete rewrite as a professional library landing page with architecture diagram, feature table, and benchmark results.
+- **Development docs**: Architecture, performance roadmap, and internal API documentation.
+
+### Testing
+
+- **19 quantized conv regression tests**: U4x8/U8x4/F16x2 packed types tested with YOLO-like dimensions (conv1x1, conv3x3 stride=1/2) and 3 stress tests (large batch, large K, multiple blocks).
+- **33+ ONNX/DAG tests**: Shape inference, constant folding, YOLO pipeline end-to-end, Q/DQ correctness.
+- **Quantized transformer notebook**: End-to-end training + inference with packed layers.
+
+### New Files (key additions)
+
+- `src/nn/dag.rs` — DAG model, executor, node types, fused pattern detection
+- `src/storage_pool.rs` — Thread-safe storage allocation pool
+- `src/backends/packed_simd.rs` — Block-major GEMM, TlsVecPool, unpack SIMD
+- `src/dtypes/u8x4.rs`, `src/dtypes/u4x8.rs`, `src/dtypes/f16x2.rs` — Packed word types with unpack
+- `src/packed_tensor.rs` — Block-major packing, byte validation
+- `src/python/packed_tensor.rs` — Python bindings for packed tensors
+- `fastnn/io/onnx.py` — ONNX import with shape inference, Q/DQ folding, constant folding
+- `fastnn/nn/dag_model.py` — Python DAGModel wrapper
+- `fastnn/io/act_calibrate.py` — Activation-aware calibration
+- `fastnn/io/profiler.py` — Mixed-precision auto-profiler
+- `src/kernels/cpu/arm_neon.rs` — ARM NEON SIMD kernels for U4x8/U8x4 GEMV
+- `tests/quantized_conv_regression.rs` — 19 quantized conv tests
+- `tests/test_yolo_pipeline.py` — End-to-end YOLO pipeline test
+- `tests/test_dag_packed.py`, `tests/test_packed_fused.py` — DAG and fused layer tests
+
+### Contributors
+
+This release represents the cumulative work of PRs #34 (ONNX graph executor), #35 (precision system expansion), #36 (docs audit & conv fixes), and the v1.4.0 performance optimization wave.
+
+---
+
+## v1.3.0 — Packed Precision Expansion & Quantized ONNX Support
+
+### DAG Packed Dispatch Expansion
+
+- **MatMul packed dispatch**: `OpCode::MatMul` now tries packed weights first via `dispatch_matmul_packed()`, falls back to f32 matmul.
+- **ConvTranspose packed dispatch**: `dispatch_conv_transpose_packed()` handles packed conv transpose weights.
+- **Embedding packed dispatch**: Packed embedding table lookup via gemv for memory-efficient embeddings.
+- **Real packed conv fix**: `conv_packed_from()` now uses `PackedConv2d::forward_cpu()` (im2col + packed gemm) instead of dequantizing to f32 and running f32 conv2d — this was the single biggest performance bug fix.
+
+### Quantized ONNX Runtime Ops
+
+- **QuantizeLinear / DequantizeLinear**: New OpCode handlers for ONNX Q/DQ format — supports scale+round+clamp quantization and (v-zp)*scale dequantization at runtime.
+- **QLinearConv**: Takes quantized input + quantized weight, dequantizes internally, runs f32 conv, requantizes output.
+- **MatMulInteger**: Takes quantized inputs, dequantizes both, runs f32 matmul.
+
+### ONNX Import Improvements
+
+- **Q/DQ folding**: `onnx.py` now detects QuantizeLinear→DequantizeLinear patterns around Conv/MatMul nodes and folds them, converting to packed weight storage during import.
+- **New ONNX ops**: NonZero, Unique, Tril, Triu, Pad v2 (tensor-based pads) support added to `onnx.py`.
+
+### Activation-Aware Calibration
+
+- **`ActivationCalibrator`**: New module that runs calibration data through the model, collects per-layer activation distributions, and refines quantization scales using weighted KL-divergence (NVIDIA's method).
+- Integrates with the existing `Calibrator` infrastructure and `fastnn-convert` CLI.
+
+### Mixed-Precision Auto-Profiler
+
+- **`PrecisionProfiler`**: Per-layer sensitivity analysis — quantizes each layer in isolation, measures output MSE perturbation, sorts by sensitivity.
+- **`auto_config()`**: Generates a `PrecisionConfig` with U4 assigned to least-sensitive layers, U8 to mid, F32 to most-sensitive, given a target memory budget.
+
+### Performance: Batch GEMM & ARM NEON
+
+- **Batch GEMM for packed MatMul**: `gemm_batch_packed()` with K-tiled cache blocking — processes all batch rows within each K-tile before moving to the next, improving L2 cache reuse significantly over the old per-row GEMV loop.
+- **ARM NEON SIMD kernels**: `gemv_u4x8_neon()` and `gemv_u8x4_neon()` — full SIMD widening chain (int8→int16→int32→f32→FMA) for aarch64 targets.
+- **NEON feature flag**: Added `neon = []` feature in Cargo.toml, gated on `#[cfg(all(target_arch = "aarch64", feature = "neon"))]`.
+
+### Fused Packed Layers
+
+- **PackedConvRelu**: Standalone fused conv + in-place ReLU, all 4 precisions (U4/U8/F16/F32), exposed via Python.
+- **PackedLinearGelu**: Standalone fused linear + GELU with Abramowitz & Stegun erf approximation, all 4 precisions.
+- **BN folding**: `fold_bn_into_packed_conv()` function — dequantizes packed weights to f32, applies `W_fused = W * gamma / sqrt(var + eps)`, requantizes per-channel.
+
+### WGPU Packed Conv Support
+
+- **WGSL compute shader**: `conv_packed.wgsl` implementing packed convolution on GPU with per-channel scaling and bias.
+- **Rust scaffolding**: `conv2d_packed_wgpu()` function with full WGPU pipeline creation, buffer management, and dispatch.
+
+### Code Quality
+
+- **Build warnings fixed**: Removed duplicate `[[bin]]` entries for benchmark files, fixed `[profile.bench]` panic setting.
+- **107/108 Rust unit tests pass** (1 pre-existing benchmark correctness check).
+
+### New Files
+
+- `fastnn/io/act_calibrate.py` — Activation-aware calibration
+- `fastnn/io/profiler.py` — Mixed-precision profiler
+- `src/kernels/cpu/arm_neon.rs` — ARM NEON SIMD kernels
+- `src/backends/wgpu/shaders/conv_packed.wgsl` — WGPU packed conv shader
+- `tests/test_dag_packed.py` — DAG packed dispatch tests
+- `tests/test_packed_fused.py` — Fused packed layer tests
+- `benches/packed_dispatch_bench.rs` — Packed dispatch performance benchmarks
+
+---
+
 ## v1.2.0 — Fused Kernel Optimizations & Performance Overhaul
 
 ### Performance: Fused Operator Kernels

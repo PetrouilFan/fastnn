@@ -14,8 +14,6 @@ pub mod storage;
 pub mod storage_pool;
 pub mod storage_quantized;
 pub mod tensor;
-pub mod train;
-
 pub use error::{FastnnError, FastnnResult};
 pub use storage_quantized::QuantizedTensor;
 
@@ -26,6 +24,7 @@ pub use tensor::Tensor;
 // Native packed precision modules
 pub mod backends;
 pub mod dtypes;
+pub mod packed_conv;
 pub mod packed_layer;
 pub mod packed_tensor;
 pub mod packed_train;
@@ -33,6 +32,7 @@ pub mod swar;
 
 // Re-export packed precision public API
 pub use dtypes::{F16x2, F32x1, PackedWord, U4x8, U8x4};
+pub use packed_conv::{Conv2d16, Conv2d32, Conv2d4, Conv2d8, PackedConv2d};
 pub use packed_layer::{is_wgpu, use_cpu, use_wgpu};
 pub use packed_layer::{Linear16, Linear32, Linear4, Linear8, PackedLinear};
 pub use packed_tensor::PackedTensor;
@@ -60,4 +60,3 @@ pub(crate) fn set_seeded_rng(seed: u64) {
     let mutex = SEEDED_RNG.get_or_init(|| Mutex::new(rng.clone()));
     *mutex.lock() = rng;
 }
-

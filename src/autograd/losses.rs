@@ -97,25 +97,35 @@ impl Node for LayerNormBackward {
         &self.inputs
     }
 }
-pub struct EmbeddingBackward {
-    pub weight: Tensor,
-    pub indices: Tensor,
+
+pub struct BCEWithLogitsBackward {
+    pub input: Tensor,
+    pub target: Tensor,
     pub edges: Vec<Edge>,
+    pub inputs: Vec<Tensor>,
 }
 
-impl EmbeddingBackward {
-    pub fn new(weight: Tensor, indices: Tensor, edges: Vec<Edge>) -> Self {
-        EmbeddingBackward {
-            weight,
-            indices,
+impl BCEWithLogitsBackward {
+    pub fn new(input: Tensor, target: Tensor, edges: Vec<Edge>) -> Self {
+        BCEWithLogitsBackward {
+            input: input.clone(),
+            target: target.clone(),
             edges,
+            inputs: vec![input, target],
         }
     }
 }
 
-impl Node for EmbeddingBackward {
+impl Node for BCEWithLogitsBackward {
     fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
-        vec![crate::autograd::extract_first_grad(grad_outputs)]
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
+
+        let grad_input = grad.mul(&self.target.mul_scalar(-1.0).add_scalar(1.0).sigmoid());
+        let grad_target = grad.mul_scalar(0.0);
+
+        vec![Some(grad_input), Some(grad_target)]
     }
 
     fn next_edges(&self) -> &[Edge] {
@@ -123,15 +133,66 @@ impl Node for EmbeddingBackward {
     }
 
     fn num_inputs(&self) -> usize {
-        1
+        2
     }
 
     fn name(&self) -> &str {
-        "EmbeddingBackward"
+        "BCEWithLogitsBackward"
     }
 
     fn inputs(&self) -> &[Tensor] {
-        std::slice::from_ref(&self.weight)
+        &self.inputs
+    }
+}
+
+pub struct HuberLossBackward {
+    pub input: Tensor,
+    pub target: Tensor,
+    pub delta: f32,
+    pub edges: Vec<Edge>,
+    pub inputs: Vec<Tensor>,
+}
+
+impl HuberLossBackward {
+    pub fn new(input: Tensor, target: Tensor, delta: f32, edges: Vec<Edge>) -> Self {
+        HuberLossBackward {
+            input: input.clone(),
+            target: target.clone(),
+            delta,
+            edges,
+            inputs: vec![input, target],
+        }
+    }
+}
+
+impl Node for HuberLossBackward {
+    fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
+        let Some(grad) = crate::autograd::extract_first_grad(grad_outputs) else {
+            return vec![None, None];
+        };
+
+        let diff = self.input.sub(&self.target);
+        let diff_sign = diff.sign();
+        let grad_input = grad.mul(&diff_sign.clamp(-self.delta, self.delta).div_scalar(self.delta));
+        let grad_target = grad.mul_scalar(0.0);
+
+        vec![Some(grad_input), Some(grad_target)]
+    }
+
+    fn next_edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
+    fn num_inputs(&self) -> usize {
+        2
+    }
+
+    fn name(&self) -> &str {
+        "HuberLossBackward"
+    }
+
+fn inputs(&self) -> &[Tensor] {
+        &self.inputs
     }
 }
 
@@ -140,15 +201,17 @@ pub struct CrossEntropyBackward {
     pub targets: Tensor,
     pub reduction: String,
     pub edges: Vec<Edge>,
+    pub inputs: Vec<Tensor>,
 }
 
 impl CrossEntropyBackward {
     pub fn new(logits: Tensor, targets: Tensor, reduction: String, edges: Vec<Edge>) -> Self {
         CrossEntropyBackward {
-            logits,
-            targets,
+            logits: logits.clone(),
+            targets: targets.clone(),
             reduction,
             edges,
+            inputs: vec![logits, targets],
         }
     }
 }
@@ -168,11 +231,8 @@ impl Node for CrossEntropyBackward {
         let logits_cpu = crate::autograd::ensure_cpu(logits);
         let logits_data = logits_cpu.as_f32_slice();
 
-        // Convert targets to integer indices
         let targets_cpu = crate::autograd::ensure_cpu(targets);
         let targets_i64 = targets_cpu.as_i64_slice();
-
-        // Convert to f32 representation for kernel (kernel expects f32 bit patterns of indices)
         let targets_data: Vec<f32> = targets_i64.iter().map(|&x| x as f32).collect();
 
         let mut grad_logits_data = vec![0.0f32; batch_size * num_classes];
@@ -205,7 +265,7 @@ impl Node for CrossEntropyBackward {
     }
 
     fn num_inputs(&self) -> usize {
-        1
+        2
     }
 
     fn name(&self) -> &str {
@@ -213,24 +273,27 @@ impl Node for CrossEntropyBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        std::slice::from_ref(&self.logits)
+        &self.inputs
     }
 }
+
 pub struct MSELossBackward {
     pub pred: Tensor,
     pub target: Tensor,
     pub reduction: String,
     pub edges: Vec<Edge>,
+    pub inputs: Vec<Tensor>,
     two_scalar: Tensor,
 }
 
 impl MSELossBackward {
     pub fn new(pred: Tensor, target: Tensor, reduction: String, edges: Vec<Edge>) -> Self {
         MSELossBackward {
-            pred,
-            target,
+            pred: pred.clone(),
+            target: target.clone(),
             reduction,
             edges,
+            inputs: vec![pred, target],
             two_scalar: Tensor::from_scalar(2.0),
         }
     }
@@ -262,7 +325,7 @@ impl Node for MSELossBackward {
     }
 
     fn num_inputs(&self) -> usize {
-        1
+        2
     }
 
     fn name(&self) -> &str {
@@ -270,7 +333,13 @@ impl Node for MSELossBackward {
     }
 
     fn inputs(&self) -> &[Tensor] {
-        std::slice::from_ref(&self.pred)
+        &self.inputs
+    }
+}
+
+impl LayerNormBackward {
+    fn inputs(&self) -> &[Tensor] {
+        &self.inputs
     }
 }
 

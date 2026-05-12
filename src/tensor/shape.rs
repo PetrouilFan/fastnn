@@ -47,10 +47,40 @@ impl TensorImpl {
         if self.is_contiguous() {
             return Tensor::new(self.clone());
         }
-        let data = self.as_f32_slice().to_vec();
+        let numel = self.numel() as usize;
+        let ndim = self.ndim();
+        let mut data = vec![0.0f32; numel];
+        // SAFETY: We verified the storage is `Storage::Cpu`. The pointer is derived
+        // from the backing `Vec<u8>` allocation, which is valid for the duration of
+        // this function. The length `len` is within the bounds of the allocation.
+        let src = unsafe {
+            let crate::storage::Storage::Cpu(cpu) = &self.storage.as_ref() else {
+                panic!("contiguous(): only supported for CPU tensors");
+            };
+            let ptr = cpu.data.as_ref().as_ptr() as *const f32;
+            let len = cpu.data.len() / 4;
+            std::slice::from_raw_parts(ptr, len)
+        };
+        let strides = &self.strides;
+        let sizes = &self.sizes;
+        let offset = self.storage_offset;
+        let mut indices = vec![0i64; ndim];
+        for i in 0..numel {
+            let mut src_idx = offset;
+            for d in 0..ndim {
+                src_idx += indices[d] * strides[d];
+            }
+            data[i] = src[src_idx as usize];
+            for d in (0..ndim).rev() {
+                indices[d] += 1;
+                if indices[d] < sizes[d] {
+                    break;
+                }
+                indices[d] = 0;
+            }
+        }
         let sizes = self.sizes.clone();
         let mut new_tensor = Tensor::from_vec(data, sizes.to_vec());
-
         if let Some(meta) = &self.autograd_meta {
             let Ok(meta_lock) = meta.lock() else {
                 return new_tensor;
@@ -61,11 +91,13 @@ impl TensorImpl {
                     Some(Arc::new(std::sync::Mutex::new(new_meta)));
             }
         }
-
         new_tensor
     }
 
     pub fn view(&self, sizes: SmallVec<[i64; 8]>) -> TensorImpl {
+        if !self.is_contiguous() {
+            panic!("view() requires contiguous tensor, use reshape() instead");
+        }
         let mut new_sizes = sizes.clone();
         let mut product: i64 = 1;
         let mut minus_one_idx = None;
@@ -117,6 +149,10 @@ impl TensorImpl {
     }
 
     pub fn reshape(&self, sizes: SmallVec<[i64; 8]>) -> Tensor {
+        if !self.is_contiguous() {
+            let t = self.contiguous();
+            return t.inner.reshape(sizes);
+        }
         let mut new_sizes = sizes.clone();
         let mut product: i64 = 1;
         let mut minus_one_idx = None;
@@ -348,9 +384,13 @@ impl Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let output: Tensor = self.inner.view(sizes).into();
 
-        let edges = autograd::make_edge(self);
-        let backward = Arc::new(autograd::ViewBackward::new(self.clone(), edges));
-        Self::attach_grad_fn(output, backward)
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::ViewBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn reshape(&self, shape: Vec<i64>) -> Tensor {
@@ -380,12 +420,33 @@ impl Tensor {
     }
 
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
-        self.inner.transpose(dim0, dim1)
+        let output = self.inner.transpose(dim0, dim1);
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::TransposeBackward::new(
+                self.clone(),
+                dim0,
+                dim1,
+                edges,
+            ));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn permute(&self, dims: Vec<i64>) -> Tensor {
-        let sizes: SmallVec<[i64; 8]> = dims.into();
-        self.inner.permute(sizes)
+        let sizes: SmallVec<[i64; 8]> = dims.clone().into();
+        let output = self.inner.permute(sizes);
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::PermuteBackward::new(self.clone(), dims, edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
@@ -406,7 +467,15 @@ impl Tensor {
 
     pub fn expand(&self, shape: Vec<i64>) -> Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        self.inner.expand(sizes)
+        let output = self.inner.expand(sizes);
+
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::ExpandBackward::new(self.clone(), edges));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn flip(&self, dim: i32) -> Tensor {

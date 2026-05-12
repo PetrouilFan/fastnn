@@ -63,6 +63,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx512 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             add_parallel_avx512(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -72,6 +73,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx2 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             add_parallel_avx2(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -90,6 +92,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             {
                 (0..num_chunks)
                     .into_par_iter()
+                    // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                     .for_each(|chunk_idx| unsafe {
                         add_parallel_neon(
                             chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -110,6 +113,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                // SAFETY: Pointers `a_ptr`, `b_ptr`, `out_ptr` are valid for `numel` elements; loop bounds prevent out-of-bounds SIMD accesses.
                 SimdLevel::Avx512 => unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -131,6 +135,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         i += 1;
                     }
                 },
+                // SAFETY: Pointers are valid for `numel` elements; loop bounds prevent out-of-bounds SIMD accesses.
                 SimdLevel::Avx2 => unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -158,6 +163,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 },
                 SimdLevel::Scalar => {
                     for idx in 0..numel {
+                        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                         unsafe {
                             *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
                         }
@@ -166,6 +172,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
+                // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                 unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -210,6 +217,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             )))]
             {
                 for idx in 0..numel {
+                    // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                     unsafe {
                         *out_ptr.add(idx) = *a_ptr.add(idx) + *b_ptr.add(idx);
                     }
@@ -233,6 +241,7 @@ pub unsafe fn add_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_ptr = out_data.as_mut_ptr();
 
     let out_usize = out_ptr as usize;
+    // SAFETY: `input_ptrs` are valid per-iteration pointers from TensorIterator; `out_ptr` is valid for the output tensor.
     iter.for_each_with_index(|idx, input_ptrs| unsafe {
         let a_val = match dtype {
             DType::F32 => *(input_ptrs[0].as_ptr() as *const f32),
@@ -306,6 +315,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx512 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             sub_parallel_avx512(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -315,6 +325,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx2 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             sub_parallel_avx2(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -340,6 +351,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             match SIMD_LEVEL.get_or_init(detect_simd_level) {
+                // SAFETY: Pointers `a_ptr`, `b_ptr`, `out_ptr` are valid for `numel` elements; loop bounds prevent out-of-bounds SIMD accesses.
                 SimdLevel::Avx512 => unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -361,6 +373,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         i += 1;
                     }
                 },
+                // SAFETY: Pointers are valid for `numel` elements; loop bounds prevent out-of-bounds SIMD accesses.
                 SimdLevel::Avx2 => unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -388,6 +401,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 },
                 SimdLevel::Scalar => {
                     for idx in 0..numel {
+                        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                         unsafe {
                             *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
                         }
@@ -396,6 +410,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             {
+                // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                 unsafe {
                     let mut i = 0usize;
                     while i + 16 <= numel {
@@ -440,6 +455,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             )))]
             {
                 for idx in 0..numel {
+                    // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
                     unsafe {
                         *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
                     }
@@ -462,6 +478,7 @@ pub unsafe fn sub_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
     let out_usize = out_ptr as usize;
+    // SAFETY: `input_ptrs` are valid per-iteration pointers from TensorIterator; `out_ptr` is valid for the output tensor.
     iter.for_each_with_index(|idx, input_ptrs| unsafe {
         let a_val = *(input_ptrs[0].as_ptr() as *const f32);
         let b_val = *(input_ptrs[1].as_ptr() as *const f32);
@@ -513,6 +530,7 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx512 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             mul_parallel_avx512(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -522,6 +540,7 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                 SimdLevel::Avx2 => {
                     (0..num_chunks)
                         .into_par_iter()
+                        // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                         .for_each(|chunk_idx| unsafe {
                             mul_parallel_avx2(
                                 chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -540,6 +559,7 @@ pub unsafe fn mul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             {
                 (0..num_chunks)
                     .into_par_iter()
+                    // SAFETY: The parallel closure operates on disjoint chunks; each chunk's memory range is within the valid allocations.
                     .for_each(|chunk_idx| unsafe {
                         mul_parallel_neon(
                             chunk_idx, chunk_size, numel, a_usize, b_usize, out_usize,
@@ -2444,15 +2464,35 @@ pub unsafe fn silu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
 
-            // SiLU is transcendental, use scalar for parallel path
             (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                 let start = chunk_idx * chunk_size;
                 let end = std::cmp::min(start + chunk_size, numel);
+                let len = end - start;
 
-                for i in start..end {
+                let a_slice =
+                    unsafe { std::slice::from_raw_parts((a_usize + start * 4) as *const f32, len) };
+                let out_slice = unsafe {
+                    std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len)
+                };
+
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if len >= 8 && is_x86_feature_detected!("avx2") {
                     unsafe {
-                        let x = *((a_usize + i * 4) as *const f32);
-                        *((out_usize + i * 4) as *mut f32) = x / (1.0 + (-x).exp());
+                        use std::arch::x86_64::*;
+                        for i in (0..len - 7).step_by(8) {
+                            let x = _mm256_loadu_ps(a_slice.as_ptr().add(i));
+                            let neg_x = _mm256_sub_ps(_mm256_setzero_ps(), x);
+                            let exp_neg_x = fast_exp_avx2(neg_x);
+                            let one = _mm256_set1_ps(1.0);
+                            let denom = _mm256_add_ps(one, exp_neg_x);
+                            let silu = _mm256_div_ps(x, denom);
+                            _mm256_storeu_ps(out_slice.as_mut_ptr().add(i), silu);
+                        }
+                    }
+                } else {
+                    for i in 0..len {
+                        let x = a_slice[i];
+                        out_slice[i] = x / (1.0 + (-x).exp());
                     }
                 }
             });
@@ -3057,6 +3097,12 @@ pub unsafe fn prelu_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             } else {
                 indices[1] as usize % w_numel
             };
+            // SAFETY: w_idx is computed as `indices[1] as usize % w_numel` (or 0 when w_numel==1),
+            // which is always < w_data.len(). The debug_assert confirms this at runtime.
+            debug_assert!(
+                w_idx < w_data.len(),
+                "leaky_relu weight index out of bounds"
+            );
             let w = *w_data.get_unchecked(w_idx);
             *ptr.add(i) = if v > 0.0 { v } else { v * w };
         }
@@ -3488,13 +3534,47 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
                 let start = chunk_idx * chunk_size;
                 let end = std::cmp::min(start + chunk_size, numel);
+                let len = end - start;
 
-                for i in start..end {
-                    unsafe {
-                        let x_val = *((x_usize + i * 4) as *const f32);
-                        let grad_val = *((grad_usize + i * 4) as *const f32);
+                let x_slice =
+                    unsafe { std::slice::from_raw_parts((x_usize + start * 4) as *const f32, len) };
+                let g_slice = unsafe {
+                    std::slice::from_raw_parts((grad_usize + start * 4) as *const f32, len)
+                };
+                let out_slice = unsafe {
+                    std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len)
+                };
 
-                        // Compute gelu'(x)
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if len >= 8 && is_x86_feature_detected!("avx2") {
+                    let sqrt_2_over_pi = f32x8::new([0.7978846; 8]);
+                    let coeff = f32x8::new([0.044715; 8]);
+                    let half = f32x8::new([0.5; 8]);
+                    let one = f32x8::new([1.0; 8]);
+                    let three = f32x8::new([3.0; 8]);
+                    let two = f32x8::new([2.0; 8]);
+
+                    for i in (0..len - 7).step_by(8) {
+                        let xv = from_slice_unaligned_f32x8(&x_slice[i..i + 8]);
+                        let gv = from_slice_unaligned_f32x8(&g_slice[i..i + 8]);
+
+                        let x2 = xv * xv;
+                        let inner = sqrt_2_over_pi * (xv + coeff * xv * x2);
+                        let exp_2x = (two * inner).exp();
+                        let t = (exp_2x - one) / (exp_2x + one);
+                        let t2 = t * t;
+                        let sech2 = one - t2;
+                        let d_inner = sqrt_2_over_pi * (one + three * coeff * x2);
+                        let deriv = half * (one + t) + half * xv * sech2 * d_inner;
+                        let result = gv * deriv;
+
+                        let out_arr: [f32; 8] = result.into();
+                        out_slice[i..i + 8].copy_from_slice(&out_arr);
+                    }
+                    let remainder_start = (len / 8) * 8;
+                    for i in remainder_start..len {
+                        let x_val = x_slice[i];
+                        let g_val = g_slice[i];
                         let x2 = x_val * x_val;
                         let x3 = x2 * x_val;
                         let inner = SQRT_2_OVER_PI * (x_val + COEFF * x3);
@@ -3503,8 +3583,21 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
                         let sech2 = 1.0 - t2;
                         let d_inner_dx = SQRT_2_OVER_PI * (1.0 + 3.0 * COEFF * x2);
                         let derivative = 0.5 * (1.0 + t) + 0.5 * x_val * sech2 * d_inner_dx;
-
-                        *((out_usize + i * 4) as *mut f32) = grad_val * derivative;
+                        out_slice[i] = g_val * derivative;
+                    }
+                } else {
+                    for i in 0..len {
+                        let x_val = x_slice[i];
+                        let g_val = g_slice[i];
+                        let x2 = x_val * x_val;
+                        let x3 = x2 * x_val;
+                        let inner = SQRT_2_OVER_PI * (x_val + COEFF * x3);
+                        let t = inner.tanh();
+                        let t2 = t * t;
+                        let sech2 = 1.0 - t2;
+                        let d_inner_dx = SQRT_2_OVER_PI * (1.0 + 3.0 * COEFF * x2);
+                        let derivative = 0.5 * (1.0 + t) + 0.5 * x_val * sech2 * d_inner_dx;
+                        out_slice[i] = g_val * derivative;
                     }
                 }
             });
@@ -3561,19 +3654,17 @@ pub unsafe fn gelu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
 /// Fused SiLUBackward kernel: computes grad_input = grad * sigmoid(x) * (1 + x * (1 - sigmoid(x)))
 /// This eliminates ~4 intermediate tensor allocations.
 pub unsafe fn silu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
-    let x = args[0]; // input tensor
-    let s = args[1]; // sigmoid(x) (output of forward pass)
-    let grad = args[2]; // gradient from next layer
+    let x = args[0];
+    let s = args[1];
+    let grad = args[2];
 
     let numel = x.numel() as usize;
     let mut output = Tensor::empty(x.shape_ref().to_vec(), x.dtype(), x.device());
 
-    // Input tensors are read-only, just get data pointers
     let x_ptr = x.data_ptr() as *const f32;
     let s_ptr = s.data_ptr() as *const f32;
     let grad_ptr = grad.data_ptr() as *const f32;
 
-    // Output needs mutable access
     let output_inner = Arc::make_mut(&mut output.inner);
     let output_storage = Arc::make_mut(&mut output_inner.storage);
     let Storage::Cpu(out_cpu) = output_storage else {
@@ -3582,12 +3673,75 @@ pub unsafe fn silu_backward_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let out_data = Arc::make_mut(&mut out_cpu.data);
     let out_ptr = out_data.as_mut_ptr() as *mut f32;
 
+    if numel > 2048 {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk_size = CHUNK_MEMBOUND;
+            let num_chunks = numel.div_ceil(chunk_size);
+
+            let x_usize = x_ptr as usize;
+            let s_usize = s_ptr as usize;
+            let g_usize = grad_ptr as usize;
+            let out_usize = out_ptr as usize;
+
+            (0..num_chunks).into_par_iter().for_each(|chunk_idx| {
+                let start = chunk_idx * chunk_size;
+                let end = std::cmp::min(start + chunk_size, numel);
+                let len = end - start;
+
+                let x_slice =
+                    unsafe { std::slice::from_raw_parts((x_usize + start * 4) as *const f32, len) };
+                let s_slice =
+                    unsafe { std::slice::from_raw_parts((s_usize + start * 4) as *const f32, len) };
+                let g_slice =
+                    unsafe { std::slice::from_raw_parts((g_usize + start * 4) as *const f32, len) };
+                let out_slice = unsafe {
+                    std::slice::from_raw_parts_mut((out_usize + start * 4) as *mut f32, len)
+                };
+
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if len >= 8 && is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        use std::arch::x86_64::*;
+                        let one = _mm256_set1_ps(1.0);
+                        for i in (0..len - 7).step_by(8) {
+                            let xv = _mm256_loadu_ps(x_slice.as_ptr().add(i));
+                            let sv = _mm256_loadu_ps(s_slice.as_ptr().add(i));
+                            let gv = _mm256_loadu_ps(g_slice.as_ptr().add(i));
+                            let one_minus_s = _mm256_sub_ps(one, sv);
+                            let x_times_one_minus_s = _mm256_mul_ps(xv, one_minus_s);
+                            let inner = _mm256_add_ps(one, x_times_one_minus_s);
+                            let deriv = _mm256_mul_ps(sv, inner);
+                            let result = _mm256_mul_ps(gv, deriv);
+                            _mm256_storeu_ps(out_slice.as_mut_ptr().add(i), result);
+                        }
+                    }
+                    let remainder_start = (len / 8) * 8;
+                    for i in remainder_start..len {
+                        let x_val = x_slice[i];
+                        let s_val = s_slice[i];
+                        let g_val = g_slice[i];
+                        out_slice[i] = g_val * s_val * (1.0 + x_val * (1.0 - s_val));
+                    }
+                } else {
+                    for i in 0..len {
+                        let x_val = x_slice[i];
+                        let s_val = s_slice[i];
+                        let g_val = g_slice[i];
+                        out_slice[i] = g_val * s_val * (1.0 + x_val * (1.0 - s_val));
+                    }
+                }
+            });
+            return vec![output];
+        }
+    }
+
     for i in 0..numel {
         unsafe {
             let x_val = *x_ptr.add(i);
             let s_val = *s_ptr.add(i);
             let g_val = *grad_ptr.add(i);
-            // derivative = s * (1 + x * (1 - s))
             let derivative = s_val * (1.0 + x_val * (1.0 - s_val));
             *out_ptr.add(i) = g_val * derivative;
         }

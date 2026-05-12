@@ -1,7 +1,7 @@
 use crate::storage::{CpuStorage, DType, Device, GpuStorage, Storage};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use super::{Tensor, TensorImpl};
 
@@ -10,16 +10,139 @@ impl TensorImpl {
         if dtype == self.dtype {
             return self.clone().into();
         }
-        // TODO: implement proper type conversion
-        self.clone().into()
+        match self.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let numel = self.numel() as usize;
+                let data = cpu.data.as_ref();
+
+                // Read source elements as f32 (handles all source dtypes)
+                let f32_data: Vec<f32> = match self.dtype {
+                    DType::F32 => {
+                        let src = bytemuck::cast_slice::<_, f32>(data);
+                        src[self.storage_offset as usize..self.storage_offset as usize + numel]
+                            .to_vec()
+                    }
+                    DType::F64 => {
+                        let src = bytemuck::cast_slice::<_, f64>(data);
+                        src[self.storage_offset as usize..self.storage_offset as usize + numel]
+                            .iter()
+                            .map(|&v| v as f32)
+                            .collect()
+                    }
+                    DType::I32 => {
+                        let src = bytemuck::cast_slice::<_, i32>(data);
+                        src[self.storage_offset as usize..self.storage_offset as usize + numel]
+                            .iter()
+                            .map(|&v| v as f32)
+                            .collect()
+                    }
+                    DType::I64 => {
+                        let src = bytemuck::cast_slice::<_, i64>(data);
+                        src[self.storage_offset as usize..self.storage_offset as usize + numel]
+                            .iter()
+                            .map(|&v| v as f32)
+                            .collect()
+                    }
+                    DType::F16 => {
+                        let src = data.as_ptr() as *const half::f16;
+                        let offset = self.storage_offset as usize;
+                        // SAFETY: The pointer `src` is derived from the CPU storage's backing
+                        // `Vec<u8>`, and `offset + numel` is within the bounds of the allocation.
+                        let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
+                        slice.iter().map(|&v| f32::from(v)).collect()
+                    }
+                    DType::BF16 => {
+                        let src = data.as_ptr() as *const half::bf16;
+                        let offset = self.storage_offset as usize;
+                        // SAFETY: The pointer `src` is derived from the CPU storage's backing
+                        // `Vec<u8>`, and `offset + numel` is within the bounds of the allocation.
+                        let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
+                        slice.iter().map(|&v| f32::from(v)).collect()
+                    }
+                    DType::Bool => data
+                        [self.storage_offset as usize..self.storage_offset as usize + numel]
+                        .iter()
+                        .map(|&v| if v != 0 { 1.0 } else { 0.0 })
+                        .collect(),
+                };
+
+                // Convert f32 to target dtype
+                let nbytes = numel * dtype.size();
+                let mut new_bytes = vec![0u8; nbytes];
+
+                match dtype {
+                    DType::F32 => {
+                        let dst = bytemuck::cast_slice_mut::<_, f32>(&mut new_bytes);
+                        dst.copy_from_slice(&f32_data);
+                    }
+                    DType::F64 => {
+                        let dst = bytemuck::cast_slice_mut::<_, f64>(&mut new_bytes);
+                        for (i, &v) in f32_data.iter().enumerate() {
+                            dst[i] = v as f64;
+                        }
+                    }
+                    DType::I32 => {
+                        let dst = bytemuck::cast_slice_mut::<_, i32>(&mut new_bytes);
+                        for (i, &v) in f32_data.iter().enumerate() {
+                            dst[i] = v as i32;
+                        }
+                    }
+                    DType::I64 => {
+                        let dst = bytemuck::cast_slice_mut::<_, i64>(&mut new_bytes);
+                        for (i, &v) in f32_data.iter().enumerate() {
+                            dst[i] = v as i64;
+                        }
+                    }
+                    DType::F16 => {
+                        let dst = new_bytes.as_mut_ptr() as *mut half::f16;
+                        for (i, &v) in f32_data.iter().enumerate() {
+                            // SAFETY: `dst` points to a valid `new_bytes` allocation of sufficient
+                            // size, and `i` is within bounds (0..numel).
+                            unsafe {
+                                *dst.add(i) = half::f16::from_f32(v);
+                            }
+                        }
+                    }
+                    DType::BF16 => {
+                        let dst = new_bytes.as_mut_ptr() as *mut half::bf16;
+                        for (i, &v) in f32_data.iter().enumerate() {
+                            // SAFETY: `dst` points to a valid `new_bytes` allocation of sufficient
+                            // size, and `i` is within bounds (0..numel).
+                            unsafe {
+                                *dst.add(i) = half::bf16::from_f32(v);
+                            }
+                        }
+                    }
+                    DType::Bool => {
+                        for (i, &v) in f32_data.iter().enumerate() {
+                            new_bytes[i] = if v != 0.0 { 1 } else { 0 };
+                        }
+                    }
+                }
+
+                let new_storage = Arc::new(Storage::Cpu(CpuStorage {
+                    data: Arc::new(new_bytes),
+                    nbytes,
+                    gpu_buffer_cache: RwLock::new(HashMap::new()),
+                }));
+
+                TensorImpl::new(new_storage, self.sizes.clone(), dtype).into()
+            }
+            Storage::Wgpu(_) => {
+                panic!("to_dtype for GPU tensors not yet supported. Use .cpu() first.");
+            }
+        }
     }
 
     pub fn to_device(&self, device: Device) -> Tensor {
         if device == self.device {
             return self.clone().into();
         }
-        // TODO: implement device transfer
-        self.clone().into()
+        let tensor: Tensor = self.clone().into();
+        match device {
+            Device::Cpu => tensor.to_cpu(),
+            Device::Wgpu(device_id) => tensor.to_gpu(device_id),
+        }
     }
 
     pub fn is_gpu(&self) -> bool {
@@ -76,9 +199,10 @@ impl Tensor {
 
     pub fn to_cpu(&self) -> Tensor {
         match self.inner.storage.as_ref() {
-            Storage::Cpu(_) => {
-                Tensor::new(self.inner.new_on_device(self.inner.storage.clone(), Device::Cpu))
-            }
+            Storage::Cpu(_) => Tensor::new(
+                self.inner
+                    .new_on_device(self.inner.storage.clone(), Device::Cpu),
+            ),
             Storage::Wgpu(gpu) => {
                 use crate::kernels::gpu::get_context;
                 let ctx = get_context(gpu.device_id);

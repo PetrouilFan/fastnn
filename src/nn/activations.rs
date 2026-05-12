@@ -1,7 +1,9 @@
 #![allow(dead_code)]
+use crate::autograd::{self, AdaptiveAvgPool2dBackward, AutogradMeta};
 use crate::dispatcher::{dispatch, DispatchKey};
 use crate::nn::Module;
 use crate::tensor::Tensor;
+use std::sync::Arc;
 
 macro_rules! impl_stateless_activation {
     ($name:ident, $dispatch_name:expr) => {
@@ -22,7 +24,11 @@ macro_rules! impl_stateless_activation {
 
         impl Module for $name {
             fn forward(&self, x: &Tensor) -> Tensor {
-                let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x]);
+                let result = dispatch($dispatch_name, DispatchKey::Cpu, &[x]).expect(concat!(
+                    "Activation::forward: ",
+                    $dispatch_name,
+                    " dispatch failed"
+                ));
                 result[0].clone()
             }
 
@@ -76,7 +82,8 @@ impl LeakyReLU {
 impl Module for LeakyReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
         let slope_tensor = Tensor::from_scalar(self.negative_slope as f32);
-        let result = dispatch("leaky_relu", DispatchKey::Cpu, &[x, &slope_tensor]);
+        let result = dispatch("leaky_relu", DispatchKey::Cpu, &[x, &slope_tensor])
+            .expect("LeakyReLU::forward: dispatch failed");
         result[0].clone()
     }
 
@@ -84,7 +91,7 @@ impl Module for LeakyReLU {
 }
 
 pub struct PReLU {
-    weight: Tensor,
+    pub weight: Tensor,
 }
 
 impl PReLU {
@@ -96,14 +103,15 @@ impl PReLU {
             crate::storage::Device::Cpu,
         );
         let w = weight.clone();
-        w.requires_grad_(true);
+        let w = w.requires_grad_(true);
         PReLU { weight: w }
     }
 }
 
 impl Module for PReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let result = dispatch("prelu", DispatchKey::Cpu, &[x, &self.weight]);
+        let result = dispatch("prelu", DispatchKey::Cpu, &[x, &self.weight])
+            .expect("PReLU::forward: dispatch failed");
         result[0].clone()
     }
 
@@ -113,6 +121,46 @@ impl Module for PReLU {
 
     fn named_parameters(&self) -> Vec<(String, Tensor)> {
         vec![("weight".to_string(), self.weight.clone())]
+    }
+
+    fn zero_grad(&self) {}
+
+    fn train_mode(&self) {}
+
+    fn eval_mode(&self) {}
+
+    fn is_training(&self) -> bool {
+        false
+    }
+}
+
+pub struct Softmax {
+    dim: i64,
+}
+
+impl Softmax {
+    pub fn new(dim: i64) -> Self {
+        Softmax { dim }
+    }
+}
+
+impl Default for Softmax {
+    fn default() -> Self {
+        Self::new(-1)
+    }
+}
+
+impl Module for Softmax {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        x.softmax(self.dim as i32)
+    }
+
+    fn parameters(&self) -> Vec<Tensor> {
+        vec![]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![]
     }
 
     fn zero_grad(&self) {}
@@ -141,7 +189,8 @@ impl Module for Softplus {
     fn forward(&self, x: &Tensor) -> Tensor {
         let beta_t = Tensor::from_scalar(self.beta as f32);
         let threshold_t = Tensor::from_scalar(self.threshold as f32);
-        let result = dispatch("softplus", DispatchKey::Cpu, &[x, &beta_t, &threshold_t]);
+        let result = dispatch("softplus", DispatchKey::Cpu, &[x, &beta_t, &threshold_t])
+            .expect("Softplus::forward: dispatch failed");
         result[0].clone()
     }
 
@@ -161,7 +210,8 @@ impl Elu {
 impl Module for Elu {
     fn forward(&self, x: &Tensor) -> Tensor {
         let alpha_tensor = Tensor::from_scalar(self.alpha as f32);
-        let result = dispatch("elu", DispatchKey::Cpu, &[x, &alpha_tensor]);
+        let result = dispatch("elu", DispatchKey::Cpu, &[x, &alpha_tensor])
+            .expect("Elu::forward: dispatch failed");
         result[0].clone()
     }
 
@@ -221,7 +271,21 @@ impl Module for AdaptiveAvgPool2d {
             }
         }
 
-        Tensor::from_vec(output_data, vec![batch, channels, out_h, out_w])
+        let mut output = Tensor::from_vec(output_data, vec![batch, channels, out_h, out_w]);
+
+        if x.requires_grad() {
+            let backward = AdaptiveAvgPool2dBackward::new(
+                x.clone(),
+                vec![out_h, out_w],
+                autograd::make_edge(x),
+            );
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(Arc::new(backward));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(std::sync::Mutex::new(meta)));
+        }
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {

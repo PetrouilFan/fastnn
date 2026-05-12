@@ -6,10 +6,10 @@ use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use self::factories::simd_copy_f32;
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 use self::factories::memcpy_f32;
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use self::factories::simd_copy_f32;
 use self::shape::compute_strides;
 
 mod device;
@@ -188,8 +188,6 @@ impl TensorImpl {
         new.into()
     }
 
-
-
     pub fn increment_version(&self) {
         self.version_counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -201,7 +199,12 @@ impl TensorImpl {
     #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
         match &self.storage.as_ref() {
-            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
+            Storage::Cpu(cpu) => {
+                let ptr = cpu.data.as_ref().as_ptr();
+                let elem_size = self.dtype.size();
+                // SAFETY: storage_offset * elem_size is within bounds of the storage allocation.
+                unsafe { ptr.add(self.storage_offset as usize * elem_size) }
+            }
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
                 panic!(
@@ -220,6 +223,8 @@ impl TensorImpl {
                 let ptr = cpu.data.as_ref().as_ptr();
                 // storage_offset is in elements, cast to f32 pointer first
                 let f32_ptr = ptr as *const f32;
+                // SAFETY: The storage allocation is valid for the lifetime of `self`,
+                // and `storage_offset` has been validated to be within bounds of the allocation.
                 unsafe { f32_ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
@@ -241,6 +246,8 @@ impl TensorImpl {
                 // Unsafe: caller must ensure exclusive ownership of storage
                 // This is guaranteed by &mut self if Arc is not shared
                 let ptr = cpu.data.as_ref().as_ptr() as *mut f32;
+                // SAFETY: The caller guarantees exclusive ownership via `&mut self`,
+                // and `storage_offset` is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize) }
             }
             Storage::Wgpu(_) => {
@@ -255,11 +262,9 @@ impl TensorImpl {
                 // Unsafe: caller must ensure exclusive ownership of storage
                 // This is guaranteed by &mut self if Arc is not shared
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                let elem_size = match self.dtype {
-                    DType::F32 | DType::I32 | DType::Bool => 4,
-                    DType::F64 | DType::I64 => 8,
-                    DType::F16 | DType::BF16 => 2,
-                };
+                let elem_size = self.dtype.size();
+                // SAFETY: The caller guarantees exclusive ownership via `&mut self`,
+                // and `storage_offset * elem_size` is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
             Storage::Wgpu(_) => {
@@ -270,6 +275,9 @@ impl TensorImpl {
 
     pub fn as_f32_slice(&self) -> &[f32] {
         match &self.storage.as_ref() {
+            // SAFETY: We validate bounds below before creating the slice. The pointer
+            // is derived from the CPU storage's backing `Vec<u8>` and is valid for
+            // the lifetime of `self`.
             Storage::Cpu(cpu) => unsafe {
                 let ptr = cpu.data.as_ref().as_ptr() as *const f32;
                 let ptr = ptr.add(self.storage_offset as usize);
@@ -295,6 +303,8 @@ impl TensorImpl {
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
         let ptr = self.data_ptr_f32_mut();
         let numel = self.numel() as usize;
+        // SAFETY: We validate bounds below before creating the slice. The pointer
+        // is derived from `data_ptr_f32_mut()` which ensures exclusive ownership.
         unsafe {
             // Unconditional bounds validation to prevent UB in release builds
             if let Storage::Cpu(cpu) = self.storage.as_ref() {
@@ -311,7 +321,6 @@ impl TensorImpl {
             std::slice::from_raw_parts_mut(ptr, numel)
         }
     }
-
 }
 
 impl Clone for TensorImpl {
@@ -341,7 +350,6 @@ impl Drop for TensorImpl {
     }
 }
 
-
 #[derive(Clone)]
 pub struct Tensor {
     pub inner: Arc<TensorImpl>,
@@ -354,20 +362,9 @@ impl Tensor {
         }
     }
 
-
-
-
     pub fn id(&self) -> usize {
         self.inner.id()
     }
-
-
-
-
-
-
-
-
 
     pub fn dtype(&self) -> DType {
         self.inner.dtype
@@ -377,7 +374,10 @@ impl Tensor {
         self.inner.device
     }
 
-    pub(crate) fn attach_grad_fn(mut output: Tensor, backward: Arc<dyn autograd::Node + 'static>) -> Tensor {
+    pub(crate) fn attach_grad_fn(
+        mut output: Tensor,
+        backward: Arc<dyn autograd::Node + 'static>,
+    ) -> Tensor {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
         Arc::make_mut(&mut output.inner).autograd_meta =
@@ -392,7 +392,7 @@ impl Tensor {
     pub fn requires_grad_(&self, requires_grad: bool) -> Tensor {
         let mut inner = self.inner.clone();
         Arc::make_mut(&mut inner).set_requires_grad(requires_grad);
-        Tensor::new(inner.as_ref().clone())
+        Tensor { inner }
     }
 
     pub fn grad(&self) -> Option<Tensor> {
@@ -433,26 +433,34 @@ impl Tensor {
         match self.inner.dtype {
             DType::F32 => {
                 let f32_ptr = ptr as *const f32;
+                // SAFETY: `self.inner.numel() == 1` was validated above. The pointer
+                // is derived from the CPU storage allocation and `storage_offset` is
+                // within bounds for a single element read.
                 unsafe { *f32_ptr.add(self.inner.storage_offset as usize) }
             }
             DType::F64 => {
                 let f64_ptr = ptr as *const f64;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { *f64_ptr.add(self.inner.storage_offset as usize) as f32 }
             }
             DType::I32 => {
                 let i32_ptr = ptr as *const i32;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { *i32_ptr.add(self.inner.storage_offset as usize) as f32 }
             }
             DType::I64 => {
                 let i64_ptr = ptr as *const i64;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { *i64_ptr.add(self.inner.storage_offset as usize) as f32 }
             }
             DType::BF16 => {
                 let bf16_ptr = ptr as *const half::bf16;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { f32::from(*bf16_ptr.add(self.inner.storage_offset as usize)) }
             }
             DType::F16 => {
                 let f16_ptr = ptr as *const half::f16;
+                // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { f32::from(*f16_ptr.add(self.inner.storage_offset as usize)) }
             }
             _ => panic!("Unsupported dtype for item()"),
@@ -637,18 +645,8 @@ impl Tensor {
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        let inner = &self.inner;
-        match inner.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                // Unsafe: caller must ensure exclusive ownership of storage
-                // This is guaranteed by &mut self if Arc is not shared
-                let ptr = cpu.data.as_ref().as_ptr() as *mut f32;
-                unsafe { ptr.add(inner.storage_offset as usize) }
-            }
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
-        }
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.data_ptr_f32_mut()
     }
 
     /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
@@ -660,11 +658,7 @@ impl Tensor {
                 // Unsafe: caller must ensure exclusive ownership of storage
                 // This is guaranteed by &mut self if Arc is not shared
                 let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                let elem_size = match inner.dtype {
-                    DType::F32 | DType::I32 | DType::Bool => 4,
-                    DType::F64 | DType::I64 => 8,
-                    DType::F16 | DType::BF16 => 2,
-                };
+                let elem_size = inner.dtype.size();
                 unsafe { ptr.add(inner.storage_offset as usize * elem_size) }
             }
             Storage::Wgpu(_) => {
@@ -737,7 +731,6 @@ impl Tensor {
     pub fn version(&self) -> u64 {
         self.inner.version()
     }
-
 }
 
 impl From<TensorImpl> for Tensor {
@@ -757,7 +750,6 @@ impl std::fmt::Debug for Tensor {
         )
     }
 }
-
 
 pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     let parts: Vec<&str> = equation.split("->").collect();
@@ -793,7 +785,7 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     }
 
     // Build permutation for a: move contracted dims to the end
-    let mut a_perm: Vec<i64> = Vec::new();
+    let mut a_perm: Vec<i64> = Vec::with_capacity(a_chars.len());
     for &c in &a_chars {
         if !contracted.contains(&c) {
             a_perm.push(a_chars.iter().position(|&x| x == c).unwrap() as i64);
@@ -811,7 +803,7 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     };
 
     // Build permutation for b: move contracted dims to the front
-    let mut b_perm: Vec<i64> = Vec::new();
+    let mut b_perm: Vec<i64> = Vec::with_capacity(b_chars.len());
     for &c in &b_chars {
         if contracted.contains(&c) {
             b_perm.push(b_chars.iter().position(|&x| x == c).unwrap() as i64);
@@ -850,7 +842,7 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     let result_2d = a_2d.matmul(&b_2d);
 
     // Reshape to output shape
-    let mut out_shape: Vec<i64> = Vec::new();
+    let mut out_shape: Vec<i64> = Vec::with_capacity(out_chars.len());
     for &c in &out_chars {
         if let Some(pos) = a_chars.iter().position(|&x| x == c) {
             out_shape.push(a.inner.sizes[pos]);

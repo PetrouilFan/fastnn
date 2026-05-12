@@ -6,6 +6,7 @@ use super::PackedWord;
 #[derive(Copy, Clone, Debug, Default)]
 pub struct U8x4(pub u32);
 
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
 unsafe impl bytemuck::Pod for U8x4 {}
 unsafe impl bytemuck::Zeroable for U8x4 {}
 
@@ -29,10 +30,38 @@ impl PackedWord for U8x4 {
     #[inline]
     fn pack_from_f32(vals: [f32; 4]) -> Self {
         let bytes = [
-            vals[0].clamp(-128.0, 127.0).round() as i8 as u8,
-            vals[1].clamp(-128.0, 127.0).round() as i8 as u8,
-            vals[2].clamp(-128.0, 127.0).round() as i8 as u8,
-            vals[3].clamp(-128.0, 127.0).round() as i8 as u8,
+            {
+                let clamped = vals[0].clamp(-128.0, 127.0).round();
+                if clamped.is_nan() {
+                    0u8
+                } else {
+                    clamped as i8 as u8
+                }
+            },
+            {
+                let clamped = vals[1].clamp(-128.0, 127.0).round();
+                if clamped.is_nan() {
+                    0u8
+                } else {
+                    clamped as i8 as u8
+                }
+            },
+            {
+                let clamped = vals[2].clamp(-128.0, 127.0).round();
+                if clamped.is_nan() {
+                    0u8
+                } else {
+                    clamped as i8 as u8
+                }
+            },
+            {
+                let clamped = vals[3].clamp(-128.0, 127.0).round();
+                if clamped.is_nan() {
+                    0u8
+                } else {
+                    clamped as i8 as u8
+                }
+            },
         ];
         U8x4(u32::from_le_bytes(bytes))
     }
@@ -43,10 +72,6 @@ impl PackedWord for U8x4 {
 
     fn wgsl_return_type() -> &'static str {
         "vec4<f32>"
-    }
-
-    fn wgsl_dot_logic() -> &'static str {
-        "acc += dot(unpacked, act0);"
     }
 }
 

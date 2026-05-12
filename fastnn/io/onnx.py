@@ -15,7 +15,11 @@ import numpy as np
 if TYPE_CHECKING:
     import onnx
 
-from fastnn.io import MODEL_MAGIC, MODEL_VERSION, _pack_u32, _pack_u64, write_tensor, write_fnn_file
+from fastnn.io import (
+    MODEL_MAGIC, MODEL_VERSION, _pack_u32, _pack_u64, _pack_u8,
+    write_tensor, write_tensor_v3, write_fnn_file, write_fnn_file_v3,
+    DTYPE_F32, DTYPE_F16, DTYPE_U8, DTYPE_U4,
+)
 
 __all__ = ["import_onnx"]
 
@@ -42,6 +46,7 @@ def get_pooling_config(node, default_kernel=(2, 2)):
 def _get_attr(node: "onnx.NodeProto", name: str, default=None):
     """Get attribute value from node."""
     import onnx
+    from onnx import numpy_helper
     for attr in node.attribute:
         if attr.name == name:
             if attr.HasField("f"):
@@ -50,6 +55,9 @@ def _get_attr(node: "onnx.NodeProto", name: str, default=None):
                 return attr.i
             elif attr.HasField("s"):
                 return attr.s.decode("utf-8")
+            elif attr.HasField("t"):
+                # Tensor attribute: return as numpy array
+                return numpy_helper.to_array(attr.t)
             elif attr.ints:
                 return list(attr.ints)
             elif attr.floats:
@@ -57,12 +65,19 @@ def _get_attr(node: "onnx.NodeProto", name: str, default=None):
     return default
 
 
-def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
+def import_onnx(
+    onnx_path: str,
+    fnn_path: str,
+    config: Optional[Any] = None,
+) -> Dict[str, Any]:
     """Import an ONNX model and save it in fastnn format.
 
     Args:
         onnx_path: Path to .onnx file
         fnn_path: Path to output .fnn file
+        config: Optional PrecisionConfig for quantized import.
+            When set, weight parameters matching the config are quantized.
+            Non-weight params (bias, running_mean/var, constants) stay F32.
 
     Returns:
         Dictionary with model info (layers, input_shape, output_shape)
@@ -71,6 +86,15 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
     import onnx.numpy_helper
 
     model = onnx.load(onnx_path)
+    
+    # If config is given, resolve the precision module
+    if config is not None:
+        from fastnn.precision import Precision, Quantizer, PrecisionConfig as _PrecisionConfig
+        if not isinstance(config, _PrecisionConfig):
+            try:
+                config = _PrecisionConfig.from_dict_spec(config) if isinstance(config, dict) else config
+            except Exception:
+                pass
     
     layers = []
     layer_index = 0
@@ -87,6 +111,10 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
 
     # Collect all parameters first
     params = []
+
+    # Add all initializers as params (including scalar constants used by Gather, Range, etc.)
+    for init_name, init_arr in initializer_map.items():
+        params.append((init_name, init_arr))
 
     for node in model.graph.node:
         op_type = node.op_type
@@ -123,16 +151,18 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             weight = initializer_map.get(node.input[1])
             bias = initializer_map.get(node.input[2]) if len(node.input) > 2 else None
 
-            _get_attr(node, "alpha", 1.0)
-            _get_attr(node, "beta", 1.0)
+            alpha = _get_attr(node, "alpha", 1.0)
+            beta = _get_attr(node, "beta", 1.0)
             _get_attr(node, "transA", 0)
-            trans_b = _get_attr(node, "transB", 1)
+            trans_b = _get_attr(node, "transB", 0)
 
             if trans_b:
                 weight = weight.T
 
             in_features = weight.shape[0]
             out_features = weight.shape[1]
+
+            weight = weight * alpha
 
             layer_info["type"] = "Linear"
             layer_info["in_features"] = in_features
@@ -141,7 +171,7 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
 
             params.append((f"{node.name}.weight", weight))
             if bias is not None:
-                params.append((f"{node.name}.bias", bias))
+                params.append((f"{node.name}.bias", bias * beta))
 
         elif op_type == "Relu":
             pass  # No parameters
@@ -163,16 +193,17 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             params.append((f"{node.name}.running_var", var))
 
         elif op_type == "MaxPool":
-            config = get_pooling_config(node)
-            layer_info["kernel_size"] = config["kernel_size"]
-            layer_info["stride"] = config["stride"]
-            layer_info["padding"] = config["padding"]
+            pool_config = get_pooling_config(node)
+            layer_info["kernel_size"] = pool_config["kernel_size"]
+            layer_info["stride"] = pool_config["stride"]
+            layer_info["padding"] = pool_config["padding"]
 
         elif op_type == "AveragePool":
-            config = get_pooling_config(node)
+            pool_config = get_pooling_config(node)
             layer_info["type"] = "AvgPool"
-            layer_info["kernel_size"] = config["kernel_size"]
-            layer_info["stride"] = config["stride"]
+            layer_info["kernel_size"] = pool_config["kernel_size"]
+            layer_info["stride"] = pool_config["stride"]
+            layer_info["padding"] = pool_config["padding"]
 
         elif op_type == "GlobalAveragePool":
             layer_info["type"] = "GlobalAvgPool"
@@ -243,19 +274,563 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
             params.append((f"{node.name}.weight", scale))
             params.append((f"{node.name}.bias", bias))
 
+        elif op_type == "Split":
+            split = _get_attr(node, "split", None)
+            axis = _get_attr(node, "axis", 0)
+            layer_info["axis"] = axis
+            if split is not None:
+                layer_info["split"] = list(split)
+
+        elif op_type == "Shape":
+            layer_info["type"] = "ShapeOp"
+
+        elif op_type == "Cast":
+            to = _get_attr(node, "to", 1)
+            layer_info["to"] = to
+            layer_info["type"] = "CastOp"
+
+        elif op_type == "Gather":
+            axis = _get_attr(node, "axis", 0)
+            layer_info["axis"] = axis
+            layer_info["type"] = "GatherOp"
+
+        elif op_type == "Sub":
+            bias = initializer_map.get(node.input[1])
+            if bias is not None:
+                layer_info["type"] = "BiasSub"
+                params.append((f"{node.name}.bias", -bias))
+            else:
+                layer_info["type"] = "ElementwiseSub"
+
+        elif op_type == "Div":
+            layer_info["type"] = "ElementwiseDiv"
+
+        elif op_type == "Pow":
+            exponent = initializer_map.get(node.input[1])
+            if exponent is not None:
+                layer_info["exponent"] = float(exponent.flatten()[0])
+            layer_info["type"] = "ElementwisePow"
+
+        elif op_type == "Exp":
+            layer_info["type"] = "ExpOp"
+
+        elif op_type == "Sqrt":
+            layer_info["type"] = "SqrtOp"
+
+        elif op_type == "Neg":
+            layer_info["type"] = "NegOp"
+
+        elif op_type == "Resize":
+            mode = _get_attr(node, "mode", "nearest")
+            coord_mode = _get_attr(node, "coordinate_transformation_mode", "half_pixel")
+            layer_info["type"] = "Resize"
+            layer_info["mode"] = mode
+            layer_info["coordinate_transformation_mode"] = coord_mode
+
+        elif op_type == "ReduceMean":
+            axes = _get_attr(node, "axes", None)
+            keepdims = _get_attr(node, "keepdims", 1)
+            layer_info["type"] = "ReduceMean"
+            if axes is not None:
+                layer_info["axes"] = list(axes)
+            layer_info["keepdims"] = bool(keepdims)
+
+        elif op_type == "ReduceSum":
+            axes = _get_attr(node, "axes", None)
+            keepdims = _get_attr(node, "keepdims", 1)
+            layer_info["type"] = "ReduceSum"
+            if axes is not None:
+                layer_info["axes"] = list(axes)
+            layer_info["keepdims"] = bool(keepdims)
+
+        elif op_type == "Tile":
+            layer_info["type"] = "TileOp"
+
+        elif op_type == "Pad":
+            mode = _get_attr(node, "mode", "constant")
+            layer_info["type"] = "Pad"
+            layer_info["mode"] = mode
+            pads = _get_attr(node, "pads", None)
+            if pads is not None:
+                layer_info["pads"] = list(pads)
+            elif len(node.input) > 1 and node.input[1] in initializer_map:
+                layer_info["pads"] = initializer_map[node.input[1]].flatten().tolist()
+
+        elif op_type == "Slice":
+            layer_info["type"] = "SliceOp"
+
+        elif op_type == "Where":
+            layer_info["type"] = "WhereOp"
+
+        elif op_type == "NonZero":
+            layer_info["type"] = "NonZeroOp"
+
+        elif op_type == "Unique":
+            layer_info["type"] = "UniqueOp"
+
+        elif op_type == "Tril":
+            layer_info["type"] = "TrilOp"
+
+        elif op_type == "Triu":
+            layer_info["type"] = "TriuOp"
+
+        elif op_type == "NonMaxSuppression":
+            layer_info["type"] = "NonMaxSuppression"
+            center_point_box = _get_attr(node, "center_point_box", 0)
+            layer_info["center_point_box"] = center_point_box
+
+        elif op_type == "TopK":
+            axis = _get_attr(node, "axis", -1)
+            layer_info["axis"] = axis
+            layer_info["type"] = "TopKOp"
+
+        elif op_type == "Softmax":
+            axis = _get_attr(node, "axis", 1)
+            layer_info["axis"] = axis
+
+        elif op_type == "Log":
+            layer_info["type"] = "LogOp"
+
+        elif op_type == "Erf":
+            layer_info["type"] = "ErfOp"
+
+        elif op_type == "Constant":
+            value = _get_attr(node, "value", None)
+            if value is not None:
+                layer_info["type"] = "ConstantOp"
+                try:
+                    import onnx.numpy_helper
+                    const_tensor = onnx.numpy_helper.to_array(value)
+                    layer_info["dims"] = list(const_tensor.shape)
+                    params.append((f"{node.name}.value", const_tensor))
+                except Exception:
+                    pass
+
+        elif op_type == "Unsqueeze":
+            axes = _get_attr(node, "axes", None)
+            if axes is not None:
+                layer_info["axes"] = list(axes)
+            layer_info["type"] = "UnsqueezeOp"
+
+        elif op_type == "Squeeze":
+            axes = _get_attr(node, "axes", None)
+            if axes is not None:
+                layer_info["axes"] = list(axes)
+            layer_info["type"] = "SqueezeOp"
+
+        elif op_type == "Identity":
+            layer_info["type"] = "IdentityOp"
+
+        elif op_type == "Loop":
+            layer_info["type"] = "LoopOp"
+
+        elif op_type == "If":
+            layer_info["type"] = "IfOp"
+
+        elif op_type == "And":
+            layer_info["type"] = "AndOp"
+
+        elif op_type == "Or":
+            layer_info["type"] = "OrOp"
+
+        elif op_type == "Xor":
+            layer_info["type"] = "XorOp"
+
+        elif op_type == "Not":
+            layer_info["type"] = "NotOp"
+
+        elif op_type == "Less":
+            layer_info["type"] = "LessOp"
+
+        elif op_type == "Greater":
+            layer_info["type"] = "GreaterOp"
+
+        elif op_type == "Equal":
+            layer_info["type"] = "EqualOp"
+
+        elif op_type == "Expand":
+            layer_info["type"] = "Expand"
+
+        elif op_type == "Ceil":
+            layer_info["type"] = "CeilOp"
+
+        elif op_type == "Floor":
+            layer_info["type"] = "FloorOp"
+
+        elif op_type == "Round":
+            layer_info["type"] = "RoundOp"
+
+        elif op_type == "Sign":
+            layer_info["type"] = "SignOp"
+
+        elif op_type == "Reciprocal":
+            layer_info["type"] = "ReciprocalOp"
+
+        elif op_type == "IsNaN":
+            layer_info["type"] = "IsNaNOp"
+
+        elif op_type == "IsInf":
+            layer_info["type"] = "IsInfOp"
+
+        elif op_type == "LogSoftmax":
+            axis = _get_attr(node, "axis", 1)
+            layer_info["type"] = "LogSoftmax"
+            layer_info["axis"] = axis
+
+        elif op_type == "Selu":
+            alpha = _get_attr(node, "alpha", 1.67326)
+            gamma = _get_attr(node, "gamma", 1.0507)
+            layer_info["type"] = "Selu"
+            layer_info["alpha"] = alpha
+            layer_info["gamma"] = gamma
+
+        elif op_type == "HardSigmoid":
+            alpha = _get_attr(node, "alpha", 0.2)
+            beta = _get_attr(node, "beta", 0.5)
+            layer_info["type"] = "HardSigmoid"
+            layer_info["alpha"] = alpha
+            layer_info["beta"] = beta
+
+        elif op_type == "HardSwish":
+            layer_info["type"] = "Hardswish"
+
+        elif op_type == "LayerNormalization":
+            layer_info["type"] = "LayerNorm"
+            axis = _get_attr(node, "axis", -1)
+            epsilon = _get_attr(node, "epsilon", 1e-5)
+            layer_info["axis"] = axis
+            layer_info["eps"] = epsilon
+            scale = initializer_map.get(node.input[1])
+            bias = initializer_map.get(node.input[2]) if len(node.input) > 2 else None
+            if scale is not None:
+                params.append((f"{node.name}.weight", scale))
+            if bias is not None:
+                params.append((f"{node.name}.bias", bias))
+
+        elif op_type == "ConvTranspose":
+            weight = initializer_map.get(node.input[1])
+            bias = initializer_map.get(node.input[2]) if len(node.input) > 2 else None
+            if weight is not None:
+                out_channels, in_channels = weight.shape[:2]
+                kernel_h, _ = weight.shape[2], weight.shape[3]
+                stride = _get_attr(node, "strides", [1, 1])
+                padding = _get_attr(node, "pads", [0, 0, 0, 0])
+                output_padding = _get_attr(node, "output_padding", [0, 0])
+                dilation = _get_attr(node, "dilations", [1, 1])
+                groups = _get_attr(node, "group", 1)
+                layer_info["type"] = "ConvTranspose"
+                layer_info["in_channels"] = in_channels
+                layer_info["out_channels"] = out_channels
+                layer_info["kernel_size"] = kernel_h
+                layer_info["stride"] = stride[0] if isinstance(stride, list) else stride
+                layer_info["padding"] = padding[0] if isinstance(padding, list) else padding
+                layer_info["output_padding"] = output_padding[0] if isinstance(output_padding, list) else output_padding
+                layer_info["dilation"] = dilation[0] if isinstance(dilation, list) else dilation
+                layer_info["groups"] = groups
+                layer_info["bias"] = bias is not None
+                params.append((f"{node.name}.weight", weight))
+                if bias is not None:
+                    params.append((f"{node.name}.bias", bias))
+
+        elif op_type == "DepthToSpace":
+            blocksize = _get_attr(node, "blocksize", 1)
+            mode = _get_attr(node, "mode", "DCR")
+            layer_info["type"] = "DepthToSpace"
+            layer_info["blocksize"] = blocksize
+            layer_info["mode"] = mode
+
+        elif op_type == "SpaceToDepth":
+            blocksize = _get_attr(node, "blocksize", 1)
+            layer_info["type"] = "SpaceToDepth"
+            layer_info["blocksize"] = blocksize
+
+        elif op_type == "Compress":
+            axis = _get_attr(node, "axis", None)
+            layer_info["type"] = "Compress"
+            if axis is not None:
+                layer_info["axis"] = axis
+
+        elif op_type == "CumSum":
+            axis = _get_attr(node, "axis", None)
+            exclusive = _get_attr(node, "exclusive", 0)
+            reverse = _get_attr(node, "reverse", 0)
+            layer_info["type"] = "CumSum"
+            if axis is not None:
+                layer_info["axis"] = axis if not isinstance(axis, list) else axis[0]
+            layer_info["exclusive"] = bool(exclusive)
+            layer_info["reverse"] = bool(reverse)
+
+        elif op_type == "Einsum":
+            equation = _get_attr(node, "equation", "")
+            layer_info["type"] = "Einsum"
+            layer_info["equation"] = equation
+
+        elif op_type == "EyeLike":
+            k = _get_attr(node, "k", 0)
+            layer_info["type"] = "EyeLike"
+            layer_info["k"] = k
+
+        elif op_type == "OneHot":
+            axis = _get_attr(node, "axis", -1)
+            layer_info["type"] = "OneHot"
+            layer_info["axis"] = axis
+
+        elif op_type == "RandomNormal":
+            mean = _get_attr(node, "mean", 0.0)
+            scale = _get_attr(node, "scale", 1.0)
+            shape = _get_attr(node, "shape", None)
+            seed = _get_attr(node, "seed", None)
+            layer_info["type"] = "RandomNormal"
+            layer_info["mean"] = mean
+            layer_info["scale"] = scale
+            if shape is not None:
+                layer_info["shape"] = list(shape)
+            if seed is not None:
+                layer_info["seed"] = seed
+
+        elif op_type == "RandomUniform":
+            low = _get_attr(node, "low", 0.0)
+            high = _get_attr(node, "high", 1.0)
+            shape = _get_attr(node, "shape", None)
+            seed = _get_attr(node, "seed", None)
+            layer_info["type"] = "RandomUniform"
+            layer_info["low"] = low
+            layer_info["high"] = high
+            if shape is not None:
+                layer_info["shape"] = list(shape)
+            if seed is not None:
+                layer_info["seed"] = seed
+
+        elif op_type == "Range":
+            layer_info["type"] = "RangeOp"
+
+        elif op_type == "Attention":
+            num_heads = _get_attr(node, "num_heads", 12)
+            layer_info["type"] = "Attention"
+            layer_info["num_heads"] = num_heads
+
+        elif op_type == "BiasGelu":
+            layer_info["type"] = "BiasGelu"
+
+        elif op_type == "ConstantOfShape":
+            value = _get_attr(node, "value", None)
+            layer_info["type"] = "ConstantOfShape"
+            if value is not None:
+                const_tensor = value if isinstance(value, np.ndarray) else onnx.numpy_helper.to_array(value)
+                layer_info["value"] = const_tensor.flatten()[0].item() if hasattr(const_tensor, 'flatten') else float(const_tensor)
+                layer_info["dims"] = list(const_tensor.shape)
+
+        elif op_type == "DequantizeLinear":
+            axis = _get_attr(node, "axis", 1)
+            layer_info["type"] = "DequantizeLinear"
+            layer_info["axis"] = axis
+
+        elif op_type == "EmbedLayerNormalization":
+            layer_info["type"] = "EmbedLayerNormalization"
+
+        elif op_type == "FastGelu":
+            layer_info["type"] = "FastGelu"
+
+        elif op_type == "GatherND":
+            batch_dims = _get_attr(node, "batch_dims", 0)
+            layer_info["type"] = "GatherND"
+            layer_info["batch_dims"] = batch_dims
+
+        elif op_type == "Gelu":
+            layer_info["type"] = "Gelu"
+
+        elif op_type == "GRU":
+            hidden_size = _get_attr(node, "hidden_size", None)
+            direction = _get_attr(node, "direction", "forward")
+            layer_info["type"] = "GRU"
+            if hidden_size is not None:
+                layer_info["hidden_size"] = hidden_size
+            layer_info["direction"] = direction
+
+        elif op_type == "GroupQueryAttention":
+            num_heads = _get_attr(node, "num_heads", 32)
+            kv_num_heads = _get_attr(node, "kv_num_heads", 8)
+            layer_info["type"] = "GroupQueryAttention"
+            layer_info["num_heads"] = num_heads
+            layer_info["kv_num_heads"] = kv_num_heads
+
+        elif op_type == "LSTM":
+            hidden_size = _get_attr(node, "hidden_size", None)
+            direction = _get_attr(node, "direction", "forward")
+            layer_info["type"] = "LSTM"
+            if hidden_size is not None:
+                layer_info["hidden_size"] = hidden_size
+            layer_info["direction"] = direction
+
+        elif op_type == "MultiHeadAttention":
+            num_heads = _get_attr(node, "num_heads", 12)
+            layer_info["type"] = "MultiHeadAttention"
+            layer_info["num_heads"] = num_heads
+
+        elif op_type == "QuantizeLinear":
+            axis = _get_attr(node, "axis", 1)
+            layer_info["type"] = "QuantizeLinear"
+            layer_info["axis"] = axis
+
+        elif op_type == "RMSNormalization":
+            epsilon = _get_attr(node, "epsilon", 1e-5)
+            layer_info["type"] = "RMSNorm"
+            layer_info["eps"] = epsilon
+
+        elif op_type == "RotaryEmbedding":
+            layer_info["type"] = "RotaryEmbedding"
+
+        elif op_type == "ScatterND":
+            reduction = _get_attr(node, "reduction", "none")
+            layer_info["type"] = "ScatterND"
+            layer_info["reduction"] = reduction
+
+        elif op_type == "SkipLayerNormalization":
+            epsilon = _get_attr(node, "epsilon", 1e-5)
+            layer_info["type"] = "SkipLayerNorm"
+            layer_info["eps"] = epsilon
+
+        elif op_type == "Swish":
+            layer_info["type"] = "Swish"
+
         else:
             logger.warning(f"Unsupported operator: {op_type}")
             layer_info["type"] = f"Unsupported_{op_type}"
 
         layers.append(layer_info)
 
-    # Write to file with unified format
+    # Store full graph topology for DAG reconstruction
+    # Build a name->layer_info lookup so we can merge parsed attributes into graph nodes
+    layer_by_name = {li["name"]: li for li in layers}
+    graph_nodes = []
+    for i, node in enumerate(model.graph.node):
+        node_name = node.name or f"{node.op_type}_{i}"
+        gn = {
+            "name": node_name,
+            "op_type": node.op_type,
+            "inputs": list(node.input),
+            "outputs": list(node.output),
+        }
+        # Merge parsed attributes from layer_info (excluding name/type to avoid collision)
+        layer_info = layer_by_name.get(node_name)
+        if layer_info is not None:
+            for k, v in layer_info.items():
+                if k not in ("name", "type") and v is not None:
+                    gn[k] = v
+        graph_nodes.append(gn)
+
+    # Fuse Conv+BatchNormalization patterns before QDQ folding
+    # (BN must be fused into clean f32 weights before any quantization)
+    graph_nodes, layers, params = _fuse_conv_bn_patterns(
+        graph_nodes, layers, params, initializer_map
+    )
+
+    # Fold QuantizeLinear/DequantizeLinear patterns
+    graph_nodes, layers, params = _fold_qdq_patterns(
+        graph_nodes, layers, params, initializer_map
+    )
+
+    graph = {
+        "nodes": graph_nodes,
+        "inputs": [{
+            "name": inp.name,
+            "shape": [d.dim_value for d in inp.type.tensor_type.shape.dim] if inp.type.tensor_type.HasField("shape") else None
+        } for inp in model.graph.input],
+        "outputs": [{
+            "name": out.name,
+            "shape": [d.dim_value for d in out.type.tensor_type.shape.dim] if out.type.tensor_type.HasField("shape") else None
+        } for out in model.graph.output],
+    }
+
+    # Write to file with unified format (v3 if quantized, v2 otherwise)
     header = {
         "layers": layers,
+        "graph": graph,
         "total_parameters": len(params),
     }
-    with open(fnn_path, "wb") as f:
-        write_fnn_file(f, header, params)
+
+    has_quantized_params = any(
+        hasattr(arr, 'dtype') and arr.dtype.kind in ('i', 'u')
+        for _, arr in params
+    )
+    is_quantized = (config is not None and config.default.should_quantize()) or has_quantized_params
+
+    if is_quantized:
+        # v3 format: quantize weights per config, non-weights stay F32
+        params_v3 = []
+        for name, arr in params:
+            quantizer = config.get_quantizer(name)
+            is_weight = name.endswith(".weight")
+
+            if is_weight and quantizer.should_quantize():
+                # Quantize this weight
+                scales, zeros = quantizer.quantize(arr)
+                use_per_channel = quantizer.scheme == "per_channel" and len(scales) > 1
+
+                if use_per_channel:
+                    # Use per-channel quantization via Rust bindings
+                    from fastnn import PackedTensor4, PackedTensor8, PackedTensor16
+                    cls_map = {
+                        4: PackedTensor4,
+                        8: PackedTensor8,
+                        16: PackedTensor16,
+                    }
+                    bit_width = quantizer.precision.bit_width
+                    packed_cls = cls_map[bit_width]
+                    shape = list(arr.shape)
+                    packed = packed_cls.from_f32_per_channel(
+                        arr.flatten().tolist(), shape
+                    )
+                    params_v3.append((
+                        name,
+                        bytes(packed.to_bytes()),
+                        {
+                            4: DTYPE_U4,
+                            8: DTYPE_U8,
+                            16: DTYPE_F16,
+                        }[bit_width],
+                        packed.scales(),
+                        packed.zeros(),
+                        shape,
+                    ))
+                else:
+                    # Per-tensor quantization
+                    from fastnn import PackedTensor4, PackedTensor8, PackedTensor16
+                    cls_map = {
+                        4: PackedTensor4,
+                        8: PackedTensor8,
+                        16: PackedTensor16,
+                    }
+                    bit_width = quantizer.precision.bit_width
+                    packed_cls = cls_map[bit_width]
+                    shape = list(arr.shape)
+                    s = float(scales[0]) if len(scales) > 0 else 1.0
+                    z = float(zeros[0]) if len(zeros) > 0 else 0.0
+                    packed = packed_cls(arr.flatten().tolist(), shape, s, z)
+                    params_v3.append((
+                        name,
+                        bytes(packed.to_bytes()),
+                        {
+                            4: DTYPE_U4,
+                            8: DTYPE_U8,
+                            16: DTYPE_F16,
+                        }[bit_width],
+                        packed.scales(),
+                        packed.zeros(),
+                        shape,
+                    ))
+            else:
+                # Store as-is (F32)
+                shape = list(arr.shape) if hasattr(arr, 'shape') else []
+                params_v3.append((name, arr, DTYPE_F32, [], [], shape))
+
+        header["precision"] = config.to_dict()
+        with open(fnn_path, "wb") as f:
+            write_fnn_file_v3(f, header, params_v3, version=3)
+    else:
+        # v2 format: all F32 (non-quantized ONNX import stays v2 for backward compat)
+        with open(fnn_path, "wb") as f:
+            write_fnn_file(f, header, params, version=2)
 
     # Get input/output shapes
     input_shape = None
@@ -271,8 +846,325 @@ def import_onnx(onnx_path: str, fnn_path: str) -> Dict[str, Any]:
 
     result = {
         "layers": layers,
+        "graph": graph,
         "parameters": len(params),
         "input_shape": input_shape,
         "output_shape": output_shape,
     }
     return result
+
+
+def _fuse_conv_bn_patterns(
+    graph_nodes: list,
+    layers: list,
+    params: list,
+    initializer_map: dict,
+):
+    """Fuse Conv -> BatchNormalization patterns before QDQ folding.
+
+    Absorbs BN parameters (gamma, beta, mean, var) into the preceding
+    Conv layer's weight and bias. Must run before QDQ folding so that
+    BN fusion operates on clean f32 weights.
+
+    Returns:
+        Tuple of (modified_graph_nodes, modified_layers, modified_params).
+    """
+    if not graph_nodes:
+        return graph_nodes, layers, params
+
+    # Build consumer map: output_name -> list of consuming node indices
+    output_to_consumers = {}
+    for i, gn in enumerate(graph_nodes):
+        for inp in gn.get("inputs", []):
+            output_to_consumers.setdefault(inp, []).append(i)
+
+    bn_indices_to_remove = set()
+    param_updates = []
+    param_additions = []
+    bn_param_names_to_remove = set()
+    layers_to_remove_names = set()
+    fused_count = 0
+
+    for i, gn in enumerate(graph_nodes):
+        if i in bn_indices_to_remove:
+            continue
+        if gn["op_type"] != "Conv":
+            continue
+
+        conv_name = gn["name"]
+        conv_outputs = gn.get("outputs", [])
+        if not conv_outputs:
+            continue
+
+        conv_output = conv_outputs[0]
+        consumer_idxs = output_to_consumers.get(conv_output, [])
+
+        bn_idx = None
+        for ci in consumer_idxs:
+            if graph_nodes[ci]["op_type"] == "BatchNormalization":
+                bn_idx = ci
+                break
+
+        if bn_idx is None or bn_idx in bn_indices_to_remove:
+            continue
+
+        bn_node = graph_nodes[bn_idx]
+        bn_name = bn_node["name"]
+
+        bn_inputs = bn_node.get("inputs", [])
+        if len(bn_inputs) < 5:
+            continue
+
+        scale = initializer_map.get(bn_inputs[1])
+        beta_arr = initializer_map.get(bn_inputs[2])
+        mean = initializer_map.get(bn_inputs[3])
+        var = initializer_map.get(bn_inputs[4])
+        if scale is None or beta_arr is None or mean is None or var is None:
+            continue
+
+        epsilon = bn_node.get("epsilon", bn_node.get("eps", 1e-5))
+
+        w_name = f"{conv_name}.weight"
+        b_name = f"{conv_name}.bias"
+
+        w = None
+        b = None
+        for pn, pa in params:
+            if pn == w_name:
+                w = pa
+            if pn == b_name:
+                b = pa
+
+        if w is None:
+            continue
+
+        # BN fusion math:
+        #   w_fused = w * gamma / sqrt(var + epsilon)
+        #   b_fused = (b - mean) * gamma / sqrt(var + epsilon) + beta
+        scale_r = scale.reshape([-1] + [1] * (w.ndim - 1))
+        var_r = var.reshape([-1] + [1] * (w.ndim - 1))
+        sf = scale_r / np.sqrt(var_r + epsilon)
+
+        w_fused = w * sf
+        param_updates.append((w_name, w_fused.astype(w.dtype)))
+
+        if b is not None:
+            mean_r = mean.reshape([-1] + [1] * (w.ndim - 1))
+            b_fused = (b - mean_r.squeeze()) * sf.squeeze() + beta_arr
+            param_updates.append((b_name, b_fused.astype(b.dtype)))
+        else:
+            sf_1d = scale / np.sqrt(var + epsilon)
+            b_fused = -mean * sf_1d + beta_arr
+            param_additions.append((b_name, b_fused.astype(np.float32)))
+            for li in layers:
+                if li["name"] == conv_name:
+                    li["bias"] = True
+                    break
+
+        # Reroute BN's consumers to Conv's output
+        bn_outputs = bn_node.get("outputs", [])
+        if bn_outputs:
+            bn_output = bn_outputs[0]
+            for ci in output_to_consumers.get(bn_output, []):
+                if ci in bn_indices_to_remove:
+                    continue
+                cnode = graph_nodes[ci]
+                cnode["inputs"] = [
+                    conv_output if inp == bn_output else inp
+                    for inp in cnode.get("inputs", [])
+                ]
+
+        bn_indices_to_remove.add(bn_idx)
+        layers_to_remove_names.add(bn_name)
+        bn_param_names_to_remove.update([
+            f"{bn_name}.weight", f"{bn_name}.bias",
+            f"{bn_name}.running_mean", f"{bn_name}.running_var",
+        ])
+        fused_count += 1
+
+    if fused_count == 0:
+        return graph_nodes, layers, params
+
+    # Apply deferred param updates
+    for pname, pval in param_updates:
+        for j, (pn, _) in enumerate(params):
+            if pn == pname:
+                params[j] = (pname, pval)
+                break
+
+    params.extend(param_additions)
+
+    # Remove BN params
+    params = [(pn, pa) for pn, pa in params if pn not in bn_param_names_to_remove]
+
+    # Remove BN graph nodes
+    graph_nodes = [gn for j, gn in enumerate(graph_nodes) if j not in bn_indices_to_remove]
+
+    # Remove BN layers
+    layers = [li for li in layers if li["name"] not in layers_to_remove_names]
+
+    logger.info("Conv+BN fusion: fused %d pairs during import", fused_count)
+
+    return graph_nodes, layers, params
+
+
+def _fold_qdq_patterns(
+    graph_nodes: list,
+    layers: list,
+    params: list,
+    initializer_map: dict,
+):
+    """Fold QuantizeLinear/DequantizeLinear patterns in the graph.
+
+    Detects Q → single_op → DQ patterns and folds them by removing
+    the Q/DQ nodes and optionally quantizing the op's weights.
+    Also handles standalone Q/DQ on weight initializers.
+
+    Returns:
+        Tuple of (modified_graph_nodes, modified_layers, modified_params).
+    """
+    if not graph_nodes:
+        return graph_nodes, layers, params
+
+    # Build consumer map: output_name -> list of consuming nodes
+    output_to_consumers = {}
+    for node in graph_nodes:
+        for inp in node.get("inputs", []):
+            if inp not in output_to_consumers:
+                output_to_consumers[inp] = []
+            output_to_consumers[inp].append(node)
+
+    # Build output to producer map
+    output_to_producer = {}
+    for node in graph_nodes:
+        for out in node.get("outputs", []):
+            output_to_producer[out] = node
+
+    nodes_to_remove = set()
+    folded_count = 0
+
+    # Pass 1: Detect Q → single_op → DQ patterns
+    for node in list(graph_nodes):
+        if node["op_type"] != "QuantizeLinear":
+            continue
+        q_name = node["name"]
+        if q_name in nodes_to_remove:
+            continue
+
+        q_output = node["outputs"][0]
+        consumers = output_to_consumers.get(q_output, [])
+
+        if len(consumers) != 1:
+            continue
+
+        mid_node = consumers[0]
+        if mid_node["op_type"] in ("QuantizeLinear", "DequantizeLinear"):
+            continue
+        if mid_node["name"] in nodes_to_remove:
+            continue
+
+        mid_output = mid_node["outputs"][0]
+        mid_consumers = output_to_consumers.get(mid_output, [])
+
+        if len(mid_consumers) != 1:
+            continue
+
+        dq_node = mid_consumers[0]
+        if dq_node["op_type"] != "DequantizeLinear":
+            continue
+        if dq_node["name"] in nodes_to_remove:
+            continue
+
+        # Found Q → mid_node → DQ pattern
+        q_input = node["inputs"][0]
+
+        # Extract scale/zero_point from initializers
+        q_scale = 1.0
+        q_zp = 0.0
+        dq_scale = 1.0
+        dq_zp = 0.0
+        if len(node["inputs"]) > 1 and node["inputs"][1] in initializer_map:
+            q_scale = float(initializer_map[node["inputs"][1]].flatten()[0])
+        if len(node["inputs"]) > 2 and node["inputs"][2] in initializer_map:
+            q_zp = float(initializer_map[node["inputs"][2]].flatten()[0])
+        if len(dq_node["inputs"]) > 1 and dq_node["inputs"][1] in initializer_map:
+            dq_scale = float(initializer_map[dq_node["inputs"][1]].flatten()[0])
+        if len(dq_node["inputs"]) > 2 and dq_node["inputs"][2] in initializer_map:
+            dq_zp = float(initializer_map[dq_node["inputs"][2]].flatten()[0])
+
+        # Rewire: mid_node takes Q's input and its output goes to DQ's consumers
+        new_mid_node = dict(mid_node)
+        new_mid_node["inputs"] = [q_input] + mid_node["inputs"][1:]
+        new_mid_node["outputs"] = list(dq_node["outputs"])
+        new_mid_node["qdq_scale"] = q_scale
+        new_mid_node["qdq_zp"] = q_zp
+        new_mid_node["qdq_dq_scale"] = dq_scale
+        new_mid_node["qdq_dq_zp"] = dq_zp
+        idx = graph_nodes.index(mid_node)
+        graph_nodes[idx] = new_mid_node
+
+        nodes_to_remove.add(q_name)
+        nodes_to_remove.add(dq_node["name"])
+        folded_count += 1
+
+    # Pass 2: Handle standalone QuantizeLinear on weight initializers
+    for node in list(graph_nodes):
+        if node["op_type"] != "QuantizeLinear":
+            continue
+        if node["name"] in nodes_to_remove:
+            continue
+
+        q_input = node["inputs"][0]
+        if q_input not in initializer_map:
+            continue
+
+        # This Q applies directly to a weight initializer
+        weight_arr = initializer_map[q_input]
+        q_scale = 1.0
+        q_zp = 0.0
+        if len(node["inputs"]) > 1 and node["inputs"][1] in initializer_map:
+            q_scale = float(initializer_map[node["inputs"][1]].flatten()[0])
+        if len(node["inputs"]) > 2 and node["inputs"][2] in initializer_map:
+            q_zp = float(initializer_map[node["inputs"][2]].flatten()[0])
+
+        # Dequantize back to f32 (the normal quantization pipeline will re-quantize)
+        quantized = np.round(weight_arr / q_scale + q_zp)
+        dequantized = (quantized - q_zp) * q_scale
+        params.append((q_input, dequantized.astype(np.float32)))
+        nodes_to_remove.add(node["name"])
+
+    # Pass 3: Handle standalone DequantizeLinear on weight initializers
+    for node in list(graph_nodes):
+        if node["op_type"] != "DequantizeLinear":
+            continue
+        if node["name"] in nodes_to_remove:
+            continue
+
+        dq_input = node["inputs"][0]
+        if dq_input not in initializer_map:
+            continue
+
+        dq_scale = 1.0
+        dq_zp = 0.0
+        if len(node["inputs"]) > 1 and node["inputs"][1] in initializer_map:
+            dq_scale = float(initializer_map[node["inputs"][1]].flatten()[0])
+        if len(node["inputs"]) > 2 and node["inputs"][2] in initializer_map:
+            dq_zp = float(initializer_map[node["inputs"][2]].flatten()[0])
+
+        # Dequantize back to f32
+        dq_data = initializer_map[dq_input]
+        dequantized = (dq_data.astype(np.float32) - dq_zp) * dq_scale
+        params.append((dq_input, dequantized))
+        nodes_to_remove.add(node["name"])
+
+    # Remove folded nodes from graph_nodes
+    if nodes_to_remove:
+        remaining_nodes = [n for n in graph_nodes if n["name"] not in nodes_to_remove]
+        remaining_layers = [l for l in layers if l["name"] not in nodes_to_remove]
+
+        if folded_count > 0:
+            logger.info("Q/DQ folding: folded %d Q→Op→DQ pattern(s), removed %d total Q/DQ nodes", folded_count, len(nodes_to_remove))
+
+        return remaining_nodes, remaining_layers, params
+
+    return graph_nodes, layers, params

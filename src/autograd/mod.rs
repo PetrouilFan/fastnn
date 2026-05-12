@@ -3,6 +3,7 @@ mod engine;
 pub use engine::backward;
 
 use crate::dispatcher::dispatch;
+use crate::storage::Storage;
 use crate::tensor::Tensor;
 use std::cell::Cell;
 use std::sync::Arc;
@@ -38,25 +39,20 @@ pub fn no_grad_exit() {
 /// // All tensor operations here won't build computation graph
 /// let output = model.forward(&input);
 /// ```
-pub struct NoGradGuard {
-    prev_state: bool,
-}
+pub struct NoGradGuard;
 
 impl NoGradGuard {
     /// Create a new NoGradGuard that disables gradient computation.
-    /// The previous state is saved and will be restored when the guard is dropped.
+    /// The previous state is restored when the guard is dropped.
     pub fn new() -> Self {
-        let prev_state = is_grad_enabled();
         no_grad_enter();
-        NoGradGuard { prev_state }
+        NoGradGuard
     }
 }
 
 impl Drop for NoGradGuard {
     fn drop(&mut self) {
-        if self.prev_state {
-            no_grad_exit();
-        }
+        no_grad_exit();
     }
 }
 
@@ -110,14 +106,26 @@ impl AutogradMeta {
 
     /// Zero the gradient.
     /// If set_to_none is true, drop the grad buffer (old behavior).
-    /// If false, zero-fill the existing grad tensor's data (TODO: implement).
+    /// If false, zero-fill the existing grad tensor's data in-place.
     pub fn zero_grad(&mut self, set_to_none: bool) {
         if set_to_none {
             self.grad = None;
-        } else {
-            // TODO: zero-fill grad tensor's data to avoid reallocation
-            // For now, just drop it (same as set_to_none=true)
-            self.grad = None;
+        } else if let Some(ref mut grad_tensor) = self.grad {
+            let inner = Arc::make_mut(&mut grad_tensor.inner);
+            let numel = inner.numel() as usize;
+            let elem_size = inner.dtype.size();
+            let offset = inner.storage_offset as usize;
+            let storage = Arc::make_mut(&mut inner.storage);
+            match storage {
+                Storage::Cpu(cpu) => {
+                    let data = Arc::make_mut(&mut cpu.data);
+                    let start = offset * elem_size;
+                    data[start..start + numel * elem_size].fill(0);
+                }
+                Storage::Wgpu(_) => {
+                    self.grad = None;
+                }
+            }
         }
     }
 }
@@ -128,13 +136,12 @@ pub struct Edge(pub Arc<dyn Node>, pub usize);
 pub fn make_edge(tensor: &Tensor) -> Vec<Edge> {
     tensor
         .grad_fn()
-        .map(|node| Edge(node, 0))
-        .map(|e| vec![e])
+        .map(|node| vec![Edge(node, 0)])
         .unwrap_or_default()
 }
 
 pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
-    let mut edges = Vec::new();
+    let mut edges = Vec::with_capacity(2);
     if let Some(node) = tensor_a.grad_fn() {
         edges.push(Edge(node, 0));
     }
@@ -177,7 +184,7 @@ pub fn sum_to_shape(mut grad: Tensor, target_shape: &[i64]) -> Tensor {
     let diff = grad_ndim as i32 - target_ndim as i32;
 
     // Collect dims to sum
-    let mut dims_to_sum: Vec<i32> = Vec::new();
+    let mut dims_to_sum: Vec<i32> = Vec::with_capacity(grad_ndim);
     for i in 0..grad_ndim {
         let target_dim = if i as i32 >= diff {
             target_shape[(i as i32 - diff) as usize]
@@ -206,11 +213,23 @@ pub fn extract_first_grad(grad_outputs: Vec<Option<Tensor>>) -> Option<Tensor> {
 
 /// Helper to ensure a tensor is on CPU, returning a CPU tensor.
 /// If the tensor is already on CPU, returns a clone. Otherwise, converts to CPU.
+///
+/// **Important**: This also materializes broadcast views (e.g., from `expand()`) into
+/// contiguous storage. Without this, a gradient created via `expand()` has `numel=N` but
+/// shares the scalar's underlying storage (`storage_len=1`), causing `as_f32_slice()` to
+/// panic with `offset + numel exceeds storage bounds`.
 pub fn ensure_cpu(tensor: &Tensor) -> Tensor {
-    if tensor.inner.is_cpu() {
+    let t = if tensor.inner.is_cpu() {
         tensor.clone()
     } else {
         tensor.to_cpu()
+    };
+    // Materialize broadcast views (stride=0) so that as_f32_slice() can return
+    // a valid flat slice covering all logical elements.
+    if !t.is_contiguous() {
+        t.contiguous()
+    } else {
+        t
     }
 }
 
@@ -220,3 +239,7 @@ include!("reductions.rs");
 include!("conv.rs");
 include!("losses.rs");
 include!("views.rs");
+include!("pooling.rs");
+include!("norm_backward.rs");
+include!("dropout_backward.rs");
+include!("upsample_backward.rs");

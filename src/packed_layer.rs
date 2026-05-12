@@ -36,6 +36,12 @@ pub struct PackedLinear<T: PackedWord> {
     pub bias: Option<Vec<f32>>,
     /// Master weights in f32 for optimizer updates (training only)
     pub master_weight: Option<Vec<f32>>,
+    /// Cached input from the last forward pass (for backward computation)
+    pub cached_input: Mutex<Option<Vec<f32>>>,
+    /// Gradient accumulator for master weights
+    pub master_grad: Mutex<Vec<f32>>,
+    /// Training state (train/eval)
+    pub training: std::sync::atomic::AtomicBool,
     pub in_features: usize,
     pub out_features: usize,
     /// Cached GPU buffer for weights — None until first GPU forward call
@@ -53,6 +59,16 @@ pub struct PackedLinear<T: PackedWord> {
 impl<T: PackedWord> PackedLinear<T> {
     /// Create a new packed linear layer with Kaiming initialization.
     pub fn new(in_features: usize, out_features: usize, use_bias: bool) -> Self {
+        assert!(
+            in_features > 0,
+            "PackedLinear: in_features must be > 0 (got {})",
+            in_features
+        );
+        assert!(
+            out_features > 0,
+            "PackedLinear: out_features must be > 0 (got {})",
+            out_features
+        );
         let numel = in_features * out_features;
         // Kaiming initialization
         let std = (2.0 / in_features as f32).sqrt();
@@ -73,10 +89,14 @@ impl<T: PackedWord> PackedLinear<T> {
             None
         };
 
+        let master_grad_size = in_features * out_features;
         PackedLinear {
             weight,
             bias,
             master_weight: Some(master),
+            cached_input: Mutex::new(None),
+            master_grad: Mutex::new(vec![0.0; master_grad_size]),
+            training: std::sync::atomic::AtomicBool::new(true),
             in_features,
             out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
@@ -98,6 +118,9 @@ impl<T: PackedWord> PackedLinear<T> {
             weight,
             bias,
             master_weight: None,
+            cached_input: Mutex::new(None),
+            master_grad: Mutex::new(vec![0.0; in_features * out_features]),
+            training: std::sync::atomic::AtomicBool::new(true),
             in_features,
             out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
@@ -108,15 +131,39 @@ impl<T: PackedWord> PackedLinear<T> {
         }
     }
 
-    /// Forward pass on CPU.
-    pub fn forward_cpu(&self, input: &[f32]) -> Vec<f32> {
-        let mut output = vec![0.0; self.out_features];
-        cpu::gemv_cpu(&self.weight, input, &mut output);
+    /// Forward pass with caller-provided output buffer (avoids allocation).
+    pub fn forward_into(&self, input: &[f32], output: &mut [f32]) {
+        // Cache input for backward pass (only in training mode)
+        if self.training.load(std::sync::atomic::Ordering::Relaxed) {
+            *self.cached_input.lock().unwrap() = Some(input.to_vec());
+        }
+        assert_eq!(
+            input.len(),
+            self.in_features,
+            "PackedLinear::forward_into: input length {} != in_features {}",
+            input.len(),
+            self.in_features
+        );
+        assert_eq!(
+            output.len(),
+            self.out_features,
+            "PackedLinear::forward_into: output length {} != out_features {}",
+            output.len(),
+            self.out_features
+        );
+        output.fill(0.0);
+        cpu::gemv_cpu(&self.weight, input, output);
         if let Some(ref bias) = self.bias {
             for (o, b) in output.iter_mut().zip(bias.iter()) {
                 *o += *b;
             }
         }
+    }
+
+    /// Forward pass on CPU.
+    pub fn forward_cpu(&self, input: &[f32]) -> Vec<f32> {
+        let mut output = vec![0.0; self.out_features];
+        self.forward_into(input, &mut output);
         output
     }
 
@@ -127,7 +174,6 @@ impl<T: PackedWord> PackedLinear<T> {
         let (weight_buf, output_buf, params_buf, activation_buf) = self.ensure_gpu_bufs(&ctx);
 
         let mut output = gemv_wgpu_persistent::<T>(
-            &ctx,
             &self.gpu_bind_group,
             weight_buf,
             output_buf,
@@ -135,6 +181,7 @@ impl<T: PackedWord> PackedLinear<T> {
             activation_buf,
             input,
             self.out_features as u32,
+            self.in_features as u32,
             self.weight.packed_len() as u32,
             self.weight.scale(),
             self.weight.zero(),
@@ -155,6 +202,58 @@ impl<T: PackedWord> PackedLinear<T> {
         } else {
             self.forward_cpu(input)
         }
+    }
+
+    /// Compute backward pass for input gradient.
+    /// grad_output: [out_features] gradient flowing back from loss
+    /// Returns: [in_features] gradient for input
+    pub fn backward(&self, grad_output: &[f32]) -> Vec<f32> {
+        let out_f = self.out_features;
+        let in_f = self.in_features;
+        let cached = self.cached_input.lock().unwrap();
+        let input = cached
+            .as_ref()
+            .expect("backward called without forward pass");
+
+        // Compute input gradient: W^T @ grad_output
+        let grad_input =
+            cpu::packed_linear_backward_input_cpu(&self.weight, grad_output, input, out_f, in_f);
+
+        // Accumulate weight gradient: dL/dW = dL/dout ⊗ input
+        // grad_output[j] * input[i] → master_grad[j * in_f + i] += ...
+        let mut mg = self.master_grad.lock().unwrap();
+        cpu::packed_linear_backward_weight_cpu(
+            &self.weight,
+            grad_output,
+            input,
+            &mut mg,
+            out_f,
+            in_f,
+        );
+
+        grad_input
+    }
+
+    /// Zero the master gradient
+    pub fn zero_grad(&self) {
+        self.master_grad.lock().unwrap().fill(0.0);
+    }
+
+    /// Set training mode
+    pub fn train_mode(&self) {
+        self.training
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set evaluation mode
+    pub fn eval_mode(&self) {
+        self.training
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Check if in training mode
+    pub fn is_training(&self) -> bool {
+        self.training.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Ensure GPU buffers are created and cached.
@@ -188,7 +287,7 @@ impl<T: PackedWord> PackedLinear<T> {
             if guard.is_none() {
                 // GemvParams is bound as uniform — needs UNIFORM | COPY_DST usage
                 let buf = ctx.create_buffer_with_usage(
-                    16,
+                    20,
                     wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     "gemv_params",
                 );
@@ -252,7 +351,6 @@ impl<T: PackedWord> PackedLinear<T> {
             // Invalidate GPU cache because weights changed
             *self.gpu_weight_buf.lock().unwrap() = None;
             *self.gpu_params_buf.lock().unwrap() = None;
-            *self.gpu_activation_buf.lock().unwrap() = None;
             *self.gpu_bind_group.lock().unwrap() = None;
         }
     }
@@ -270,7 +368,7 @@ impl<T: PackedWord> PackedLinear<T> {
 
     /// Memory usage in bytes for the packed weights.
     pub fn packed_weight_bytes(&self) -> usize {
-        self.weight.packed_len() * std::mem::size_of::<u32>()
+        self.weight.packed_len() * std::mem::size_of::<T>()
     }
 
     /// Memory savings ratio vs f32.
@@ -278,6 +376,25 @@ impl<T: PackedWord> PackedLinear<T> {
         let f32_bytes = self.out_features * self.in_features * 4;
         let packed_bytes = self.packed_weight_bytes();
         f32_bytes as f32 / packed_bytes as f32
+    }
+
+    /// Fused forward: linear → GELU, fused in one pass.
+    pub fn forward_gelu(&self, input: &[f32]) -> Vec<f32> {
+        let mut out = self.forward_cpu(input);
+        for v in out.iter_mut() {
+            let x = *v;
+            // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+            // erf approximation via Abramowitz & Stegun
+            let z = x * 0.707_106_77;
+            let t = 1.0 / (1.0 + 0.3275911 * z.abs());
+            let poly = ((((1.061_405_4 * t + -1.453_152_1) * t) + 1.421_413_8) * t + -0.284_496_72)
+                * t
+                + 0.254_829_6;
+            let erf = 1.0 - poly * (-z * z).exp();
+            let erf_sgn = if z >= 0.0 { erf } else { -erf };
+            *v = 0.5 * x * (1.0 + erf_sgn);
+        }
+        out
     }
 }
 
@@ -287,6 +404,11 @@ impl<T: PackedWord> Clone for PackedLinear<T> {
             weight: self.weight.clone(),
             bias: self.bias.clone(),
             master_weight: self.master_weight.clone(),
+            cached_input: Mutex::new(None),
+            master_grad: Mutex::new(self.master_grad.lock().unwrap().clone()),
+            training: std::sync::atomic::AtomicBool::new(
+                self.training.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             in_features: self.in_features,
             out_features: self.out_features,
             gpu_weight_buf: Arc::new(Mutex::new(None)),
@@ -348,5 +470,36 @@ mod tests {
         for (a, b) in orig.iter().zip(repacked.iter()) {
             assert!((a - b).abs() <= layer.weight.scale() + 0.01);
         }
+    }
+
+    #[test]
+    fn test_packed_linear_u4_non_multiple_feature_dim() {
+        let layer = PackedLinear::<U4x8>::new(7, 16, true);
+        assert_eq!(layer.in_features, 7);
+        assert_eq!(layer.out_features, 16);
+        let input = vec![1.0; 7];
+        let output = layer.forward_cpu(&input);
+        assert_eq!(output.len(), 16);
+        assert!(output.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_packed_linear_u8_non_multiple_feature_dim() {
+        let layer = PackedLinear::<U8x4>::new(10, 8, false);
+        let input = vec![0.5; 10];
+        let output = layer.forward_cpu(&input);
+        assert_eq!(output.len(), 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "in_features must be > 0")]
+    fn test_packed_linear_zero_in_features_panics() {
+        let _layer = PackedLinear::<F32x1>::new(0, 4, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "out_features must be > 0")]
+    fn test_packed_linear_zero_out_features_panics() {
+        let _layer = PackedLinear::<F32x1>::new(4, 0, true);
     }
 }

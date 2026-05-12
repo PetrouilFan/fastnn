@@ -317,10 +317,55 @@ struct MaxPool2d {
 
 impl_nn_module!(MaxPool2d {
     #[new]
-    #[pyo3(signature = (kernel_size, stride=2, padding=1, dilation=1))]
+    #[pyo3(signature = (kernel_size, stride=2, padding=0, dilation=1))]
     fn new(kernel_size: i64, stride: i64, padding: i64, dilation: i64) -> Self {
         MaxPool2d {
             inner: core_nn::pooling::MaxPool2d::new(kernel_size, stride, padding, dilation),
+        }
+    }
+});
+
+#[pyclass]
+struct AvgPool2d {
+    inner: core_nn::pooling::AvgPool2d,
+}
+
+impl_nn_module!(AvgPool2d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride = 2, padding = 0))]
+    fn new(kernel_size: i64, stride: i64, padding: i64) -> Self {
+        AvgPool2d {
+            inner: core_nn::pooling::AvgPool2d::new(kernel_size, stride, padding),
+        }
+    }
+});
+
+#[pyclass]
+struct AvgPool1d {
+    inner: core_nn::pooling::AvgPool1d,
+}
+
+impl_nn_module!(AvgPool1d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride = 2, padding = 0))]
+    fn new(kernel_size: i64, stride: i64, padding: i64) -> Self {
+        AvgPool1d {
+            inner: core_nn::pooling::AvgPool1d::new(kernel_size, stride, padding),
+        }
+    }
+});
+
+#[pyclass]
+struct MaxPool1d {
+    inner: core_nn::pooling::MaxPool1d,
+}
+
+impl_nn_module!(MaxPool1d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride = 2, padding = 0, dilation = 1))]
+    fn new(kernel_size: i64, stride: i64, padding: i64, dilation: i64) -> Self {
+        MaxPool1d {
+            inner: core_nn::pooling::MaxPool1d::new(kernel_size, stride, padding, dilation),
         }
     }
 });
@@ -509,11 +554,11 @@ impl_nn_module!(LayerNorm {
     }
 
     fn set_weight(&mut self, weight: PyTensor) {
-        self.inner.weight = Some(weight.inner);
+        self.inner.weight = weight.inner;
     }
 
-    fn set_bias(&mut self, bias: Option<PyTensor>) {
-        self.inner.bias = bias.map(|t| t.inner);
+    fn set_bias(&mut self, bias: PyTensor) {
+        self.inner.bias = bias.inner;
     }
 
     #[classmethod]
@@ -525,8 +570,8 @@ impl_nn_module!(LayerNorm {
         eps: f64,
     ) -> Self {
         let mut inner = core_nn::norm::LayerNorm::new(normalized_shape, eps);
-        inner.weight = Some(weight.inner);
-        inner.bias = Some(bias.inner);
+        inner.weight = weight.inner;
+        inner.bias = bias.inner;
         LayerNorm { inner }
     }
 });
@@ -553,8 +598,16 @@ impl_nn_module!(BatchNorm1d {
         self.inner.bias = bias.map(|t| t.inner);
     }
 
+    fn get_running_mean(&self) -> PyTensor {
+        PyTensor::from_tensor(self.inner.running_mean.read().clone())
+    }
+
     fn set_running_mean(&mut self, running_mean: PyTensor) {
         self.inner.running_mean = Arc::new(RwLock::new(running_mean.inner));
+    }
+
+    fn get_running_var(&self) -> PyTensor {
+        PyTensor::from_tensor(self.inner.running_var.read().clone())
     }
 
     fn set_running_var(&mut self, running_var: PyTensor) {
@@ -743,6 +796,38 @@ impl_activation!(Softplus, softplus, beta: f64 = 1.0, threshold: f64 = 20.0);
 impl_activation!(Elu, elu, alpha: f64 = 1.0);
 
 #[pyclass]
+struct PReLU {
+    inner: core_nn::activations::PReLU,
+}
+
+impl_nn_module!(PReLU {
+    #[new]
+    fn new(num_parameters: i64) -> Self {
+        PReLU {
+            inner: core_nn::activations::PReLU::new(num_parameters),
+        }
+    }
+
+    fn set_weight(&mut self, weight: PyTensor) {
+        self.inner.weight = weight.inner;
+    }
+});
+
+#[pyclass]
+struct Softmax {
+    inner: core_nn::activations::Softmax,
+}
+
+impl_nn_module!(Softmax {
+    #[new]
+    fn new(dim: i64) -> Self {
+        Softmax {
+            inner: core_nn::activations::Softmax::new(dim),
+        }
+    }
+});
+
+#[pyclass]
 struct Mish;
 
 #[pymethods]
@@ -877,6 +962,266 @@ impl_nn_module!(PyTransformerEncoder {
 
     fn forward(&self, x: &PyTensor) -> PyTensor {
         PyTensor::from_tensor(self.inner.forward(&x.inner))
+    }
+});
+
+// ---- DAGExecutor (ONNX graph execution) ----
+
+#[pyclass]
+pub struct DAGExecutor {
+    inner: core_nn::dag::DAGExecutor,
+}
+
+#[pymethods]
+impl DAGExecutor {
+    #[new]
+    #[pyo3(signature = (nodes, params, input_names, output_names, packed_params = None))]
+    #[allow(clippy::type_complexity)]
+    fn new(
+        nodes: Vec<HashMap<String, String>>,
+        params: HashMap<String, PyTensor>,
+        input_names: Vec<String>,
+        output_names: Vec<String>,
+        packed_params: Option<HashMap<String, (Vec<u8>, Vec<usize>, u8, Vec<f64>, Vec<f64>)>>,
+    ) -> Self {
+        let dag_nodes: Vec<core_nn::dag::DAGNode> = nodes
+            .into_iter()
+            .map(|m| {
+                let name = m.get("name").cloned().unwrap_or_default();
+                let op_type = m.get("op_type").cloned().unwrap_or_default();
+                let inputs: Vec<String> = m
+                    .get("inputs")
+                    .map(|s| {
+                        s.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let outputs: Vec<String> = m
+                    .get("outputs")
+                    .map(|s| {
+                        s.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let attrs: HashMap<String, String> = m
+                    .into_iter()
+                    .filter(|(k, _)| *k != "name" && *k != "op_type" && *k != "inputs" && *k != "outputs")
+                    .collect();
+                core_nn::dag::DAGNode {
+                    name,
+                    op_code: core_nn::dag::op_type_to_code(&op_type),
+                    op_type,
+                    inputs,
+                    outputs,
+                    attrs,
+                }
+            })
+            .collect();
+        let rust_params: HashMap<String, Tensor> = params
+            .into_iter()
+            .map(|(k, v)| (k, v.inner))
+            .collect();
+
+        if let Some(pk) = packed_params {
+            let rust_packed: HashMap<String, core_nn::dag::WeightStorage> = pk
+                .into_iter()
+                .map(|(k, (raw_data, shape, dtype, scales, zeros))| {
+                    let scales_f32: Vec<f32> = scales.into_iter().map(|x| x as f32).collect();
+                    let zeros_f32: Vec<f32> = zeros.into_iter().map(|x| x as f32).collect();
+                    let storage = match dtype {
+                        1 => {
+                            let data: Vec<F16x2> = bytemuck::cast_slice(&raw_data).to_vec();
+                            core_nn::dag::WeightStorage::F16(crate::packed_tensor::PackedTensor::from_raw(data, shape, scales_f32, zeros_f32))
+                        }
+                        2 => {
+                            let data: Vec<U8x4> = bytemuck::cast_slice(&raw_data).to_vec();
+                            core_nn::dag::WeightStorage::U8(crate::packed_tensor::PackedTensor::from_raw(data, shape, scales_f32, zeros_f32))
+                        }
+                        3 => {
+                            let data: Vec<U4x8> = bytemuck::cast_slice(&raw_data).to_vec();
+                            core_nn::dag::WeightStorage::U4(crate::packed_tensor::PackedTensor::from_raw(data, shape, scales_f32, zeros_f32))
+                        }
+                        _ => core_nn::dag::WeightStorage::F32,
+                    };
+                    (k, storage)
+                })
+                .collect();
+            DAGExecutor {
+                inner: core_nn::dag::DAGExecutor::with_packed(
+                    dag_nodes,
+                    rust_params,
+                    rust_packed,
+                    input_names,
+                    output_names,
+                ),
+            }
+        } else {
+            DAGExecutor {
+                inner: core_nn::dag::DAGExecutor::new(dag_nodes, rust_params, input_names, output_names),
+            }
+        }
+    }
+
+    fn forward(&self, inputs: HashMap<String, PyTensor>) -> HashMap<String, PyTensor> {
+        let rust_inputs: HashMap<String, Tensor> = inputs
+            .into_iter()
+            .map(|(k, v)| (k, v.inner))
+            .collect();
+        let outputs = self.inner.forward(&rust_inputs);
+        outputs
+            .into_iter()
+            .map(|(k, v)| (k, PyTensor::from_tensor(v)))
+            .collect()
+    }
+
+    fn parameters(&self) -> Vec<PyTensor> {
+        self.inner
+            .parameters()
+            .into_iter()
+            .map(PyTensor::from_tensor)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+        self.inner
+            .named_parameters()
+            .into_iter()
+            .map(|(n, t)| (n, PyTensor::from_tensor(t)))
+            .collect()
+    }
+
+    fn zero_grad(&self) {
+        self.inner.zero_grad();
+    }
+
+    fn train(&self) {
+        self.inner.train_mode();
+    }
+
+    fn eval(&self) {
+        self.inner.eval_mode();
+    }
+
+    fn is_training(&self) -> bool {
+        self.inner.is_training()
+    }
+}
+
+// ---- PackedMultiHeadAttention (4-bit, U4x8) ----
+
+#[pyclass]
+pub struct PyPackedMultiHeadAttention4 {
+    inner: crate::nn::attention::PackedMultiHeadAttention<crate::dtypes::U4x8>,
+}
+
+impl_nn_module!(PyPackedMultiHeadAttention4 {
+    #[new]
+    #[pyo3(signature = (d_model, num_heads, dropout_p = 0.0, causal = false))]
+    fn new(d_model: i64, num_heads: i64, dropout_p: f64, causal: bool) -> Self {
+        PyPackedMultiHeadAttention4 {
+            inner: crate::nn::attention::PackedMultiHeadAttention::new(
+                d_model, num_heads, dropout_p as f32, causal, 2048
+            )
+        }
+    }
+
+    fn set_kv_cache(&mut self, k: &PyTensor, v: &PyTensor) {
+        let k_data = k.numpy();
+        let v_data = v.numpy();
+        self.inner.set_kv_cache(k_data, v_data);
+    }
+
+    fn clear_kv_cache(&mut self) {
+        self.inner.clear_kv_cache();
+    }
+});
+
+// ---- PackedMultiHeadAttention (8-bit, U8x4) ----
+
+#[pyclass]
+pub struct PyPackedMultiHeadAttention8 {
+    inner: crate::nn::attention::PackedMultiHeadAttention<crate::dtypes::U8x4>,
+}
+
+impl_nn_module!(PyPackedMultiHeadAttention8 {
+    #[new]
+    #[pyo3(signature = (d_model, num_heads, dropout_p = 0.0, causal = false))]
+    fn new(d_model: i64, num_heads: i64, dropout_p: f64, causal: bool) -> Self {
+        PyPackedMultiHeadAttention8 {
+            inner: crate::nn::attention::PackedMultiHeadAttention::new(
+                d_model, num_heads, dropout_p as f32, causal, 2048
+            )
+        }
+    }
+
+    fn set_kv_cache(&mut self, k: &PyTensor, v: &PyTensor) {
+        let k_data = k.numpy();
+        let v_data = v.numpy();
+        self.inner.set_kv_cache(k_data, v_data);
+    }
+
+    fn clear_kv_cache(&mut self) {
+        self.inner.clear_kv_cache();
+    }
+});
+
+// ---- PackedTransformerEncoder (4-bit, U4x8) ----
+
+#[pyclass]
+pub struct PyPackedTransformerEncoder4 {
+    inner: crate::nn::transformer::PackedTransformerEncoder<crate::dtypes::U4x8>,
+}
+
+impl_nn_module!(PyPackedTransformerEncoder4 {
+    #[new]
+    #[pyo3(signature = (vocab_size, max_seq_len, d_model, num_heads, num_layers, ff_dim, num_classes, dropout_p = 0.0))]
+    fn new(vocab_size: i64, max_seq_len: i64, d_model: i64, num_heads: i64,
+           num_layers: i64, ff_dim: i64, num_classes: i64, dropout_p: f64) -> Self {
+        PyPackedTransformerEncoder4 {
+            inner: crate::nn::transformer::PackedTransformerEncoder::new(
+                vocab_size,
+                max_seq_len,
+                d_model,
+                num_heads,
+                num_layers,
+                ff_dim,
+                num_classes,
+                dropout_p as f32,
+            )
+        }
+    }
+});
+
+// ---- PackedTransformerEncoder (8-bit, U8x4) ----
+
+#[pyclass]
+pub struct PyPackedTransformerEncoder8 {
+    inner: crate::nn::transformer::PackedTransformerEncoder<crate::dtypes::U8x4>,
+}
+
+impl_nn_module!(PyPackedTransformerEncoder8 {
+    #[new]
+    #[pyo3(signature = (vocab_size, max_seq_len, d_model, num_heads, num_layers, ff_dim, num_classes, dropout_p = 0.0))]
+    fn new(vocab_size: i64, max_seq_len: i64, d_model: i64, num_heads: i64,
+           num_layers: i64, ff_dim: i64, num_classes: i64, dropout_p: f64) -> Self {
+        PyPackedTransformerEncoder8 {
+            inner: crate::nn::transformer::PackedTransformerEncoder::new(
+                vocab_size,
+                max_seq_len,
+                d_model,
+                num_heads,
+                num_layers,
+                ff_dim,
+                num_classes,
+                dropout_p as f32,
+            )
+        }
     }
 });
 

@@ -51,12 +51,17 @@ def clip_grad_norm_(parameters: Union[Any, List[Any]], max_norm: float, norm_typ
     Returns:
         The total norm of the parameters (before clipping).
     
+    Raises:
+        ValueError: If norm_type is less than or equal to 0.
+    
     Examples:
         >>> optimizer = fnn.optimizers.SGD(model.parameters(), lr=0.01)
         >>> loss.backward()
         >>> fnn.optimizers.clip_grad_norm_(model.parameters(), 1.0)
         >>> optimizer.step()
     """
+    if norm_type <= 0:
+        raise ValueError(f"norm_type must be > 0, got {norm_type}")
     return _core.clip_grad_norm_(parameters, max_norm, norm_type)
 
 

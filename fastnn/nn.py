@@ -17,9 +17,10 @@ Dropout2d = _core.Dropout2d
 Embedding = _core.Embedding
 Upsample = _core.Upsample
 MaxPool2d = _core.MaxPool2d
+AvgPool2d = _core.AvgPool2d
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
 ReLU = _core.ReLU
-GELU = _core.Gelu
+GELU = _core.Gelu  # Alias for Rust's Gelu (case matches Rust convention)
 Sigmoid = _core.Sigmoid
 Tanh = _core.Tanh
 SiLU = _core.SiLU
@@ -27,16 +28,30 @@ LeakyReLU = _core.LeakyReLU
 Softplus = _core.Softplus
 Hardswish = _core.Hardswish
 Elu = _core.Elu
+Softmax = _core.Softmax
+PReLU = _core.PReLU
 Mish = _core.Mish
 Sequential = _core.Sequential_
 ModuleList = _core.ModuleList
 ResidualBlock = _core.ResidualBlock
+DAGExecutor = _core.DAGExecutor
 FusedConvBn = _core.FusedConvBn
 FusedConvBnRelu = _core.FusedConvBnRelu
 FusedConvBnGelu = _core.FusedConvBnGelu
 
 # Python layers
 from fastnn.layers import Flatten, PySequential, BasicBlock
+
+from fastnn._core import (
+    PyLinear4 as Linear4, PyLinear8 as Linear8, PyLinear16 as Linear16, PyLinear32 as Linear32,
+    PyPackedMultiHeadAttention4 as PackedMultiHeadAttention4,
+    PyPackedMultiHeadAttention8 as PackedMultiHeadAttention8,
+    PyPackedTransformerEncoder4 as PackedTransformerEncoder4,
+    PyPackedTransformerEncoder8 as PackedTransformerEncoder8,
+)
+
+# Weight initialization (use submodule import to avoid __getattr__ fallback)
+import fastnn.init as init
 
 
 # Model classes
@@ -61,6 +76,7 @@ __all__ = [
     "Embedding",
     "Upsample",
     "MaxPool2d",
+    "AvgPool2d",
     "AdaptiveAvgPool2d",
     "ReLU",
     "GELU",
@@ -71,9 +87,12 @@ __all__ = [
     "Softplus",
     "Hardswish",
     "Elu",
+    "Softmax",
+    "PReLU",
     "Mish",
     "Sequential",
     "ModuleList",
+    "DAGExecutor",
     "ResidualBlock",
     "FusedConvBn",
     "FusedConvBnRelu",
@@ -82,4 +101,5 @@ __all__ = [
     "PySequential",
     "BasicBlock",
     "MLP",
+    "init",
 ]

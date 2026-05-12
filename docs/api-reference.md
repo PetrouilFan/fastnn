@@ -28,6 +28,7 @@ loss = fnn.mse_loss(pred, target)
 | Function | Description |
 |----------|-------------|
 | `fnn.tensor(data, shape, device=None)` | Create tensor from flat Python list + shape |
+| `fnn.from_numpy(arr, device=None)` | Create tensor from numpy array |
 | `fnn.zeros(shape, dtype=None, device=None)` | Create tensor of zeros |
 | `fnn.ones(shape, dtype=None, device=None)` | Create tensor of ones |
 | `fnn.full(shape, value, dtype=None, device=None)` | Create tensor filled with value |
@@ -72,8 +73,6 @@ fnn.silu(x)       # SiLU (Swish)
 fnn.leaky_relu(x, negative_slope)  # Leaky ReLU
 fnn.softplus(x)   # Softplus
 fnn.hardswish(x)   # HardSwish
-fnn.elu(x, alpha)  # ELU
-fnn.mish(x)        # Mish
 ```
 
 ### Reductions
@@ -105,9 +104,13 @@ q_clipped = fnn.minimum(q1, q2)  # Conservative Q estimate
 fnn.einsum('ij,jk->ik', [a, b])  # Einstein summation
 fnn.flash_attention(q, k, v, causal=None)  # Memory-efficient attention
 fnn.fused_add_relu(a, b)  # Fused add + ReLU
-fnn.fused_linear_relu(x, w, bias)  # Fused linear + ReLU
-fnn.fused_linear_gelu(x, w, bias)  # Fused linear + GELU
 fnn.fused_conv_bn_silu(conv, bn, x)  # Fused Conv + BN + SiLU
+fnn.fused_linear_relu(x, weight, bias)  # Fused matmul + ReLU
+fnn.fused_linear_gelu(x, weight, bias)  # Fused matmul + GELU
+fnn.cumsum(x, dim)        # Cumulative sum
+fnn.erf(x)                # Error function
+fnn.topk(x, k, dim)       # Top-k values and indices
+fnn.gather(x, dim, index)  # Gather values along dimension
 ```
 
 ### Concatenation and Stacking
@@ -180,9 +183,15 @@ fnn.huber_loss(pred, target, delta=1.0)    # Huber loss (smooth L1)
 | `fnn.Mish()` | Mish |
 | `fnn.MaxPool2d(kernel_size, stride, padding)` | Max pooling 2D |
 | `fnn.AdaptiveAvgPool2d(output_h, output_w)` | Adaptive average pooling |
+| `fnn.MaxPool1d(kernel_size, stride, padding)` | Max pooling 1D |
+| `fnn.AvgPool1d(kernel_size, stride, padding)` | Average pooling 1D |
+| `fnn.AvgPool2d(kernel_size, stride, padding)` | Average pooling 2D |
+| `fnn.PReLU()` | Parametric ReLU |
 | `fnn.Flatten(start_dim, end_dim)` | Flatten layer |
 | `fnn.ResidualBlock(conv1, bn1, relu, conv2, bn2, downsample)` | ResNet BasicBlock |
-| `fnn.FusedConvBnSilu(...)` | Fused Conv+BN+SiLU |
+| `fnn.FusedConvBn(conv, bn)` | Fused Conv2d+BatchNorm2d for inference |
+| `fnn.FusedConvBnRelu(conv, bn)` | Fused Conv+BN+ReLU |
+| `fnn.FusedConvBnGelu(conv, bn)` | Fused Conv+BN+GELU |
 | `fnn.Sequential(layers)` | Sequential container |
 | `fnn.ModuleList(modules)` | Module list container |
 
@@ -230,6 +239,68 @@ fnn.io.convert_from_pytorch(torch_model, "model.fnn")
 info = fnn.io.convert_from_onnx("model.onnx", "model.fnn")
 ```
 
+## Packed Precision Layers
+
+```python
+# Packed linear layers
+fnn.Linear4(in, out, bias)      # 4-bit packed linear
+fnn.Linear8(in, out, bias)      # 8-bit packed linear
+fnn.Linear16(in, out, bias)     # 16-bit packed linear
+fnn.Linear32(in, out, bias)     # 32-bit packed linear
+
+# Packed fused layers
+fnn.PackedConvRelu4(ci, co, k, ...)   # Packed conv + ReLU (4-bit)
+fnn.PackedConvRelu8(ci, co, k, ...)   # Packed conv + ReLU (8-bit)
+fnn.PackedLinearGelu4(in, out)         # Packed linear + GELU (4-bit)
+fnn.PackedLinearGelu8(in, out)         # Packed linear + GELU (8-bit)
+
+# Packed conv2d
+fnn.PackedConv2d4(ci, co, k, ...)     # 4-bit packed conv
+fnn.PackedConv2d8(ci, co, k, ...)     # 8-bit packed conv
+
+# Packed tensors
+fnn.packed_tensor(data, shape, scale, zero, dtype="u4")
+fnn.packed_tensor_from_f32(data, shape, dtype="u4")
+fnn.PackedTensor4(data, shape, scale, zp)    # 4-bit packed tensor
+fnn.PackedTensor8(data, shape, scale, zp)    # 8-bit packed tensor
+fnn.QuantizedTensor(data, scale, zp, qdtype) # Quantized tensor
+
+# Packed multi-head attention & transformer
+fnn.PackedMultiHeadAttention4(d_model, n_heads)   # 4-bit packed MHA
+fnn.PackedMultiHeadAttention8(d_model, n_heads)   # 8-bit packed MHA
+fnn.PackedTransformerEncoder4(vocab, max_seq, ...) # 4-bit packed transformer
+fnn.PackedTransformerEncoder8(vocab, max_seq, ...) # 8-bit packed transformer
+
+# Master weight optimizers
+fnn.MasterWeightOptimizer4(params, lr)
+fnn.MasterWeightOptimizer8(params, lr)
+
+# Backend control
+fnn.use_wgpu()   # Switch to GPU backend
+fnn.use_cpu()    # Switch to CPU backend
+fnn.is_wgpu()    # Check if GPU backend is active
+```
+
+## YOLO & NMS Utilities
+
+```python
+fnn.YOLO("model.onnx")                    # YOLO object detection model
+fnn.nms(boxes, scores, iou_threshold)     # Non-maximum suppression
+fnn.yolo_decode(output, conf_thresh)      # YOLO output decoding
+fnn.yolo_dfl_decode(output, conf_thresh)  # YOLOv8+ DFL decoding
+fnn.xywh2xyxy(boxes)                      # Convert bbox format
+fnn.scale_boxes(img1_shape, boxes, img0_shape)  # Rescale boxes
+```
+
+## DAG Executor
+
+```python
+fnn.DAGExecutor(params, ops, input_names, output_names)
+# Executes ONNX model graphs natively in Rust
+executor.forward({"input_name": tensor})
+executor(tensor)  # For single-input/single-output
+```
+
 ## Utilities
 
 ```python
@@ -238,8 +309,12 @@ fnn.set_seed(n)            # Set random seed
 fnn.set_num_threads(n)     # Set CPU thread count
 fnn.set_default_device(device)  # Set default device (cpu/wgpu)
 fnn.allocator_stats()      # Get memory stats
-fnn.list_registered_ops() # List all registered operations
+fnn.list_registered_ops()  # List all registered operations
 fnn.batched_mlp_forward()  # Batched MLP inference
+fnn.clear_storage_pool()   # Clear storage pool cache
+fnn.import_onnx(onnx_path, fnn_path)  # Import ONNX model
+fnn.load_state_dict(model, state_dict)  # Load state dict
+fnn.from_numpy(arr)        # Create tensor from numpy array
 ```
 
 ## Parallel Training
@@ -319,6 +394,11 @@ tensor.hardswish()
 tensor.mish()
 tensor.softmax(dim)
 tensor.log_softmax(dim)
+tensor.erf()              # Error function
+
+# Fused linear + activation
+tensor.fused_linear_relu(weight, bias=None)   # matmul + ReLU in one pass
+tensor.fused_linear_gelu(weight, bias=None)   # matmul + GELU in one pass
 
 # Note: ELU is available as a layer (fnn.Elu(alpha)) but NOT as a tensor method
 
@@ -327,6 +407,10 @@ tensor.sum(dim=None, keepdim=False)
 tensor.mean(dim=None, keepdim=False)
 tensor.max(dim=None, keepdim=False)
 tensor.min(dim=None, keepdim=False)
+tensor.cumsum(dim=None)   # Cumulative sum
+
+# Top-k
+tensor.topk(k, dim=None)  # Returns (values, indices)
 
 # Shape operations
 tensor.view(shape)
@@ -337,7 +421,12 @@ tensor.permute(dims)
 tensor.transpose(d0, d1)
 tensor.flip(dim)
 tensor.repeat(repeats)
+tensor.expand(sizes)       # Expand without copy
+tensor.gather(dim, index)  # Gather values along dim
 tensor.where_tensor(cond, other)
+
+# Slicing
+tensor[slice]              # Standard Python slicing
 
 # Indexing
 tensor[slice]       # Indexing/slicing

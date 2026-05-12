@@ -368,7 +368,8 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
     #[allow(dead_code)]
     /// Create a new quantized transformer block.
     pub fn new(d_model: i64, num_heads: i64, ff_dim: i64, dropout_p: f32) -> Self {
-        let self_attn = PackedMultiHeadAttention::<T>::new(d_model, num_heads, dropout_p, false);
+        let self_attn =
+            PackedMultiHeadAttention::<T>::new(d_model, num_heads, dropout_p, false, 2048);
         let norm1 = LayerNorm::new(d_model, 1e-5);
         let norm2 = LayerNorm::new(d_model, 1e-5);
         let ff1 = PackedLinear::<T>::new(d_model as usize, ff_dim as usize, true);
@@ -389,6 +390,7 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
     }
 
     /// Forward pass with quantized operations.
+    #[inline]
     pub fn forward(&self, x: &Tensor) -> Tensor {
         // Layer 1: Self-attention with residual connection and dropout
         let x_norm1 = self.norm1.forward(x);
@@ -397,20 +399,16 @@ impl<T: PackedWord> PackedTransformerBlock<T> {
         let x = attn_dropped.add(x);
 
         // Layer 2: Feed-forward with residual connection and dropout
-        let _x_norm2 = self.norm2.forward(&x);
+        let x_norm2 = self.norm2.forward(&x);
 
         // Convert to f32 for quantized linear layers
-        let x_data = x.to_numpy();
+        let x_data = x_norm2.to_numpy();
 
-        // Fused feed-forward: linear -> gelu -> linear
-        // Note: This is a simplified implementation
-        // In practice, we'd want to use proper quantized GEMM
+        // Fused feed-forward: linear -> relu -> linear
+        // ReLU is much cheaper than GELU (max vs tanh) and activations can stay packed
         let ff_hidden = self.ff1.forward(&x_data);
-        let ff_gelu: Vec<f32> = ff_hidden
-            .iter()
-            .map(|&v| v.max(0.0) * (1.0 + (-v).exp()))
-            .collect(); // GELU approximation
-        let ff_out = self.ff2.forward(&ff_gelu);
+        let ff_relu: Vec<f32> = ff_hidden.iter().map(|&v| v.max(0.0)).collect();
+        let ff_out = self.ff2.forward(&ff_relu);
         let ff_dropped = self.dropout.forward(&Tensor::from_vec(
             ff_out.clone(),
             vec![x.shape_ref()[0], x.shape_ref()[1], self.d_model],
@@ -441,10 +439,18 @@ impl<T: PackedWord> Module for PackedTransformerBlock<T> {
 
     fn train_mode(&self) {
         self.training.store(true, Ordering::Relaxed);
+        self.self_attn.train_mode();
+        self.norm1.train_mode();
+        self.norm2.train_mode();
+        self.dropout.train_mode();
     }
 
     fn eval_mode(&self) {
         self.training.store(false, Ordering::Relaxed);
+        self.self_attn.eval_mode();
+        self.norm1.eval_mode();
+        self.norm2.eval_mode();
+        self.dropout.eval_mode();
     }
 
     fn is_training(&self) -> bool {
@@ -539,6 +545,15 @@ impl<T: PackedWord> PackedTransformerEncoder<T> {
         // Use standard embeddings (kept in f32 for compatibility)
         let x = self.embedding.forward(token_ids);
 
+        // Add positional embeddings
+        let seq_len_usize = seq_len as usize;
+        let batch_usize = batch as usize;
+        let positions: Vec<f32> = (0..seq_len_usize).map(|i| i as f32).collect();
+        let pos_tensor = Tensor::from_vec(positions, vec![1, seq_len]);
+        let pos_expanded = pos_tensor.expand(vec![batch, seq_len]);
+        let pos_emb = self.pos_embedding.forward(&pos_expanded);
+        let x = x.add(&pos_emb);
+
         // Process through quantized layers
         let mut x = x;
         for layer in &self.layers {
@@ -551,9 +566,17 @@ impl<T: PackedWord> PackedTransformerEncoder<T> {
         let cls_token = x.slice(1, 0, 1, 1);
         let cls_token = cls_token.squeeze(Some(1));
 
-        // Quantized classifier - convert to f32 for quantized linear layer
-        let cls_data = cls_token.to_numpy();
-        let output_data = self.classifier.forward(&cls_data);
+        // Quantized classifier - handle batch > 1 properly
+        let cls_numpy = cls_token.to_numpy();
+        let d_model_usize = self.d_model as usize;
+        let num_classes_usize = self.num_classes as usize;
+        let mut output_data = Vec::with_capacity(batch_usize * num_classes_usize);
+        for b in 0..batch_usize {
+            let start = b * d_model_usize;
+            let end = start + d_model_usize;
+            let row_output = self.classifier.forward(&cls_numpy[start..end]);
+            output_data.extend(row_output);
+        }
         Tensor::from_vec(output_data, vec![batch, self.num_classes])
     }
 }

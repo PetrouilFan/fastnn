@@ -97,9 +97,19 @@ impl PyTensor {
     /// Returns a PyCapsule wrapping a DLManagedTensor.
     fn __dlpack__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use crate::io::dlpack::to_dlpack;
+        use pyo3::exceptions::PyValueError;
         let ptr = to_dlpack(&self.inner);
+        if ptr.is_null() {
+            return Err(PyValueError::new_err(
+                "DLPack conversion failed: unsupported dtype or device"
+            ));
+        }
         // Create PyCapsule with the DLPack tensor
         // The capsule name must be "dltensor" per DLPack spec
+        // SAFETY: The GIL is held (we have `py: Python<'_>`). `ptr` points to
+        // a valid DLManagedTensor created by `to_dlpack`. `PyCapsule_New`
+        // takes ownership of the pointer and manages its lifetime via the
+        // provided destructor.
         let capsule = unsafe {
             pyo3::ffi::PyCapsule_New(
                 ptr as *mut std::ffi::c_void,
@@ -112,6 +122,10 @@ impl PyTensor {
                 "Failed to create DLPack capsule",
             ));
         }
+        // SAFETY: `capsule` is a non-null PyObject pointer returned by
+        // `PyCapsule_New` above. `from_owned_ptr` takes ownership, which is
+        // correct since the capsule was just created and not yet owned by
+        // any Python object.
         Ok(unsafe { pyo3::Bound::from_owned_ptr(py, capsule).unbind() })
     }
 
@@ -122,6 +136,37 @@ impl PyTensor {
         match self.inner.device() {
             crate::storage::Device::Cpu => (1, 0),
             crate::storage::Device::Wgpu(_) => (1, 0), // Report as CPU for DLPack compatibility
+        }
+    }
+
+    /// Import a tensor via the DLPack protocol.
+    /// Accepts any Python object that supports `__dlpack__`.
+    #[staticmethod]
+    fn from_dlpack(source: &Bound<'_, PyAny>) -> PyResult<Self> {
+        use pyo3::exceptions::PyValueError;
+
+        let capsule = source
+            .call_method0("__dlpack__")
+            .map_err(|_| PyValueError::new_err("object does not support the DLPack protocol"))?;
+
+        // SAFETY: The GIL is held. The capsule object is a valid DLPack capsule
+        // returned by `source.__dlpack__()`. `PyCapsule_GetPointer` extracts the
+        // managed tensor pointer, which is valid per the DLPack protocol.
+        unsafe {
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                capsule.as_ptr(),
+                c"dltensor".as_ptr(),
+            );
+            if ptr.is_null() {
+                return Err(PyValueError::new_err("failed to get DLPack capsule pointer"));
+            }
+            let tensor =
+                crate::io::dlpack::from_dlpack(ptr as *mut crate::io::dlpack::DLManagedTensor)?;
+            pyo3::ffi::PyCapsule_SetName(
+                capsule.as_ptr(),
+                c"used_dltensor".as_ptr(),
+            );
+            Ok(PyTensor::from_tensor(tensor))
         }
     }
 
@@ -293,7 +338,16 @@ impl PyTensor {
             Ok(PyTensor::from_tensor(sliced))
         } else {
             // Assume it's an integer index
-            let idx_val: usize = idx.extract()?;
+            let idx_val: isize = idx.extract()?;
+            let dim_size = self.inner.shape()[0] as isize;
+            // Handle negative indices (Python convention: -1 is last element)
+            let idx_val = if idx_val < 0 { dim_size + idx_val } else { idx_val };
+            if idx_val < 0 || idx_val >= dim_size {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "index {} is out of bounds for dimension 0 of size {}",
+                    idx_val, dim_size
+                )));
+            }
             // For 2D tensor [N, D], t[idx] returns [D] (the row)
             // For 1D tensor [N], t[idx] returns scalar (0-dim)
             // Implementation: slice(0, idx, idx+1, 1).squeeze(0)

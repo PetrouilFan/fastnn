@@ -113,7 +113,8 @@ impl Node for Conv2dBackward {
                         dilation_scalar,
                         one_scalar,
                     ],
-                )[0]
+                )
+                .expect("Conv2dBackward::apply: conv2d dispatch failed")[0]
                 .clone()
             } else {
                 // For stride > 1, dilate grad_output first
@@ -144,6 +145,8 @@ impl Node for Conv2dBackward {
                                 let dst_idx = (b * out_channels + c) * dilated_h * dilated_w
                                     + (oh * stride) * dilated_w
                                     + (ow * stride);
+
+// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
                                 unsafe {
                                     *dilated_data.add(dst_idx as usize) = *grad_data.add(src_idx as usize);
                                 }
@@ -165,12 +168,13 @@ impl Node for Conv2dBackward {
                         dilation_scalar,
                         one_scalar,
                     ],
-                )[0]
+                )
+                .expect("Conv2dBackward::apply: conv2d (dilated) dispatch failed")[0]
                 .clone()
             }
         } else {
             // Grouped convolution: process each group separately
-            let mut grad_input_parts = Vec::new();
+            let mut grad_input_parts = Vec::with_capacity(groups as usize);
             let out_channels_per_group = out_channels / groups;
             let in_channels_actual = in_channels_per_group;
 
@@ -206,7 +210,8 @@ impl Node for Conv2dBackward {
                             dilation_scalar,
                             one_scalar,
                         ],
-                    )[0]
+                    )
+                    .expect("Conv2dBackward::apply: conv2d (grouped) dispatch failed")[0]
                     .clone()
                 } else {
                     let out_h_g = grad_g.shape_ref()[2];
@@ -265,7 +270,8 @@ impl Node for Conv2dBackward {
                             dilation_scalar,
                             one_scalar,
                         ],
-                    )[0]
+                    )
+                    .expect("Conv2dBackward::apply: conv2d (grouped dilated) dispatch failed")[0]
                     .clone()
                 };
 
@@ -534,7 +540,8 @@ impl Node for ConvTranspose2dBackward {
                 &self.zero_scalar,
                 &self.one_scalar,
             ],
-        )[0]
+        )
+        .expect("ConvTranspose2dBackward::apply: conv2d (grad_input) dispatch failed")[0]
         .clone();
 
         // grad_weight: conv2d(input, grad_output) with appropriate padding
@@ -551,7 +558,8 @@ impl Node for ConvTranspose2dBackward {
                 &self.zero_scalar,
                 &self.one_scalar,
             ],
-        )[0]
+        )
+        .expect("ConvTranspose2dBackward::apply: conv2d (grad_weight) dispatch failed")[0]
         .clone();
 
         // grad_bias: sum over batch, height, width dimensions

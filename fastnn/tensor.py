@@ -1,5 +1,7 @@
 """Tensor constructors and Tensor type exports."""
 
+import math
+
 import numpy as np
 
 import fastnn._core as _core
@@ -25,7 +27,7 @@ def _flatten(nested):
     while stack:
         try:
             item = next(stack[-1])
-            if isinstance(item, list):
+            if isinstance(item, (list, tuple)):
                 stack.append(iter(item))
             else:
                 result.append(item)
@@ -34,11 +36,21 @@ def _flatten(nested):
     return result
 
 def tensor(data, shape, device=None, dtype=None):
+    if dtype is not None:
+        raise ValueError("dtype not yet supported")
     if isinstance(data, np.ndarray):
         data = _ensure_tensor_ready(data)
         shape = shape if shape is not None else list(data.shape)
         return _core.tensor_from_data(data.flatten().tolist(), shape, device)
+    if isinstance(data, Tensor):
+        # Already a fastnn tensor — return as-is (or reshape if needed)
+        if shape is not None and list(data.shape) != list(shape):
+            raise ValueError(f"Cannot convert tensor of shape {data.shape} to shape {shape}")
+        return data
     flat_data = _flatten(data)
+    expected_size = math.prod(shape) if shape else len(flat_data)
+    if len(flat_data) != expected_size:
+        raise ValueError(f"Shape {shape} has {expected_size} elements but got {len(flat_data)} values")
     return _core.tensor_from_data(flat_data, shape, device)
 
 

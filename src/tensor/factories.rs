@@ -20,6 +20,9 @@ use std::arch::x86_64::{_mm256_loadu_ps, _mm256_storeu_ps};
 pub(super) fn simd_copy_f32(src: *const f32, dst: *mut f32, len: usize) {
     let mut i = 0;
     while i + 8 <= len {
+        // SAFETY: `src` and `dst` are valid pointers to `len` elements, and `i` is
+        // within bounds (i + 8 <= len). The SIMD load/store intrinsics require valid,
+        // aligned-or-guaranteed-ok pointers (loadu/storeu tolerate misalignment).
         unsafe {
             let v = _mm256_loadu_ps(src.add(i));
             _mm256_storeu_ps(dst.add(i), v);
@@ -27,6 +30,8 @@ pub(super) fn simd_copy_f32(src: *const f32, dst: *mut f32, len: usize) {
         i += 8;
     }
     while i < len {
+        // SAFETY: `src` and `dst` are valid pointers to `len` elements, and `i` is
+        // within bounds (i < len).
         unsafe {
             *dst.add(i) = *src.add(i);
         }
@@ -37,6 +42,8 @@ pub(super) fn simd_copy_f32(src: *const f32, dst: *mut f32, len: usize) {
 /// Fallback memcpy for f32
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 pub(super) fn memcpy_f32(src: *const f32, dst: *mut f32, len: usize) {
+    // SAFETY: The caller guarantees `src` and `dst` are valid pointers to `len`
+    // elements of `f32` and that the two memory regions do not overlap.
     unsafe {
         std::ptr::copy_nonoverlapping(src, dst, len);
     }
@@ -59,9 +66,8 @@ pub(super) fn dim_scalar(dim: i32) -> Tensor {
 
 impl Tensor {
     pub fn from_scalar(value: f32) -> Self {
-        let mut storage = Arc::new(Storage::new_cpu(DType::F32, 4));
-        let storage_mut = Arc::make_mut(&mut storage);
-        let Storage::Cpu(cpu_storage) = storage_mut else {
+        let mut storage = get_storage_pool().acquire_uninit(4, Device::Cpu);
+        let Storage::Cpu(cpu_storage) = Arc::make_mut(&mut storage) else {
             panic!("Expected CPU storage");
         };
         let data = Arc::make_mut(&mut cpu_storage.data);
@@ -75,19 +81,44 @@ impl Tensor {
 
     pub fn from_vec(values: Vec<f32>, shape: Vec<i64>) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
+        let numel = sizes.iter().product::<i64>() as usize;
+        let nbytes = numel * std::mem::size_of::<f32>();
+        debug_assert!(
+            values.len() >= numel,
+            "from_vec: values.len() ({}) < product(shape) ({})",
+            values.len(),
+            numel
+        );
+        let mut storage = get_storage_pool().acquire_uninit(nbytes, Device::Cpu);
+        if let Storage::Cpu(cpu) = Arc::make_mut(&mut storage) {
+            let data = Arc::make_mut(&mut cpu.data);
+            let dst = data.as_mut_ptr() as *mut f32;
+            unsafe {
+                std::ptr::copy_nonoverlapping(values.as_ptr(), dst, numel);
+            }
+        }
         Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 
-    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
+    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, _device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
-        Tensor::new(TensorImpl::new_with_device(
-            storage,
-            sizes,
-            device,
-            DType::F32,
-        ))
+        let numel = sizes.iter().product::<i64>() as usize;
+        let nbytes = numel * std::mem::size_of::<f32>();
+        debug_assert!(
+            values.len() >= numel,
+            "from_vec_with_device: values.len() ({}) < product(shape) ({})",
+            values.len(),
+            numel
+        );
+        let mut storage = get_storage_pool().acquire_uninit(nbytes, _device);
+        if let Storage::Cpu(cpu) = Arc::make_mut(&mut storage) {
+            let data = Arc::make_mut(&mut cpu.data);
+            let dst = data.as_mut_ptr() as *mut f32;
+            unsafe {
+                std::ptr::copy_nonoverlapping(values.as_ptr(), dst, numel);
+            }
+        }
+        Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
@@ -162,24 +193,32 @@ impl Tensor {
                 let data = Arc::make_mut(&mut cpu_storage.data);
                 match dtype {
                     DType::F32 => {
+                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
+                        // (numel * sizeof(f32)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f32, numel)
                         };
                         slice.fill(1.0);
                     }
                     DType::F64 => {
+                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
+                        // (numel * sizeof(f64)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, numel)
                         };
                         slice.fill(1.0);
                     }
                     DType::I32 => {
+                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
+                        // (numel * sizeof(i32)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i32, numel)
                         };
                         slice.fill(1);
                     }
                     DType::BF16 => {
+                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
+                        // (numel * sizeof(bf16)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(
                                 data.as_mut_ptr() as *mut half::bf16,
@@ -189,6 +228,8 @@ impl Tensor {
                         slice.fill(half::bf16::from_f32(1.0));
                     }
                     DType::F16 => {
+                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
+                        // (numel * sizeof(f16)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(
                                 data.as_mut_ptr() as *mut half::f16,
@@ -198,12 +239,16 @@ impl Tensor {
                         slice.fill(half::f16::from_f32(1.0));
                     }
                     DType::I64 => {
+                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
+                        // (numel * sizeof(i64)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i64, numel)
                         };
                         slice.fill(1);
                     }
                     DType::Bool => {
+                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
+                        // (numel * sizeof(u8)). The pointer is valid and properly aligned.
                         let slice =
                             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr(), numel) };
                         slice.fill(1);
@@ -235,6 +280,8 @@ impl Tensor {
                     DType::F32 => {
                         let f32_ptr = ptr as *mut f32;
                         for i in 0..numel {
+                            // SAFETY: `f32_ptr` points to a uniquely owned buffer of sufficient
+                            // size (numel * sizeof(f32)), and `i` is within bounds.
                             unsafe {
                                 *f32_ptr.add(i) = value;
                             }
@@ -243,6 +290,8 @@ impl Tensor {
                     DType::F64 => {
                         let f64_ptr = ptr as *mut f64;
                         for i in 0..numel {
+                            // SAFETY: `f64_ptr` points to a uniquely owned buffer of sufficient
+                            // size (numel * sizeof(f64)), and `i` is within bounds.
                             unsafe {
                                 *f64_ptr.add(i) = value as f64;
                             }
@@ -251,6 +300,8 @@ impl Tensor {
                     DType::I32 => {
                         let i32_ptr = ptr as *mut i32;
                         for i in 0..numel {
+                            // SAFETY: `i32_ptr` points to a uniquely owned buffer of sufficient
+                            // size (numel * sizeof(i32)), and `i` is within bounds.
                             unsafe {
                                 *i32_ptr.add(i) = value as i32;
                             }
@@ -259,6 +310,8 @@ impl Tensor {
                     DType::BF16 => {
                         let bf16_ptr = ptr as *mut half::bf16;
                         for i in 0..numel {
+                            // SAFETY: `bf16_ptr` points to a uniquely owned buffer of sufficient
+                            // size (numel * sizeof(bf16)), and `i` is within bounds.
                             unsafe {
                                 *bf16_ptr.add(i) = half::bf16::from_f32(value);
                             }
@@ -267,6 +320,8 @@ impl Tensor {
                     DType::F16 => {
                         let f16_ptr = ptr as *mut half::f16;
                         for i in 0..numel {
+                            // SAFETY: `f16_ptr` points to a uniquely owned buffer of sufficient
+                            // size (numel * sizeof(f16)), and `i` is within bounds.
                             unsafe {
                                 *f16_ptr.add(i) = half::f16::from_f32(value);
                             }

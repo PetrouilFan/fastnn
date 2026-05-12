@@ -181,16 +181,18 @@ class RandomSampler(Sampler):
         super().__init__(data_source)
         if replacement:
             raise NotImplementedError("RandomSampler does not support replacement")
-        self.num_samples = num_samples or len(data_source)
+        n = len(data_source)
+        if num_samples is not None and num_samples > n:
+            raise ValueError(
+                f"num_samples ({num_samples}) cannot exceed len(data_source) ({n})"
+            )
+        self.num_samples = num_samples or n
         self.generator = generator or random.Random()
         self._indices_buffer = None
 
     def __iter__(self) -> Iterator[int]:
         n = len(self.data_source)
-        if self._indices_buffer is None or len(self._indices_buffer) != n:
-            self._indices_buffer = np.arange(n, dtype=np.int64)
-        else:
-            np.arange(n, dtype=np.int64, out=self._indices_buffer)
+        self._indices_buffer = np.arange(n, dtype=np.int64)
         self.generator.shuffle(self._indices_buffer)
         return iter(self._indices_buffer[: self.num_samples].tolist())
 
@@ -275,14 +277,10 @@ def default_collate(batch: list) -> tuple:
     if isinstance(elem, tuple):
         return tuple(map(default_collate, zip(*batch)))
 
-    if hasattr(elem, "numpy"):
-        if all(hasattr(b, "numpy") for b in batch):
-            return fnn.stack(batch, dim=0)
-        batch_np = [to_numpy(b) for b in batch]
-        result_np = np.stack(batch_np, axis=0)
-        return fnn.tensor(result_np, result_np.shape)
+    if hasattr(elem, "numpy") and all(hasattr(b, "numpy") for b in batch):
+        return fnn.stack(batch, dim=0)
 
-    if isinstance(elem, np.ndarray):
+    if hasattr(elem, "numpy") or isinstance(elem, np.ndarray):
         batch_np = [to_numpy(b) for b in batch]
         result_np = np.stack(batch_np, axis=0)
         return fnn.tensor(result_np, result_np.shape)

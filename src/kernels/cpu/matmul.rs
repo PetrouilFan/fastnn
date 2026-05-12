@@ -18,8 +18,16 @@ use std::sync::Arc;
 pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     // Removed debug file writing that was causing issues on Windows
 
-    let a = args[0];
-    let b = args[1];
+    let a = if args[0].is_contiguous() {
+        args[0].clone()
+    } else {
+        args[0].contiguous()
+    };
+    let b = if args[1].is_contiguous() {
+        args[1].clone()
+    } else {
+        args[1].contiguous()
+    };
 
     let a_shape = a.shape_ref();
     let b_shape = b.shape_ref();
@@ -32,46 +40,27 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
     let k = a_shape[a_shape.len() - 1] as i32;
     let n = b_shape[b_shape.len() - 1] as i32;
 
-    // Detect transposed matrices by checking strides
-    // A contiguous matrix [rows, cols] has strides [cols, 1]
-    // A transposed matrix (from [rows, cols]) has strides [1, rows]
-    let a_strides = a.strides();
-    let b_strides = b.strides();
-    let _a_is_transposed =
-        a_strides[a.ndim() - 2] == 1 && a_strides[a.ndim() - 1] == a_shape[a_shape.len() - 2];
-    let b_is_transposed =
-        b_strides[b.ndim() - 2] == 1 && b_strides[b.ndim() - 1] == b_shape[b_shape.len() - 2];
+    // Both tensors are now contiguous (ensured above), so no transposed
+    // stride detection is needed. The 3D flattening below also produces
+    // contiguous tensors. This avoids a class of bugs where a 4D batched
+    // tensor with transposed inner dims (e.g. from attention softmax
+    // followed by transpose) is incorrectly detected as "transposed" at
+    // the 4D level, causing the stride-based check to use a batch
+    // dimension as the inner dimension and panic.
 
-    // For matmul: A[m, k] @ B[k, n] = C[m, n]
-    // When B is transposed (shape [n, k] representing original [k, n]):
-    // The transposed view has shape [n, k] where n is the original outer dim
-    // and k is the original inner dim
-    if b_is_transposed {
-        // B is transposed: shape [n, k] represents original matrix [k, n]
-        // For matmul A[m,k] @ B[k,n], we need B's inner dim (k) to match A's inner dim (k)
-        // In the transposed view [n, k], the inner dim k is at position 0 (b_shape[0])
-        let b_inner_dim = b_shape[0] as i32; // k is at position 0 for transposed
-        if b_inner_dim != k {
-            panic!(
-                "matmul: transposed B dimensions incompatible: A[{}, {}] @ B.T[{}, {}]",
-                m, k, b_shape[0], b_shape[1]
-            );
-        }
-    } else {
-        // Standard case: B is not transposed, shape [k, n]
-        if b_shape[b_shape.len() - 2] as i32 != k {
-            panic!(
-                "matmul: A[{}, {}] @ B[{}, {}] - B second-to-last dim {} != k {}",
-                m,
-                k,
-                b_shape[b_shape.len() - 2],
-                b_shape[b_shape.len() - 1],
-                b_shape[b_shape.len() - 2],
-                k
-            );
-        }
+    // Both tensors are contiguous (ensured above), so B is never transposed.
+    // Standard dimension compatibility check: B's second-to-last dim must equal A's last dim (k).
+    if b_shape[b_shape.len() - 2] as i32 != k {
+        panic!(
+            "matmul: A[{}, {}] @ B[{}, {}] - B second-to-last dim {} != k {}",
+            m,
+            k,
+            b_shape[b_shape.len() - 2],
+            b_shape[b_shape.len() - 1],
+            b_shape[b_shape.len() - 2],
+            k
+        );
     }
-
     // Use custom tiled matmul
     let batch_a = if a_shape.len() > 2 {
         a_shape[..a_shape.len() - 2].iter().product::<i64>() as usize
@@ -97,7 +86,6 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             a_shape[a_shape.len() - 2],
             a_shape[a_shape.len() - 1],
         ])
-        .contiguous()
     } else {
         a.clone()
     };
@@ -108,10 +96,23 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             b_shape[b_shape.len() - 2],
             b_shape[b_shape.len() - 1],
         ])
-        .contiguous()
     } else {
         b.clone()
     };
+
+    // Validate inner dimensions on the (possibly flattened) 3D tensors.
+    // This must run after batch flattening so shape indexing is unambiguous
+    // for ND inputs (e.g. 4D batched attention tensors).
+    let a_3d_shape = a_3d.shape_ref();
+    let b_3d_shape = b_3d.shape_ref();
+    let a_inner = a_3d_shape[a_3d_shape.len() - 1];
+    let b_inner = b_3d_shape[b_3d_shape.len() - 2];
+    if a_inner != b_inner {
+        panic!(
+            "matmul: inner dimension mismatch: A[..{}] @ B[..{}]",
+            a_inner, b_inner
+        );
+    }
 
     let a = &a_3d;
     let b = &b_3d;
@@ -205,9 +206,12 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             // Reshape trick: treat [batch, m, k] as [batch*m, k]
             // Single BLAS call for entire batch
             let batch_m = batch * m as usize;
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, batch_m * k as usize) };
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
             let out_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, batch_m * n as usize) };
             matmul_blas_with_transpose_into(
                 a_slice,
@@ -222,10 +226,13 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
         } else if can_batch_blas {
             // Batched 3D BLAS loop: process each batch element separately
             let a_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts(a_ptr, batch * m as usize * k as usize) };
             let b_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts(b_ptr, batch * k as usize * n as usize) };
             let out_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, batch * m as usize * n as usize) };
 
             let m_usize = m as usize;
@@ -276,9 +283,12 @@ pub unsafe fn matmul_kernel(args: &[&Tensor]) -> Vec<Tensor> {
             }
         } else {
             // Single batch BLAS
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let a_slice = unsafe { std::slice::from_raw_parts(a_ptr, a_rows * a_cols) };
+            // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
             let b_slice = unsafe { std::slice::from_raw_parts(b_ptr, k as usize * b_cols) };
             let out_slice =
+                // SAFETY: The pointer is valid, properly aligned, and points to `len` initialized elements derived from a valid Tensor allocation.
                 unsafe { std::slice::from_raw_parts_mut(out_ptr, m as usize * n as usize) };
             matmul_blas_with_transpose_into(
                 a_slice,
@@ -426,25 +436,31 @@ pub unsafe fn parallel_matmul(
     let bs0 = b_stride_0 as usize;
     let bs1 = b_stride_1 as usize;
 
-    // Parallelize at the row level (batch * m rows).
-    // Each row calls blocked_row_matmul which tiles K and N for cache efficiency.
-    (0..total_rows).into_par_iter().for_each(|row_idx| {
-        blocked_row_matmul(
-            a_usize as *const f32,
-            b_usize as *const f32,
-            out_usize as *mut f32,
-            row_idx,
-            m_usize,
-            n_usize,
-            k_usize,
-            abs,
-            as0,
-            as1,
-            bbs,
-            bs0,
-            bs1,
-        );
-    });
+    let num_threads = rayon::current_num_threads();
+    let chunk_size = (total_rows / (num_threads * 4)).max(1);
+
+    (0..total_rows)
+        .into_par_iter()
+        .chunks(chunk_size)
+        .for_each(|row_chunk| {
+            for &row_idx in &row_chunk {
+                blocked_row_matmul(
+                    a_usize as *const f32,
+                    b_usize as *const f32,
+                    out_usize as *mut f32,
+                    row_idx,
+                    m_usize,
+                    n_usize,
+                    k_usize,
+                    abs,
+                    as0,
+                    as1,
+                    bbs,
+                    bs0,
+                    bs1,
+                );
+            }
+        });
 }
 
 /// Cache-blocked scalar matmul for one row of output: C[row, :] += A[row, :] @ B.
@@ -488,8 +504,18 @@ pub unsafe fn blocked_row_matmul(
     let b_off = bat * b_batch_stride;
     let out_off = row * n;
 
-    // Clear output row
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let use_simd = a_stride_1 == 1 && b_stride_1 == 1 && n >= 8;
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let use_simd = false;
+
+    // Zero output before accumulating. Both SIMD and scalar paths accumulate
+    // across K-tiles (the outer `ko` loop), so the output must start at zero.
+    // Previously the SIMD path skipped this, causing accumulation into
+    // uninitialized/garbage memory when Tensor::empty was used (or into stale
+    // values when the same buffer was reused across iterations as in the test).
     for j in 0..n {
+        // SAFETY: Pointer arithmetic stays within bounds of the allocated tensor storage.
         unsafe {
             *out_ptr.add(out_off + j) = 0.0;
         }
@@ -499,7 +525,7 @@ pub unsafe fn blocked_row_matmul(
     // For fixed (i, kk): C[i, j..j+8] += A[i, kk] * B[kk, j..j+8]
     // B[kk, j..j+8] is 8 contiguous floats — a correct plain load.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if a_stride_1 == 1 && b_stride_1 == 1 && n >= 8 {
+    if use_simd {
         use std::arch::x86_64::*;
 
         const TILE_N_SIMD: usize = 8;

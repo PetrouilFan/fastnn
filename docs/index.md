@@ -6,10 +6,12 @@ A Python deep learning library with a Rust core, inspired by NVLabs/vibetensor a
 
 FastNN provides:
 - **Tensor operations** with full autograd support
-- **Neural network modules**: Linear, Conv2d, BatchNorm, LayerNorm, Dropout, Embedding, activations
+- **Neural network modules**: Linear, Conv2d, BatchNorm, LayerNorm, Dropout, Embedding, activations, fused layers
 - **Optimizers**: SGD, Adam, AdamW, Muon, Lion, RMSprop
 - **Training infrastructure**: DataLoader with callbacks, metrics, checkpoints
-- **IO**: Custom binary format (.fnn), DLPack interop (Rust only)
+- **Packed precision**: 4-bit, 8-bit, 16-bit quantized inference with SIMD/SWAR kernels; packed linear, conv, and fused layers
+- **IO**: Custom binary format (.fnn, v2/v3), PyTorch model export, ONNX model import (Q/DQ folding, quantized runtime)
+- **YOLO object detection**: Full pipeline for YOLOv5/v8/v10/v11 ONNX models with NMS post-processing
 
 ## Sections
 

@@ -209,14 +209,14 @@ for epoch in range(100):
 
 ## Optimizer State
 
-Save and load optimizer state using `fastnn.io`:
+Save and load optimizer state using `state_dict`/`load_state_dict`:
 
 ```python
 # Save
-fnn.io.save(optimizer, 'optimizer.fno')
+state = optimizer.state_dict()
 
 # Load
-fnn.io.load('optimizer.fno')
+optimizer.load_state_dict(state)
 ```
 
 ## Choosing an Optimizer

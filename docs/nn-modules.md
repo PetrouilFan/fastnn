@@ -222,6 +222,7 @@ softplus = fnn.Softplus(beta=1.0, threshold=20.0)
 hardswish = fnn.Hardswish()
 elu = fnn.Elu(alpha=1.0)
 mish = fnn.Mish()
+prelu = fnn.PReLU()
 
 output = relu(input_tensor)
 ```
@@ -237,8 +238,6 @@ output = input_tensor.silu()
 output = input_tensor.leaky_relu(0.01)
 output = input_tensor.softplus(beta, threshold)
 output = input_tensor.hardswish()
-output = input_tensor.elu(alpha)
-output = input_tensor.mish()
 output = input_tensor.softmax(dim=-1)
 output = input_tensor.log_softmax(dim=-1)
 ```
@@ -252,6 +251,31 @@ pool = fnn.MaxPool2d(kernel_size=2, stride=2)
 input_tensor = fnn.randn([8, 64, 32, 32])
 output = pool(input_tensor)
 print(output.shape)  # (8, 64, 16, 16)
+```
+
+### MaxPool1d
+
+```python
+pool = fnn.MaxPool1d(kernel_size=2, stride=2)
+input_tensor = fnn.randn([8, 64, 32])
+output = pool(input_tensor)
+```
+
+### AvgPool2d
+
+```python
+pool = fnn.AvgPool2d(kernel_size=2, stride=2)
+input_tensor = fnn.randn([8, 64, 32, 32])
+output = pool(input_tensor)
+print(output.shape)  # (8, 64, 16, 16)
+```
+
+### AvgPool1d
+
+```python
+pool = fnn.AvgPool1d(kernel_size=2, stride=2)
+input_tensor = fnn.randn([8, 64, 32])
+output = pool(input_tensor)
 ```
 
 ### AdaptiveAvgPool2d
@@ -294,6 +318,86 @@ block = fnn.ResidualBlock(
 input_tensor = fnn.randn([4, 64, 32, 32])
 output = block(input_tensor)
 print(output.shape)  # (4, 64, 32, 32)
+```
+
+## Fused Conv + BN Layers
+
+Fused inference-only layers that combine Conv2d and BatchNorm2d into a single pass:
+
+```python
+conv = fnn.Conv2d(3, 64, 3, padding=1)
+bn = fnn.BatchNorm2d(64)
+
+# FusedConvBn — Conv+BN fused
+fused = fnn.FusedConvBn(conv, bn)
+
+# FusedConvBnRelu — Conv+BN+ReLU fused
+fused_relu = fnn.FusedConvBnRelu(conv, bn)
+
+# FusedConvBnGelu — Conv+BN+GELU fused  
+fused_gelu = fnn.FusedConvBnGelu(conv, bn)
+```
+
+## Packed Precision Layers
+
+Quantized layers with packed weight storage (U4, U8, F16, F32 precisions):
+
+```python
+# Packed linear layers
+fnn.Linear4(128, 64)    # 4-bit packed linear
+fnn.Linear8(128, 64)    # 8-bit packed linear
+fnn.Linear16(128, 64)   # 16-bit packed linear
+fnn.Linear32(128, 64)   # 32-bit (f32) packed linear
+
+# Packed fused conv + ReLU
+fnn.PackedConvRelu4(3, 64, 3, padding=1)
+fnn.PackedConvRelu8(3, 64, 3, padding=1)
+fnn.PackedConvRelu16(3, 64, 3, padding=1)
+fnn.PackedConvRelu32(3, 64, 3, padding=1)
+
+# Packed fused linear + GELU
+fnn.PackedLinearGelu4(128, 64)
+fnn.PackedLinearGelu8(128, 64)
+fnn.PackedLinearGelu16(128, 64)
+fnn.PackedLinearGelu32(128, 64)
+
+# Packed convolution layers
+fnn.PackedConv2d4(3, 64, 3, padding=1)
+fnn.PackedConv2d8(3, 64, 3, padding=1)
+fnn.PackedConv2d16(3, 64, 3, padding=1)
+fnn.PackedConv2d32(3, 64, 3, padding=1)
+```
+
+## Multi-Head Attention
+
+```python
+# Standard attention
+mha = fnn.MultiHeadAttention(d_model=512, n_heads=8)
+output = mha(query, key, value)
+
+# Packed quantized attention (U4/U8)
+from fastnn import PackedMultiHeadAttention4, PackedMultiHeadAttention8
+mha4 = PackedMultiHeadAttention4(d_model=512, n_heads=8)
+mha8 = PackedMultiHeadAttention8(d_model=512, n_heads=8)
+```
+
+## Transformer
+
+```python
+# Standard transformer block
+block = fnn.TransformerBlock(d_model=512, n_heads=8, ff_dim=2048, dropout=0.1)
+
+# Full transformer encoder
+encoder = fnn.TransformerEncoder(
+    vocab_size=10000, max_seq_len=512,
+    d_model=512, n_heads=8, n_layers=6,
+    ff_dim=2048, n_classes=10, dropout=0.1
+)
+
+# Packed quantized transformer encoder (U4/U8)
+from fastnn import PackedTransformerEncoder4, PackedTransformerEncoder8
+enc4 = PackedTransformerEncoder4(10000, 512, 512, 8, 6, 2048, 10)
+enc8 = PackedTransformerEncoder8(10000, 512, 512, 8, 6, 2048, 10)
 ```
 
 ## Sequential
