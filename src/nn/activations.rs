@@ -25,6 +25,9 @@ macro_rules! impl_stateless_activation {
     ($name:ident, "hardswish") => {
         impl_activation_via_tensor!($name, hardswish);
     };
+    ($name:ident, "mish") => {
+        impl_activation_via_tensor!($name, mish);
+    };
     // Fallback for ops without Tensor methods — use dispatcher
     ($name:ident, $dispatch_name:expr) => {
         #[allow(dead_code)]

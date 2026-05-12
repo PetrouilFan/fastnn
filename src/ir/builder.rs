@@ -591,6 +591,18 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Mish activation: x * tanh(softplus(x)).
+    pub fn mish(&self, input: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Mish,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     // =========================================================================
     // Binary element-wise ops for RL / control
     // =========================================================================

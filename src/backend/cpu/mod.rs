@@ -300,7 +300,8 @@ impl Backend for CpuBackend {
                 | Opcode::Clamp
                 | Opcode::Sign
                 | Opcode::LogicalNot
-                | Opcode::LogSoftmax => {
+                | Opcode::LogSoftmax
+                | Opcode::Mish => {
                     let kernel = match node.opcode {
                         Opcode::Relu => "relu_f32",
                         Opcode::Gelu => "gelu_f32",
@@ -320,6 +321,7 @@ impl Backend for CpuBackend {
                         Opcode::Sign => "sign_f32",
                         Opcode::LogicalNot => "logical_not_f32",
                         Opcode::LogSoftmax => "log_softmax_f32",
+                        Opcode::Mish => "mish_f32",
                         _ => unreachable!(),
                     };
                     let mut extra_params: Vec<usize> = Vec::new();
@@ -1118,6 +1120,23 @@ impl Backend for CpuBackend {
                                     for i in 0..out_f32.len().min(input.len()) {
                                         out_f32[i] = (input[i] - max_val) - log_sum;
                                     }
+                                }
+                            }
+                        }
+                        "mish_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    let x = input[i];
+                                    let sp = (1.0 + x.exp()).ln();
+                                    out_f32[i] = x * sp.tanh();
                                 }
                             }
                         }

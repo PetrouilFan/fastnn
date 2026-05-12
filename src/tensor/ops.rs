@@ -1210,6 +1210,27 @@ impl Tensor {
         }
     }
 
+    pub fn mish(&self) -> Tensor {
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.mish(&ins[0])])
+                .expect("Tensor::mish: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("mish", dispatch_key, &[self])
+                .expect("Tensor::mish: dispatch failed")[0].clone()
+        };
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let backward = Arc::new(autograd::MishBackward::new());
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
+    }
+
     pub fn elu(&self, alpha: f32) -> Tensor {
         let output = if self.device() == Device::Cpu {
             Tensor::exec_aot(&[self], |g, ins| vec![g.elu(&ins[0], alpha)])
