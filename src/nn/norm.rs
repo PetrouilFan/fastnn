@@ -2,8 +2,6 @@ use crate::autograd::{
     self, AutogradMeta, BatchNorm1dBackward, BatchNorm2dBackward, GroupNormBackward,
     RMSNormBackward,
 };
-use crate::dispatcher::dispatch;
-use crate::storage::Device;
 use crate::tensor::Tensor;
 use crate::{
     impl_training_state,
@@ -50,24 +48,13 @@ impl Module for LayerNorm {
         let weight = &self.weight;
         let bias = &self.bias;
 
-        let output = if x.device() == Device::Cpu {
-            Tensor::exec_aot(&[x, weight, bias], |g, ins| {
-                vec![g.layer_norm(&ins[0], &ins[1], &ins[2], self.eps)]
-            })
-            .expect("LayerNorm::forward: AOT failed")
-            .into_iter()
-            .next()
-            .unwrap()
-        } else {
-            let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
-            let result = dispatch(
-                "layer_norm",
-                dispatch_key,
-                &[x, x, weight, bias, &self.eps_scalar],
-            )
-            .expect("LayerNorm::forward: dispatch failed");
-            result[0].clone()
-        };
+        let output = Tensor::exec_aot(&[x, weight, bias], |g, ins| {
+            vec![g.layer_norm(&ins[0], &ins[1], &ins[2], self.eps)]
+        })
+        .expect("LayerNorm::forward: AOT failed")
+        .into_iter()
+        .next()
+        .unwrap();
 
         // Set up gradient tracking for layer norm
         if x.requires_grad() || weight.requires_grad() || bias.requires_grad() {
@@ -334,20 +321,10 @@ impl RMSNorm {
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let result = if x.device() == Device::Cpu {
-            Tensor::exec_aot(&[x, &self.weight], |g, ins| {
-                vec![g.rms_norm(&ins[0], &ins[1], self.eps as f64)]
-            })
-            .expect("RMSNorm::forward: AOT failed")
-        } else {
-            let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
-            dispatch(
-                "rms_norm",
-                dispatch_key,
-                &[x, &self.weight, &self.eps_scalar],
-            )
-            .expect("RMSNorm::forward: dispatch failed")
-        };
+        let result = Tensor::exec_aot(&[x, &self.weight], |g, ins| {
+            vec![g.rms_norm(&ins[0], &ins[1], self.eps as f64)]
+        })
+        .expect("RMSNorm::forward: AOT failed");
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() || self.weight.requires_grad() {

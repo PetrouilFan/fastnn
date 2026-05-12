@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 use crate::autograd::{self, AdaptiveAvgPool2dBackward, AutogradMeta};
-use crate::dispatcher::{DispatchKey, dispatch};
 use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::sync::Arc;
@@ -123,15 +122,11 @@ impl PReLU {
 
 impl Module for PReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
-        use crate::storage::Device;
-        let result = if x.device() == Device::Cpu {
-            Tensor::exec_aot(&[x, &self.weight], |g, ins| vec![g.prelu(&ins[0], &ins[1])])
-                .expect("PReLU::forward: AOT failed")
-        } else {
-            dispatch("prelu", DispatchKey::Wgpu, &[x, &self.weight])
-                .expect("PReLU::forward: dispatch failed")
-        };
-        result.into_iter().next().unwrap()
+        Tensor::exec_aot(&[x, &self.weight], |g, ins| vec![g.prelu(&ins[0], &ins[1])])
+            .expect("PReLU::forward: AOT failed")
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
