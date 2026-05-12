@@ -28,7 +28,7 @@ impl Tensor {
                     let mut output = output;
                     let edges = autograd::make_edge(self);
                     let backward =
-                        autograd::SumBackward::new(self.clone(), dim_normalized, keepdim, edges);
+                        autograd::SumBackward::new();
                     let mut meta = autograd::AutogradMeta::new_non_leaf(true);
                     meta.grad_fn = Some(std::sync::Arc::new(backward));
                     Arc::make_mut(&mut output.inner).autograd_meta =
@@ -54,12 +54,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::SumBackward::new(
-                self.clone(),
-                dim as usize,
-                keepdim,
-                edges,
-            ));
+            let backward = Arc::new(autograd::SumBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -97,13 +92,7 @@ impl Tensor {
         if autograd::is_grad_enabled() && self.requires_grad() {
             let dim_size = self.shape()[dim as usize];
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::MeanBackward::new(
-                self.clone(),
-                dim as usize,
-                keepdim,
-                dim_size,
-                edges,
-            ));
+            let backward = Arc::new(autograd::MeanBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output

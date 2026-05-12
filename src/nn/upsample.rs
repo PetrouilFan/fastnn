@@ -96,13 +96,7 @@ impl Module for Upsample {
         };
 
         if x.requires_grad() {
-            let backward = crate::autograd::UpsampleBackward::new(
-                x.clone(),
-                self.scale_factor,
-                self.mode.clone(),
-                crate::autograd::make_edge(x),
-                vec![x.clone()],
-            );
+            let backward = crate::autograd::UpsampleBackward::new();
             let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(std::sync::Arc::new(backward));
             std::sync::Arc::make_mut(&mut output.inner).autograd_meta =

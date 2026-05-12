@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::autograd::{AutogradMeta, Edge, Node};
-use crate::dispatcher::{register, DispatchKey, KernelFn};
 use crate::iterator::TensorIterator;
 use crate::kernels::blas::{
     matmul_blas, matmul_blas_into, matmul_blas_with_transpose, matmul_blas_with_transpose_into,

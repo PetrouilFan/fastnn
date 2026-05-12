@@ -1,7 +1,7 @@
 /// Helper to dispatch a unary operation
 fn dispatch_unary(op: &str, tensor: &Tensor) -> PyResult<Tensor> {
-    let dispatch_key = dispatcher::device_to_dispatch_key(tensor.device());
-    let result = dispatcher::try_dispatch(op, dispatch_key, &[tensor])?;
+    let dispatch_key = crate::dispatcher::device_to_dispatch_key(tensor.device());
+    let result = crate::dispatcher::try_dispatch(op, dispatch_key, &[tensor])?;
     result.into_iter().next().ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!(
             "dispatch returned empty result for unary op '{}'", op
@@ -11,8 +11,8 @@ fn dispatch_unary(op: &str, tensor: &Tensor) -> PyResult<Tensor> {
 
 /// Helper to dispatch a binary operation
 fn dispatch_binary(op: &str, a: &Tensor, b: &Tensor) -> PyResult<Tensor> {
-    let dispatch_key = dispatcher::device_to_dispatch_key(a.device());
-    let result = dispatcher::try_dispatch(op, dispatch_key, &[a, b])?;
+    let dispatch_key = crate::dispatcher::device_to_dispatch_key(a.device());
+    let result = crate::dispatcher::try_dispatch(op, dispatch_key, &[a, b])?;
     result.into_iter().next().ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!(
             "dispatch returned empty result for binary op '{}'", op
@@ -22,8 +22,8 @@ fn dispatch_binary(op: &str, a: &Tensor, b: &Tensor) -> PyResult<Tensor> {
 
 /// Helper to dispatch an operation with variable number of arguments
 fn dispatch_op(op: &str, args: &[&Tensor]) -> PyResult<Tensor> {
-    let dispatch_key = dispatcher::device_to_dispatch_key(args[0].device());
-    let result = dispatcher::try_dispatch(op, dispatch_key, args)?;
+    let dispatch_key = crate::dispatcher::device_to_dispatch_key(args[0].device());
+    let result = crate::dispatcher::try_dispatch(op, dispatch_key, args)?;
     result.into_iter().next().ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!(
             "dispatch returned empty result for op '{}'", op
@@ -105,12 +105,7 @@ macro_rules! loss_fn {
             let output = dispatch_op(stringify!($name), &args)?;
 
             Ok(wrap_loss_with_autograd(output, &pred.inner, || {
-                std::sync::Arc::new(autograd::$backward_type::new(
-                    pred.inner.clone(),
-                    target.inner.clone(),
-                    reduction,
-                    autograd::make_edge(&pred.inner),
-                ))
+                std::sync::Arc::new(autograd::$backward_type::new())
             }))
         }
     };
@@ -489,7 +484,7 @@ fn clear_storage_pool() -> String {
 
 #[pyfunction]
 fn list_registered_ops() -> Vec<String> {
-    dispatcher_list_ops()
+    crate::dispatcher::list_registered_ops()
 }
 
 #[pyfunction]
@@ -576,11 +571,7 @@ fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyResult<PyTensor> {
     let output = dispatch_op("bce_with_logits", &args)?;
 
     Ok(wrap_loss_with_autograd(output, &input.inner, || {
-        std::sync::Arc::new(autograd::BCEWithLogitsBackward::new(
-            input.inner.clone(),
-            target.inner.clone(),
-            autograd::make_edge(&input.inner),
-        ))
+        std::sync::Arc::new(autograd::BCEWithLogitsBackward::new())
     }))
 }
 
@@ -591,12 +582,7 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTen
     let output = dispatch_op("huber_loss", &args)?;
 
     Ok(wrap_loss_with_autograd(output, &input.inner, || {
-        std::sync::Arc::new(autograd::HuberLossBackward::new(
-            input.inner.clone(),
-            target.inner.clone(),
-            delta,
-            autograd::make_edge(&input.inner),
-        ))
+        std::sync::Arc::new(autograd::HuberLossBackward::new())
     }))
 }
 

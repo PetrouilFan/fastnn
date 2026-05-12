@@ -50,14 +50,7 @@ impl Tensor {
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::SliceBackward::new(
-                self.clone(),
-                dim,
-                start,
-                end,
-                step,
-                edges,
-            ));
+            let backward = Arc::new(autograd::SliceBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -71,10 +64,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
-            let backward = Arc::new(autograd::MaximumBackward::new(
-                vec![self.clone(), other.clone()],
-                edges,
-            ));
+            let backward = Arc::new(autograd::MaximumBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -110,10 +100,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
-            let backward = Arc::new(autograd::MinimumBackward::new(
-                vec![self.clone(), other.clone()],
-                edges,
-            ));
+            let backward = Arc::new(autograd::MinimumBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -192,7 +179,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::AddScalarBackward::new(self.clone(), edges));
+            let backward = Arc::new(autograd::AddScalarBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -210,11 +197,7 @@ impl Tensor {
         let output = result[0].clone();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::DivScalarBackward::new(
-                self.clone(),
-                scalar,
-                edges,
-            ));
+            let backward = Arc::new(autograd::DivScalarBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -298,12 +281,7 @@ impl Tensor {
                     edges.push(Edge(node, i));
                 }
             }
-            let backward = Arc::new(autograd::CatBackward::new(
-                tensors.to_vec(),
-                dim,
-                split_sizes,
-                edges,
-            ));
+            let backward = Arc::new(autograd::CatBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -386,11 +364,7 @@ impl Tensor {
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
-            let backward = Arc::new(autograd::RepeatBackward::new(
-                self.clone(),
-                repeats.to_vec(),
-                edges,
-            ));
+            let backward = Arc::new(autograd::RepeatBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -429,11 +403,7 @@ impl Tensor {
 
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
-            let backward = Arc::new(autograd::WhereBackward::new(
-                vec![self.clone(), other.clone()],
-                condition.clone(),
-                edges,
-            ));
+            let backward = Arc::new(autograd::WhereBackward::new());
             Self::attach_grad_fn(output, backward)
         } else {
             output

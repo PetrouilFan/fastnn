@@ -7,7 +7,6 @@ use super::*;
 
 use crate::autograd::{AutogradMeta, Edge, Node};
 
-use crate::dispatcher::{register, DispatchKey, KernelFn};
 
 use crate::iterator::TensorIterator;
 

@@ -1,3 +1,12 @@
+//! Runtime dispatch table (v1.x backward compatibility).
+//!
+//! In v2.0.0 the dispatch table is replaced by the AOT compiler
+//! (`ComputeGraph` → compiler passes → `Backend::compile` → `Backend::dispatch`).
+//! This module is kept so that v1.x nn/ and tensor/ code compiles during
+//! the migration.  New code should use the v2.0 pipeline directly.
+
+#![allow(dead_code)]
+
 use crate::error::{FastnnError, FastnnResult};
 use crate::storage::Device;
 use crate::tensor::Tensor;
