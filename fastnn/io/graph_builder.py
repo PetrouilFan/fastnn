@@ -123,13 +123,20 @@ def build_dag_model(header: dict, path: str) -> Any:
         _, file_version, _, num_params = read_fnn_header(f)
         raw_params = read_fnn_parameters(f, num_params, version=file_version)
 
-    # Unpack v3 format if needed: convert (data, dtype, scales, zeros) tuples -> tensors + packed_params
+    # Unpack v3 format if needed: convert (data, dtype, scales, zeros, shape) tuples -> tensors + packed_params
     from fastnn.io import DTYPE_F32, DTYPE_U4, DTYPE_U8, DTYPE_F16
     params = {}
     packed_params_dict = {}
     for name, value in raw_params.items():
-        if isinstance(value, tuple) and len(value) == 4:
-            data, dtype, scales, zeros = value
+        if isinstance(value, tuple) and len(value) >= 4:
+            # Tuple formats: v3.0 = (data, dtype, scales, zeros)
+            #               v3.1 = (data, dtype, scales, zeros, shape)
+            data, dtype = value[0], value[1]
+            scales = value[2] if len(value) > 2 else []
+            zeros = value[3] if len(value) > 3 else []
+            shape = value[4] if len(value) > 4 else (
+                list(data.shape) if hasattr(data, 'shape') else []
+            )
             if dtype == DTYPE_F32:
                 # F32: data is numpy array
                 params[name] = fnn.tensor(data, list(data.shape))
@@ -148,8 +155,6 @@ def build_dag_model(header: dict, path: str) -> Any:
                     "f16": fnn.PackedTensor16,
                 }[dtype_str]
 
-                shape = list(data.shape) if hasattr(data, 'shape') else []
-
                 # Reconstruct packed tensor to get shape info
                 packed = packed_cls.from_bytes(bytes(data), shape,
                                                 list(scales), list(zeros))
@@ -159,15 +164,9 @@ def build_dag_model(header: dict, path: str) -> Any:
                 params[name] = fnn.tensor(f32_data, shape)
 
                 # Store packed raw data for WeightStorage native dispatch
-                if shape:
-                    # Shape must be known for WeightStorage
-                    weight_shape = shape
-                else:
-                    # Infer from packed tensor
-                    weight_shape = list(packed.shape())
                 packed_params_dict[name] = (
                     bytes(data),         # raw packed bytes
-                    weight_shape,        # shape list
+                    shape,               # shape list
                     dtype,               # dtype tag (2=U8, 3=U4, 1=F16)
                     list(scales),        # scales
                     list(zeros),         # zeros
@@ -254,7 +253,9 @@ def build_dag_model(header: dict, path: str) -> Any:
     # Run graph optimization passes (Sigmoid+Mul -> SiLU fusion, constant folding, dead node elimination, Conv+BN fusion)
     from fastnn.io.graph_optimizer import optimize_graph
     graph = fuse_silu(graph)
-    header = optimize_graph(header)
+    # Skip Conv+BN fusion for quantized models (already fused during import before QDQ folding)
+    if not packed_params_dict:
+        header = optimize_graph(header)
 
     # Re-read nodes after optimization passes
     graph = header.get("graph", {})
@@ -282,10 +283,8 @@ def build_dag_model(header: dict, path: str) -> Any:
                     dag_node[key] = value
         dag_nodes.append(dag_node)
 
-    # Convert numpy params to fastnn tensors
-    fnn_params = {}
-    for name, arr in params.items():
-        fnn_params[name] = fnn.tensor(arr, list(arr.shape))
+    # params already contains fastnn tensors from the unpacking step above
+    fnn_params = dict(params)  # copy, since we'll add aliases
     # Add aliases for ONNX initializer names that differ from storage names
     for init_name, param_name in initializer_to_param.items():
         if init_name not in fnn_params and param_name in fnn_params:
