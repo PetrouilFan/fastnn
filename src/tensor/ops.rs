@@ -870,14 +870,20 @@ impl Tensor {
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
+        let output = if self.device() == Device::Cpu && other.device() == Device::Cpu {
+            Tensor::exec_aot(&[self, other], |g, ins| vec![g.sub(&ins[0], &ins[1])])
+                .expect("Tensor::sub: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = match (self.device(), other.device()) {
+                (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+                (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+                _ => device_to_dispatch_key(Device::Cpu),
+            };
+            dispatch("sub", dispatch_key, &[self, other]).expect("Tensor::sub: dispatch failed")[0].clone()
         };
-        let result =
-            dispatch("sub", dispatch_key, &[self, other]).expect("Tensor::sub: dispatch failed");
-        let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
@@ -987,14 +993,20 @@ impl Tensor {
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
-        let dispatch_key = match (self.device(), other.device()) {
-            (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-            (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-            _ => device_to_dispatch_key(Device::Cpu),
+        let output = if self.device() == Device::Cpu && other.device() == Device::Cpu {
+            Tensor::exec_aot(&[self, other], |g, ins| vec![g.div(&ins[0], &ins[1])])
+                .expect("Tensor::div: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = match (self.device(), other.device()) {
+                (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
+                (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
+                _ => device_to_dispatch_key(Device::Cpu),
+            };
+            dispatch("div", dispatch_key, &[self, other]).expect("Tensor::div: dispatch failed")[0].clone()
         };
-        let result =
-            dispatch("div", dispatch_key, &[self, other]).expect("Tensor::div: dispatch failed");
-        let output = result[0].clone();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
@@ -1098,9 +1110,16 @@ impl Tensor {
     }
 
     pub fn neg(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("neg", dispatch_key, &[self]).expect("Tensor::neg: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.neg(&ins[0])])
+                .expect("Tensor::neg: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("neg", dispatch_key, &[self]).expect("Tensor::neg: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::NegBackward::new());
@@ -1156,9 +1175,16 @@ impl Tensor {
     }
 
     pub fn exp(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("exp", dispatch_key, &[self]).expect("Tensor::exp: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.exp(&ins[0])])
+                .expect("Tensor::exp: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("exp", dispatch_key, &[self]).expect("Tensor::exp: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::ExpBackward::new());
@@ -1169,9 +1195,16 @@ impl Tensor {
     }
 
     pub fn ln(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("log", dispatch_key, &[self]).expect("Tensor::log: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.log(&ins[0])])
+                .expect("Tensor::ln: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("log", dispatch_key, &[self]).expect("Tensor::log: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::LogBackward::new());
@@ -1182,10 +1215,16 @@ impl Tensor {
     }
 
     pub fn sigmoid(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result =
-            dispatch("sigmoid", dispatch_key, &[self]).expect("Tensor::sigmoid: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.sigmoid(&ins[0])])
+                .expect("Tensor::sigmoid: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("sigmoid", dispatch_key, &[self]).expect("Tensor::sigmoid: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::SigmoidBackward::new());
@@ -1196,10 +1235,16 @@ impl Tensor {
     }
 
     pub fn tanh(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result =
-            dispatch("tanh", dispatch_key, &[self]).expect("Tensor::tanh: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.tanh(&ins[0])])
+                .expect("Tensor::tanh: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("tanh", dispatch_key, &[self]).expect("Tensor::tanh: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::TanhBackward::new());
@@ -1210,10 +1255,16 @@ impl Tensor {
     }
 
     pub fn silu(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result =
-            dispatch("silu", dispatch_key, &[self]).expect("Tensor::silu: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.silu(&ins[0])])
+                .expect("Tensor::silu: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("silu", dispatch_key, &[self]).expect("Tensor::silu: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::SiLUBackward::new());
@@ -1224,10 +1275,16 @@ impl Tensor {
     }
 
     pub fn gelu(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result =
-            dispatch("gelu", dispatch_key, &[self]).expect("Tensor::gelu: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.gelu(&ins[0])])
+                .expect("Tensor::gelu: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("gelu", dispatch_key, &[self]).expect("Tensor::gelu: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::GeluBackward::new());
@@ -1298,10 +1355,17 @@ impl Tensor {
     }
 
     pub fn softmax(&self, dim: i32) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("softmax", dispatch_key, &[self, &dim_scalar(dim)])
-            .expect("Tensor::softmax: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.softmax(&ins[0], dim as usize)])
+                .expect("Tensor::softmax: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("softmax", dispatch_key, &[self, &dim_scalar(dim)])
+                .expect("Tensor::softmax: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::SoftmaxBackward::new());
@@ -1312,10 +1376,16 @@ impl Tensor {
     }
 
     pub fn sqrt(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result =
-            dispatch("sqrt", dispatch_key, &[self]).expect("Tensor::sqrt: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.sqrt(&ins[0])])
+                .expect("Tensor::sqrt: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("sqrt", dispatch_key, &[self]).expect("Tensor::sqrt: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::SqrtBackward::new());
@@ -1384,9 +1454,16 @@ impl Tensor {
     }
 
     pub fn abs(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("abs", dispatch_key, &[self]).expect("Tensor::abs: dispatch failed");
-        let output = result[0].clone();
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.abs(&ins[0])])
+                .expect("Tensor::abs: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("abs", dispatch_key, &[self]).expect("Tensor::abs: dispatch failed")[0].clone()
+        };
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::AbsBackward::new());
