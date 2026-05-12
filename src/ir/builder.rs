@@ -773,7 +773,7 @@ fn conv_spatial_dim(input_dim: &DimExpr, kernel_dim: &DimExpr, stride: usize, pa
                 }
                 _ => {
                     // Cannot fully evaluate — produce a Bounded or Symbol expression
-                    let h_eval = input_dim.evaluate().unwrap_or(4096);
+                    let h_eval = input_dim.evaluate().unwrap_or(SYMBOL_DIM_MAX);
                     let k_eval = kernel_dim.evaluate().unwrap_or(1);
                     let estimated = ((h_eval + 2 * p).saturating_sub(k_eval)) / s + 1;
                     match input_dim {
@@ -1017,6 +1017,86 @@ mod tests {
             "reduce_mean with batch=1 failed: got {:?}", read_f32(&result_1[0]));
         assert_eq!(read_f32(&result_1[1]), vec![100.0],
             "reduce_sum with batch=1 failed: got {:?}", read_f32(&result_1[1]));
+    }
+
+    #[test]
+    fn test_shape_assertion_matmul_mismatch() {
+        let g = GraphBuilder::new();
+        // A: [2, 64], B: [32, 10] — inner dim mismatch (64 vs 32).
+        // Compile catches this via Known dim comparison.
+        let a = g.input(&[2, 64], IrDType::F32);
+        let b = g.input(&[32, 10], IrDType::F32);
+        let c = g.matmul(&a, &b);
+
+        let a_data = f32_data(&(0..128).map(|i| i as f32).collect::<Vec<_>>());
+        let b_data = f32_data(&(0..320).map(|i| i as f32).collect::<Vec<_>>());
+
+        let result = g.compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data]);
+        assert!(result.is_err(), "expected shape mismatch error, got {:?}", result);
+        let err = result.err().unwrap();
+        let msg = format!("{}", err);
+        // Compile catches this, so error should mention MatMul or inner dim
+        assert!(msg.contains("MatMul") || msg.contains("inner dim"),
+            "expected matmul shape error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_shape_assertion_broadcast_mismatch() {
+        let g = GraphBuilder::new();
+        // A: [3, 4], B: [2, 4] — can't broadcast dim 0 (3 vs 2, neither is 1)
+        let a = g.input(&[3, 4], IrDType::F32);
+        let b = g.input(&[2, 4], IrDType::F32);
+        let c = g.add(&a, &b);
+
+        let a_data = f32_data(&(0..12).map(|i| i as f32).collect::<Vec<_>>());
+        let b_data = f32_data(&(0..8).map(|i| i as f32).collect::<Vec<_>>());
+
+        let result = g.compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data]);
+        assert!(result.is_err(), "expected broadcast error, got {:?}", result);
+        let err = result.err().unwrap();
+        let msg = format!("{}", err);
+        assert!(msg.contains("broadcast") || msg.contains("Broadcast") || msg.contains("shape validation"),
+            "expected broadcast shape error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_dynamic_multi_symbol() {
+        let g = GraphBuilder::new();
+        // Input A: [B, T, 64] — two symbolic dims
+        // Bias: [B, 1, 128] — shares B, lets us infer B from its data
+        // Weight: [64, 128]
+        let b = DimExpr::Symbol("B".into());
+        let t = DimExpr::Symbol("T".into());
+        let a = g.input_with_dims(&[b.clone(), t, DimExpr::Known(64)], IrDType::F32);
+        let bias = g.input_with_dims(&[b, DimExpr::Known(1), DimExpr::Known(128)], IrDType::F32);
+        let w = g.input(&[64, 128], IrDType::F32);
+
+        // MatMul: [B, T, 64] @ [64, 128] → [B, T, 128]
+        let mm = g.matmul(&a, &w);
+        // Add bias (broadcasts): [B, T, 128] + [B, 1, 128] → [B, T, 128]
+        let out = g.add(&mm, &bias);
+
+        // Batch=2, seq_len=3: A data = 2*3*64*4 = 1536 bytes (384 f32s)
+        let a_data = f32_data(&(0..384).map(|i| i as f32).collect::<Vec<_>>());
+        // Bias data = 2*1*128*4 = 1024 bytes (256 f32s)
+        let bias_data = f32_data(&(0..256).map(|i| i as f32).collect::<Vec<_>>());
+        // Weight data = 64*128*4 = 32768 bytes (8192 f32s)
+        let w_data = f32_data(&(0..8192).map(|i| (i % 128) as f32).collect::<Vec<_>>());
+
+        // Batch=2, seq_len=3: A data = 2*3*64*4 = 1536 bytes
+        let a_data = f32_data(&(0..384).map(|i| i as f32).collect::<Vec<_>>());
+        // Bias data = 2*128*4 = 1024 bytes
+        let bias_data = f32_data(&(0..256).map(|i| i as f32).collect::<Vec<_>>());
+        // Weight data = 64*128*4 = 32768 bytes
+        let w_data = f32_data(&(0..8192).map(|i| (i % 128) as f32).collect::<Vec<_>>());
+
+        let result = g.compile_and_execute(
+            &[&out], CpuBackend, &[&a_data, &bias_data, &w_data],
+        ).unwrap();
+        let out_f32 = read_f32(&result[0]);
+        // Output should be [2, 3, 128] = 768 elements
+        assert_eq!(out_f32.len(), 768,
+            "multi-symbol output should be 2*3*128=768 elements, got {}", out_f32.len());
     }
 
     #[test]
