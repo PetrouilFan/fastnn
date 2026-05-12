@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId, TensorType};
+use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv, TensorType};
 use std::collections::HashMap;
 
 /// A single allocation slot in the arena
@@ -16,6 +16,38 @@ pub struct AllocSlot {
 pub struct MemoryPlan {
     pub total_size: usize,
     pub slots: HashMap<NodeId, AllocSlot>,
+}
+
+impl MemoryPlan {
+    /// Tighten slot sizes using runtime-resolved shape information.
+    ///
+    /// Slots whose symbolic dims resolved to smaller concrete values are
+    /// shrunk, and `total_size` is recomputed.  Offsets are not changed
+    /// (the slot layout is preserved), so this is safe to call after the
+    /// plan was compiled with max-estimate sizes.
+    pub fn tighten(&self, graph: &ComputeGraph, shape_env: &ShapeEnv) -> Self {
+        let mut new_slots = self.slots.clone();
+        let mut max_end = 0usize;
+        for (&node_id, slot) in &self.slots {
+            let tight_size = graph
+                .get_node(node_id)
+                .map(|n| n.output_type.byte_size_with_env(Some(shape_env)))
+                .unwrap_or(slot.size);
+            let clamped = tight_size.min(slot.size);
+            new_slots.insert(
+                node_id,
+                AllocSlot {
+                    size: clamped,
+                    ..*slot
+                },
+            );
+            max_end = max_end.max(slot.offset + clamped);
+        }
+        MemoryPlan {
+            total_size: max_end,
+            slots: new_slots,
+        }
+    }
 }
 
 /// Live range of a value: (first_use_index, last_use_index)
@@ -36,11 +68,6 @@ struct AllocInfo {
 struct FreeBlock {
     offset: usize,
     size: usize,
-}
-
-/// Compute the byte size of a tensor's storage
-fn tensor_byte_size(t: &TensorType) -> usize {
-    t.byte_size()
 }
 
 /// Add a free block to the free list, merging adjacent blocks
@@ -98,7 +125,27 @@ fn find_best_fit(free_list: &mut Vec<FreeBlock>, size: usize) -> Option<usize> {
     }
 }
 
+/// Compute the byte size of a tensor's storage, optionally using a ShapeEnv
+/// to resolve symbolic dims to tighter bounds.
+fn tensor_byte_size(t: &TensorType, shape_env: Option<&ShapeEnv>) -> usize {
+    t.byte_size_with_env(shape_env)
+}
+
+/// Plan memory using max estimates (no ShapeEnv).  Equivalent to
+/// `plan_memory_with_env(graph, None)`.
 pub fn plan_memory(graph: &ComputeGraph) -> Result<MemoryPlan, String> {
+    plan_memory_with_env(graph, None)
+}
+
+/// Plan memory, optionally using a runtime ShapeEnv for tighter allocations.
+///
+/// When `shape_env` is `Some`, symbolic dimensions are resolved to their
+/// concrete runtime values where possible, reducing the arena size compared
+/// to the default `SYMBOL_DIM_MAX` fallback.
+pub fn plan_memory_with_env(
+    graph: &ComputeGraph,
+    shape_env: Option<&ShapeEnv>,
+) -> Result<MemoryPlan, String> {
     if graph.nodes.is_empty() {
         return Ok(MemoryPlan {
             total_size: 0,
@@ -119,7 +166,7 @@ pub fn plan_memory(graph: &ComputeGraph) -> Result<MemoryPlan, String> {
             None => continue,
         };
 
-        let size = tensor_byte_size(&node.output_type);
+        let size = tensor_byte_size(&node.output_type, shape_env);
         if size == 0 { continue; }
 
         let first_use = position.get(&node_id).copied().unwrap_or(0);

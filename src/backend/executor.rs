@@ -90,7 +90,13 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        // Allocate the arena
+        // Build runtime shape env from input sizes, validate shapes.
+        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs);
+        validate_shapes(graph, &shape_env).map_err(|e| {
+            BackendError::Dispatch(format!("shape validation: {e}"))
+        })?;
+        // Allocate arena — must use the original plan arena_size because
+        // compiled instructions reference the original (max-estimate) slot sizes.
         let arena = self.backend.allocate_arena(plan.arena_size);
 
         // Write input data into the arena at the slots for graph input nodes
@@ -113,11 +119,7 @@ impl<B: Backend> GraphExecutor<B> {
                 .write_arena(&arena, slot.offset, input_bytes);
         }
 
-        // Dispatch the plan — first build a runtime shape env from input sizes
-        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs);
-        validate_shapes(graph, &shape_env).map_err(|e| {
-            BackendError::Dispatch(format!("shape validation: {e}"))
-        })?;
+        // Dispatch the plan
         self.backend.dispatch(plan, &arena, &shape_env)?;
 
         // Read output data from the arena — compute actual sizes using shape_env

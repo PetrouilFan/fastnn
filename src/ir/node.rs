@@ -348,13 +348,24 @@ impl TensorType {
     /// Compute the byte size of this tensor's storage, using `SYMBOL_DIM_MAX`
     /// as the fallback extent for pure [`DimExpr::Symbol`] dimensions.
     pub fn byte_size(&self) -> usize {
+        self.byte_size_with_env(None)
+    }
+
+    /// Compute the byte size of this tensor's storage, resolving symbolic
+    /// dimensions against the provided [`ShapeEnv`] when available.
+    /// Pure [`DimExpr::Symbol`] dimensions (not [`DimExpr::Bounded`]) still
+    /// fall back to `SYMBOL_DIM_MAX`.
+    pub fn byte_size_with_env(&self, env: Option<&ShapeEnv>) -> usize {
         let numel: usize = self
             .shape
             .iter()
             .map(|d| match d {
                 DimExpr::Known(v) => *v as usize,
                 DimExpr::Bounded { max, .. } => *max as usize,
-                DimExpr::Symbol(_) => SYMBOL_DIM_MAX as usize,
+                DimExpr::Symbol(_) => match env {
+                    Some(e) => d.evaluate_with_env(e).unwrap_or(SYMBOL_DIM_MAX) as usize,
+                    None => SYMBOL_DIM_MAX as usize,
+                },
             })
             .product();
         numel * self.dtype.byte_size()
