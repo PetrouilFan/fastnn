@@ -692,6 +692,19 @@ impl Backend for CpuBackend {
                 Opcode::Input => {
                     // No instruction needed.
                 }
+                Opcode::ArgMax => {
+                    let axis: i64 = node.attrs.get("axis")
+                        .and_then(|a| a.parse().ok())
+                        .unwrap_or(-1);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "argmax".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![axis as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
                 _ => {
                     if let Some(&input_id) = node.inputs.first() {
                         if let Some(in_slot) = memory_plan.slots.get(&input_id) {
@@ -2313,6 +2326,59 @@ impl Backend for CpuBackend {
                                 let s = scalar.first().copied().unwrap_or(0.0);
                                 for i in 0..out_f32.len().min(data.len()) {
                                     out_f32[i] = data[i] / s;
+                                }
+                            }
+                        }
+                        "argmax" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d[input_slice.offset..input_slice.offset + input_slice.size]
+                                    ).to_vec()
+                                };
+                                let axis = params.first().copied().unwrap_or(usize::MAX);
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, u64>(
+                                        &mut d[out_start..out_end]
+                                    )
+                                };
+                                if axis == usize::MAX {
+                                    let max_idx = input.iter()
+                                        .enumerate()
+                                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                                        .map(|(i, _)| i as u64)
+                                        .unwrap_or(0);
+                                    for v in out_f32.iter_mut() {
+                                        *v = max_idx;
+                                    }
+                                } else {
+                                    let dim_size = axis;
+                                    if dim_size > 0 && input.len() % dim_size == 0 {
+                                        let num_rows = input.len() / dim_size;
+                                        for row in 0..num_rows {
+                                            let start = row * dim_size;
+                                            let end = start + dim_size;
+                                            let max_idx = input[start..end].iter()
+                                                .enumerate()
+                                                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                                                .map(|(i, _)| (row * dim_size + i) as u64)
+                                                .unwrap_or(0);
+                                            if row < out_f32.len() {
+                                                out_f32[row] = max_idx;
+                                            }
+                                        }
+                                    } else {
+                                        let max_idx = input.iter()
+                                            .enumerate()
+                                            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                                            .map(|(i, _)| i as u64)
+                                            .unwrap_or(0);
+                                        for v in out_f32.iter_mut() {
+                                            *v = max_idx;
+                                        }
+                                    }
                                 }
                             }
                         }
