@@ -40,15 +40,7 @@ struct FreeBlock {
 
 /// Compute the byte size of a tensor's storage
 fn tensor_byte_size(t: &TensorType) -> usize {
-    let numel: usize = t.shape.iter()
-        .map(|d| match d {
-            DimExpr::Known(v) => *v as usize,
-            DimExpr::Bounded { max, .. } => *max as usize,
-            DimExpr::Symbol(_) => 4096,
-        })
-        .product();
-    let elem_size = t.dtype.byte_size();
-    numel * elem_size
+    t.byte_size()
 }
 
 /// Add a free block to the free list, merging adjacent blocks

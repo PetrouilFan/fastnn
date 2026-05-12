@@ -47,6 +47,12 @@ pub enum Opcode {
     Input,
 }
 
+/// Default maximum extent assumed for a purely symbolic dimension (no Bounded bound).
+/// Used by the memory planner to allocate sufficient arena space for graphs that
+/// contain unbounded Symbol dims.  Callers that know tighter bounds should use
+/// [`DimExpr::Bounded`] instead.
+pub const SYMBOL_DIM_MAX: u64 = 4096;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DimExpr {
     Known(u64),
@@ -179,12 +185,24 @@ impl ShapeEnv {
 
     /// Build a ShapeEnv by matching input byte sizes against graph input node shapes.
     ///
-    /// For each graph input, this computes the known-element count from the known
-    /// dimensions of its `TensorType` shape, then divides the total input byte count
-    /// by `known_numel * elem_size` to back-fill the single remaining symbolic
-    /// dimension (typically the batch size N).
+    /// For each graph input, this infers symbolic dimension values from the
+    /// input byte data.  The algorithm has two passes:
+    ///
+    /// 1. **Single-symbol inputs** — if an input shape has exactly one
+    ///    [`DimExpr::Symbol`] or [`DimExpr::Bounded`] dimension, its value is
+    ///    computed directly from `data_bytes / (known_numel * elem_size)`.
+    ///
+    /// 2. **Multi-symbol inputs** — after pass 1, any already-bound symbols
+    ///    are treated as known.  If exactly one symbol remains unbound, it is
+    ///    inferred from the remaining unknown element count.
+    ///
+    /// This handles the common case of `[B, T, D]` where `B` is also present
+    /// in another input (e.g. a bias of shape `[B]`).
     pub fn from_graph_inputs(graph: &ComputeGraph, inputs: &[&[u8]]) -> Self {
         let mut env = ShapeEnv::new();
+        let mut input_infos: Vec<(NodeId, usize, usize, Vec<String>)> = Vec::new();
+
+        // Pass 1: collect shape info, bind single-symbol inputs
         for (i, &input_id) in graph.inputs.iter().enumerate() {
             let data_bytes = inputs.get(i).map(|b| b.len()).unwrap_or(0);
             if data_bytes == 0 {
@@ -209,22 +227,45 @@ impl ShapeEnv {
                 if unknown_numel == 0 {
                     continue;
                 }
-                // Find the single symbolic dimension and bind it
-                let symbolic: Vec<&String> = node
+                let symbolic: Vec<String> = node
                     .output_type
                     .shape
                     .iter()
                     .filter_map(|d| match d {
-                        DimExpr::Symbol(s) => Some(s),
-                        DimExpr::Bounded { sym, .. } => Some(sym),
+                        DimExpr::Symbol(s) => Some(s.clone()),
+                        DimExpr::Bounded { sym, .. } => Some(sym.clone()),
                         _ => None,
                     })
                     .collect();
+
                 if symbolic.len() == 1 {
-                    env.bind(symbolic[0], unknown_numel as u64);
+                    env.bind(&symbolic[0], unknown_numel as u64);
+                } else if symbolic.len() > 1 {
+                    input_infos.push((input_id, known_numel, total_numel, symbolic));
                 }
             }
         }
+
+        // Pass 2: multi-symbol inputs — resolve remaining symbols using
+        // already-bound values.
+        for (_id, known_numel, total_numel, symbolic) in &input_infos {
+            let mut known_product = *known_numel;
+            let mut unbound: Vec<&str> = Vec::new();
+            for sym in symbolic {
+                if let Some(val) = env.resolve(sym) {
+                    known_product *= val as usize;
+                } else {
+                    unbound.push(sym);
+                }
+            }
+            if unbound.len() == 1 && known_product > 0 {
+                let val = total_numel / known_product;
+                if val > 0 {
+                    env.bind(unbound[0], val as u64);
+                }
+            }
+        }
+
         env
     }
 }
@@ -302,6 +343,21 @@ impl TensorType {
             }
         }
         Some(total)
+    }
+
+    /// Compute the byte size of this tensor's storage, using `SYMBOL_DIM_MAX`
+    /// as the fallback extent for pure [`DimExpr::Symbol`] dimensions.
+    pub fn byte_size(&self) -> usize {
+        let numel: usize = self
+            .shape
+            .iter()
+            .map(|d| match d {
+                DimExpr::Known(v) => *v as usize,
+                DimExpr::Bounded { max, .. } => *max as usize,
+                DimExpr::Symbol(_) => SYMBOL_DIM_MAX as usize,
+            })
+            .product();
+        numel * self.dtype.byte_size()
     }
 }
 
