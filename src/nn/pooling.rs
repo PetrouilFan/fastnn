@@ -1,5 +1,5 @@
 use crate::autograd::{self, AutogradMeta, AvgPool2dBackward, MaxPool2dBackward};
-use crate::dispatcher::{DispatchKey, dispatch};
+use crate::dispatcher::dispatch;
 use crate::nn::Module;
 use crate::storage::Device;
 use crate::tensor::Tensor;
@@ -38,25 +38,34 @@ impl MaxPool2d {
 
 impl Module for MaxPool2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        // TODO: When AOT backward supports argmax extraction, migrate to exec_aot
-        let result = dispatch(
-            "max_pool2d",
-            DispatchKey::Cpu,
-            &[
-                x,
-                &self.kernel_size_scalar,
-                &self.stride_scalar,
-                &self.padding_scalar,
-                &self.dilation_scalar,
-            ],
-        )
-        .expect("MaxPool2d::forward: dispatch failed");
-        let mut output = result[0].clone();
+        let result = if x.device() == Device::Cpu {
+            Tensor::exec_aot(&[x], |g, ins| {
+                vec![g.max_pool2d(
+                    &ins[0],
+                    self.kernel_size as usize,
+                    self.stride as usize,
+                    self.padding as usize,
+                )]
+            })
+            .expect("MaxPool2d::forward: AOT execution failed")
+        } else {
+            dispatch(
+                "max_pool2d",
+                crate::dispatcher::device_to_dispatch_key(x.device()),
+                &[
+                    x,
+                    &self.kernel_size_scalar,
+                    &self.stride_scalar,
+                    &self.padding_scalar,
+                    &self.dilation_scalar,
+                ],
+            )
+            .expect("MaxPool2d::forward: dispatch failed")
+        };
+        let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() {
-            let argmax_data = result[1].as_f32_slice();
-            let argmax_indices: Vec<usize> = argmax_data.iter().map(|&v| v as usize).collect();
-
+            // Backward stub — AOT backward with argmax not yet implemented
             let backward = MaxPool2dBackward::new();
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
@@ -121,7 +130,7 @@ impl Module for AvgPool1d {
                 vec![g.avg_pool2d(&ins[0], self.kernel_size as usize, self.stride as usize, self.padding as usize)]
             }).expect("AvgPool1d::forward: AOT failed")
         } else {
-            dispatch("avg_pool2d", DispatchKey::Wgpu, &[&x_4d, &self.kernel_size_scalar, &self.stride_scalar, &self.padding_scalar])
+            dispatch("avg_pool2d", crate::dispatcher::DispatchKey::Wgpu, &[&x_4d, &self.kernel_size_scalar, &self.stride_scalar, &self.padding_scalar])
                 .expect("AvgPool1d::forward: dispatch failed")
         };
         let out_4d = result.into_iter().next().unwrap();
@@ -177,20 +186,34 @@ impl Module for MaxPool1d {
     fn forward(&self, x: &Tensor) -> Tensor {
         let x_shape = x.shape_ref();
         let x_4d = x.reshape(vec![x_shape[0], x_shape[1], 1, x_shape[2]]);
-        // TODO: When AOT backward supports argmax, migrate to exec_aot
-        let result = dispatch(
-            "max_pool2d",
-            DispatchKey::Cpu,
-            &[
-                &x_4d,
-                &self.kernel_size_scalar,
-                &self.stride_scalar,
-                &self.padding_scalar,
-                &self.dilation_scalar,
-            ],
-        )
-        .expect("MaxPool1d::forward: dispatch failed");
-        let out_4d = result[0].clone();
+        let out_4d = if x_4d.device() == Device::Cpu {
+            Tensor::exec_aot(&[&x_4d], |g, ins| {
+                vec![g.max_pool2d(
+                    &ins[0],
+                    self.kernel_size as usize,
+                    self.stride as usize,
+                    self.padding as usize,
+                )]
+            })
+            .expect("MaxPool1d::forward: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
+        } else {
+            dispatch(
+                "max_pool2d",
+                crate::dispatcher::device_to_dispatch_key(x_4d.device()),
+                &[
+                    &x_4d,
+                    &self.kernel_size_scalar,
+                    &self.stride_scalar,
+                    &self.padding_scalar,
+                    &self.dilation_scalar,
+                ],
+            )
+            .expect("MaxPool1d::forward: dispatch failed")[0]
+                .clone()
+        };
         let out_shape = out_4d.shape_ref();
         out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]])
     }
@@ -241,7 +264,7 @@ impl Module for AvgPool2d {
                 vec![g.avg_pool2d(&ins[0], self.kernel_size as usize, self.stride as usize, self.padding as usize)]
             }).expect("AvgPool2d::forward: AOT failed")
         } else {
-            dispatch("avg_pool2d", DispatchKey::Wgpu, &[x, &self.kernel_size_scalar, &self.stride_scalar, &self.padding_scalar])
+            dispatch("avg_pool2d", crate::dispatcher::DispatchKey::Wgpu, &[x, &self.kernel_size_scalar, &self.stride_scalar, &self.padding_scalar])
                 .expect("AvgPool2d::forward: dispatch failed")
         };
         let mut output = result.into_iter().next().unwrap();

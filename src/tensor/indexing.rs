@@ -1,5 +1,6 @@
 use crate::autograd::{self, Edge};
 use crate::dispatcher::{device_to_dispatch_key, dispatch};
+use crate::ir::node::DimExpr;
 use crate::storage::Device;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -273,6 +274,22 @@ impl Tensor {
                 .expect("Tensor::logical_not: dispatch failed")[0].clone()
         };
         output
+    }
+
+    pub fn argmax(&self, dim: Option<usize>) -> Tensor {
+        let result = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| {
+                let axis = dim.map(|d| DimExpr::Known(d as u64));
+                let out = g.argmax(&ins[0], axis);
+                vec![out]
+            })
+            .expect("Tensor::argmax: AOT execution failed")
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("argmax", dispatch_key, &[self])
+                .expect("Tensor::argmax: dispatch failed")
+        };
+        result.into_iter().next().unwrap()
     }
 
     pub fn cat(tensors: &[Tensor], dim: i32) -> Tensor {
