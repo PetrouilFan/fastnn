@@ -453,7 +453,7 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
                 }
             }
-            Opcode::Conv2d => {
+            Opcode::Conv2d | Opcode::Conv1d | Opcode::Conv3d | Opcode::ConvTranspose2d => {
                 if node.inputs.len() >= 2 {
                     if let Some(&input_id) = node.inputs.first() {
                         accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
@@ -501,7 +501,7 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
-            Opcode::BatchNorm | Opcode::LayerNorm => {
+            Opcode::BatchNorm | Opcode::LayerNorm | Opcode::RMSNorm => {
                 if let Some(&input_id) = node.inputs.first() {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
@@ -511,10 +511,13 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
-            Opcode::Constant(_) | Opcode::Input => {
+            Opcode::Constant(_) | Opcode::Input
+            | Opcode::GtScalar | Opcode::LtScalar | Opcode::EqScalar => {
             }
             Opcode::Pad | Opcode::Slice | Opcode::Concat | Opcode::Gather | Opcode::ScatterNd
-            | Opcode::Transpose | Opcode::Maximum | Opcode::Minimum | Opcode::ReduceMax => {
+            | Opcode::Transpose | Opcode::Maximum | Opcode::Minimum | Opcode::ReduceMax
+            | Opcode::Prelu | Opcode::Embedding | Opcode::Pow
+            | Opcode::AddScalar | Opcode::MulScalar | Opcode::DivScalar => {
                 for &input_id in &node.inputs {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }

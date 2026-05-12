@@ -317,6 +317,12 @@ impl GraphBuilder {
     /// Convolution 2D.
     pub fn conv2d(&self, input: &GraphTensor, weight: &GraphTensor,
                   stride: usize, padding: usize) -> GraphTensor {
+        self.conv2d_with_params(input, weight, stride, padding, 1, 1)
+    }
+
+    /// Convolution 2D with full parameter control.
+    pub fn conv2d_with_params(&self, input: &GraphTensor, weight: &GraphTensor,
+                              stride: usize, padding: usize, dilation: usize, groups: usize) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
@@ -342,6 +348,8 @@ impl GraphBuilder {
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
+        attrs.insert("dilation".to_string(), dilation.to_string());
+        attrs.insert("groups".to_string(), groups.to_string());
 
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
@@ -777,6 +785,480 @@ impl GraphBuilder {
             input_ids,
             output_type.clone(),
             attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Shape ops
+    // =========================================================================
+
+    /// Slice a tensor along a dimension.
+    pub fn slice(&self, input: &GraphTensor, dim: usize, start: usize, end: usize) -> GraphTensor {
+        let mut output_shape = input.shape().to_vec();
+        if dim < output_shape.len() {
+            output_shape[dim] = DimExpr::Known((end - start) as u64);
+        }
+        let output_type = TensorType::new(output_shape, input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("dim".to_string(), dim.to_string());
+        attrs.insert("start".to_string(), start.to_string());
+        attrs.insert("end".to_string(), end.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Slice,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Squeeze (remove) a dimension.
+    pub fn squeeze(&self, input: &GraphTensor, dim: usize) -> GraphTensor {
+        let mut output_shape = input.shape().to_vec();
+        if dim < output_shape.len() {
+            output_shape.remove(dim);
+        }
+        let output_type = TensorType::new(output_shape, input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("dim".to_string(), dim.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Squeeze,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Unsqueeze (insert) a dimension of size 1.
+    pub fn unsqueeze(&self, input: &GraphTensor, dim: usize) -> GraphTensor {
+        let mut output_shape = input.shape().to_vec();
+        output_shape.insert(dim, DimExpr::Known(1));
+        let output_type = TensorType::new(output_shape, input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("dim".to_string(), dim.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Unsqueeze,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Pooling
+    // =========================================================================
+
+    /// Max pooling 2D.
+    pub fn max_pool2d(&self, input: &GraphTensor, kernel_size: usize, stride: usize, padding: usize) -> GraphTensor {
+        let a_shape = input.shape();
+        let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
+        let channels = a_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
+        let h_out = if a_shape.len() > 2 {
+            conv_spatial_dim(&a_shape[2], &DimExpr::Known(kernel_size as u64), stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
+        let w_out = if a_shape.len() > 3 {
+            conv_spatial_dim(&a_shape[3], &DimExpr::Known(kernel_size as u64), stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
+        let output_type = TensorType::new(vec![batch, channels, h_out, w_out], input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("kernel_size".to_string(), kernel_size.to_string());
+        attrs.insert("stride".to_string(), stride.to_string());
+        attrs.insert("padding".to_string(), padding.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::MaxPool,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Average pooling 2D.
+    pub fn avg_pool2d(&self, input: &GraphTensor, kernel_size: usize, stride: usize, padding: usize) -> GraphTensor {
+        let a_shape = input.shape();
+        let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
+        let channels = a_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
+        let h_out = if a_shape.len() > 2 {
+            conv_spatial_dim(&a_shape[2], &DimExpr::Known(kernel_size as u64), stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
+        let w_out = if a_shape.len() > 3 {
+            conv_spatial_dim(&a_shape[3], &DimExpr::Known(kernel_size as u64), stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
+        let output_type = TensorType::new(vec![batch, channels, h_out, w_out], input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("kernel_size".to_string(), kernel_size.to_string());
+        attrs.insert("stride".to_string(), stride.to_string());
+        attrs.insert("padding".to_string(), padding.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::AvgPool,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Normalization
+    // =========================================================================
+
+    /// Batch normalization.
+    pub fn batch_norm(&self, input: &GraphTensor, weight: &GraphTensor, bias: &GraphTensor, running_mean: &GraphTensor, running_var: &GraphTensor, eps: f64) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut attrs = HashMap::new();
+        attrs.insert("eps".to_string(), eps.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::BatchNorm,
+            vec![input.node_id, weight.node_id, bias.node_id, running_mean.node_id, running_var.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Layer normalization.
+    pub fn layer_norm(&self, input: &GraphTensor, weight: &GraphTensor, bias: &GraphTensor, eps: f64) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut attrs = HashMap::new();
+        attrs.insert("eps".to_string(), eps.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::LayerNorm,
+            vec![input.node_id, weight.node_id, bias.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Tensor manipulation
+    // =========================================================================
+
+    /// Pad a tensor.
+    pub fn pad(&self, input: &GraphTensor, pads: &[(usize, usize)]) -> GraphTensor {
+        let input_shape = input.shape();
+        let mut output_shape = input_shape.to_vec();
+        for (i, &(lo, hi)) in pads.iter().enumerate() {
+            if i < output_shape.len() {
+                let lo_d = DimExpr::Known(lo as u64);
+                let hi_d = DimExpr::Known(hi as u64);
+                output_shape[i] = dim_add(&dim_add(&output_shape[i], &lo_d), &hi_d);
+            }
+        }
+        let output_type = TensorType::new(output_shape, input.dtype());
+        let mut attrs = HashMap::new();
+        let pads_str: Vec<String> = pads.iter().map(|(lo, hi)| format!("{},{}", lo, hi)).collect();
+        attrs.insert("pads".to_string(), pads_str.join(","));
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Pad,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Gather elements along an axis.
+    pub fn gather(&self, input: &GraphTensor, indices: &GraphTensor, axis: usize) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut attrs = HashMap::new();
+        attrs.insert("axis".to_string(), axis.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Gather,
+            vec![input.node_id, indices.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Scatter ND updates into a tensor.
+    pub fn scatter_nd(&self, input: &GraphTensor, indices: &GraphTensor, updates: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::ScatterNd,
+            vec![input.node_id, indices.node_id, updates.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Convolutions
+    // =========================================================================
+
+    /// Convolution 1D.
+    pub fn conv1d(&self, input: &GraphTensor, weight: &GraphTensor, stride: usize, padding: usize) -> GraphTensor {
+        let a_shape = input.shape();
+        let w_shape = weight.shape();
+        let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
+        let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
+        let w_out = if a_shape.len() > 2 && w_shape.len() > 2 {
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
+        let output_type = TensorType::new(vec![batch, out_channels, w_out], input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("stride".to_string(), stride.to_string());
+        attrs.insert("padding".to_string(), padding.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Conv1d,
+            vec![input.node_id, weight.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Convolution 3D.
+    pub fn conv3d(&self, input: &GraphTensor, weight: &GraphTensor, stride: usize, padding: usize) -> GraphTensor {
+        let a_shape = input.shape();
+        let w_shape = weight.shape();
+        let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
+        let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
+        let d_out = if a_shape.len() > 2 && w_shape.len() > 2 {
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
+        let h_out = if a_shape.len() > 3 && w_shape.len() > 3 {
+            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
+        let w_out = if a_shape.len() > 4 && w_shape.len() > 4 {
+            conv_spatial_dim(&a_shape[4], &w_shape[4], stride, padding)
+        } else {
+            DimExpr::Known(1)
+        };
+        let output_type = TensorType::new(vec![batch, out_channels, d_out, h_out, w_out], input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("stride".to_string(), stride.to_string());
+        attrs.insert("padding".to_string(), padding.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Conv3d,
+            vec![input.node_id, weight.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Transposed convolution 2D.
+    pub fn conv_transpose2d(&self, input: &GraphTensor, weight: &GraphTensor, stride: usize, padding: usize) -> GraphTensor {
+        let a_shape = input.shape();
+        let w_shape = weight.shape();
+        let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
+        let out_channels = w_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
+        let h_out = if a_shape.len() > 2 && w_shape.len() > 2 {
+            match (&a_shape[2], &w_shape[2]) {
+                (DimExpr::Known(h), DimExpr::Known(kh)) => {
+                    DimExpr::Known(((h - 1) * stride as u64 + kh - 2 * padding as u64))
+                }
+                _ => {
+                    let h_val = a_shape[2].evaluate().unwrap_or(0);
+                    let kh_val = w_shape[2].evaluate().unwrap_or(1);
+                    let estimated = (h_val.saturating_sub(1)) * stride as u64 + kh_val - 2 * padding as u64;
+                    DimExpr::Bounded {
+                        sym: format!("conv_trans_spatial({})", estimated),
+                        max: estimated,
+                    }
+                }
+            }
+        } else {
+            DimExpr::Known(1)
+        };
+        let w_out = if a_shape.len() > 3 && w_shape.len() > 3 {
+            match (&a_shape[3], &w_shape[3]) {
+                (DimExpr::Known(w), DimExpr::Known(kw)) => {
+                    DimExpr::Known(((w - 1) * stride as u64 + kw - 2 * padding as u64))
+                }
+                _ => {
+                    let w_val = a_shape[3].evaluate().unwrap_or(0);
+                    let kw_val = w_shape[3].evaluate().unwrap_or(1);
+                    let estimated = (w_val.saturating_sub(1)) * stride as u64 + kw_val - 2 * padding as u64;
+                    DimExpr::Bounded {
+                        sym: format!("conv_trans_spatial({})", estimated),
+                        max: estimated,
+                    }
+                }
+            }
+        } else {
+            DimExpr::Known(1)
+        };
+        let output_type = TensorType::new(vec![batch, out_channels, h_out, w_out], input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("stride".to_string(), stride.to_string());
+        attrs.insert("padding".to_string(), padding.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::ConvTranspose2d,
+            vec![input.node_id, weight.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Activations
+    // =========================================================================
+
+    /// PReLU activation.
+    pub fn prelu(&self, input: &GraphTensor, weight: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Prelu,
+            vec![input.node_id, weight.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// RMS normalization.
+    pub fn rms_norm(&self, input: &GraphTensor, weight: &GraphTensor, eps: f64) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut attrs = HashMap::new();
+        attrs.insert("eps".to_string(), eps.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::RMSNorm,
+            vec![input.node_id, weight.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Embedding
+    // =========================================================================
+
+    /// Embedding lookup.
+    pub fn embedding(&self, weight: &GraphTensor, indices: &GraphTensor) -> GraphTensor {
+        let w_shape = weight.shape();
+        let embed_dim = w_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
+        let mut output_shape = indices.shape().to_vec();
+        output_shape.push(embed_dim);
+        let output_type = TensorType::new(output_shape, weight.dtype());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Embedding,
+            vec![weight.node_id, indices.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    // =========================================================================
+    // Element-wise ops
+    // =========================================================================
+
+    /// Element-wise power.
+    pub fn pow(&self, input: &GraphTensor, exponent: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Pow,
+            vec![input.node_id, exponent.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Greater-than scalar comparison (output as 0.0/1.0 f32).
+    pub fn gt_scalar(&self, input: &GraphTensor, scalar: &GraphTensor) -> GraphTensor {
+        let output_type = TensorType::new(input.shape().to_vec(), IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::GtScalar,
+            vec![input.node_id, scalar.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Less-than scalar comparison (output as 0.0/1.0 f32).
+    pub fn lt_scalar(&self, input: &GraphTensor, scalar: &GraphTensor) -> GraphTensor {
+        let output_type = TensorType::new(input.shape().to_vec(), IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::LtScalar,
+            vec![input.node_id, scalar.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Equal scalar comparison (output as 0.0/1.0 f32).
+    pub fn eq_scalar(&self, input: &GraphTensor, scalar: &GraphTensor) -> GraphTensor {
+        let output_type = TensorType::new(input.shape().to_vec(), IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::EqScalar,
+            vec![input.node_id, scalar.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Add scalar element-wise.
+    pub fn add_scalar(&self, input: &GraphTensor, scalar: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::AddScalar,
+            vec![input.node_id, scalar.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Multiply scalar element-wise.
+    pub fn mul_scalar(&self, input: &GraphTensor, scalar: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::MulScalar,
+            vec![input.node_id, scalar.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Divide scalar element-wise.
+    pub fn div_scalar(&self, input: &GraphTensor, scalar: &GraphTensor) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::DivScalar,
+            vec![input.node_id, scalar.node_id],
+            output_type.clone(),
         );
         GraphTensor::new(self.clone(), node_id, output_type)
     }

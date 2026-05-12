@@ -161,12 +161,147 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     None
                 }
             }
-            Opcode::Pad
-            | Opcode::Gather
-            | Opcode::ScatterNd
-            | Opcode::Slice
-            | Opcode::Squeeze
-            | Opcode::Unsqueeze => inputs.first().map(|i| i.output_type.shape.clone()),
+            Opcode::Slice => {
+                if inputs.len() >= 1 {
+                    let input_shape = &inputs[0].output_type.shape;
+                    let mut shape = input_shape.clone();
+                    if let Some(dim_str) = node.attrs.get("dim") {
+                        if let Ok(dim) = dim_str.parse::<usize>() {
+                            let start: u64 = node
+                                .attrs
+                                .get("start")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                            let end: u64 = node
+                                .attrs
+                                .get("end")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                            if dim < shape.len() && end > start {
+                                shape[dim] = DimExpr::Known(end - start);
+                            }
+                        }
+                    }
+                    Some(shape)
+                } else {
+                    None
+                }
+            }
+            Opcode::Squeeze => inputs.first().map(|i| {
+                let mut shape = i.output_type.shape.clone();
+                if let Some(dim_str) = node.attrs.get("dim") {
+                    if let Ok(dim) = dim_str.parse::<usize>() {
+                        if dim < shape.len() {
+                            shape.remove(dim);
+                        }
+                    }
+                } else {
+                    shape.retain(|d| !matches!(d, DimExpr::Known(1)));
+                }
+                shape
+            }),
+            Opcode::Unsqueeze => inputs.first().map(|i| {
+                let mut shape = i.output_type.shape.clone();
+                if let Some(dim_str) = node.attrs.get("dim") {
+                    if let Ok(dim) = dim_str.parse::<usize>() {
+                        if dim <= shape.len() {
+                            shape.insert(dim, DimExpr::Known(1));
+                        }
+                    }
+                }
+                shape
+            }),
+            Opcode::Pad => {
+                if inputs.len() >= 1 {
+                    let input_shape = &inputs[0].output_type.shape;
+                    let mut shape = input_shape.clone();
+                    if let Some(pads_str) = node.attrs.get("pads") {
+                        let pads: Vec<u64> = pads_str
+                            .split(',')
+                            .filter_map(|s| s.trim().parse().ok())
+                            .collect();
+                        let n_dims = shape.len().min(pads.len() / 2);
+                        for i in 0..n_dims {
+                            let lo = DimExpr::Known(pads[2 * i]);
+                            let hi = DimExpr::Known(pads[2 * i + 1]);
+                            shape[i] = shape[i].add(&lo).add(&hi);
+                        }
+                    }
+                    Some(shape)
+                } else {
+                    None
+                }
+            }
+            Opcode::Gather | Opcode::ScatterNd => {
+                inputs.first().map(|i| i.output_type.shape.clone())
+            }
+            Opcode::Conv1d => {
+                if inputs.len() >= 2 {
+                    Some(conv1d_output_shape(
+                        &inputs[0].output_type.shape,
+                        &inputs[1].output_type.shape,
+                        &node.attrs,
+                    )?)
+                } else {
+                    None
+                }
+            }
+            Opcode::Conv3d => {
+                if inputs.len() >= 2 {
+                    Some(conv3d_output_shape(
+                        &inputs[0].output_type.shape,
+                        &inputs[1].output_type.shape,
+                        &node.attrs,
+                    )?)
+                } else {
+                    None
+                }
+            }
+            Opcode::ConvTranspose2d => {
+                if inputs.len() >= 2 {
+                    Some(conv_transpose2d_output_shape(
+                        &inputs[0].output_type.shape,
+                        &inputs[1].output_type.shape,
+                        &node.attrs,
+                    )?)
+                } else {
+                    None
+                }
+            }
+            Opcode::Prelu | Opcode::RMSNorm => {
+                inputs.first().map(|i| i.output_type.shape.clone())
+            }
+            Opcode::Embedding => {
+                if inputs.len() >= 2 {
+                    let weight_shape = &inputs[0].output_type.shape;
+                    let indices_shape = &inputs[1].output_type.shape;
+                    let mut shape = indices_shape.clone();
+                    if weight_shape.len() >= 2 {
+                        shape.push(weight_shape[1].clone());
+                    }
+                    Some(shape)
+                } else {
+                    None
+                }
+            }
+            Opcode::Pow => {
+                if inputs.len() >= 2 {
+                    Some(broadcast_shapes(
+                        &inputs[0].output_type.shape,
+                        &inputs[1].output_type.shape,
+                    )?)
+                } else if inputs.len() == 1 {
+                    Some(inputs[0].output_type.shape.clone())
+                } else {
+                    None
+                }
+            }
+            Opcode::GtScalar
+            | Opcode::LtScalar
+            | Opcode::EqScalar
+            | Opcode::AddScalar
+            | Opcode::MulScalar
+            | Opcode::DivScalar => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::Constant(_) | Opcode::Input => None,
         };
 
@@ -343,6 +478,137 @@ fn spatial_output_dim(
                     }
                     Ok(DimExpr::Known(result as u64))
                 }
+                _ => Ok(DimExpr::Symbol("?".to_string())),
+            }
+        }
+    }
+}
+
+fn conv1d_output_shape(
+    input_shape: &[DimExpr],
+    weight_shape: &[DimExpr],
+    attrs: &HashMap<String, String>,
+) -> Result<Vec<DimExpr>, String> {
+    if input_shape.len() < 3 {
+        return Err(format!(
+            "Conv1d: input must have 3 dimensions [N,C,W], got {}",
+            input_shape.len()
+        ));
+    }
+    if weight_shape.len() < 3 {
+        return Err(format!(
+            "Conv1d: weight must have 3 dimensions [F,C,KW], got {}",
+            weight_shape.len()
+        ));
+    }
+
+    let stride: i64 = attrs
+        .get("stride")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let padding: i64 = attrs
+        .get("padding")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+
+    let n = input_shape[0].clone();
+    let f = weight_shape[0].clone();
+    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
+
+    Ok(vec![n, f, w_out])
+}
+
+fn conv3d_output_shape(
+    input_shape: &[DimExpr],
+    weight_shape: &[DimExpr],
+    attrs: &HashMap<String, String>,
+) -> Result<Vec<DimExpr>, String> {
+    if input_shape.len() < 5 {
+        return Err(format!(
+            "Conv3d: input must have 5 dimensions [N,C,D,H,W], got {}",
+            input_shape.len()
+        ));
+    }
+    if weight_shape.len() < 5 {
+        return Err(format!(
+            "Conv3d: weight must have 5 dimensions [F,C,KD,KH,KW], got {}",
+            weight_shape.len()
+        ));
+    }
+
+    let stride: i64 = attrs
+        .get("stride")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let padding: i64 = attrs
+        .get("padding")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+
+    let n = input_shape[0].clone();
+    let f = weight_shape[0].clone();
+    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
+    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding)?;
+    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding)?;
+
+    Ok(vec![n, f, d_out, h_out, w_out])
+}
+
+fn conv_transpose2d_output_shape(
+    input_shape: &[DimExpr],
+    weight_shape: &[DimExpr],
+    attrs: &HashMap<String, String>,
+) -> Result<Vec<DimExpr>, String> {
+    if input_shape.len() < 4 {
+        return Err(format!(
+            "ConvTranspose2d: input must have 4 dimensions [N,C,H,W], got {}",
+            input_shape.len()
+        ));
+    }
+    if weight_shape.len() < 4 {
+        return Err(format!(
+            "ConvTranspose2d: weight must have 4 dimensions [C,F,KH,KW], got {}",
+            weight_shape.len()
+        ));
+    }
+
+    let stride: i64 = attrs
+        .get("stride")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let padding: i64 = attrs
+        .get("padding")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+
+    let n = input_shape[0].clone();
+    let f = weight_shape[1].clone();
+
+    let h_out = conv_transpose_spatial_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
+    let w_out = conv_transpose_spatial_dim(&input_shape[3], &weight_shape[3], stride, padding)?;
+
+    Ok(vec![n, f, h_out, w_out])
+}
+
+fn conv_transpose_spatial_dim(
+    input_dim: &DimExpr,
+    kernel_dim: &DimExpr,
+    stride: i64,
+    padding: i64,
+) -> Result<DimExpr, String> {
+    let result = |input: i64, kernel: i64| -> DimExpr {
+        DimExpr::Known(((input - 1) * stride - 2 * padding + kernel) as u64)
+    };
+    match (input_dim, kernel_dim) {
+        (DimExpr::Known(h), DimExpr::Known(k)) => {
+            let out = result(*h as i64, *k as i64);
+            Ok(out)
+        }
+        _ => {
+            let h_val = input_dim.evaluate();
+            let k_val = kernel_dim.evaluate();
+            match (h_val, k_val) {
+                (Some(h), Some(k)) => Ok(result(h as i64, k as i64)),
                 _ => Ok(DimExpr::Symbol("?".to_string())),
             }
         }

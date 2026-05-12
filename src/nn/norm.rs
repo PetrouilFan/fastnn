@@ -3,6 +3,7 @@ use crate::autograd::{
     RMSNormBackward,
 };
 use crate::dispatcher::{DispatchKey, dispatch};
+use crate::storage::Device;
 use crate::tensor::Tensor;
 use crate::{
     impl_training_state,
@@ -49,17 +50,23 @@ impl Module for LayerNorm {
         let weight = &self.weight;
         let bias = &self.bias;
 
-        let result = dispatch(
-            "layer_norm",
-            DispatchKey::Cpu,
-            &[x, x, weight, bias, &self.eps_scalar],
-        )
-        .expect("LayerNorm::forward: dispatch failed");
-
-        let output = result[0].clone();
-        let mean = result[1].clone();
-        let variance = result[2].clone();
-        let x_hat = result[3].clone();
+        let output = if x.device() == Device::Cpu {
+            Tensor::exec_aot(&[x, weight, bias], |g, ins| {
+                vec![g.layer_norm(&ins[0], &ins[1], &ins[2], self.eps)]
+            })
+            .expect("LayerNorm::forward: AOT failed")
+            .into_iter()
+            .next()
+            .unwrap()
+        } else {
+            let result = dispatch(
+                "layer_norm",
+                DispatchKey::Cpu,
+                &[x, x, weight, bias, &self.eps_scalar],
+            )
+            .expect("LayerNorm::forward: dispatch failed");
+            result[0].clone()
+        };
 
         // Set up gradient tracking for layer norm
         if x.requires_grad() || weight.requires_grad() || bias.requires_grad() {
@@ -207,6 +214,7 @@ impl Module for BatchNorm1d {
             (running_mean.clone(), running_var.clone())
         };
 
+        // TODO(migration): Replace dispatch with AOT when batch_norm graph op supports training mode
         let result = dispatch(
             "batch_norm",
             DispatchKey::Cpu,
@@ -342,14 +350,21 @@ impl RMSNorm {
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
-        let result = crate::dispatcher::dispatch(
-            "rms_norm",
-            dispatch_key,
-            &[x, &self.weight, &self.eps_scalar],
-        )
-        .expect("RMSNorm::forward: dispatch failed");
-        let mut output = result[0].clone();
+        let result = if x.device() == Device::Cpu {
+            Tensor::exec_aot(&[x, &self.weight], |g, ins| {
+                vec![g.rms_norm(&ins[0], &ins[1], self.eps as f64)]
+            })
+            .expect("RMSNorm::forward: AOT failed")
+        } else {
+            let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+            dispatch(
+                "rms_norm",
+                dispatch_key,
+                &[x, &self.weight, &self.eps_scalar],
+            )
+            .expect("RMSNorm::forward: dispatch failed")
+        };
+        let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() || self.weight.requires_grad() {
             let edges = {
@@ -593,6 +608,7 @@ impl Module for BatchNorm2d {
             };
 
         let dispatch_key = crate::dispatcher::device_to_dispatch_key(x.device());
+        // TODO(migration): Replace dispatch with AOT when batch_norm graph op supports training mode
         let result = crate::dispatcher::dispatch(
             "batch_norm",
             dispatch_key,
