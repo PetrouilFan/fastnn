@@ -59,17 +59,11 @@ impl Tensor {
     }
 
     pub fn maximum(&self, other: &Tensor) -> Tensor {
-        let output = if self.device() == Device::Cpu && other.device() == Device::Cpu {
-            Tensor::exec_aot(&[self, other], |g, ins| vec![g.maximum(&ins[0], &ins[1])])
-                .expect("Tensor::maximum: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            dispatch("maximum", dispatch_key, &[self, other])
-                .expect("Tensor::maximum: dispatch failed")[0].clone()
-        };
+        let output = Tensor::exec_aot(&[self, other], |g, ins| vec![g.maximum(&ins[0], &ins[1])])
+            .expect("Tensor::maximum: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
             let backward = Arc::new(autograd::MaximumBackward::new());
@@ -80,52 +74,28 @@ impl Tensor {
     }
 
     pub fn gt_scalar(&self, threshold: f32) -> Tensor {
-        let output = if self.device() == Device::Cpu {
-            let scalar = Tensor::from_scalar(threshold);
-            Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.gt_scalar(&ins[0], &ins[1])])
-                .expect("Tensor::gt_scalar: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            dispatch("gt_scalar", dispatch_key, &[self, &Tensor::from_scalar(threshold)])
-                .expect("Tensor::gt_scalar: dispatch failed")[0].clone()
-        };
-        output
+        let scalar = Tensor::from_scalar(threshold);
+        Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.gt_scalar(&ins[0], &ins[1])])
+            .expect("Tensor::gt_scalar: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     pub fn sign(&self) -> Tensor {
-        let result = if self.device() == Device::Cpu {
-            Tensor::exec_aot(&[self], |g, ins| vec![g.sign(&ins[0])])
-                .expect("Tensor::sign: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            dispatch("sign", dispatch_key, &[self])
-                .expect("Tensor::sign: dispatch failed")[0].clone()
-        };
-        result
+        Tensor::exec_aot(&[self], |g, ins| vec![g.sign(&ins[0])])
+            .expect("Tensor::sign: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     pub fn minimum(&self, other: &Tensor) -> Tensor {
-        let output = if self.device() == Device::Cpu && other.device() == Device::Cpu {
-            Tensor::exec_aot(&[self, other], |g, ins| vec![g.minimum(&ins[0], &ins[1])])
-                .expect("Tensor::minimum: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = match (self.device(), other.device()) {
-                (Device::Wgpu(id), _) => device_to_dispatch_key(Device::Wgpu(id)),
-                (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
-                _ => device_to_dispatch_key(Device::Cpu),
-            };
-            dispatch("minimum", dispatch_key, &[self, other])
-                .expect("Tensor::minimum: dispatch failed")[0].clone()
-        };
+        let output = Tensor::exec_aot(&[self, other], |g, ins| vec![g.minimum(&ins[0], &ins[1])])
+            .expect("Tensor::minimum: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap();
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = autograd::make_edges(self, other);
             let backward = Arc::new(autograd::MinimumBackward::new());
@@ -186,50 +156,30 @@ impl Tensor {
     }
 
     pub fn lt_scalar(&self, threshold: f32) -> Tensor {
-        let output = if self.device() == Device::Cpu {
-            let scalar = Tensor::from_scalar(threshold);
-            Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.lt_scalar(&ins[0], &ins[1])])
-                .expect("Tensor::lt_scalar: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            dispatch("lt_scalar", dispatch_key, &[self, &Tensor::from_scalar(threshold)])
-                .expect("Tensor::lt_scalar: dispatch failed")[0].clone()
-        };
-        output
+        let scalar = Tensor::from_scalar(threshold);
+        Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.lt_scalar(&ins[0], &ins[1])])
+            .expect("Tensor::lt_scalar: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     pub fn eq_scalar(&self, threshold: f32) -> Tensor {
-        let output = if self.device() == Device::Cpu {
-            let scalar = Tensor::from_scalar(threshold);
-            Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.eq_scalar(&ins[0], &ins[1])])
-                .expect("Tensor::eq_scalar: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            dispatch("eq_scalar", dispatch_key, &[self, &Tensor::from_scalar(threshold)])
-                .expect("Tensor::eq_scalar: dispatch failed")[0].clone()
-        };
-        output
+        let scalar = Tensor::from_scalar(threshold);
+        Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.eq_scalar(&ins[0], &ins[1])])
+            .expect("Tensor::eq_scalar: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     pub fn add_scalar(&self, scalar: f32) -> Tensor {
-        let output = if self.device() == Device::Cpu {
-            let s = Tensor::from_scalar(scalar);
-            Tensor::exec_aot(&[self, &s], |g, ins| vec![g.add_scalar(&ins[0], &ins[1])])
-                .expect("Tensor::add_scalar: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            dispatch("add_scalar", dispatch_key, &[self, &Tensor::from_scalar(scalar)])
-                .expect("Tensor::add_scalar: dispatch failed")[0].clone()
-        };
+        let s = Tensor::from_scalar(scalar);
+        let output = Tensor::exec_aot(&[self, &s], |g, ins| vec![g.add_scalar(&ins[0], &ins[1])])
+            .expect("Tensor::add_scalar: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::AddScalarBackward::new());
@@ -240,18 +190,12 @@ impl Tensor {
     }
 
     pub fn div_scalar(&self, scalar: f32) -> Tensor {
-        let output = if self.device() == Device::Cpu {
-            let s = Tensor::from_scalar(scalar);
-            Tensor::exec_aot(&[self, &s], |g, ins| vec![g.div_scalar(&ins[0], &ins[1])])
-                .expect("Tensor::div_scalar: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            dispatch("div_scalar", dispatch_key, &[self, &Tensor::from_scalar(scalar)])
-                .expect("Tensor::div_scalar: dispatch failed")[0].clone()
-        };
+        let s = Tensor::from_scalar(scalar);
+        let output = Tensor::exec_aot(&[self, &s], |g, ins| vec![g.div_scalar(&ins[0], &ins[1])])
+            .expect("Tensor::div_scalar: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::DivScalarBackward::new());
@@ -262,18 +206,11 @@ impl Tensor {
     }
 
     pub fn logical_not(&self) -> Tensor {
-        let output = if self.device() == Device::Cpu {
-            Tensor::exec_aot(&[self], |g, ins| vec![g.logical_not(&ins[0])])
-                .expect("Tensor::logical_not: AOT execution failed")
-                .into_iter()
-                .next()
-                .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            dispatch("logical_not", dispatch_key, &[self])
-                .expect("Tensor::logical_not: dispatch failed")[0].clone()
-        };
-        output
+        Tensor::exec_aot(&[self], |g, ins| vec![g.logical_not(&ins[0])])
+            .expect("Tensor::logical_not: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     pub fn argmax(&self, dim: Option<usize>) -> Tensor {

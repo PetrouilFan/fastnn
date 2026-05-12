@@ -1,11 +1,9 @@
 // Tensor reduction methods
 
 use crate::autograd;
-use crate::dispatcher::{device_to_dispatch_key, dispatch};
 use crate::storage::{DType, Device};
 use std::sync::Arc;
 
-use super::factories::dim_scalar;
 use super::Tensor;
 
 impl Tensor {
@@ -39,31 +37,15 @@ impl Tensor {
             }
         }
 
-        // Fallback: dispatch or AOT
-        let output = if self.device() == Device::Cpu {
-            let ndim = self.inner.ndim() as i32;
-            let norm_dim = if dim < 0 { ndim + dim } else { dim } as usize;
-            Tensor::exec_aot(&[self], |g, ins| {
-                vec![g.reduce_sum(&ins[0], norm_dim, keepdim)]
-            })
-            .expect("Tensor::sum: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            let result = dispatch(
-                "sum",
-                dispatch_key,
-                &[
-                    self,
-                    &dim_scalar(dim),
-                    &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
-                ],
-            )
-            .expect("Tensor::sum: dispatch failed");
-            result[0].clone()
-        };
+        let ndim = self.inner.ndim() as i32;
+        let norm_dim = if dim < 0 { ndim + dim } else { dim } as usize;
+        let output = Tensor::exec_aot(&[self], |g, ins| {
+            vec![g.reduce_sum(&ins[0], norm_dim, keepdim)]
+        })
+        .expect("Tensor::sum: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let backward = Arc::new(autograd::SumBackward::new());
@@ -76,51 +58,25 @@ impl Tensor {
     pub fn max(&self, dim: i32, keepdim: bool) -> Tensor {
         let ndim = self.inner.ndim() as i32;
         let norm_dim = if dim < 0 { ndim + dim } else { dim } as usize;
-        if self.device() == Device::Cpu {
-            Tensor::exec_aot(&[self], |g, ins| {
-                vec![g.reduce_max(&ins[0], norm_dim, keepdim)]
-            })
-            .expect("Tensor::max: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            let result = dispatch(
-                "max",
-                dispatch_key,
-                &[self, &dim_scalar(dim), &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 })],
-            )
-            .expect("Tensor::max: dispatch failed");
-            result[0].clone()
-        }
+        Tensor::exec_aot(&[self], |g, ins| {
+            vec![g.reduce_max(&ins[0], norm_dim, keepdim)]
+        })
+        .expect("Tensor::max: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     pub fn mean(&self, dim: i32, keepdim: bool) -> Tensor {
         let ndim = self.inner.ndim() as i32;
         let norm_dim = if dim < 0 { ndim + dim } else { dim } as usize;
-        let output = if self.device() == Device::Cpu {
-            Tensor::exec_aot(&[self], |g, ins| {
-                vec![g.reduce_mean(&ins[0], norm_dim, keepdim)]
-            })
-            .expect("Tensor::mean: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap()
-        } else {
-            let dispatch_key = device_to_dispatch_key(self.device());
-            let result = dispatch(
-                "mean",
-                dispatch_key,
-                &[
-                    self,
-                    &dim_scalar(dim),
-                    &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
-                ],
-            )
-            .expect("Tensor::mean: dispatch failed");
-            result[0].clone()
-        };
+        let output = Tensor::exec_aot(&[self], |g, ins| {
+            vec![g.reduce_mean(&ins[0], norm_dim, keepdim)]
+        })
+        .expect("Tensor::mean: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
             let dim_size = self.shape()[dim as usize];
             let edges = autograd::make_edge(self);
