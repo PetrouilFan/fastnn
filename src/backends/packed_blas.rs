@@ -319,6 +319,7 @@ pub fn gemv_u8x4_tiled(
                     for p in packed_start..packed_end {
                         let w = weights_u32[row_off + p];
                         let base = p * 4;
+                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                         if base >= k_offset && base + 4 <= k_end {
                             // SAFETY: The offset stays within the bounds of the allocated storage. No aliasing mutable reference exists.
                             unsafe {
@@ -327,14 +328,14 @@ pub fn gemv_u8x4_tiled(
                                     row_bufs.as_mut_ptr().add(row_start + (base - k_offset)),
                                 );
                             }
-                        } else {
-                            let bytes = w.to_le_bytes();
-                            for j in 0..4 {
-                                let idx = base + j;
-                                if idx >= k_offset && idx < k_end {
-                                    row_bufs[row_start + (idx - k_offset)] =
-                                        (bytes[j] as i8) as f32;
-                                }
+                            continue;
+                        }
+                        let bytes = w.to_le_bytes();
+                        for j in 0..4 {
+                            let idx = base + j;
+                            if idx >= k_offset && idx < k_end {
+                                row_bufs[row_start + (idx - k_offset)] =
+                                    (bytes[j] as i8) as f32;
                             }
                         }
                     }

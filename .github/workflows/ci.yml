@@ -139,14 +139,15 @@ jobs:
           uv run python benchmarks/pytorch_comparison.py \
             --fast --output results.json
 
-      - name: Build packed precision benchmark binary
+      - name: Build packed precision benchmarks (cargo bench)
         shell: bash
-        run: cargo build --release --bin packed_bench_json
+        run: cargo bench --no-run
 
       - name: Run packed precision benchmarks
         shell: bash
         run: |
-          ./target/release/packed_bench_json > packed_results.json
+          cargo bench --bench packed_bench -- --output-format bencher 2>&1 | tee packed_results.txt
+          cargo bench --bench packed_dispatch_bench -- --output-format bencher 2>&1 | tee -a packed_results.txt
 
       - name: Merge and write benchmark summary
         if: always()
@@ -156,7 +157,7 @@ jobs:
             echo "**Commit:** ${{ github.sha }}"
             echo "**Run:** ${{ github.run_id }}"
             echo ""
-            uv run python .github/merge_benchmarks.py results.json packed_results.json
+            echo "Packed precision benchmarks completed. See artifacts for raw output."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark results
@@ -166,4 +167,4 @@ jobs:
           name: benchmark-results
           path: |
             results.json
-            packed_results.json
+            packed_results.txt
