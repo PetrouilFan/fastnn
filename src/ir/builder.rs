@@ -1060,6 +1060,50 @@ mod tests {
     }
 
     #[test]
+    fn test_compiled_plan_reuse_across_shapes() {
+        use crate::backend::executor::GraphExecutor;
+
+        let g = GraphBuilder::new();
+        // Input: [N, 4] with symbolic batch dim
+        let n = DimExpr::Symbol("N".into());
+        let x = g.input_with_dims(&[n, DimExpr::Known(4)], IrDType::F32);
+        // MatMul weight: [4, 3]
+        let w = g.input(&[4, 3], IrDType::F32);
+        // Output: [N, 3]
+        let out = g.matmul(&x, &w);
+
+        // Compile ONCE
+        let (plan, memory_plan, compiled_graph) = g.compile(&[&out], CpuBackend).unwrap();
+        let executor = GraphExecutor::new(CpuBackend);
+
+        // Execute with batch=2
+        let x_data_2 = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let w_data = f32_data(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
+        let result_2 = executor.execute(
+            &compiled_graph, &plan, &memory_plan, &[&x_data_2, &w_data],
+        ).unwrap();
+        let out_2 = read_f32(&result_2[0]);
+        // batch=2, feat=3 → 6 elements
+        // Row 0: [1,2,3,4] @ W = [1*1+2*0+3*0+4*1=5, 1*0+2*1+3*0+4*1=6, 1*0+2*0+3*1+4*1=7]
+        // Row 1: [5,6,7,8] @ W = [5+8=13, 6+8=14, 7+8=15]
+        assert_eq!(out_2.len(), 6, "batch=2 should produce 6 elements");
+        assert!((out_2[0] - 5.0).abs() < 1e-4);
+        assert!((out_2[4] - 14.0).abs() < 1e-4);
+
+        // Execute SAME plan with batch=1 — no recompilation
+        let x_data_1 = f32_data(&[10.0, 20.0, 30.0, 40.0]);
+        let result_1 = executor.execute(
+            &compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data],
+        ).unwrap();
+        let out_1 = read_f32(&result_1[0]);
+        // batch=1, feat=3 → 3 elements
+        // [10,20,30,40] @ W = [10+40=50, 20+40=60, 30+40=70]
+        assert_eq!(out_1.len(), 3, "batch=1 should produce 3 elements, got {}", out_1.len());
+        assert!((out_1[0] - 50.0).abs() < 1e-4);
+        assert!((out_1[2] - 70.0).abs() < 1e-4);
+    }
+
+    #[test]
     fn test_dynamic_multi_symbol() {
         let g = GraphBuilder::new();
         // Input A: [B, T, 64] — two symbolic dims
