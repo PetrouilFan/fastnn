@@ -2,7 +2,7 @@
 
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::ir::node::{ComputeGraph, IrDType, Opcode, TensorValue};
+use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorValue};
 use bytemuck;
 use std::cell::UnsafeCell;
 
@@ -77,6 +77,13 @@ impl Backend for CpuBackend {
                         .collect()
                 })
                 .collect();
+            // Also collect raw DimExpr shapes for symbolic dispatch resolution
+            let input_shape_dims: Vec<Vec<DimExpr>> = node
+                .inputs
+                .iter()
+                .filter_map(|&input_id| graph.get_node(input_id))
+                .map(|n| n.output_type.shape.clone())
+                .collect();
 
             let output_slice = memory_plan
                 .slots
@@ -127,11 +134,25 @@ impl Backend for CpuBackend {
                         .get(1)
                         .and_then(|s| s.last().copied())
                         .unwrap_or(1) as usize;
+                    // Capture symbolic dims for runtime resolution
+                    let m_dim = input_shape_dims
+                        .first()
+                        .and_then(|s| s.get(s.len().saturating_sub(2)).cloned())
+                        .unwrap_or(DimExpr::Known(m as u64));
+                    let k_dim = input_shape_dims
+                        .first()
+                        .and_then(|s| s.last().cloned())
+                        .unwrap_or(DimExpr::Known(k as u64));
+                    let n_dim = input_shape_dims
+                        .get(1)
+                        .and_then(|s| s.last().cloned())
+                        .unwrap_or(DimExpr::Known(n as u64));
                     instructions.push(Instruction::CallKernel {
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
                         params: vec![m, k, n],
+                        param_dims: Some(vec![m_dim, k_dim, n_dim]),
                     });
                 }
                 Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
@@ -157,6 +178,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         params: vec![],
+                        param_dims: None,
                     });
                 }
                 Opcode::Relu
@@ -187,6 +209,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         params: vec![],
+                        param_dims: None,
                     });
                 }
                 Opcode::Reshape | Opcode::Flatten | Opcode::Squeeze | Opcode::Unsqueeze => {
@@ -210,6 +233,25 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         params: vec![],
+                        param_dims: None,
+                    });
+                }
+                Opcode::BatchNorm | Opcode::LayerNorm => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "conv2d".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                    });
+                }
+                Opcode::Softmax | Opcode::BiasAdd => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "softmax".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
                     });
                 }
                 Opcode::BatchNorm | Opcode::LayerNorm => {
@@ -218,6 +260,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         params: vec![],
+                        param_dims: None,
                     });
                 }
                 Opcode::Softmax => {
@@ -226,6 +269,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         params: vec![],
+                        param_dims: None,
                     });
                 }
                 Opcode::ReduceSum | Opcode::ReduceMean => {
@@ -246,6 +290,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         params: vec![group_size, is_mean],
+                        param_dims: None,
                     });
                 }
                 Opcode::Transpose => {
@@ -258,11 +303,20 @@ impl Backend for CpuBackend {
                         .first()
                         .and_then(|s| s.get(1).copied())
                         .unwrap_or(1) as usize;
+                    let m_dim = input_shape_dims
+                        .first()
+                        .and_then(|s| s.first().cloned())
+                        .unwrap_or(DimExpr::Known(m as u64));
+                    let n_dim = input_shape_dims
+                        .first()
+                        .and_then(|s| s.get(1).cloned())
+                        .unwrap_or(DimExpr::Known(n as u64));
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "transpose_f32".to_string(),
                         input_slices,
                         output_slice,
                         params: vec![m, n],
+                        param_dims: Some(vec![m_dim, n_dim]),
                     });
                 }
                 // Input nodes have no producer instruction — data is written
@@ -293,6 +347,7 @@ impl Backend for CpuBackend {
         &self,
         plan: &ExecutablePlan,
         arena: &CpuBuffer,
+        shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
         for instr in &plan.instructions {
             match instr {
@@ -301,7 +356,18 @@ impl Backend for CpuBackend {
                     input_slices,
                     output_slice,
                     params,
+                    param_dims,
                 } => {
+                    // Resolve params using shape_env if param_dims provided.
+                    // This allows symbolic DimExprs (e.g. batch size "N") to be
+                    // evaluated at dispatch time with concrete values from inputs.
+                    let params: Vec<usize> = if let Some(dims) = param_dims {
+                        dims.iter()
+                            .map(|d| d.evaluate_with_env(shape_env).unwrap_or(1) as usize)
+                            .collect()
+                    } else {
+                        params.clone()
+                    };
                     let out_start = output_slice.offset;
                     let out_end = output_slice.offset + output_slice.size;
 

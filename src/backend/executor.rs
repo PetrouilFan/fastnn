@@ -17,7 +17,7 @@
 
 use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
 use crate::compiler::passes::{memory_planning, operator_fusion, shape_inference};
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId};
+use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
@@ -113,10 +113,11 @@ impl<B: Backend> GraphExecutor<B> {
                 .write_arena(&arena, slot.offset, input_bytes);
         }
 
-        // Dispatch the plan
-        self.backend.dispatch(plan, &arena)?;
+        // Dispatch the plan — first build a runtime shape env from input sizes
+        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs);
+        self.backend.dispatch(plan, &arena, &shape_env)?;
 
-        // Read output data from the arena
+        // Read output data from the arena — compute actual sizes using shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
         for &output_node_id in &graph.outputs {
             let slot = memory_plan.slots.get(&output_node_id).ok_or_else(|| {
@@ -126,7 +127,21 @@ impl<B: Backend> GraphExecutor<B> {
                 ))
             })?;
 
-            let data = self.backend.read_arena(&arena, slot.offset, slot.size);
+            // Re-evaluate output size with shape_env to handle symbolic dims
+            let actual_size = if let Some(node) = graph.get_node(output_node_id) {
+                let actual_numel: usize = node
+                    .output_type
+                    .shape
+                    .iter()
+                    .map(|d| d.evaluate_with_env(&shape_env).unwrap_or(1) as usize)
+                    .product();
+                let elem_size = node.output_type.dtype.byte_size();
+                (actual_numel * elem_size).min(slot.size)
+            } else {
+                slot.size
+            };
+
+            let data = self.backend.read_arena(&arena, slot.offset, actual_size);
             outputs.push(data);
         }
 
