@@ -1,4 +1,3 @@
-use crate::storage::Device;
 use crate::tensor::Tensor;
 use crate::{
     impl_training_state,
@@ -34,17 +33,13 @@ impl Embedding {
 
 impl Module for Embedding {
     fn forward(&self, indices: &Tensor) -> Tensor {
-        let result = if self.weight.device() == Device::Cpu {
-            Tensor::exec_aot(&[&self.weight, indices], |g, ins| {
-                vec![g.embedding(&ins[0], &ins[1])]
-            })
-            .expect("Embedding::forward: AOT failed")
-        } else {
-            let key = crate::dispatcher::device_to_dispatch_key(self.weight.device());
-            crate::dispatcher::dispatch("embedding", key, &[&self.weight, indices])
-                .expect("Embedding::forward: dispatch failed")
-        };
-        result.into_iter().next().unwrap()
+        Tensor::exec_aot(&[&self.weight, indices], |g, ins| {
+            vec![g.embedding(&ins[0], &ins[1])]
+        })
+        .expect("Embedding::forward: AOT failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
