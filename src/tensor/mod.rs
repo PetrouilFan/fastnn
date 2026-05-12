@@ -1,4 +1,8 @@
 use crate::autograd::{self, AutogradMeta};
+use crate::backend::cpu::CpuBackend;
+use crate::backend::BackendError;
+use crate::ir::builder::GraphBuilder;
+use crate::ir::node::{DimExpr, IrDType, TensorType};
 use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
 use smallvec::smallvec;
@@ -1013,5 +1017,107 @@ pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
             let clipped_tensor = Tensor::from_vec(clipped, g.shape());
             t.set_grad(Some(clipped_tensor));
         }
+    }
+}
+
+// =============================================================================
+// AOT pipeline bridge — replace eager dispatcher calls with graph lowering
+// =============================================================================
+
+fn dtype_to_ir(dt: DType) -> IrDType {
+    match dt {
+        DType::F32 => IrDType::F32,
+        DType::F64 => panic!("dtype_to_ir: F64 not supported in IR"),
+        DType::I32 => IrDType::I32,
+        DType::I64 => IrDType::I64,
+        DType::Bool => IrDType::Bool,
+        DType::F16 => IrDType::F16,
+        DType::BF16 => IrDType::BF16,
+    }
+}
+
+fn ir_to_dtype(idt: IrDType) -> DType {
+    match idt {
+        IrDType::F32 => DType::F32,
+        IrDType::F16 => DType::F16,
+        IrDType::BF16 => DType::BF16,
+        IrDType::I32 => DType::I32,
+        IrDType::I64 => DType::I64,
+        IrDType::Bool => DType::Bool,
+        IrDType::U4 { .. } | IrDType::U8 { .. } => {
+            panic!("ir_to_dtype: quantized types not supported in Tensor bridge")
+        }
+    }
+}
+
+impl Tensor {
+    /// Expose the tensor's data as a raw byte slice (CPU only).
+    pub fn as_bytes(&self) -> &[u8] {
+        match self.inner.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let elem_size = self.inner.dtype.size();
+                let offset = self.inner.storage_offset as usize * elem_size;
+                let num_bytes = self.inner.numel() as usize * elem_size;
+                &cpu.data[offset..offset + num_bytes]
+            }
+            _ => panic!("as_bytes: GPU tensors not supported; call .to_cpu() first"),
+        }
+    }
+
+    /// Build a single-op graph, compile it with the AOT pipeline, execute,
+    /// and return the output as a `Tensor`.
+    ///
+    /// `build_graph` receives the [`GraphBuilder`] and its graph-tensor inputs,
+    /// and must return the output [`GraphTensor`]s for the operation.
+    pub fn exec_aot<F>(inputs: &[&Tensor], build_graph: F) -> Result<Vec<Tensor>, BackendError>
+    where
+        F: FnOnce(&GraphBuilder, &[crate::ir::builder::GraphTensor]) -> Vec<crate::ir::builder::GraphTensor>,
+    {
+        let g = GraphBuilder::new();
+        let graph_inputs: Vec<_> = inputs
+            .iter()
+            .map(|t| {
+                let dims: Vec<DimExpr> = t
+                    .shape()
+                    .iter()
+                    .map(|&s| DimExpr::Known(s as u64))
+                    .collect();
+                g.input_with_dims(&dims, dtype_to_ir(t.dtype()))
+            })
+            .collect();
+
+        let graph_outputs = build_graph(&g, &graph_inputs);
+
+        let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
+        let result_bytes = g.compile_and_execute(
+            &graph_outputs.iter().collect::<Vec<_>>(),
+            CpuBackend,
+            &input_bytes,
+        )?;
+
+        Ok(graph_outputs
+            .into_iter()
+            .zip(result_bytes)
+            .map(|(gt, bytes)| {
+                let shape: SmallVec<[i64; 8]> = gt
+                    .shape()
+                    .iter()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as i64,
+                        _ => unreachable!("AOT bridge: graph op output has concrete shape"),
+                    })
+                    .collect();
+                let dt = ir_to_dtype(gt.dtype());
+                let num_bytes = bytes.len();
+                let mut data = vec![0u8; num_bytes];
+                data.copy_from_slice(&bytes);
+                let storage = Storage::Cpu(crate::storage::CpuStorage {
+                    data: Arc::new(data),
+                    nbytes: num_bytes,
+                    gpu_buffer_cache: parking_lot::RwLock::new(std::collections::HashMap::new()),
+                });
+                Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))
+            })
+            .collect())
     }
 }

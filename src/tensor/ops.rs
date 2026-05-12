@@ -1,7 +1,7 @@
 // Tensor operation methods - arithmetic, matmul, activations, and operator overloads
 
 use crate::autograd;
-use crate::dispatcher::{device_to_dispatch_key, dispatch};
+use crate::dispatcher::{device_to_dispatch_key, dispatch, DispatchKey};
 use crate::storage::{CpuStorage, DType, Device, Storage};
 use parking_lot::RwLock;
 use smallvec::smallvec;
@@ -102,9 +102,18 @@ impl Tensor {
             (_, Device::Wgpu(id)) => device_to_dispatch_key(Device::Wgpu(id)),
             _ => device_to_dispatch_key(Device::Cpu),
         };
-        let result =
-            dispatch("add", dispatch_key, &[self, other]).expect("Tensor::add: dispatch failed");
-        let output = result[0].clone();
+        let output = if dispatch_key == DispatchKey::Cpu {
+            // Use AOT pipeline for CPU ops
+            let results = Tensor::exec_aot(&[self, other], |g, ins| {
+                vec![g.add(&ins[0], &ins[1])]
+            })
+            .expect("Tensor::add: AOT execution failed");
+            results.into_iter().next().unwrap()
+        } else {
+            let result = dispatch("add", dispatch_key, &[self, other])
+                .expect("Tensor::add: dispatch failed");
+            result[0].clone()
+        };
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
