@@ -230,12 +230,13 @@ impl ShapeEnv {
 }
 
 impl DimExpr {
-    /// Evaluate with runtime shape environment.  Bounded dims return their max
-    /// (same as evaluate()), while Symbol dims look up in the environment.
+    /// Evaluate with runtime shape environment.  Bounded dims try resolving
+    /// their symbol name first, falling back to the compile-time max bound.
+    /// Symbol dims resolve from the environment.
     pub fn evaluate_with_env(&self, env: &ShapeEnv) -> Option<u64> {
         match self {
             DimExpr::Known(v) => Some(*v),
-            DimExpr::Bounded { max, .. } => Some(*max),
+            DimExpr::Bounded { sym, max } => env.resolve(sym).or(Some(*max)),
             DimExpr::Symbol(s) => env.resolve(s),
         }
     }

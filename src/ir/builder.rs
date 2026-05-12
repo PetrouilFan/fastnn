@@ -984,6 +984,42 @@ mod tests {
     }
 
     #[test]
+    fn test_dynamic_batch_reduce_mean() {
+        let g = GraphBuilder::new();
+        // Input: [N, 4] with symbolic batch dim
+        let n = DimExpr::Symbol("N".into());
+        let x = g.input_with_dims(&[n, DimExpr::Known(4)], IrDType::F32);
+
+        // Reduce mean over dim 1 (no keepdim): [N, 4] → [N]
+        let mean = g.reduce_mean(&x, 1, false);
+        // Reduce sum over dim 1 (no keepdim): [N, 4] → [N]
+        let sum = g.reduce_sum(&x, 1, false);
+
+        // Test with batch=2: input data is 2*4*4 = 32 bytes
+        let x_data_2 = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let result_2 = g.compile_and_execute(
+            &[&mean, &sum], CpuBackend, &[&x_data_2],
+        ).unwrap();
+        // mean = [(1+2+3+4)/4=2.5, (5+6+7+8)/4=6.5]
+        assert_eq!(read_f32(&result_2[0]), vec![2.5, 6.5],
+            "reduce_mean with batch=2 failed: got {:?}", read_f32(&result_2[0]));
+        // sum = [1+2+3+4=10, 5+6+7+8=26]
+        assert_eq!(read_f32(&result_2[1]), vec![10.0, 26.0],
+            "reduce_sum with batch=2 failed: got {:?}", read_f32(&result_2[1]));
+
+        // Test with batch=1: input data is 1*4*4 = 16 bytes
+        let x_data_1 = f32_data(&[10.0, 20.0, 30.0, 40.0]);
+        let result_1 = g.compile_and_execute(
+            &[&mean, &sum], CpuBackend, &[&x_data_1],
+        ).unwrap();
+        // mean = 25, sum = 100
+        assert_eq!(read_f32(&result_1[0]), vec![25.0],
+            "reduce_mean with batch=1 failed: got {:?}", read_f32(&result_1[0]));
+        assert_eq!(read_f32(&result_1[1]), vec![100.0],
+            "reduce_sum with batch=1 failed: got {:?}", read_f32(&result_1[1]));
+    }
+
+    #[test]
     fn test_activations() {
         let g = GraphBuilder::new();
         let a = g.input(&[4], IrDType::F32);
