@@ -38,7 +38,16 @@ impl TensorImpl {
     pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>, dtype: DType) -> Self {
         let device = storage.device(); // Get device from storage
         let numel: i64 = sizes.iter().product();
-        let _nbytes = (numel * dtype.size() as i64) as usize;
+        let nbytes = (numel * dtype.size() as i64) as usize;
+        // Validate storage is large enough for the declared shape.
+        // This catches mismatches between shape inference and actual data size.
+        let storage_nbytes = storage.nbytes();
+        assert!(
+            nbytes <= storage_nbytes,
+            "TensorImpl::new: shape {:?} requires {} bytes for {} elements of {:?}, \
+             but storage only has {} bytes. This is a shape-inference or data-pipeline bug.",
+            sizes, nbytes, numel, dtype, storage_nbytes
+        );
 
         let strides = compute_strides(&sizes);
 
@@ -291,10 +300,12 @@ impl TensorImpl {
                 assert!(
                     self.storage_offset as usize + numel <= storage_len,
                     "as_f32_slice: offset + numel exceeds storage bounds. \
-                     offset={}, numel={}, storage_len={}",
+                     offset={}, numel={}, storage_len={}, shape={:?}, dtype={:?}",
                     self.storage_offset,
                     numel,
-                    storage_len
+                    storage_len,
+                    self.sizes,
+                    self.dtype
                 );
                 std::slice::from_raw_parts(ptr, numel)
             },
@@ -1108,7 +1119,20 @@ impl Tensor {
                     })
                     .collect();
                 let dt = ir_to_dtype(gt.dtype());
+                let numel: usize = shape.iter().map(|&s| s as usize).product();
+                let expected_bytes = numel * dt.size();
                 let num_bytes = bytes.len();
+                // Validate that the AOT pipeline produced the right number of
+                // bytes for the shape inferred during graph construction.
+                // A mismatch here indicates a shape-inference or memory-planning
+                // bug in the compiler pipeline.
+                assert_eq!(
+                    num_bytes, expected_bytes,
+                    "AOT bridge: output byte size mismatch for shape {:?}, dtype {:?}: \
+                     got {} bytes but expected {} ({} elements × {} bytes/elem). \
+                     This is likely a shape-inference bug in the compiler pass.",
+                    shape, dt, num_bytes, expected_bytes, numel, dt.size()
+                );
                 let mut data = vec![0u8; num_bytes];
                 data.copy_from_slice(&bytes);
                 let storage = Storage::Cpu(crate::storage::CpuStorage {
