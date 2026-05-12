@@ -74,18 +74,26 @@ impl Tensor {
     }
 
     pub fn max(&self, dim: i32, keepdim: bool) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch(
-            "max",
-            dispatch_key,
-            &[
-                self,
-                &dim_scalar(dim),
-                &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 }),
-            ],
-        )
-        .expect("Tensor::max: dispatch failed");
-        result[0].clone()
+        let ndim = self.inner.ndim() as i32;
+        let norm_dim = if dim < 0 { ndim + dim } else { dim } as usize;
+        if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| {
+                vec![g.reduce_max(&ins[0], norm_dim, keepdim)]
+            })
+            .expect("Tensor::max: AOT execution failed")
+            .into_iter()
+            .next()
+            .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            let result = dispatch(
+                "max",
+                dispatch_key,
+                &[self, &dim_scalar(dim), &Tensor::from_scalar(if keepdim { 1.0 } else { 0.0 })],
+            )
+            .expect("Tensor::max: dispatch failed");
+            result[0].clone()
+        }
     }
 
     pub fn mean(&self, dim: i32, keepdim: bool) -> Tensor {

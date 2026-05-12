@@ -227,10 +227,18 @@ impl Tensor {
     }
 
     pub fn logical_not(&self) -> Tensor {
-        let dispatch_key = device_to_dispatch_key(self.device());
-        let result = dispatch("logical_not", dispatch_key, &[self])
-            .expect("Tensor::logical_not: dispatch failed");
-        result[0].clone()
+        let output = if self.device() == Device::Cpu {
+            Tensor::exec_aot(&[self], |g, ins| vec![g.logical_not(&ins[0])])
+                .expect("Tensor::logical_not: AOT execution failed")
+                .into_iter()
+                .next()
+                .unwrap()
+        } else {
+            let dispatch_key = device_to_dispatch_key(self.device());
+            dispatch("logical_not", dispatch_key, &[self])
+                .expect("Tensor::logical_not: dispatch failed")[0].clone()
+        };
+        output
     }
 
     pub fn cat(tensors: &[Tensor], dim: i32) -> Tensor {
