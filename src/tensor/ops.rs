@@ -898,79 +898,6 @@ impl Tensor {
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
-        // Fast path: CPU contiguous same-shape mul, skip dispatch overhead
-        if self.device() == Device::Cpu
-            && other.device() == Device::Cpu
-            && self.inner.dtype == DType::F32
-            && other.inner.dtype == DType::F32
-            && self.is_contiguous()
-            && other.is_contiguous()
-            && self.inner.sizes == other.inner.sizes
-        {
-            let numel = self.inner.numel() as usize;
-            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
-            {
-                let inner = Arc::make_mut(&mut output.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    unreachable!("mul fast path only runs when both tensors are on CPU")
-                };
-                let out_data = Arc::make_mut(&mut cpu_storage.data);
-                let a_ptr = self.data_ptr_f32();
-                let b_ptr = other.data_ptr_f32();
-                let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-                // Single-threaded AVX2 SIMD - faster than rayon for memory-bound ops
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                        unsafe {
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let av = _mm256_loadu_ps(a_ptr.add(i));
-                                let bv = _mm256_loadu_ps(b_ptr.add(i));
-                                _mm256_storeu_ps(out_ptr.add(i), _mm256_mul_ps(av, bv));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *out_ptr.add(j) = *a_ptr.add(j) * *b_ptr.add(j);
-                            }
-                        }
-                    } else {
-                        for i in 0..numel {
-                            // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                            unsafe {
-                                *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
-                            }
-                        }
-                    }
-                }
-                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                {
-                    for i in 0..numel {
-                        // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                        unsafe {
-                            *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
-                        }
-                    }
-                }
-            }
-            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-                let edges = {
-                    let mut edges = autograd::make_edge(self);
-                    edges.extend(autograd::make_edge(other));
-                    edges
-                };
-                let backward = autograd::MulBackward::new();
-                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(std::sync::Arc::new(backward));
-                Arc::make_mut(&mut output.inner).autograd_meta =
-                    Some(Arc::new(std::sync::Mutex::new(meta)));
-            }
-            return output;
-        }
-
         let output = if self.device() == Device::Cpu && other.device() == Device::Cpu {
             Tensor::exec_aot(&[self, other], |g, ins| vec![g.mul(&ins[0], &ins[1])])
                 .expect("Tensor::mul: AOT execution failed")
@@ -1144,37 +1071,6 @@ impl Tensor {
     }
 
     pub fn relu(&self) -> Tensor {
-        // Fast path: contiguous CPU F32, skip dispatch
-        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
-            let numel = self.inner.numel() as usize;
-            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
-            {
-                let inner = Arc::make_mut(&mut output.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    panic!("expected CPU storage for relu fast path")
-                };
-                let out_data = Arc::make_mut(&mut cpu_storage.data);
-                let a_ptr = self.data_ptr_f32();
-                let out_ptr = out_data.as_mut_ptr() as *mut f32;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *out_ptr.add(i) = (*a_ptr.add(i)).max(0.0);
-                    }
-                }
-            }
-            if autograd::is_grad_enabled() && self.requires_grad() {
-                let edges = autograd::make_edge(self);
-                let backward = autograd::ReluBackward::new();
-                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(std::sync::Arc::new(backward));
-                Arc::make_mut(&mut output.inner).autograd_meta =
-                    Some(Arc::new(std::sync::Mutex::new(meta)));
-            }
-            return output;
-        }
-
         let output = if self.device() == Device::Cpu {
             Tensor::exec_aot(&[self], |g, ins| vec![g.relu(&ins[0])])
                 .expect("Tensor::relu: AOT execution failed")
