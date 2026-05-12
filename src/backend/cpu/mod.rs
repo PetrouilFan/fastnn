@@ -4,6 +4,7 @@ use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruc
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{U4x8, U8x4};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorValue};
+use crate::kernels::blas::matmul_blas_into;
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use std::cell::UnsafeCell;
@@ -977,14 +978,19 @@ impl Backend for CpuBackend {
                                         &mut d[out_start..out_end]
                                     )
                                 };
-                                // Simple triple-loop matmul: C[M,N] = A[M,K] @ B[K,N]
-                                for i in 0..m {
-                                    for j in 0..n {
-                                        let mut sum = 0.0f32;
-                                        for kk in 0.._k {
-                                            sum += a[i * _k + kk] * b[kk * n + j];
+                                // Use BLAS for large matrices, scalar triple-loop for small ones
+                                let threshold = 32; // cross-over where BLAS wins over O(n³) scalar
+                                if m * _k * n >= threshold {
+                                    matmul_blas_into(&a, &b, out_f32, m as usize, _k as usize, n as usize);
+                                } else {
+                                    for i in 0..m {
+                                        for j in 0..n {
+                                            let mut sum = 0.0f32;
+                                            for kk in 0.._k {
+                                                sum += a[(i * _k + kk) as usize] * b[(kk * n + j) as usize];
+                                            }
+                                            out_f32[(i * n + j) as usize] = sum;
                                         }
-                                        out_f32[i * n + j] = sum;
                                     }
                                 }
                             }
