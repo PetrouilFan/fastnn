@@ -174,7 +174,18 @@ impl ShapeEnv {
     }
 
     /// Bind a symbol name to a concrete value.
+    ///
+    /// # Panics
+    /// Panics if the symbol is already bound to a *different* value, to prevent
+    /// silently inconsistent runtime shapes.
     pub fn bind(&mut self, name: &str, value: u64) {
+        if let Some(&existing) = self.symbols.get(name) {
+            assert_eq!(
+                existing, value,
+                "ShapeEnv: symbol '{}' bound to {} then inconsistently to {}",
+                name, existing, value
+            );
+        }
         self.symbols.insert(name.to_string(), value);
     }
 
