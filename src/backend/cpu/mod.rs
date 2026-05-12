@@ -8,6 +8,7 @@ use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use std::cell::UnsafeCell;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 pub mod microkernels;
 
@@ -47,6 +48,17 @@ fn resolve_params(
 }
 
 /// CPU memory arena with interior mutability for zero-allocation dispatch.
+///
+/// # Soundness
+///
+/// `CpuBuffer` wraps [`Vec<u8>`] in an [`UnsafeCell`] so that the
+/// [`dispatch`](Backend::dispatch) method can mutate the arena through
+/// a shared `&CpuBuffer` reference.  Dispatch is single-threaded and
+/// processes instructions sequentially, so the `&mut [u8]` slices
+/// returned by [`data_mut`](CpuBuffer::data_mut) are never aliased.
+///
+/// `Send + Sync` are safe because the inner `Vec<u8>` is itself
+/// `Send + Sync` and the arena is never accessed concurrently.
 pub struct CpuBuffer(UnsafeCell<Vec<u8>>);
 
 impl CpuBuffer {
@@ -54,13 +66,22 @@ impl CpuBuffer {
         CpuBuffer(UnsafeCell::new(data))
     }
 
-    /// Get a mutable slice to the arena data. SAFETY: caller must ensure
-    /// no other references exist when this is called.
+    /// Get a mutable slice to the arena data.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that no other `&mut [u8]` reference
+    /// derived from this arena is live when this method is called.
+    /// This is satisfied by the sequential dispatch loop — each
+    /// `data_mut` call's borrow ends before the next one begins.
     pub fn data_mut(&self) -> &mut [u8] {
         unsafe { &mut *self.0.get() }.as_mut_slice()
     }
 }
 
+// SAFETY: `Vec<u8>` is `Send + Sync`.  The arena is never accessed
+// concurrently — dispatch is single-threaded — so interior mutability
+// via `UnsafeCell` does not introduce data races.
 unsafe impl Send for CpuBuffer {}
 unsafe impl Sync for CpuBuffer {}
 
