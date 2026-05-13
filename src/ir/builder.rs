@@ -1295,6 +1295,191 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    // =========================================================================
+    // Vision / Image ops
+    // =========================================================================
+
+    /// Upsample using nearest-neighbor interpolation.
+    pub fn upsample_nearest2d(
+        &self, input: &GraphTensor, scale_h: usize, scale_w: usize,
+    ) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("scale_h".to_string(), scale_h.to_string());
+        attrs.insert("scale_w".to_string(), scale_w.to_string());
+        let input_shape = input.shape();
+        let out_shape = if input_shape.len() >= 4 {
+            vec![
+                input_shape[0].clone(),
+                input_shape[1].clone(),
+                input_shape[2].mul(&DimExpr::Known(scale_h as u64)),
+                input_shape[3].mul(&DimExpr::Known(scale_w as u64)),
+            ]
+        } else {
+            input_shape.to_vec()
+        };
+        let tt = TensorType::new(out_shape, input.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::UpsampleNearest2d,
+                vec![input.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Upsample using bilinear interpolation.
+    pub fn upsample_bilinear2d(
+        &self, input: &GraphTensor, scale_h: usize, scale_w: usize,
+    ) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("scale_h".to_string(), scale_h.to_string());
+        attrs.insert("scale_w".to_string(), scale_w.to_string());
+        let input_shape = input.shape();
+        let out_shape = if input_shape.len() >= 4 {
+            vec![
+                input_shape[0].clone(),
+                input_shape[1].clone(),
+                input_shape[2].mul(&DimExpr::Known(scale_h as u64)),
+                input_shape[3].mul(&DimExpr::Known(scale_w as u64)),
+            ]
+        } else {
+            input_shape.to_vec()
+        };
+        let tt = TensorType::new(out_shape, input.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::UpsampleBilinear2d,
+                vec![input.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Adaptive average pooling to a fixed output size.
+    pub fn adaptive_avg_pool2d(
+        &self, input: &GraphTensor, output_h: usize, output_w: usize,
+    ) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("output_h".to_string(), output_h.to_string());
+        attrs.insert("output_w".to_string(), output_w.to_string());
+        let input_shape = input.shape();
+        let out_shape = if input_shape.len() >= 4 {
+            vec![
+                input_shape[0].clone(),
+                input_shape[1].clone(),
+                DimExpr::Known(output_h as u64),
+                DimExpr::Known(output_w as u64),
+            ]
+        } else {
+            input_shape.to_vec()
+        };
+        let tt = TensorType::new(out_shape, input.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::AdaptiveAvgPool2d,
+                vec![input.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Repeat tensor along specified dimensions.
+    pub fn repeat(&self, input: &GraphTensor, repeats: &[usize]) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        let repeats_str: Vec<String> = repeats.iter().map(|r| r.to_string()).collect();
+        attrs.insert("repeats".to_string(), repeats_str.join(","));
+        let input_shape = input.shape();
+        let out_shape: Vec<DimExpr> = input_shape.iter().zip(repeats.iter())
+            .map(|(d, &r)| d.mul(&DimExpr::Known(r as u64)))
+            .collect();
+        let tt = TensorType::new(out_shape, input.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::Repeat,
+                vec![input.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Cumulative sum along a dimension.
+    pub fn cumsum(
+        &self, input: &GraphTensor, dim: usize, exclusive: bool, reverse: bool,
+    ) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("dim".to_string(), dim.to_string());
+        attrs.insert("exclusive".to_string(), (if exclusive { 1 } else { 0 }).to_string());
+        attrs.insert("reverse".to_string(), (if reverse { 1 } else { 0 }).to_string());
+        let tt = TensorType::new(input.shape().to_vec(), input.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::CumSum,
+                vec![input.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Error function (Gauss error function).
+    pub fn erf(&self, input: &GraphTensor) -> GraphTensor {
+        let tt = TensorType::new(input.shape().to_vec(), input.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node(Opcode::Erf, vec![input.node_id], tt.clone())
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Flip (reverse) tensor along specified dimensions.
+    pub fn flip(&self, input: &GraphTensor, dims: &[usize]) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        let dims_str: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
+        attrs.insert("dims".to_string(), dims_str.join(","));
+        let tt = TensorType::new(input.shape().to_vec(), input.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::Flip,
+                vec![input.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Element-wise where: selects elements from x where condition is true, else from y.
+    pub fn where_tensor(
+        &self, condition: &GraphTensor, x: &GraphTensor, y: &GraphTensor,
+    ) -> GraphTensor {
+        let x_shape = x.shape();
+        let out_tt = TensorType::new(x_shape.to_vec(), x.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node(
+                Opcode::Where,
+                vec![condition.node_id, x.node_id, y.node_id],
+                out_tt.clone(),
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, out_tt)
+    }
+
     // ── Autograd / Backward ───────────────────────────────────────────────
 
     /// Build the backward graph for a given loss tensor.

@@ -303,7 +303,10 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             | Opcode::AddScalar
             | Opcode::MulScalar
             | Opcode::DivScalar => inputs.first().map(|i| i.output_type.shape.clone()),
-            Opcode::Constant(_) | Opcode::Input => None,
+            Opcode::Constant(_) | Opcode::Input
+            | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
+            | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
+            | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where => None,
         };
 
         if let Some(shape) = inferred {

@@ -72,6 +72,15 @@ pub enum Opcode {
     DivScalar,
     /// Mish activation: x * tanh(softplus(x))
     Mish,
+    UpsampleNearest2d,
+    UpsampleBilinear2d,
+    AdaptiveAvgPool2d,
+    Repeat,
+    CumSum,
+    Erf,
+    Flip,
+    /// Element-wise where(condition, x, y) — selects from x or y based on condition
+    Where,
 }
 
 /// Default maximum extent assumed for a purely symbolic dimension (no Bounded bound).

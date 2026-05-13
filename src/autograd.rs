@@ -516,7 +516,10 @@ pub fn build_backward_graph(
             | Opcode::Transpose | Opcode::Maximum | Opcode::Minimum | Opcode::ReduceMax
             | Opcode::ArgMax
             | Opcode::Prelu | Opcode::Embedding | Opcode::Pow
-            | Opcode::AddScalar | Opcode::MulScalar | Opcode::DivScalar => {
+            | Opcode::AddScalar | Opcode::MulScalar | Opcode::DivScalar
+            | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
+            | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
+            | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where => {
                 for &input_id in &node.inputs {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
