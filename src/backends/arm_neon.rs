@@ -3,7 +3,6 @@
 //! Gates on `target_arch = "aarch64"` + `feature = "neon"`.
 //! Provides U8x4 and U4x8 GEMV accelerators using NEON intrinsics.
 
-use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 
 #[cfg(all(target_arch = "aarch64", feature = "neon"))]

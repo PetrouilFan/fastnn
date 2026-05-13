@@ -1,6 +1,5 @@
 use crate::autograd::{self, Edge};
 use crate::ir::node::DimExpr;
-use smallvec::SmallVec;
 use std::sync::Arc;
 
 use super::{Tensor, TensorImpl};
