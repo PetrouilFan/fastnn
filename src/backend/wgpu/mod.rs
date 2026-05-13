@@ -27,6 +27,8 @@
 //! | MaxPool / AvgPool | Dedicated pooling WGSL shader |
 //! | Embedding | Gather WGSL shader |
 //! | Concat, Pad, Gather, Slice, BiasAdd, BatchNorm | CPU fallback |
+//! | Quantized MatMul (matmul_u4/u8) | CPU fallback (per-channel packed GEMM) |
+//! | Quantized Conv2d (conv2d_u4/u8) | CPU fallback (im2col + packed GEMM) |
 
 #![allow(dead_code)]
 
@@ -329,6 +331,26 @@ fn try_gpu_dispatch(
         }
         "argmax" => {
             argmax::dispatch_argmax_gpu(arena, input_slices, output_slice)
+        }
+        "matmul_u4" | "matmul_u8" => {
+            // Quantized matmul falls back to CPU — the WGSL GEMV shader doesn't
+            // yet support per-channel quantization or packed u4/u8 words.
+            // TODO(v2.1): add a packed GEMM/GEMV WGSL shader with per-channel scales.
+            Err(BackendError::UnsupportedOp(format!(
+                "{}: GPU dispatch not yet implemented for quantized matmul, falling back to CPU",
+                kernel_name
+            )))
+        }
+        "conv2d_u4" | "conv2d_u8" => {
+            // Quantized conv2d falls back to CPU — the WGSL conv_packed shader
+            // hardcodes U4x8 packing and lacks U8x4 support. The im2col+GEMM
+            // approach on CPU is correct for v2.0.0 inference.
+            // TODO(v2.1): generalize conv_packed.wgsl for U8x4 and wire
+            // conv2d_packed_wgpu<T>() into this dispatch path.
+            Err(BackendError::UnsupportedOp(format!(
+                "{}: GPU dispatch not yet implemented for quantized conv2d, falling back to CPU",
+                kernel_name
+            )))
         }
         "upsample_nearest2d" | "upsample_bilinear2d" => {
             Err(BackendError::UnsupportedOp(kernel_name.to_string()))
