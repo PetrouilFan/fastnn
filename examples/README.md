@@ -95,6 +95,5 @@ optimized_header = optimize_graph(header)
 
 ## Performance Notes
 
-- The Python `DAGModel` prototype executes ops through Python dispatch
-- The Rust `DAGExecutor` (production) executes ops through native Rust code with direct Tensor method calls
+- All ONNX models run through the v2.0 AOT compiler pipeline (`AotExecutor`) which compiles the graph through shape inference, operator fusion, optional quantization, and memory planning before execution
 - Conv2d currently runs on CPU; GPU support requires WGPU conv kernels (planned)
