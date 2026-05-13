@@ -81,6 +81,10 @@ pub enum Opcode {
     Flip,
     /// Element-wise where(condition, x, y) — selects from x or y based on condition
     Where,
+    /// Top-K values: returns the top-k values from the input along the given axis.
+    TopKValues,
+    /// Top-K indices: returns the indices of the top-k values along the given axis.
+    TopKIndices,
     // ── v2.1 optimizer opcodes (CPU training via IR) ──────────────────
     /// SGD weight update: weight -= lr * (grad + weight_decay * weight)
     SgdUpdate,

@@ -674,6 +674,41 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Return the top-k values along the given axis.
+    /// k is the number of values to select.
+    /// axis: -1 means the last dimension.
+    pub fn topk_values(&self, input: &GraphTensor, k: usize, axis: i64) -> GraphTensor {
+        let output_type = TensorType::new(input.shape().to_vec(), input.dtype());
+        let mut attrs = HashMap::new();
+        attrs.insert("k".to_string(), k.to_string());
+        attrs.insert("axis".to_string(), axis.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::TopKValues,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Return the indices of the top-k values along the given axis.
+    /// Output dtype is I64 (indices).
+    pub fn topk_indices(&self, input: &GraphTensor, k: usize, axis: i64) -> GraphTensor {
+        let output_type = TensorType::new(input.shape().to_vec(), IrDType::I64);
+        let mut attrs = HashMap::new();
+        attrs.insert("k".to_string(), k.to_string());
+        attrs.insert("axis".to_string(), axis.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::TopKIndices,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Reshape tensor.
     pub fn reshape(&self, input: &GraphTensor, shape: &[DimExpr]) -> GraphTensor {
         let output_type = TensorType::new(shape.to_vec(), input.dtype());
