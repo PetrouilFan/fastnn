@@ -980,12 +980,14 @@ pub struct AotExecutor {
 #[pymethods]
 impl AotExecutor {
     #[new]
-    #[pyo3(signature = (nodes, params, input_names, output_names))]
+    #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, quantize=None))]
     fn new(
         nodes: Vec<std::collections::HashMap<String, String>>,
         params: std::collections::HashMap<String, PyTensor>,
         input_names: Vec<String>,
         output_names: Vec<String>,
+        input_shapes: Option<std::collections::HashMap<String, Vec<i64>>>,
+        quantize: Option<u8>,
     ) -> pyo3::PyResult<Self> {
         // Convert Python node dicts to OnnxNodes
         let onnx_nodes: Vec<crate::onnx::converter::OnnxNode> = nodes
@@ -1034,16 +1036,37 @@ impl AotExecutor {
             .map(|(k, v)| (k, v.inner))
             .collect();
 
+        // Build input shapes map if provided.
+        let mut rust_input_shapes: std::collections::HashMap<String, Vec<crate::ir::node::DimExpr>> =
+            std::collections::HashMap::new();
+        if let Some(shapes) = input_shapes {
+            for (name, dims) in shapes {
+                let ir_dims: Vec<crate::ir::node::DimExpr> = dims
+                    .into_iter()
+                    .map(|d| {
+                        if d < 0 {
+                            // Negative dim = symbolic (batch, height, width, etc.)
+                            crate::ir::node::DimExpr::Symbol(format!("d{}", -d))
+                        } else {
+                            crate::ir::node::DimExpr::Known(d as u64)
+                        }
+                    })
+                    .collect();
+                rust_input_shapes.insert(name, ir_dims);
+            }
+        }
+
         let converter = crate::onnx::converter::OnnxConverter::new(
             &onnx_nodes, &rust_params, &input_names, &output_names,
-        );
+        )
+        .with_input_shapes(&rust_input_shapes);
         let graph = converter
             .to_compute_graph()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
         let executor = crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
         let (plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan(&graph)
+            .compile_with_plan_and_quantize(&graph, quantize)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let output_map: Vec<(String, usize)> = output_names
