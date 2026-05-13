@@ -106,8 +106,8 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
             continue;
         }
 
-        // Determine output channels (dim 0 of the weight tensor).
-        let out_channels = orig_shape.get(0).copied().unwrap_or(1);
+        // Determine inner dimension for the weight tensor.
+        let _out_channels = orig_shape.get(0).copied().unwrap_or(1);
         let inner_dim = if orig_shape.len() >= 2 {
             orig_shape[1..].iter().product::<usize>()
         } else {
@@ -119,7 +119,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
         }
 
         // Quantize using PackedTensor and extract raw bytes + metadata.
-        let (packed_bytes, scales, zero_points, new_dtype) = if bit_width == 4 {
+        let (packed_bytes, _scales, _zero_points, new_dtype) = if bit_width == 4 {
             let pt = PackedTensor::<U4x8>::from_f32_per_channel(&f32_data, &orig_shape);
             let bytes = pt.as_bytes().to_vec();
             (bytes, pt.scales.clone(), pt.zeros.clone(), IrDType::U4 { scales: pt.scales.clone(), zero_points: pt.zeros.clone() })

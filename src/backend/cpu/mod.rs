@@ -372,13 +372,42 @@ impl Backend for CpuBackend {
                     let padding: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
                     let dilation: usize = node.attrs.get("dilation").and_then(|d| d.parse().ok()).unwrap_or(1);
                     let groups: usize = node.attrs.get("groups").and_then(|g| g.parse().ok()).unwrap_or(1);
+                    // Detect quantized weights for packed conv2d dispatch
+                    let weight_dtype = node.inputs.get(1)
+                        .and_then(|&w_id| graph.get_node(w_id))
+                        .map(|wn| wn.output_type.dtype.clone());
+                    let is_quantized = weight_dtype.as_ref().map_or(false, |d| matches!(d, IrDType::U4 { .. } | IrDType::U8 { .. }));
+                    let (kernel_name, weight_meta) = if is_quantized {
+                        let dtype = weight_dtype.as_ref().unwrap();
+                        let (kernel, bit_width) = if matches!(dtype, IrDType::U4 { .. }) {
+                            ("conv2d_u4", 4usize)
+                        } else {
+                            ("conv2d_u8", 8usize)
+                        };
+                        let meta = node.inputs.get(1).and_then(|&w_id| {
+                            graph.get_node(w_id).map(|wn| {
+                                let (bw, scales, zero_points) = match &wn.output_type.dtype {
+                                    IrDType::U4 { scales, zero_points } => (4usize, scales.clone(), zero_points.clone()),
+                                    IrDType::U8 { scales, zero_points } => (8usize, scales.clone(), zero_points.clone()),
+                                    _ => (bit_width, vec![], vec![]),
+                                };
+                                let w_shape: Vec<usize> = wn.output_type.shape.iter()
+                                    .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
+                                    .collect();
+                                crate::backend::QuantizedWeightMeta { bit_width: bw, scales, zero_points, shape: w_shape }
+                            })
+                        });
+                        (kernel.to_string(), meta)
+                    } else {
+                        ("conv2d".to_string(), None)
+                    };
                     instructions.push(Instruction::CallKernel {
-                        kernel_name: "conv2d".to_string(),
+                        kernel_name,
                         input_slices,
                         output_slice,
                         params: vec![stride, padding, dilation, groups],
                         param_dims: None,
-                        weight_meta: None,
+                        weight_meta,
                     });
                 }
                 Opcode::BatchNorm | Opcode::LayerNorm => {
@@ -1401,11 +1430,12 @@ impl Backend for CpuBackend {
                             }
                         }
                         "matmul_u4" => {
-                            if let [w_slice, a_slice] = &input_slices[..] {
-                                let (weights, activations) = {
+                            // input_slices: [activation (f32), weight (packed U4)]
+                            if let [a_slice, w_slice] = &input_slices[..] {
+                                let (activations, packed_bytes) = {
                                     let d = arena.data_mut();
-                                    (bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec(),
-                                     bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec())
+                                    (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
+                                     bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec())
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u4: expected params [M,K,N]".into())); };
@@ -1413,8 +1443,7 @@ impl Backend for CpuBackend {
                                     bit_width: 4, scales: vec![1.0], zero_points: vec![0.0], shape: vec![m, k]
                                 });
                                 // Construct PackedTensor from arena data and call SIMD gemm
-                                let _num_words = weights.len();
-                                let u4x8_data: Vec<U4x8> = bytemuck::cast_slice(&weights).to_vec();
+                                let u4x8_data: Vec<U4x8> = bytemuck::cast_slice(&packed_bytes).to_vec();
                                 let pt = PackedTensor::from_raw(u4x8_data, meta.shape.clone(), meta.scales, meta.zero_points);
                                 let out_f32 = {
                                     let d = arena.data_mut();
@@ -1434,11 +1463,12 @@ impl Backend for CpuBackend {
                             }
                         }
                         "matmul_u8" => {
-                            if let [w_slice, a_slice] = &input_slices[..] {
-                                let (weights, activations) = {
+                            // input_slices: [activation (f32), weight (packed U8)]
+                            if let [a_slice, w_slice] = &input_slices[..] {
+                                let (activations, packed_bytes) = {
                                     let d = arena.data_mut();
-                                    (bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec(),
-                                     bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec())
+                                    (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
+                                     bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec())
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u8: expected params [M,K,N]".into())); };
@@ -1446,7 +1476,7 @@ impl Backend for CpuBackend {
                                     bit_width: 8, scales: vec![1.0], zero_points: vec![0.0], shape: vec![m, k]
                                 });
                                 // Construct PackedTensor from arena data and call SIMD gemm
-                                let u8x4_data: Vec<U8x4> = bytemuck::cast_slice(&weights).to_vec();
+                                let u8x4_data: Vec<U8x4> = bytemuck::cast_slice(&packed_bytes).to_vec();
                                 let pt = PackedTensor::from_raw(u8x4_data, meta.shape.clone(), meta.scales, meta.zero_points);
                                 let out_f32 = {
                                     let d = arena.data_mut();
@@ -1800,6 +1830,141 @@ impl Backend for CpuBackend {
                                 }
                             }
                         }
+                        "conv2d_u4" | "conv2d_u8" => {
+                            // Quantized conv2d using im2col + packed GEMM (same approach as PackedConv2d)
+                            // input_slices: [activation (f32), weight (packed)]  optional: [bias (f32)]
+                            // weight_meta carries bit_width, shape=[OC, IC_per_group*KH*KW], scales[], zero_points[]
+                            // Approach: build im2col matrix [N*OH*OW, col_w], then call gemm_cpu per batch
+                            // where PackedTensor weights have shape [OC, col_w] and each GEMV produces OC outputs.
+                            if let [a_slice, w_slice] = &input_slices[..] {
+                                let (input_data, packed_bytes) = {
+                                    let d = arena.data_mut();
+                                    (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
+                                     bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec())
+                                };
+                                let bias_data: Vec<f32> = if input_slices.len() >= 3 {
+                                    let b_slice = &input_slices[2];
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec()
+                                } else {
+                                    vec![]
+                                };
+                                let &[stride, padding, dilation, groups] = &params[..] else {
+                                    return Err(BackendError::Dispatch("conv2d_u4/u8: expected params [stride, padding, dilation, groups]".into()));
+                                };
+                                let meta = weight_meta.clone().ok_or_else(|| {
+                                    BackendError::Dispatch("conv2d_u4/u8: missing weight_meta".into())
+                                })?;
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                // Weight shape: [OC, IC_per_group * KH * KW]
+                                let oc = meta.shape.first().copied().unwrap_or(1);
+                                let inner = meta.shape.get(1).copied().unwrap_or(1);
+                                let ni = input_data.len();
+                                if groups == 0 { return Err(BackendError::Dispatch("conv2d_u4/u8: groups=0".into())); }
+                                // Infer (N, C, H, W, kernel_size) from tensor sizes and conv params.
+                                // inner = (C / groups) * KH * KW. Try common kernel sizes.
+                                let dims = (|| -> Option<(usize, usize, usize, usize, usize)> {
+                                    for &n in &[1, 2, 4, 8, 16, 32, 64] {
+                                        if ni % n != 0 || out_f32.len() % n != 0 { continue; }
+                                        let c_hw = ni / n;
+                                        let f_hout_wout = out_f32.len() / n;
+                                        if f_hout_wout % oc != 0 { continue; }
+                                        let hout_wout = f_hout_wout / oc;
+                                        for &ksize in &[1, 3, 5, 7, 9, 11] {
+                                            let c_total = (inner / (ksize * ksize)) * groups;
+                                            if inner != (c_total / groups) * ksize * ksize { continue; }
+                                            if c_hw % c_total != 0 { continue; }
+                                            let hw = c_hw / c_total;
+                                            for h in 1..=hw {
+                                                if hw % h != 0 { continue; }
+                                                let w = hw / h;
+                                                let dk = (ksize - 1) * dilation + 1;
+                                                let h_out = if h + 2 * padding >= dk { (h + 2 * padding - dk) / stride + 1 } else { 0 };
+                                                let w_out = if w + 2 * padding >= dk { (w + 2 * padding - dk) / stride + 1 } else { 0 };
+                                                if h_out > 0 && w_out > 0 && h_out * w_out == hout_wout {
+                                                    return Some((n, c_total, h, w, ksize));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None
+                                })();
+                                let (n, c, h, w, kernel_size) = dims.ok_or_else(|| {
+                                    BackendError::Dispatch("conv2d_u4/u8: could not infer spatial dimensions".into())
+                                })?;
+                                let c_per_g = c / groups;
+                                let dk = (kernel_size - 1) * dilation + 1;
+                                let h_out = if h + 2 * padding >= dk { (h + 2 * padding - dk) / stride + 1 } else { 0 };
+                                let w_out = if w + 2 * padding >= dk { (w + 2 * padding - dk) / stride + 1 } else { 0 };
+                                // Dispatch based on bit_width to handle different PackedTensor types
+                                // (PackedTensor<U4x8> and PackedTensor<U8x4> are different types)
+                                macro_rules! dispatch_conv2d_quant {
+                                    ($PackedType:ty, $byte_cast:expr) => {{
+                                        let packed_data: Vec<$PackedType> = bytemuck::cast_slice(&packed_bytes).to_vec();
+                                        let pt = PackedTensor::from_raw(packed_data, meta.shape.clone(), meta.scales, meta.zero_points);
+                                        let col_w = c_per_g * kernel_size * kernel_size;
+                                        for nn in 0..n {
+                                            let num_pixels = h_out * w_out;
+                                            let mut col_matrix = vec![0.0f32; num_pixels * col_w];
+                                            for hh in 0..h_out {
+                                                for ww in 0..w_out {
+                                                    let row = hh * w_out + ww;
+                                                    for g in 0..groups {
+                                                        for cc in 0..c_per_g {
+                                                            for kkh in 0..kernel_size {
+                                                                for kkw in 0..kernel_size {
+                                                                    let h_in = (hh * stride + kkh * dilation) as i64 - padding as i64;
+                                                                    let w_in = (ww * stride + kkw * dilation) as i64 - padding as i64;
+                                                                    if h_in >= 0 && h_in < h as i64 && w_in >= 0 && w_in < w as i64 {
+                                                                        let src = nn * (c * h * w)
+                                                                            + (g * c_per_g + cc) * (h * w)
+                                                                            + h_in as usize * w + w_in as usize;
+                                                                        let dst = row * col_w
+                                                                            + (g * c_per_g + cc) * (kernel_size * kernel_size)
+                                                                            + kkh * kernel_size + kkw;
+                                                                        if src < input_data.len() && dst < col_matrix.len() {
+                                                                            col_matrix[dst] = input_data[src];
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let batch_inputs: Vec<Vec<f32>> = (0..num_pixels)
+                                                .map(|p| col_matrix[p * col_w..(p + 1) * col_w].to_vec())
+                                                .collect();
+                                            let mut batch_outputs: Vec<Vec<f32>> = (0..num_pixels)
+                                                .map(|_| vec![0.0f32; oc])
+                                                .collect();
+                                            crate::backend::cpu::microkernels::gemm_cpu(&pt, &batch_inputs, &mut batch_outputs);
+                                            for pixel in 0..num_pixels {
+                                                for ff in 0..oc {
+                                                    let mut val = batch_outputs[pixel][ff];
+                                                    if !bias_data.is_empty() && ff < bias_data.len() {
+                                                        val += bias_data[ff];
+                                                    }
+                                                    let out_idx = nn * (oc * h_out * w_out) + ff * (h_out * w_out) + pixel;
+                                                    if out_idx < out_f32.len() {
+                                                        out_f32[out_idx] = val;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }}
+                                }
+                                if meta.bit_width == 4 {
+                                    dispatch_conv2d_quant!(U4x8, 4);
+                                } else {
+                                    dispatch_conv2d_quant!(U8x4, 8);
+                                }
+
+                            }
+                        }
                         "concat" => {
                             if !input_slices.is_empty() {
                                 let mut output_offset = 0;
@@ -1818,6 +1983,7 @@ impl Backend for CpuBackend {
                                 }
                             }
                         }
+                        
                         "pool_f32" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let input = {
