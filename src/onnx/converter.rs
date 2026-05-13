@@ -40,6 +40,7 @@ pub struct OnnxConverter<'a> {
     params: &'a HashMap<String, Tensor>,
     input_names: &'a [String],
     output_names: &'a [String],
+    input_shapes: Option<&'a HashMap<String, Vec<DimExpr>>>,
     /// Mapping from ONNX tensor name → graph tensor node.
     name_to_id: HashMap<String, GraphTensor>,
     graph: GraphBuilder,
@@ -58,10 +59,18 @@ impl<'a> OnnxConverter<'a> {
             params,
             input_names,
             output_names,
+            input_shapes: None,
             name_to_id: HashMap::new(),
             graph: GraphBuilder::new(),
             errors: Vec::new(),
         }
+    }
+
+    /// Supply explicit shapes for dynamic graph inputs.
+    /// Each entry maps an input name to a list of DimExpr dimensions.
+    pub fn with_input_shapes(mut self, shapes: &'a HashMap<String, Vec<DimExpr>>) -> Self {
+        self.input_shapes = Some(shapes);
+        self
     }
 
     /// Convert the ONNX graph to a ComputeGraph.
@@ -74,7 +83,24 @@ impl<'a> OnnxConverter<'a> {
                 let gt = self.graph.input(&shape, ir_dtype_from_dtype(t.dtype()));
                 input_ids.push(gt.node_id());
                 self.name_to_id.insert(name.clone(), gt);
+            } else if let Some(shape_map) = self.input_shapes {
+                if let Some(dims) = shape_map.get(name.as_str()) {
+                    // Use the caller-supplied shape for this dynamic input.
+                    let gt = self.graph.input_with_dims(dims, IrDType::F32);
+                    input_ids.push(gt.node_id());
+                    self.name_to_id.insert(name.clone(), gt);
+                } else {
+                    // Input name not in shapes map: fallback to bounded.
+                    let bounded = DimExpr::Bounded {
+                        sym: name.clone(),
+                        max: 1_000_000,
+                    };
+                    let gt = self.graph.input_with_dims(&[bounded], IrDType::F32);
+                    input_ids.push(gt.node_id());
+                    self.name_to_id.insert(name.clone(), gt);
+                }
             } else {
+                // Fallback: single bounded dimension.
                 let bounded = DimExpr::Bounded {
                     sym: name.clone(),
                     max: 1_000_000,

@@ -76,7 +76,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
             None => continue,
         };
 
-        let (f32_data, orig_shape, orig_numel) = match &const_node.opcode {
+        let (f32_data, orig_shape, _orig_numel) = match &const_node.opcode {
             Opcode::Constant(TensorValue::Data { bytes, tensor_type }) => {
                 let numel = match tensor_type.numel() {
                     Some(n) => n as usize,
@@ -106,12 +106,29 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
             continue;
         }
 
-        // Determine inner dimension for the weight tensor.
-        let _out_channels = orig_shape.get(0).copied().unwrap_or(1);
-        let inner_dim = if orig_shape.len() >= 2 {
-            orig_shape[1..].iter().product::<usize>()
+        // For 2D MatMul weights, transpose from [K, N] to [N, K] so the
+        // packed GEMM kernel (gemm_packed_batched) sees [N_out, K_in].
+        // For Conv weights ([N_out, C_in, KH, KW]), N_out is already first —
+        // per-channel quantization along dim 0 is correct as-is.
+        let (quant_data, quant_shape) = if orig_shape.len() == 2 {
+            let rows = orig_shape[0];
+            let cols = orig_shape[1];
+            let mut transposed = vec![0.0f32; rows * cols];
+            for r in 0..rows {
+                for c in 0..cols {
+                    transposed[c * rows + r] = f32_data[r * cols + c];
+                }
+            }
+            (transposed, vec![cols, rows])
         } else {
-            f32_data.len()
+            (f32_data, orig_shape)
+        };
+
+        // Determine inner dimension for the weight tensor.
+        let inner_dim = if quant_shape.len() >= 2 {
+            quant_shape[1..].iter().product::<usize>()
+        } else {
+            quant_data.len()
         };
 
         if inner_dim == 0 {
@@ -120,11 +137,11 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
 
         // Quantize using PackedTensor and extract raw bytes + metadata.
         let (packed_bytes, _scales, _zero_points, new_dtype) = if bit_width == 4 {
-            let pt = PackedTensor::<U4x8>::from_f32_per_channel(&f32_data, &orig_shape);
+            let pt = PackedTensor::<U4x8>::from_f32_per_channel(&quant_data, &quant_shape);
             let bytes = pt.as_bytes().to_vec();
             (bytes, pt.scales.clone(), pt.zeros.clone(), IrDType::U4 { scales: pt.scales.clone(), zero_points: pt.zeros.clone() })
         } else {
-            let pt = PackedTensor::<U8x4>::from_f32_per_channel(&f32_data, &orig_shape);
+            let pt = PackedTensor::<U8x4>::from_f32_per_channel(&quant_data, &quant_shape);
             let bytes = pt.as_bytes().to_vec();
             (bytes, pt.scales.clone(), pt.zeros.clone(), IrDType::U8 { scales: pt.scales.clone(), zero_points: pt.zeros.clone() })
         };
@@ -161,7 +178,7 @@ mod tests {
     /// Helper: create a ComputeGraph with a MatMul and f32 Constant weight.
     fn build_matmul_graph(weight_data: &[f32], weight_shape: &[usize]) -> ComputeGraph {
         let gb = GraphBuilder::new();
-        let m = weight_shape[0];
+        let _m = weight_shape[0];
         let k = weight_shape[1];
         let input = gb.input_with_dims(&[DimExpr::Known(1), DimExpr::Known(k as u64)], IrDType::F32);
         let weight_tt = TensorType::new(
@@ -196,13 +213,15 @@ mod tests {
         assert!(has_u4_const, "Weight should be quantized to U4 after quantization");
 
         // Verify per-channel scales.
+        // The [2,8] weight is transposed to [8,2] for the packed GEMM convention,
+        // resulting in 8 per-channel scales (one per output channel = N dimension).
         let u4_node = graph.nodes.iter().find(|n| {
             matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::U4 { .. }))
         }).unwrap();
 
         if let IrDType::U4 { scales, zero_points } = &u4_node.output_type.dtype {
-            assert_eq!(scales.len(), 2, "Should have 2 per-channel scales for a [2,8] weight");
-            assert_eq!(zero_points.len(), 2, "Should have 2 per-channel zero_points");
+            assert_eq!(scales.len(), 8, "Should have 8 per-channel scales for a [2,8] weight (transposed to [8,2])");
+            assert_eq!(zero_points.len(), 8, "Should have 8 per-channel zero_points");
             for &s in scales.iter() {
                 assert!(s > 0.0, "Scale should be positive, got {}", s);
             }
@@ -229,8 +248,8 @@ mod tests {
         }).unwrap();
 
         if let IrDType::U8 { scales, zero_points } = &u8_node.output_type.dtype {
-            assert_eq!(scales.len(), 2, "Should have 2 per-channel scales for a [2,8] weight");
-            assert_eq!(zero_points.len(), 2);
+            assert_eq!(scales.len(), 8, "Should have 8 per-channel scales for a [2,8] weight (transposed to [8,2])");
+            assert_eq!(zero_points.len(), 8);
         } else {
             panic!("Expected U8 dtype after quantization");
         }
