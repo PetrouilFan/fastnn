@@ -41,14 +41,6 @@ FusedConvBnGelu = _core.FusedConvBnGelu
 # Python layers
 from fastnn.layers import Flatten, PySequential, BasicBlock
 
-from fastnn._core import (
-    PyLinear4 as Linear4, PyLinear8 as Linear8, PyLinear16 as Linear16, PyLinear32 as Linear32,
-    PyPackedMultiHeadAttention4 as PackedMultiHeadAttention4,
-    PyPackedMultiHeadAttention8 as PackedMultiHeadAttention8,
-    PyPackedTransformerEncoder4 as PackedTransformerEncoder4,
-    PyPackedTransformerEncoder8 as PackedTransformerEncoder8,
-)
-
 # Weight initialization (use submodule import to avoid __getattr__ fallback)
 import fastnn.init as init
 
@@ -91,7 +83,6 @@ __all__ = [
     "Mish",
     "Sequential",
     "ModuleList",
-    "DAGExecutor",
     "ResidualBlock",
     "FusedConvBn",
     "FusedConvBnRelu",

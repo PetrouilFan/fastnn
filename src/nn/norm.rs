@@ -435,7 +435,7 @@ impl Module for GroupNorm {
             // Scalar constants reused below
             let scalar_tt = TensorType::new(vec![], IrDType::F32);
             let two_data = 2.0f32.to_le_bytes().to_vec();
-            let two_c = g.constant(&two_data, scalar_tt.clone());
+            let _two_c = g.constant(&two_data, scalar_tt.clone());
             let eps_data = self.eps.to_le_bytes().to_vec();
             let eps_c = g.constant(&eps_data, scalar_tt);
 
