@@ -292,14 +292,15 @@ fnn.xywh2xyxy(boxes)                      # Convert bbox format
 fnn.scale_boxes(img1_shape, boxes, img0_shape)  # Rescale boxes
 ```
 
-## DAG Executor
+## AOT Executor
 
 ```python
-fnn.DAGExecutor(params, ops, input_names, output_names)
-# Executes ONNX model graphs natively in Rust
+fnn.AotExecutor(nodes, params, input_names, output_names, input_shapes=None, quantize=None)
+# Compiles and executes ONNX model graphs via the v2.0 AOT pipeline
 executor.forward({"input_name": tensor})
-executor(tensor)  # For single-input/single-output
 ```
+
+See [ONNX Import](../io/#onnx-import) for usage with real ONNX models.
 
 ## Utilities
 

@@ -1,16 +1,18 @@
 # ONNX Model Support in FastNN
 
-FastNN can load and execute ONNX models through a multi-stage pipeline:
+FastNN loads and executes ONNX models through the v2.0 AOT compiler pipeline:
 
 ## Pipeline
 
 ```
 ONNX (.onnx)
-    [import_onnx]  — parse ONNX graph, extract weights
-.fnn (JSON header + binary params, v2 or v3)
-    [build_model_from_fnn]  — auto-detect provenance
-DAGExecutor (Rust) or Sequential (Python)
-    [forward]  — execute graph topologically
+    [import_onnx]  — parse ONNX graph, extract weights (Python)
+.fnn (JSON header + binary params)
+    [OnnxConverter]  — convert to ComputeGraph IR (Rust)
+ComputeGraph IR
+    [compiler passes]  — shape inference → fusion → quantization → memory planning
+ExecutablePlan
+    [GraphExecutor::run]  — execute on CPU (or WGPU fallback)
 Output tensors
 ```
 
@@ -21,103 +23,77 @@ import fastnn as fnn
 
 # Convert ONNX to .fnn format
 info = fnn.convert_from_onnx("model.onnx", "model.fnn")
-# info contains: layers, parameters, input_shape, output_shape, graph
 ```
 
-### Supported Ops (50 operator types)
+### Supported Ops (90+ operator types)
 
-The importer supports 50 ONNX operator types:
+The importer supports 90+ ONNX operator types, of which 60+ have native IR handlers:
 
-- **NN layers**: Conv, Gemm/Linear, BatchNormalization, MaxPool, AveragePool, GlobalAveragePool
-- **Activations**: Relu, Sigmoid, Tanh, SiLU, LeakyRelu, Elu, Softmax, Clip, etc.
-- **Arithmetic**: Add, Sub, Mul, Div, Pow, Exp, Log, Sqrt, Neg, MatMul
-- **Shape ops**: Reshape, Flatten, Transpose, Concat, Split, Slice, Pad (v2), Tile, Squeeze, Unsqueeze
-- **Reductions**: ReduceMean, ReduceSum
-- **Data**: Gather, Where, TopK, NonMaxSuppression, Constant, Identity, Resize
-- **Quantized ops**: QuantizeLinear, DequantizeLinear, QLinearConv, MatMulInteger
-- **Advanced**: NonZero, Unique, Tril, Triu
+- **NN layers**: Conv, ConvTranspose, Gemm/MatMul, BatchNormalization, LayerNormalization, RMSNormalization, MaxPool, AveragePool, GlobalAveragePool
+- **Activations**: Relu, Gelu, Silu/Swish, Sigmoid, Tanh, LeakyRelu, Elu, Softplus, HardSwish, Softmax, LogSoftmax, Clip, Selu, HardSigmoid, Mish, PReLU
+- **Arithmetic**: Add, Sub, Mul, Div, Pow, Exp, Log, Sqrt, Neg, Abs, Sign, Not
+- **Shape ops**: Reshape, Flatten, Transpose, Concat, Slice, Pad, Squeeze, Unsqueeze, Gather, ScatterND
+- **Reductions**: ReduceMean, ReduceSum, ReduceMax, ArgMax
+- **Data**: Where, CumSum, Erf, Embedding, Constant, Identity, Tile, Expand, Cast, Shape
+- **Quantized ops** (decomposed to f32): QuantizeLinear, DequantizeLinear, QLinearMatMul, QLinearConv
+- **Advanced**: NonMaxSuppression, NonZero, Unique
 
-### Quantized ONNX Import (v1.3)
-
-The ONNX importer detects `QuantizeLinear → DequantizeLinear` patterns around `Conv`/`MatMul` nodes and **folds them**, converting weights to packed storage during import for zero-cost quantized inference.
+## Stage 2: Build & Compile
 
 ```python
-from fastnn.precision import PrecisionConfig
-
-# Import with automatic Q/DQ folding
-info = fnn.convert_from_onnx("model.onnx", "model.fnn")
-
-# Or specify precision config for custom quantization
-config = PrecisionConfig.uniform("u4")
-info = fnn.convert_from_onnx("model.onnx", "model.fnn")
-```
-
-Key quantized ops supported:
-
-| Op | Description |
-|----|-------------|
-| `QuantizeLinear` | Scale + round + clamp quantization (q = round(v/scale) + zp) |
-| `DequantizeLinear` | Scale-based dequantization (v = (q − zp) × scale) |
-| `QLinearConv` | Dequantizes quantized input + weight, runs f32 conv, requantizes output |
-| `MatMulInteger` | Dequantizes both quantized inputs, runs f32 matmul |
-
-## Stage 2: Build
-
-```python
-# Auto-detects whether the model came from ONNX or PyTorch
+# Auto-detect provenance, compile through AOT pipeline
 model = fnn.build_model_from_fnn("model.fnn")
-# Returns Rust DAGExecutor (ONNX) or Python Sequential (PyTorch)
+# Returns Rust AotExecutor with compiled plan
+
+# Or compile explicitly with quantization:
+executor = fnn.AotExecutor(
+    nodes=model_nodes,
+    params=model_params,
+    input_names=["input"],
+    output_names=["output"],
+    quantize=4,  # 4-bit or 8-bit weight quantization
+)
 ```
+
+The v2.0 AOT compiler runs four passes:
+1. **Shape inference** — resolves symbolic dimensions
+2. **Operator fusion** — merges MatMul+Add+ReLU, Conv2d+Add+ReLU
+3. **Weight quantization** (optional) — replaces f32 weights with packed U4/U8
+4. **Memory planning** — allocates arena slots with live-range analysis
 
 ## Stage 3: Execute
 
-### Rust DAGExecutor (production)
-
-The `DAGExecutor` is a native Rust implementation that:
-- Executes nodes in topological order using a HashMap buffer
-- Dispatches to optimized CPU kernels via the dispatcher system
-- Supports 30+ operation types natively
-- Passes through unknown ops (returns first input)
-- Includes fused QuantizeLinear / DequantizeLinear support in graph execution
-
 ```python
-# The DAGExecutor takes input names matching the model's input
-x = fnn.tensor(numpy_array, list(numpy_array.shape))
-outputs = executor.forward({"images": x})
-# Returns dict of output name -> tensor
+# Input as dict of {name: tensor}
+outputs = executor.forward({"input": input_tensor})
+
+# Or for single-input models:
+output = executor(input_tensor)
 ```
 
-### Input/Output format
+## Input/Output format
 
 The executor accepts a dict of `{name: tensor}` and returns a dict of `{name: tensor}`.
-For single-input/single-output models, `Module::forward()` is also implemented:
+
+## Python API for ONNX Models
 
 ```python
-result = executor(input_tensor)  # Module trait forward
-```
+from fastnn.io import build_dag_model
+from fastnn import AotExecutor
 
-## Graph Optimization
+# Simple interface
+model = build_dag_model("model.fnn", quantize=4)
+result = model.forward({"input": x})
 
-```python
-from fastnn.io.graph_optimizer import optimize_graph
-
-with open("model.fnn", "rb") as f:
-    from fastnn.io import read_fnn_header
-    _, _, header, _ = read_fnn_header(f)
-
-optimized = optimize_graph(header)
-# Runs: 1. Dead node elimination, 2. Conv+BN fusion, 3. Constant folding (framework)
-```
-
-## Shape Inference
-
-```python
-from fastnn.io.shape_inference import infer_shape
-
-# Get output shape for any ONNX op
-out_shapes = infer_shape("Conv", [[1, 3, 224, 224]], {
-    "kernel_shape": [3, 3], "stride": 2, "padding": 1
-})  # [[1, 3, 112, 112]]
+# Direct AotExecutor for full control
+executor = AotExecutor(
+    nodes=nodes,
+    params=params,
+    input_names=["input"],
+    output_names=["output"],
+    input_shapes={"input": [-1, 3, 224, 224]},  # dynamic batch
+    quantize=8,
+)
 ```
 
 ## YOLO Object Detection
@@ -141,12 +117,8 @@ keep = nms(boxes, scores, iou_threshold=0.5)
 # Convert YOLO format
 boxes_xyxy = xywh2xyxy(boxes_xywh)
 
-# Scale from model input to original image
-boxes_scaled = scale_boxes((640, 640), boxes_xyxy, (1080, 1920))
-
 # Full YOLO output decoding (YOLOv5/v8/v10/v11)
 detections = yolo_decode(model_output, conf_threshold=0.25)
-detections = yolo_dfl_decode(model_output, conf_threshold=0.25)  # YOLOv8+ DFL
 ```
 
 ## Architecture
@@ -154,34 +126,33 @@ detections = yolo_dfl_decode(model_output, conf_threshold=0.25)  # YOLOv8+ DFL
 ```
 fastnn/
 io/
-    onnx.py              # ONNX importer (50 ops)
+    onnx.py              # ONNX importer (90+ ops)
     graph_builder.py     # Model building (auto-detect)
-    dag_model.py         # Python DAG prototype
-    shape_inference.py   # Shape inference (50 ops)
-    graph_optimizer.py   # Graph optimization (3 passes)
+    dag_model.py         # DAGModel → AotExecutor bridge
     calibrate.py         # Calibration infrastructure
-    act_calibrate.py     # Activation calibration (KL-divergence)
-    profiler.py          # Precision profiling & sensitivity analysis
+    act_calibrate.py     # Activation calibration
+    profiler.py          # Precision profiling
     validate.py          # Model validation
 models/
     yolo.py              # YOLO model wrapper
-utils/
-    nms.py               # NMS post-processing
 src/
-nn/
-    dag.rs               # Rust DAGExecutor (~35 ops)
-kernels/
-    cpu/
-        pooling.rs       # CPU kernels (max_pool2d, avg_pool2d)
-backends/
-    wgpu/
-        shaders/
-            conv_packed.wgsl  # WGPU packed convolution shader
+    ir/                  # ComputeGraph IR, GraphBuilder
+      node.rs            # Opcode (72 variants), IrDType, DimExpr, TensorType
+      builder.rs         # GraphBuilder — fluent IR construction API
+    compiler/passes/     # AOT compiler passes
+      shape_inference.rs # Symbolic shape resolution
+      operator_fusion.rs # MatMul+Add+ReLU, Conv2d+Add+ReLU
+      quantization.rs    # U4/U8 weight quantization
+      memory_planning.rs # Arena-based memory planning
+    backend/
+      cpu/mod.rs         # CpuBackend — dispatch all ops including quantized
+    onnx/
+      converter.rs       # OnnxConverter — ONNX nodes → ComputeGraph
 ```
 
 ## Current Limitations
 
-- **Conv2d**: CPU-only for general conv; WGPU packed conv shader exists (`conv_packed.wgsl`) but is experimental
-- **Control flow**: Loop, If ops recorded but not executed
-- **Training**: ONNX models are inference-only; autograd preserved but not optimized for ONNX graphs
-- **GPU**: Elementwise ops use WGPU dispatcher; Conv/pooling ops use CPU fallback
+- **Conv2d**: CPU-only for quantized; WGPU f32 conv supported
+- **Control flow**: Loop, If ops recorded but not supported
+- **GPU quantization**: U4/U8 quantized kernels are CPU-only (WGPU fallback); WGSL shaders planned for v2.2
+- **Training**: ONNX models are inference-only; IR training pipeline is experimental (v2.1)

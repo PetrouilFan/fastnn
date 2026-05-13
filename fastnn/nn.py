@@ -34,7 +34,6 @@ Mish = _core.Mish
 Sequential = _core.Sequential_
 ModuleList = _core.ModuleList
 ResidualBlock = _core.ResidualBlock
-DAGExecutor = _core.DAGExecutor
 FusedConvBn = _core.FusedConvBn
 FusedConvBnRelu = _core.FusedConvBnRelu
 FusedConvBnGelu = _core.FusedConvBnGelu
