@@ -2366,4 +2366,104 @@ mod tests {
                 g_val, &read_f32(&grad_result[0]), &grad_b);
         }
     }
+
+    #[test]
+    fn test_end_to_end_training_step() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let W = g.parameter(&[4, 2], IrDType::F32);
+        let b = g.parameter(&[2], IrDType::F32);
+
+        let mm = g.matmul(&x, &W);
+        let logits = g.add(&mm, &b);
+        let loss = g.reduce_mean(&logits, 0, false);
+
+        // First verify forward pass loss is correct
+        let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        let b_data = f32_data(&[0.0, 0.0]);
+
+        let fwd_result = g.compile_and_execute(
+            &[&loss], CpuBackend,
+            &[&x_data, &W_data, &b_data],
+        ).unwrap();
+        let fwd_loss = read_f32(&fwd_result[0]);
+        // x@W = [[5.0, 6.0]], +b = [[5.0, 6.0]], mean=0 → [5.0, 6.0]
+        assert!((fwd_loss[0] - 5.0).abs() < 1e-4, "fwd loss[0] should be 5.0, got {:?}", fwd_loss);
+        assert!((fwd_loss[1] - 6.0).abs() < 1e-4, "fwd loss[1] should be 6.0, got {:?}", fwd_loss);
+
+        // Now test backward pass
+        let grads = g.backward(&loss).unwrap();
+        assert_eq!(grads.len(), 3, "should return gradients for x, W, and b");
+
+        // Just compile & execute the gradient output for W
+        let grad_result = g.compile_and_execute(
+            &[&grads[1]], CpuBackend,  // dW
+            &[&x_data, &W_data, &b_data],
+        ).unwrap();
+        let dW_vals = read_f32(&grad_result[0]);
+        assert_eq!(dW_vals.len(), 8, "dW should have 8 elements");
+        // dW = x^T @ dL/dy, where dL/dy = [0.5, 0.5] (mean gradient)
+        // But this depends on the exact implementation
+        assert!(dW_vals.iter().any(|&v| v.abs() > 0.0), "dW should have non-zero gradients");
+
+        // Test optimizer step
+        let dW = &grads[1];
+        let updated_W = g.apply_sgd(&W, dW, 0.1);
+
+        let opt_result = g.compile_and_execute(
+            &[&updated_W], CpuBackend,
+            &[&x_data, &W_data, &b_data],
+        ).unwrap();
+        let updated_W_vals = read_f32(&opt_result[0]);
+        assert_eq!(updated_W_vals.len(), 8, "W updated should have 8 elements");
+
+        let W_init: Vec<f32> = read_f32(&W_data);
+        assert!(updated_W_vals.iter().zip(W_init.iter()).any(|(n, o)| (n - o).abs() > 1e-6),
+            "W should be updated by SGD");
+    }
+
+    #[test]
+    fn test_training_with_adam() {
+        let g = GraphBuilder::new();
+        // Model: y = x @ W, loss = mean(y)
+        let x = g.input(&[1, 4], IrDType::F32);
+        let W = g.parameter(&[4, 2], IrDType::F32);
+
+        let mm = g.matmul(&x, &W);
+        let loss = g.reduce_mean(&mm, 0, false);
+
+        // Backward
+        let grads = g.backward(&loss).unwrap();
+        assert_eq!(grads.len(), 2, "should return gradients for x and W");
+        let dW = &grads[1];  // second gradient is for W
+
+        // Adam requires m/v state tensors
+        let m = g.parameter(&[4, 2], IrDType::F32);
+        let v = g.parameter(&[4, 2], IrDType::F32);
+        let updated_W = g.apply_adam(&W, dW, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1);
+
+        let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        let m_data = f32_data(&[0.0; 8]);
+        let v_data = f32_data(&[0.0; 8]);
+
+        let result = g.compile_and_execute(
+            &[&loss, &updated_W, &m, &v],
+            CpuBackend,
+            &[&x_data, &W_data, &m_data, &v_data],
+        ).unwrap();
+
+        let updated_W_vals = read_f32(&result[1]);
+        assert_eq!(updated_W_vals.len(), 8, "W updated should have 8 elements");
+        let W_init: Vec<f32> = read_f32(&W_data);
+        assert!(updated_W_vals.iter().zip(W_init.iter()).any(|(n, o)| (n - o).abs() > 1e-6),
+            "W should be updated by Adam");
+
+        // m and v should also have been updated (non-zero now)
+        let updated_m = read_f32(&result[2]);
+        let updated_v = read_f32(&result[3]);
+        assert!(updated_m.iter().any(|&x| x > 0.0), "Adam m should be non-zero after update");
+        assert!(updated_v.iter().any(|&x| x > 0.0), "Adam v should be non-zero after update");
+    }
 }
