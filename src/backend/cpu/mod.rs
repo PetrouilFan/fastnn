@@ -844,6 +844,22 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                Opcode::TopKValues | Opcode::TopKIndices => {
+                    let k: usize = node.attrs.get("k").and_then(|s| s.parse().ok()).unwrap_or(1);
+                    let axis: i64 = node.attrs.get("axis").and_then(|s| s.parse().ok()).unwrap_or(-1);
+                    let kernel_name = match node.opcode {
+                        Opcode::TopKValues => "topk_values",
+                        _ => "topk_indices",
+                    };
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: kernel_name.to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![k, axis as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
                 // ── Optimizer ops ──────────────────────────────────
                 Opcode::SgdUpdate => {
                     let lr: f32 = node.attrs.get("lr").and_then(|s| s.parse().ok()).unwrap_or(0.01);
@@ -2680,10 +2696,44 @@ impl Backend for CpuBackend {
                                             *v = max_idx;
                                         }
                                     }
-                                }
-                            }
-                        }
-                        "upsample_nearest2d" => {
+                                 }
+                             }
+                         }
+                         "topk_values" | "topk_indices" => {
+                             if let Some(input_slice) = input_slices.first() {
+                                 let input = {
+                                     let d = arena.data_mut();
+                                     bytemuck::cast_slice::<_, f32>(
+                                         &d[input_slice.offset..input_slice.offset + input_slice.size]
+                                     ).to_vec()
+                                 };
+                                 let k = params.first().copied().unwrap_or(1);
+                                 let _axis = params.get(1).copied().unwrap_or(usize::MAX);
+                                 let is_values = kernel_name == "topk_values";
+
+                                 let d = arena.data_mut();
+                                 if is_values {
+                                     let out_slice = bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]);
+                                     let mut indexed: Vec<(usize, f32)> = input.iter().copied().enumerate().collect();
+                                     if input.len() > k {
+                                         indexed.select_nth_unstable_by(input.len().saturating_sub(k), |a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                                     }
+                                     for i in 0..k.min(out_slice.len()) {
+                                         out_slice[i] = indexed[input.len().saturating_sub(k) + i].1;
+                                     }
+                                 } else {
+                                     let out_slice = bytemuck::cast_slice_mut::<_, u64>(&mut d[out_start..out_end]);
+                                     let mut indexed: Vec<(usize, f32)> = input.iter().copied().enumerate().collect();
+                                     if input.len() > k {
+                                         indexed.select_nth_unstable_by(input.len().saturating_sub(k), |a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                                     }
+                                     for i in 0..k.min(out_slice.len()) {
+                                         out_slice[i] = indexed[input.len().saturating_sub(k) + i].0 as u64;
+                                     }
+                                 }
+                             }
+                         }
+                         "upsample_nearest2d" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let input = {
                                     let d = arena.data_mut();

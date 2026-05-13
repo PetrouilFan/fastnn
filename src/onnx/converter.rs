@@ -393,19 +393,33 @@ impl<'a> OnnxConverter<'a> {
                     }
                 } else {
                     // Equal split: each output gets dim_size / n_outputs.
-                    // Without shape info at converter time, we can't compute the slice bounds.
-                    // Fallback: use start=0, end=MAX for first output, others use 0-length.
-                    // In practice, ONNX models almost always provide the 'split' attribute.
-                    for (i, out_name) in node.outputs.iter().enumerate() {
-                        let output = if i == 0 {
-                            // First output gets priority in ambiguity
-                            ins[0].clone()
+                    let dim_size_opt = ins[0].shape().get(axis).and_then(|d| d.evaluate());
+                    if let Some(dim_size) = dim_size_opt {
+                        let part = dim_size as usize / n_outputs.max(1);
+                        if part > 0 {
+                            let mut start = 0usize;
+                            for (i, out_name) in node.outputs.iter().enumerate() {
+                                let end = if i == n_outputs - 1 {
+                                    dim_size as usize  // last output gets remainder
+                                } else {
+                                    start + part
+                                };
+                                let output = self.graph.slice(&ins[0], axis, start, end);
+                                self.name_to_id.insert(out_name.clone(), output);
+                                start = end;
+                            }
                         } else {
-                            // Other outputs get the same input (approximate — will be wrong
-                            // for consumers that depend on shape correctness)
-                            ins[0].clone()
-                        };
-                        self.name_to_id.insert(out_name.clone(), output);
+                            // Part is 0 (dim smaller than n_outputs): passthrough
+                            for out_name in &node.outputs {
+                                self.name_to_id.insert(out_name.clone(), ins[0].clone());
+                            }
+                        }
+                    } else {
+                        // Symbolic dimension: can't compute split at converter time
+                        // Fallback: all outputs get the full input (approximate)
+                        for out_name in &node.outputs {
+                            self.name_to_id.insert(out_name.clone(), ins[0].clone());
+                        }
                     }
                 }
             }
@@ -691,6 +705,255 @@ impl<'a> OnnxConverter<'a> {
                 let c_biased = self.graph.add(&c_scaled, &ins[7]);
                 let y = self.graph.clamp(&c_biased, 0.0, 255.0);
                 self.out(node, y);
+            }
+
+            // ── TopK ─────────────────────────────────────────────────
+            "TopK" => {
+                let k: usize = node.attrs.get("k").and_then(|s| s.parse().ok()).unwrap_or(1);
+                let axis: i64 = node.attrs.get("axis").and_then(|s| s.parse().ok()).unwrap_or(-1);
+                let values = self.graph.topk_values(&ins[0], k, axis);
+                let indices = self.graph.topk_indices(&ins[0], k, axis);
+                if let Some(out_name) = node.outputs.get(0) {
+                    self.name_to_id.insert(out_name.clone(), values);
+                }
+                if let Some(out_name) = node.outputs.get(1) {
+                    self.name_to_id.insert(out_name.clone(), indices);
+                }
+            }
+
+            // ── LSTM (decomposed into primitives) ────────────────────
+            "LSTM" => {
+                let hidden_size: usize = node.attrs.get("hidden_size")
+                    .and_then(|s| s.parse().ok())
+                    .ok_or("LSTM needs hidden_size attribute")?;
+                let _direction = node.attrs.get("direction").map(|s| s.as_str()).unwrap_or("forward");
+
+                // ins[0] = X [seq_len, batch, input_size]
+                // ins[1] = W [num_dir, 4*hidden, input_size]
+                // ins[2] = R [num_dir, 4*hidden, hidden_size]
+                // ins[3] = B [num_dir, 8*hidden] (optional)
+                // ins[4] = sequence_lens (optional)
+                // ins[5] = initial_h [num_dir, batch, hidden] (optional)
+                // ins[6] = initial_c [num_dir, batch, hidden] (optional)
+                let x = &ins[0];
+                let w = &ins[1];
+                let r = &ins[2];
+
+                // Extract current timestep (first timestep for single-step)
+                let x_t = self.graph.slice(x, 0, 0, 1);   // [1, batch, input_size]
+                let x_t = self.graph.squeeze(&x_t, 0);     // [batch, input_size]
+
+                // Squeeze num_directions dim from W and R
+                let w_sq = self.graph.squeeze(w, 0);  // [4*hidden, input_size]
+                let r_sq = self.graph.squeeze(r, 0);  // [4*hidden, hidden_size]
+
+                let chunk = hidden_size;
+                // ONNX gate layout: [i, o, f, c]
+                let w_i = self.graph.slice(&w_sq, 0, 0, chunk);
+                let w_o = self.graph.slice(&w_sq, 0, chunk, 2*chunk);
+                let w_f = self.graph.slice(&w_sq, 0, 2*chunk, 3*chunk);
+                let w_c = self.graph.slice(&w_sq, 0, 3*chunk, 4*chunk);
+                let r_i = self.graph.slice(&r_sq, 0, 0, chunk);
+                let r_o = self.graph.slice(&r_sq, 0, chunk, 2*chunk);
+                let r_f = self.graph.slice(&r_sq, 0, 2*chunk, 3*chunk);
+                let r_c = self.graph.slice(&r_sq, 0, 3*chunk, 4*chunk);
+
+                // Transpose weights for x @ W^T
+                let w_i_t = self.graph.transpose(&w_i);
+                let w_o_t = self.graph.transpose(&w_o);
+                let w_f_t = self.graph.transpose(&w_f);
+                let w_c_t = self.graph.transpose(&w_c);
+                let r_i_t = self.graph.transpose(&r_i);
+                let r_o_t = self.graph.transpose(&r_o);
+                let r_f_t = self.graph.transpose(&r_f);
+                let r_c_t = self.graph.transpose(&r_c);
+
+                // Batch size from X shape
+                let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
+                let h_c_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
+
+                // Create zero initial states if not provided
+                let zero_tt = TensorType::new(h_c_shape.clone(), IrDType::F32);
+                let zero_numel: usize = h_c_shape.iter()
+                    .filter_map(|d| d.evaluate())
+                    .product::<u64>() as usize;
+                let zero_bytes = vec![0u8; zero_numel * 4];
+                let h_prev = if ins.len() > 5 {
+                    self.graph.squeeze(&ins[5], 0)
+                } else {
+                    self.graph.constant(&zero_bytes, zero_tt.clone())
+                };
+                let c_prev = if ins.len() > 6 {
+                    self.graph.squeeze(&ins[6], 0)
+                } else {
+                    self.graph.constant(&zero_bytes, zero_tt)
+                };
+
+                // Bias extraction helper
+                let extract_bias = |conv: &OnnxConverter, gate_offset: usize| -> GraphTensor {
+                    if ins.len() > 3 {
+                        let b_sq = conv.graph.squeeze(&ins[3], 0);  // [8*hidden]
+                        let wb = conv.graph.slice(&b_sq, 0, gate_offset, gate_offset + chunk);
+                        let rb = conv.graph.slice(&b_sq, 0, gate_offset + 4*chunk, gate_offset + 4*chunk + chunk);
+                        conv.graph.add(&wb, &rb)
+                    } else {
+                        conv.scalar(0.0)
+                    }
+                };
+
+                // Gate computations
+                let x_w_i = self.graph.matmul(&x_t, &w_i_t);
+                let h_r_i = self.graph.matmul(&h_prev, &r_i_t);
+                let bias_i = extract_bias(self, 0);
+                let gate_i = self.graph.add(&self.graph.add(&x_w_i, &h_r_i), &bias_i);
+                let i_t = self.graph.sigmoid(&gate_i);
+
+                let x_w_o = self.graph.matmul(&x_t, &w_o_t);
+                let h_r_o = self.graph.matmul(&h_prev, &r_o_t);
+                let bias_o = extract_bias(self, chunk);
+                let gate_o = self.graph.add(&self.graph.add(&x_w_o, &h_r_o), &bias_o);
+                let o_t = self.graph.sigmoid(&gate_o);
+
+                let x_w_f = self.graph.matmul(&x_t, &w_f_t);
+                let h_r_f = self.graph.matmul(&h_prev, &r_f_t);
+                let bias_f = extract_bias(self, 2*chunk);
+                let gate_f = self.graph.add(&self.graph.add(&x_w_f, &h_r_f), &bias_f);
+                let f_t = self.graph.sigmoid(&gate_f);
+
+                let x_w_c = self.graph.matmul(&x_t, &w_c_t);
+                let h_r_c = self.graph.matmul(&h_prev, &r_c_t);
+                let bias_c = extract_bias(self, 3*chunk);
+                let gate_c = self.graph.add(&self.graph.add(&x_w_c, &h_r_c), &bias_c);
+                let c_tilde = self.graph.tanh(&gate_c);
+
+                // Cell & hidden update: C = f * C_prev + i * c̃, H = o * tanh(C)
+                let f_c_prev = self.graph.mul(&f_t, &c_prev);
+                let i_ct = self.graph.mul(&i_t, &c_tilde);
+                let c_new = self.graph.add(&f_c_prev, &i_ct);
+                let tanh_c = self.graph.tanh(&c_new);
+                let h_new = self.graph.mul(&o_t, &tanh_c);
+
+                // Outputs: Y (all steps), Y_h (final hidden), Y_c (final cell)
+                let y = self.graph.unsqueeze(&h_new, 0);  // [1, batch, hidden]
+                if let Some(out_name) = node.outputs.get(0) {
+                    self.name_to_id.insert(out_name.clone(), y);
+                }
+                if let Some(out_name) = node.outputs.get(1) {
+                    self.name_to_id.insert(out_name.clone(), h_new.clone());
+                }
+                if let Some(out_name) = node.outputs.get(2) {
+                    self.name_to_id.insert(out_name.clone(), c_new);
+                }
+            }
+
+            // ── GRU (decomposed into primitives) ─────────────────────
+            "GRU" => {
+                let hidden_size: usize = node.attrs.get("hidden_size")
+                    .and_then(|s| s.parse().ok())
+                    .ok_or("GRU needs hidden_size attribute")?;
+                let _direction = node.attrs.get("direction").map(|s| s.as_str()).unwrap_or("forward");
+                let _linear_before_reset: usize = node.attrs.get("linear_before_reset")
+                    .and_then(|s| s.parse().ok()).unwrap_or(0);
+
+                // ins[0] = X [seq_len, batch, input_size]
+                // ins[1] = W [num_dir, 3*hidden, input_size]
+                // ins[2] = R [num_dir, 3*hidden, hidden_size]
+                // ins[3] = B [num_dir, 6*hidden] (optional)
+                // ins[4] = sequence_lens (optional)
+                // ins[5] = initial_h [num_dir, batch, hidden] (optional)
+                let x = &ins[0];
+                let w = &ins[1];
+                let r = &ins[2];
+
+                // Extract current timestep
+                let x_t = self.graph.slice(x, 0, 0, 1);
+                let x_t = self.graph.squeeze(&x_t, 0);
+
+                // Squeeze num_directions dim from W and R
+                let w_sq = self.graph.squeeze(w, 0);  // [3*hidden, input_size]
+                let r_sq = self.graph.squeeze(r, 0);  // [3*hidden, hidden_size]
+
+                let chunk = hidden_size;
+                // ONNX GRU gate layout: [z, r, h]
+                let w_z = self.graph.slice(&w_sq, 0, 0, chunk);
+                let w_r = self.graph.slice(&w_sq, 0, chunk, 2*chunk);
+                let w_h = self.graph.slice(&w_sq, 0, 2*chunk, 3*chunk);
+                let r_z = self.graph.slice(&r_sq, 0, 0, chunk);
+                let r_r = self.graph.slice(&r_sq, 0, chunk, 2*chunk);
+                let r_h = self.graph.slice(&r_sq, 0, 2*chunk, 3*chunk);
+
+                // Transpose weights
+                let w_z_t = self.graph.transpose(&w_z);
+                let w_r_t = self.graph.transpose(&w_r);
+                let w_h_t = self.graph.transpose(&w_h);
+                let r_z_t = self.graph.transpose(&r_z);
+                let r_r_t = self.graph.transpose(&r_r);
+                let r_h_t = self.graph.transpose(&r_h);
+
+                // Batch size from X shape
+                let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
+                let h_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
+                let zero_tt = TensorType::new(h_shape.clone(), IrDType::F32);
+                let zero_numel: usize = h_shape.iter()
+                    .filter_map(|d| d.evaluate())
+                    .product::<u64>() as usize;
+                let zero_bytes = vec![0u8; zero_numel * 4];
+                let h_prev = if ins.len() > 5 {
+                    self.graph.squeeze(&ins[5], 0)
+                } else {
+                    self.graph.constant(&zero_bytes, zero_tt)
+                };
+
+                // Bias extraction for GRU (layout: [W_bz, W_br, W_bh, R_bz, R_br, R_bh])
+                let extract_gru_bias = |conv: &OnnxConverter, gate_offset: usize| -> (GraphTensor, GraphTensor) {
+                    if ins.len() > 3 {
+                        let b_sq = conv.graph.squeeze(&ins[3], 0);  // [6*hidden]
+                        let wb = conv.graph.slice(&b_sq, 0, gate_offset, gate_offset + chunk);
+                        let rb = conv.graph.slice(&b_sq, 0, gate_offset + 3*chunk, gate_offset + 3*chunk + chunk);
+                        (wb, rb)
+                    } else {
+                        (conv.scalar(0.0), conv.scalar(0.0))
+                    }
+                };
+
+                // z = sigmoid(x @ W_z^T + h @ R_z^T + b_z)
+                let (wb_z, rb_z) = extract_gru_bias(self, 0);
+                let x_w_z = self.graph.matmul(&x_t, &w_z_t);
+                let h_r_z = self.graph.matmul(&h_prev, &r_z_t);
+                let gate_z = self.graph.add(&self.graph.add(&x_w_z, &h_r_z), &self.graph.add(&wb_z, &rb_z));
+                let z_t = self.graph.sigmoid(&gate_z);
+
+                // r = sigmoid(x @ W_r^T + h @ R_r^T + b_r)
+                let (wb_r, rb_r) = extract_gru_bias(self, chunk);
+                let x_w_r = self.graph.matmul(&x_t, &w_r_t);
+                let h_r_r = self.graph.matmul(&h_prev, &r_r_t);
+                let gate_r = self.graph.add(&self.graph.add(&x_w_r, &h_r_r), &self.graph.add(&wb_r, &rb_r));
+                let r_t = self.graph.sigmoid(&gate_r);
+
+                // n = tanh(x @ W_h^T + r * (h @ R_h^T + R_bh) + W_bh)
+                let (wb_h, rb_h) = extract_gru_bias(self, 2*chunk);
+                let x_w_h = self.graph.matmul(&x_t, &w_h_t);
+                let h_r_h = self.graph.matmul(&h_prev, &r_h_t);
+                let h_r_h_bias = self.graph.add(&h_r_h, &rb_h);
+                let r_h_r = self.graph.mul(&r_t, &h_r_h_bias);
+                let gate_n = self.graph.add(&self.graph.add(&x_w_h, &r_h_r), &wb_h);
+                let n_t = self.graph.tanh(&gate_n);
+
+                // H = (1 - z) * n + z * h
+                let one = self.scalar(1.0);
+                let one_minus_z = self.graph.sub(&one, &z_t);
+                let on = self.graph.mul(&one_minus_z, &n_t);
+                let zh = self.graph.mul(&z_t, &h_prev);
+                let h_new = self.graph.add(&on, &zh);
+
+                // Outputs
+                let y = self.graph.unsqueeze(&h_new, 0);  // [1, batch, hidden]
+                if let Some(out_name) = node.outputs.get(0) {
+                    self.name_to_id.insert(out_name.clone(), y);
+                }
+                if let Some(out_name) = node.outputs.get(1) {
+                    self.name_to_id.insert(out_name.clone(), h_new);
+                }
             }
 
             // ── Fallback ────────────────────────────────────────────
