@@ -461,11 +461,19 @@ pub enum IrDType {
     I32,
     I64,
     Bool,
-    U4 { scale: f32, zero_point: i8 },
-    U8 { scale: f32, zero_point: i8 },
+    /// Packed 4-bit (U4x8): 8 values per u32 word.
+    /// `scales` and `zero_points` are per-output-channel vectors.
+    U4 { scales: Vec<f32>, zero_points: Vec<f32> },
+    /// Packed 8-bit (U8x4): 4 values per u32 word.
+    /// `scales` and `zero_points` are per-output-channel vectors.
+    U8 { scales: Vec<f32>, zero_points: Vec<f32> },
 }
 
 impl IrDType {
+    /// Logical byte size per element for arena planning.
+    /// For packed types this is a conservative over-estimate (safe for
+    /// worst-case memory planning).  Use [`packed_byte_size`] for the
+    /// actual storage size needed for a given logical element count.
     pub fn byte_size(&self) -> usize {
         match self {
             IrDType::F32 => 4,
@@ -474,8 +482,32 @@ impl IrDType {
             IrDType::I32 => 4,
             IrDType::I64 => 8,
             IrDType::Bool => 1,
+            // Conservative logical overestimate (packed data fits in 1 byte/elem).
             IrDType::U4 { .. } => 1,
             IrDType::U8 { .. } => 1,
+        }
+    }
+
+    /// Actual packed storage size in bytes for a given logical element
+    /// count.  For F32/F16/etc. this equals `numel * byte_size()`.
+    /// For packed types it computes word-level packing.
+    pub fn packed_byte_size(&self, numel: usize) -> usize {
+        match self {
+            IrDType::F32 => numel * 4,
+            IrDType::F16 | IrDType::BF16 => numel * 2,
+            IrDType::I32 => numel * 4,
+            IrDType::I64 => numel * 8,
+            IrDType::Bool => numel,
+            // U4x8: 8 nibbles per u32 word (4 bytes)  => 0.5 bytes/elem
+            IrDType::U4 { .. } => {
+                let words = (numel + 7) / 8;
+                words * 4
+            }
+            // U8x4: 4 bytes per u32 word  => 1 byte/elem
+            IrDType::U8 { .. } => {
+                let words = (numel + 3) / 4;
+                words * 4
+            }
         }
     }
 
@@ -489,6 +521,32 @@ impl IrDType {
             IrDType::Bool => "bool",
             IrDType::U4 { .. } => "u4",
             IrDType::U8 { .. } => "u8",
+        }
+    }
+
+    pub fn bit_width(&self) -> usize {
+        match self {
+            IrDType::F32 => 32,
+            IrDType::F16 => 16,
+            IrDType::BF16 => 16,
+            IrDType::I32 => 32,
+            IrDType::I64 => 64,
+            IrDType::Bool => 1,
+            IrDType::U4 { .. } => 4,
+            IrDType::U8 { .. } => 8,
+        }
+    }
+
+    pub fn items_per_word(&self) -> usize {
+        match self {
+            IrDType::F32 => 1,
+            IrDType::F16 => 2,
+            IrDType::BF16 => 2,
+            IrDType::I32 => 1,
+            IrDType::I64 => 1,
+            IrDType::Bool => 32,
+            IrDType::U4 { .. } => 8,
+            IrDType::U8 { .. } => 4,
         }
     }
 }

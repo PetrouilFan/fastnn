@@ -694,6 +694,9 @@ impl Tensor {
                 // For now, we'll panic as this is not yet fully implemented
                 panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
             }
+            DType::U4 | DType::U8 => {
+                panic!("as_f32_slice: packed U4/U8 tensors cannot be viewed as f32. Use the IR pipeline to dequantize first.")
+            }
         }
     }
 
@@ -735,6 +738,9 @@ impl Tensor {
             }
             DType::BF16 | DType::F16 => {
                 panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
+            }
+            DType::U4 | DType::U8 => {
+                panic!("as_f32_slice_mut: packed U4/U8 tensors cannot be viewed as f32. Use the IR pipeline to dequantize first.")
             }
         }
     }
@@ -1035,7 +1041,7 @@ pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
 // AOT pipeline bridge — replace eager dispatcher calls with graph lowering
 // =============================================================================
 
-fn dtype_to_ir(dt: DType) -> IrDType {
+pub fn dtype_to_ir(dt: DType) -> IrDType {
     match dt {
         DType::F32 => IrDType::F32,
         DType::F64 => panic!("dtype_to_ir: F64 not supported in IR"),
@@ -1044,10 +1050,15 @@ fn dtype_to_ir(dt: DType) -> IrDType {
         DType::Bool => IrDType::Bool,
         DType::F16 => IrDType::F16,
         DType::BF16 => IrDType::BF16,
+        // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
+        // not in the Tensor-level DType.  Use default values here; the actual
+        // scales are filled in by the quantization compiler pass.
+        DType::U4 => IrDType::U4 { scales: vec![1.0], zero_points: vec![0.0] },
+        DType::U8 => IrDType::U8 { scales: vec![1.0], zero_points: vec![0.0] },
     }
 }
 
-fn ir_to_dtype(idt: IrDType) -> DType {
+pub fn ir_to_dtype(idt: IrDType) -> DType {
     match idt {
         IrDType::F32 => DType::F32,
         IrDType::F16 => DType::F16,
@@ -1055,9 +1066,10 @@ fn ir_to_dtype(idt: IrDType) -> DType {
         IrDType::I32 => DType::I32,
         IrDType::I64 => DType::I64,
         IrDType::Bool => DType::Bool,
-        IrDType::U4 { .. } | IrDType::U8 { .. } => {
-            panic!("ir_to_dtype: quantized types not supported in Tensor bridge")
-        }
+        // U4/U8 round-trips back to simple DType::U4/U8. Per-channel metadata
+        // stays in the IR node; Tensor-level storage uses the packed dtype.
+        IrDType::U4 { .. } => DType::U4,
+        IrDType::U8 { .. } => DType::U8,
     }
 }
 
