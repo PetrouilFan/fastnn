@@ -1903,7 +1903,7 @@ mod tests {
         let y = g.input_with_dims(&[n, c, h, w], IrDType::F32);
         let cat = g.concat(&[&x, &y], 0);
         let cat_shape = cat.shape();
-        assert_eq!(cat_shape[0], DimExpr::Bounded { sym: "2*N".into(), max: 8192 },
+        assert_eq!(cat_shape[0], DimExpr::Bounded { sym: "2*N".into(), max: 16384 },
             "concat along symbolic dim should produce canonical 2*N");
 
         // Concat along known dim

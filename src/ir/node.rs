@@ -97,7 +97,13 @@ pub enum Opcode {
 ///
 /// This is an atomic so it can be adjusted at runtime (e.g. from a config file
 /// or by [`set_symbol_dim_max`]).
-pub static SYMBOL_DIM_MAX: AtomicU64 = AtomicU64::new(4096);
+///
+/// The default of 8192 balances compile-time arena sizing for typical models
+/// (batch ≤ 256, feature dims ≤ 4096, spatial dims ≤ 2048).  Users with larger
+/// expected dimensions should call `set_symbol_dim_max` before graph construction.
+/// Use [`DimExpr::Bounded`] for per-dimension limits to avoid overallocation
+/// when multiple symbolic dims appear in the same tensor shape.
+pub static SYMBOL_DIM_MAX: AtomicU64 = AtomicU64::new(8192);
 
 /// Override the global [`SYMBOL_DIM_MAX`] value.  Call before constructing
 /// graphs whose unbounded Symbol dims may exceed 4096.
