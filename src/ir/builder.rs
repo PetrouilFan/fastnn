@@ -770,7 +770,7 @@ impl GraphBuilder {
     }
 
     /// Softmax along a dimension.
-    pub fn softmax(&self, input: &GraphTensor, dim: usize) -> GraphTensor {
+    pub fn softmax(&self, input: &GraphTensor, dim: i64) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), dim.to_string());

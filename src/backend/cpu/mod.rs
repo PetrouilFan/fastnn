@@ -408,11 +408,19 @@ impl Backend for CpuBackend {
                     } else {
                         ("conv2d".to_string(), None)
                     };
+                    // Extract spatial dims from input shapes to avoid
+                    // ambiguous dim inference at dispatch time.
+                    let input_c = input_shapes.first().and_then(|s| s.get(1).copied()).unwrap_or(1) as usize;
+                    let input_h = input_shapes.first().and_then(|s| s.get(2).copied()).unwrap_or(0) as usize;
+                    let input_w = input_shapes.first().and_then(|s| s.get(3).copied()).unwrap_or(0) as usize;
+                    let kernel_h = input_shapes.get(1).and_then(|s| s.get(2).copied()).unwrap_or(0) as usize;
+                    let kernel_w = input_shapes.get(1).and_then(|s| s.get(3).copied()).unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
                         kernel_name,
                         input_slices,
                         output_slice,
-                        params: vec![stride, padding, dilation, groups],
+                        // params: [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]
+                        params: vec![stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w],
                         param_dims: None,
                         weight_meta,
                     });
@@ -445,8 +453,6 @@ impl Backend for CpuBackend {
                     // Capture the axis-dimension size for the dispatch handler,
                     // which needs to know how many elements comprise a single
                     // softmax "row" (all elements along the reduction axis).
-                    // Using the dimension size rather than the axis index avoids
-                    // needing shape information at dispatch time.
                     let axis_dim = input_shapes
                         .first()
                         .and_then(|s| s.get(normalized_axis).copied())
@@ -455,13 +461,20 @@ impl Backend for CpuBackend {
                         .first()
                         .and_then(|s| s.get(normalized_axis).cloned())
                         .unwrap_or(DimExpr::Known(1));
+                    // Compute stride: product of dims after the axis.
+                    // This is needed because softmax rows are strided for
+                    // non-last dimensions (e.g. axis=2 on [N,C,H,W]).
+                    let stride = input_shapes
+                        .first()
+                        .map(|s| s[normalized_axis + 1..].iter().copied().map(|x| x as usize).product::<usize>().max(1))
+                        .unwrap_or(1);
 
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "softmax".to_string(),
                         input_slices,
                         output_slice,
-                        params: vec![axis_dim],
-                        param_dims: Some(vec![axis_dim_dim]),
+                        params: vec![axis_dim, stride],
+                        param_dims: Some(vec![axis_dim_dim, DimExpr::Known(stride as u64)]),
                         weight_meta: None,
                     });
                 }
@@ -1642,25 +1655,34 @@ impl Backend for CpuBackend {
                                 };
                                 // Resolve the axis-dimension size from params
                                 // (compile-time) or param_dims (runtime symbolic).
-                                // The axis dim size tells us how many elements form
-                                // a single softmax "row" along the reduction axis.
-                                let softmax_params = resolve_params(params, param_dims, shape_env, 1)
-                                    .unwrap_or_else(|_| vec![input.len()]);
+                                let softmax_params = resolve_params(params, param_dims, shape_env, 2)
+                                    .unwrap_or_else(|_| vec![input.len(), 1]);
                                 let axis_dim_size = softmax_params[0].max(1);
-                                let num_rows = input.len() / axis_dim_size;
+                                let stride = softmax_params.get(1).copied().unwrap_or(1).max(1);
+                                let num_rows = input.len() / axis_dim_size.max(1);
                                 for r in 0..num_rows {
-                                    let start = r * axis_dim_size;
-                                    let end = (start + axis_dim_size).min(input.len());
-                                    let max_val = input[start..end].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                                    let outer = r / stride;
+                                    let inner = r % stride;
+                                    let base = (outer * axis_dim_size * stride) + inner;
+                                    // Find max
+                                    let mut max_val = f32::NEG_INFINITY;
+                                    for i in 0..axis_dim_size {
+                                        let idx = base + i * stride;
+                                        if input[idx] > max_val { max_val = input[idx]; }
+                                    }
+                                    // Compute exp sum
                                     let mut sum = 0.0f32;
-                                    for i in start..end {
-                                        let e = (input[i] - max_val).exp();
-                                        out_f32[i] = e;
+                                    for i in 0..axis_dim_size {
+                                        let idx = base + i * stride;
+                                        let e = (input[idx] - max_val).exp();
+                                        out_f32[idx] = e;
                                         sum += e;
                                     }
+                                    // Normalize
                                     if sum > 0.0 {
-                                        for i in start..end {
-                                            out_f32[i] /= sum;
+                                        for i in 0..axis_dim_size {
+                                            let idx = base + i * stride;
+                                            out_f32[idx] /= sum;
                                         }
                                     }
                                 }
@@ -1767,50 +1789,17 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec()
                                 } else { vec![] };
-                                let &[stride, padding, dilation, groups] = &params[..] else { return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups]".into())); };
+                                // params: [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]
+                                let &[stride, padding, dilation, groups, c, h, w, kh, kw] = &params[..] else {
+                                    return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
+                                };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let ni = input_data.len();
-                                let nw = weight_data.len();
-                                let no = out_f32.len();
-                                let dims = (|| -> Option<(usize,usize,usize,usize,usize,usize,usize)> {
-                                    for &n in &[1, 2, 4, 8, 16, 32, 64] {
-                                        if ni % n != 0 || no % n != 0 { continue; }
-                                        let c_hw = ni / n;
-                                        let f_hout_wout = no / n;
-                                        for cg in 1..=c_hw.min(4096) {
-                                            let c = cg * groups;
-                                            if c_hw % c != 0 { continue; }
-                                            let hw = c_hw / c;
-                                            if nw % cg != 0 { continue; }
-                                            let f_kh_kw = nw / cg;
-                                            for f in 1..=f_hout_wout.min(f_kh_kw) {
-                                                if f_hout_wout % f != 0 || f_kh_kw % f != 0 { continue; }
-                                                let hout_wout = f_hout_wout / f;
-                                                let kh_kw = f_kh_kw / f;
-                                                for &kh in &[1, 3, 5, 7, 11] {
-                                                    if kh > kh_kw || kh_kw % kh != 0 { continue; }
-                                                    let kw = kh_kw / kh;
-                                                    if kw > 11 { continue; }
-                                                    for h in 1..=hw {
-                                                        if hw % h != 0 { continue; }
-                                                        let w = hw / h;
-                                                        let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
-                                                        let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
-                                                        if h_out * w_out == hout_wout && h_out > 0 && w_out > 0 {
-                                                            return Some((n, f, c, kh, kw, h, w));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None
-                                })();
-                                let (n, f, c, kh, kw, h, w) = dims.ok_or_else(|| BackendError::Dispatch("conv2d: could not infer dimensions".into()))?;
-                                let c_per_group = c / groups;
+                                let c_per_group = c / groups.max(1);
+                                let n = input_data.len() / (c * h * w).max(1);
+                                let f = weight_data.len() / (c_per_group * kh * kw).max(1);
                                 let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
                                 let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
                                 for nn in 0..n {
@@ -1877,8 +1866,8 @@ impl Backend for CpuBackend {
                                 } else {
                                     vec![]
                                 };
-                                let &[stride, padding, dilation, groups] = &params[..] else {
-                                    return Err(BackendError::Dispatch("conv2d_u4/u8: expected params [stride, padding, dilation, groups]".into()));
+                                let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, _kernel_w] = &params[..] else {
+                                    return Err(BackendError::Dispatch("conv2d_u4/u8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
                                 };
                                 let meta = weight_meta.clone().ok_or_else(|| {
                                     BackendError::Dispatch("conv2d_u4/u8: missing weight_meta".into())
@@ -1897,42 +1886,14 @@ impl Backend for CpuBackend {
                                     meta.shape.clone()
                                 };
                                 let oc = flat_shape.first().copied().unwrap_or(1);
-                                let inner = flat_shape.get(1).copied().unwrap_or(1);
-                                let ni = input_data.len();
+                                let c = input_c as usize;
+                                let h = input_h as usize;
+                                let w = input_w as usize;
+                                let kernel_size = kernel_h as usize;
                                 if groups == 0 { return Err(BackendError::Dispatch("conv2d_u4/u8: groups=0".into())); }
-                                // Infer (N, C, H, W, kernel_size) from tensor sizes and conv params.
-                                // inner = (C / groups) * KH * KW. Try common kernel sizes.
-                                let dims = (|| -> Option<(usize, usize, usize, usize, usize)> {
-                                    for &n in &[1, 2, 4, 8, 16, 32, 64] {
-                                        if ni % n != 0 || out_f32.len() % n != 0 { continue; }
-                                        let c_hw = ni / n;
-                                        let f_hout_wout = out_f32.len() / n;
-                                        if f_hout_wout % oc != 0 { continue; }
-                                        let hout_wout = f_hout_wout / oc;
-                                        for &ksize in &[1, 3, 5, 7, 9, 11] {
-                                            let c_total = (inner / (ksize * ksize)) * groups;
-                                            if inner != (c_total / groups) * ksize * ksize { continue; }
-                                            if c_hw % c_total != 0 { continue; }
-                                            let hw = c_hw / c_total;
-                                            for h in 1..=hw {
-                                                if hw % h != 0 { continue; }
-                                                let w = hw / h;
-                                                let dk = (ksize - 1) * dilation + 1;
-                                                let h_out = if h + 2 * padding >= dk { (h + 2 * padding - dk) / stride + 1 } else { 0 };
-                                                let w_out = if w + 2 * padding >= dk { (w + 2 * padding - dk) / stride + 1 } else { 0 };
-                                                if h_out > 0 && w_out > 0 && h_out * w_out == hout_wout {
-                                                    return Some((n, c_total, h, w, ksize));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None
-                                })();
-                                let (n, c, h, w, kernel_size) = dims.ok_or_else(|| {
-                                    BackendError::Dispatch("conv2d_u4/u8: could not infer spatial dimensions".into())
-                                })?;
                                 let c_per_g = c / groups;
                                 let dk = (kernel_size - 1) * dilation + 1;
+                                let n = input_data.len() / (c * h * w).max(1);
                                 let h_out = if h + 2 * padding >= dk { (h + 2 * padding - dk) / stride + 1 } else { 0 };
                                 let w_out = if w + 2 * padding >= dk { (w + 2 * padding - dk) / stride + 1 } else { 0 };
                                 // Dispatch based on bit_width to handle different PackedTensor types
