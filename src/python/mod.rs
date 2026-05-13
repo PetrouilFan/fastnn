@@ -227,6 +227,7 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRMSprop>()?;
     m.add_class::<PyTransformerEncoder>()?;
     m.add_class::<DAGExecutor>()?;
+    m.add_class::<AotExecutor>()?;
 
     m.add_class::<PyTensor>()?;
     m.add_class::<PyPackedTensor4>()?;
