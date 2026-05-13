@@ -1,3 +1,31 @@
+//! # fastnn — High-Performance Neural Network Inference Library
+//!
+//! fastnn provides a complete **ahead-of-time (AOT) compiler pipeline** built on a
+//! first-class IR (`ComputeGraph`). The pipeline compiles computation graphs through
+//! shape inference, operator fusion, optional weight quantization (U4/U8), and memory
+//! planning before dispatching to a backend (CPU or WGPU).
+//!
+//! # Quick Start
+//!
+//! ```rust
+//! use fastnn::ir::builder::GraphBuilder;
+//! use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+//! use fastnn::backend::cpu::CpuBackend;
+//!
+//! let gb = GraphBuilder::new();
+//! let input = gb.input_with_dims(&[DimExpr::Known(1), DimExpr::Known(784)], IrDType::F32);
+//! let weight_tt = TensorType::new(vec![DimExpr::Known(784), DimExpr::Known(10)], IrDType::F32);
+//! let weight_bytes: Vec<u8> = vec![0u8; 784 * 10 * 4]; // placeholder
+//! let weight = gb.constant(&weight_bytes, weight_tt);
+//! let output = gb.matmul(&input, &weight);
+//!
+//! // Compile with 4-bit quantization
+//! let result = gb.compile_with_quantize(&[&output], CpuBackend, Some(4));
+//! ```
+//!
+//! See [`ir::builder::GraphBuilder`] and [`backend::executor::GraphExecutor`] for the
+//! full API.
+
 #![allow(clippy::needless_range_loop)]
 
 pub mod error;

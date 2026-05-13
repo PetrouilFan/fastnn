@@ -1,3 +1,20 @@
+"""fastnn — High-Performance Neural Network Inference Library.
+
+v2.0.0 introduces a complete AOT compiler pipeline built on a first-class IR
+(ComputeGraph). The pipeline compiles graphs through shape inference, operator
+fusion, optional weight quantization (U4/U8), and memory planning before
+dispatching to a backend.
+
+Key v2.0.0 APIs:
+  - AotExecutor(nodes, params, inputs, outputs, quantize=4|8|None) — compile & run
+  - DAGModel(quantize=) — load models with optional quantization
+  - build_dag_model(quantize=) — build with optional quantization
+
+Legacy APIs (v1.x) remain available for backward compatibility:
+  - PackedLinear, PackedConv2d, PackedTensor — eager mode packed inference
+  - DAGExecutor — legacy graph execution
+"""
+
 import numpy as np
 import fastnn._core as _core
 import fastnn.precision as precision
