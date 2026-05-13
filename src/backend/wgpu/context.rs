@@ -187,7 +187,7 @@ impl WgpuContext {
 }
 
 // ============================================================================
-// GPU context (moved from kernels/gpu/mod.rs)
+// GPU context
 // ============================================================================
 
 static GPU_CONTEXTS: std::sync::OnceLock<RwLock<HashMap<usize, Arc<GpuContext>>>> =
