@@ -104,53 +104,21 @@ impl Tensor {
     }
 
     pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
-        let numel = self.numel() as usize;
-        let self_contig = if !self.is_contiguous() {
-            self.contiguous()
-        } else {
-            self.clone()
-        };
-        let other_contig = if !other.is_contiguous() {
-            other.contiguous()
-        } else {
-            other.clone()
-        };
-        let self_data = self_contig.as_f32_slice();
-        let other_data = other_contig.as_f32_slice();
-        let mut output_data = vec![0.0f32; numel];
-        for i in 0..numel {
-            output_data[i] = if self_data[i] >= other_data[i] {
-                1.0
-            } else {
-                0.0
-            };
-        }
-        Tensor::from_vec(output_data, self.shape())
+        // ge(a,b) = not(lt(a,b))
+        Tensor::exec_aot(&[self, other], |g, ins| {
+            let lt = g.lt_scalar(&ins[0], &ins[1]);
+            vec![g.logical_not(&lt)]
+        }).expect("Tensor::ge_tensor: AOT execution failed")
+        .into_iter().next().unwrap()
     }
 
     pub fn le_tensor(&self, other: &Tensor) -> Tensor {
-        let numel = self.numel() as usize;
-        let self_contig = if !self.is_contiguous() {
-            self.contiguous()
-        } else {
-            self.clone()
-        };
-        let other_contig = if !other.is_contiguous() {
-            other.contiguous()
-        } else {
-            other.clone()
-        };
-        let self_data = self_contig.as_f32_slice();
-        let other_data = other_contig.as_f32_slice();
-        let mut output_data = vec![0.0f32; numel];
-        for i in 0..numel {
-            output_data[i] = if self_data[i] <= other_data[i] {
-                1.0
-            } else {
-                0.0
-            };
-        }
-        Tensor::from_vec(output_data, self.shape())
+        // le(a,b) = not(gt(a,b))
+        Tensor::exec_aot(&[self, other], |g, ins| {
+            let gt = g.gt_scalar(&ins[0], &ins[1]);
+            vec![g.logical_not(&gt)]
+        }).expect("Tensor::le_tensor: AOT execution failed")
+        .into_iter().next().unwrap()
     }
 
     pub fn lt_scalar(&self, threshold: f32) -> Tensor {
