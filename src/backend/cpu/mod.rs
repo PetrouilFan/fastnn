@@ -232,15 +232,15 @@ impl Backend for CpuBackend {
                     let weight_meta = if is_quantized {
                         node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
-                                let (scale, zp) = match &wn.output_type.dtype {
-                                    IrDType::U4 { scale, zero_point } => (*scale, *zero_point as f32),
-                                    IrDType::U8 { scale, zero_point } => (*scale, *zero_point as f32),
-                                    _ => (1.0, 0.0),
+                                let (bit_width, scales, zero_points) = match &wn.output_type.dtype {
+                                    IrDType::U4 { scales, zero_points } => (4usize, scales.clone(), zero_points.clone()),
+                                    IrDType::U8 { scales, zero_points } => (8usize, scales.clone(), zero_points.clone()),
+                                    _ => (0usize, vec![], vec![]),
                                 };
                                 let w_shape: Vec<usize> = wn.output_type.shape.iter()
                                     .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
                                     .collect();
-                                (scale, zp, w_shape)
+                                crate::backend::QuantizedWeightMeta { bit_width, scales, zero_points, shape: w_shape }
                             })
                         })
                     } else {
@@ -1409,11 +1409,13 @@ impl Backend for CpuBackend {
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u4: expected params [M,K,N]".into())); };
-                                let (scale, zp, w_shape) = weight_meta.clone().unwrap_or((1.0, 0.0, vec![m, k]));
+                                let meta = weight_meta.clone().unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                                    bit_width: 4, scales: vec![1.0], zero_points: vec![0.0], shape: vec![m, k]
+                                });
                                 // Construct PackedTensor from arena data and call SIMD gemm
                                 let _num_words = weights.len();
                                 let u4x8_data: Vec<U4x8> = bytemuck::cast_slice(&weights).to_vec();
-                                let pt = PackedTensor::from_raw(u4x8_data, w_shape.clone(), vec![scale], vec![zp]);
+                                let pt = PackedTensor::from_raw(u4x8_data, meta.shape.clone(), meta.scales, meta.zero_points);
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -1440,10 +1442,12 @@ impl Backend for CpuBackend {
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u8: expected params [M,K,N]".into())); };
-                                let (scale, zp, w_shape) = weight_meta.clone().unwrap_or((1.0, 0.0, vec![m, k]));
+                                let meta = weight_meta.clone().unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                                    bit_width: 8, scales: vec![1.0], zero_points: vec![0.0], shape: vec![m, k]
+                                });
                                 // Construct PackedTensor from arena data and call SIMD gemm
                                 let u8x4_data: Vec<U8x4> = bytemuck::cast_slice(&weights).to_vec();
-                                let pt = PackedTensor::from_raw(u8x4_data, w_shape.clone(), vec![scale], vec![zp]);
+                                let pt = PackedTensor::from_raw(u8x4_data, meta.shape.clone(), meta.scales, meta.zero_points);
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])

@@ -1075,13 +1075,83 @@ impl AotExecutor {
         let mut result = std::collections::HashMap::new();
         for (name, idx) in &self.output_map {
             if let Some(data) = output_data.get(*idx) {
-                let num_f32 = data.len() / 4;
-                let f32_vals: Vec<f32> = data.chunks_exact(4)
-                    .map(|chunk| {
-                        f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                // Resolve the output node's dtype and shape from the graph.
+                let output_node_id = self.graph.outputs[*idx];
+                let output_node = self.graph.get_node(output_node_id)
+                    .expect("AotExecutor: output node not found in graph");
+                let ir_dtype = output_node.output_type.dtype.clone();
+                let dtype: crate::storage::DType = crate::tensor::ir_to_dtype(ir_dtype);
+                // Resolve shape from DimExpr (all should be Known after compilation).
+                let shape: Vec<i64> = output_node.output_type.shape.iter()
+                    .filter_map(|d| match d {
+                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
+                        _ => None,
                     })
                     .collect();
-                let tensor = Tensor::from_vec(f32_vals, vec![num_f32 as i64]);
+
+                let tensor = match dtype {
+                    crate::storage::DType::F32 => {
+                        let f32_vals: Vec<f32> = data.chunks_exact(4)
+                            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                            .collect();
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::I32 => {
+                        let i32_vals: Vec<i32> = data.chunks_exact(4)
+                            .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                            .collect();
+                        let f32_vals: Vec<f32> = i32_vals.iter().map(|&v| v as f32).collect();
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::I64 => {
+                        let i64_vals: Vec<i64> = data.chunks_exact(8)
+                            .map(|chunk| i64::from_le_bytes([
+                                chunk[0], chunk[1], chunk[2], chunk[3],
+                                chunk[4], chunk[5], chunk[6], chunk[7],
+                            ]))
+                            .collect();
+                        let f32_vals: Vec<f32> = i64_vals.iter().map(|&v| v as f32).collect();
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::Bool => {
+                        let vals: Vec<f32> = data.iter().map(|&b| if b != 0 { 1.0f32 } else { 0.0f32 }).collect();
+                        Tensor::from_vec(vals, shape)
+                    }
+                    crate::storage::DType::F16 => {
+                        let f16_vals: Vec<half::f16> = data.chunks_exact(2)
+                            .map(|chunk| half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])))
+                            .collect();
+                        let f32_vals: Vec<f32> = f16_vals.iter().map(|v| v.to_f32()).collect();
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::BF16 => {
+                        let bf16_vals: Vec<half::bf16> = data.chunks_exact(2)
+                            .map(|chunk| half::bf16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])))
+                            .collect();
+                        let f32_vals: Vec<f32> = bf16_vals.iter().map(|v| v.to_f32()).collect();
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    // Packed types need dequantization — for now, convert raw bytes to f32 numerically.
+                    // Proper dequantization with scales/zero_points will be added in the quantization pass.
+                    crate::storage::DType::U4 | crate::storage::DType::U8 => {
+                        // TODO: Proper dequantization using per-channel scales from IrDType metadata.
+                        // For now, treat packed bytes as raw f32 reinterpretation.
+                        let f32_vals: Vec<f32> = data.chunks_exact(4)
+                            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                            .collect();
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::F64 => {
+                        let f64_vals: Vec<f64> = data.chunks_exact(8)
+                            .map(|chunk| f64::from_le_bytes([
+                                chunk[0], chunk[1], chunk[2], chunk[3],
+                                chunk[4], chunk[5], chunk[6], chunk[7],
+                            ]))
+                            .collect();
+                        let f32_vals: Vec<f32> = f64_vals.iter().map(|&v| v as f32).collect();
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                };
                 result.insert(name.clone(), PyTensor::from_tensor(tensor));
             }
         }
