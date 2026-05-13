@@ -511,6 +511,80 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, r);
             }
 
+            // ── Quantized ops (decomposed to f32) ──────────────────
+            "QuantizeLinear" => {
+                // y = saturate(round(x / y_scale) + y_zero_point, 0, 255)
+                // Decompose: div + add + clamp (without round — acceptable approximation)
+                if ins.len() < 3 {
+                    return Err("QuantizeLinear needs 3 inputs: x, y_scale, y_zero_point".to_string());
+                }
+                let x_div = self.graph.div(&ins[0], &ins[1]);
+                let x_biased = self.graph.add(&x_div, &ins[2]);
+                let y = self.graph.clamp(&x_biased, 0.0, 255.0);
+                self.out(node, y);
+            }
+            "DequantizeLinear" => {
+                // y = (x - x_zero_point) * x_scale
+                if ins.len() < 3 {
+                    return Err("DequantizeLinear needs 3 inputs: x, x_scale, x_zero_point".to_string());
+                }
+                let x_minus_zp = self.graph.sub(&ins[0], &ins[2]);
+                let y = self.graph.mul(&x_minus_zp, &ins[1]);
+                self.out(node, y);
+            }
+            "QLinearMatMul" => {
+                // A, A_scale, A_zp, B, B_scale, B_zp, Y_scale, Y_zp
+                if ins.len() < 8 {
+                    return Err("QLinearMatMul needs 8 inputs: A, A_scale, A_zp, B, B_scale, B_zp, Y_scale, Y_zp".to_string());
+                }
+                // Dequantize A: a_f32 = (A - A_zp) * A_scale
+                let a_float = self.graph.sub(&ins[0], &ins[2]);
+                let a_deq = self.graph.mul(&a_float, &ins[1]);
+                // Dequantize B: b_f32 = (B - B_zp) * B_scale
+                let b_float = self.graph.sub(&ins[3], &ins[5]);
+                let b_deq = self.graph.mul(&b_float, &ins[4]);
+                // f32 matmul
+                let c = self.graph.matmul(&a_deq, &b_deq);
+                // Requantize: clamp(c / Y_scale + Y_zp, 0, 255)
+                let c_scaled = self.graph.div(&c, &ins[6]);
+                let c_biased = self.graph.add(&c_scaled, &ins[7]);
+                let y = self.graph.clamp(&c_biased, 0.0, 255.0);
+                self.out(node, y);
+            }
+            "QLinearConv" => {
+                // x, x_scale, x_zp, w, w_scale, w_zp, y_scale, y_zp, (optional bias)
+                if ins.len() < 8 {
+                    return Err("QLinearConv needs at least 8 inputs: x, x_scale, x_zp, w, w_scale, w_zp, y_scale, y_zp".to_string());
+                }
+                // Dequantize input: x_f32 = (x - x_zp) * x_scale
+                let x_float = self.graph.sub(&ins[0], &ins[2]);
+                let x_deq = self.graph.mul(&x_float, &ins[1]);
+                // Dequantize weight: w_f32 = (w - w_zp) * w_scale
+                let w_float = self.graph.sub(&ins[3], &ins[5]);
+                let w_deq = self.graph.mul(&w_float, &ins[4]);
+                // Read conv attributes
+                let strides: Vec<usize> = parse_ints(&node.attrs, "strides", &[1, 1]);
+                let pads: Vec<usize> = parse_ints(&node.attrs, "pads", &[0, 0]);
+                let dilations: Vec<usize> = parse_ints(&node.attrs, "dilations", &[1, 1]);
+                let group: usize = node.attrs.get("group").and_then(|g| g.parse().ok()).unwrap_or(1);
+                let stride = *strides.first().unwrap_or(&1);
+                let padding = *pads.first().unwrap_or(&0);
+                let dilation = *dilations.first().unwrap_or(&1);
+                // f32 conv
+                let c = self.graph.conv2d_with_params(&x_deq, &w_deq, stride, padding, dilation, group);
+                // Optional bias (9th input)
+                let c = if ins.len() > 8 {
+                    self.graph.add(&c, &ins[8])
+                } else {
+                    c
+                };
+                // Requantize: clamp(c / Y_scale + Y_zp, 0, 255)
+                let c_scaled = self.graph.div(&c, &ins[6]);
+                let c_biased = self.graph.add(&c_scaled, &ins[7]);
+                let y = self.graph.clamp(&c_biased, 0.0, 255.0);
+                self.out(node, y);
+            }
+
             // ── Fallback ────────────────────────────────────────────
             _ => {
                 if !ins.is_empty() {
