@@ -873,7 +873,7 @@ impl_nn_module!(AdaptiveAvgPool2d {
     #[new]
     fn new(output_h: i64, output_w: i64) -> Self {
         AdaptiveAvgPool2d {
-            inner: core_nn::activations::AdaptiveAvgPool2d::new((output_h, output_w)),
+            inner: core_nn::activations::AdaptiveAvgPool2d::new(output_h as usize, output_w as usize),
         }
     }
 });

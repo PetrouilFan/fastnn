@@ -223,62 +223,33 @@ impl Tensor {
 
     pub fn cat(tensors: &[Tensor], dim: i32) -> Tensor {
         if tensors.is_empty() {
-            panic!("cat: need at least one tensor");
+            panic!("Tensor::cat: empty input");
         }
         let ndim = tensors[0].ndim();
         let dim = if dim < 0 { ndim as i32 + dim } else { dim } as usize;
         if dim >= ndim {
-            panic!("cat: dimension out of range");
+            panic!("Tensor::cat: dimension out of range");
         }
-        let mut output_shape: SmallVec<[i64; 8]> = tensors[0].inner.sizes.clone();
-        let mut total_dim_size: i64 = 0;
         for t in tensors {
             if t.ndim() != ndim {
-                panic!("cat: tensors must have same number of dimensions");
+                panic!("Tensor::cat: tensors must have same number of dimensions");
             }
-            total_dim_size += t.inner.sizes[dim];
             for d in 0..ndim {
-                if d != dim && output_shape[d] != t.inner.sizes[d] {
-                    panic!("cat: tensor sizes mismatch at dimension {}", d);
+                if d != dim && tensors[0].inner.sizes[d] != t.inner.sizes[d] {
+                    panic!("Tensor::cat: tensor sizes mismatch at dimension {}", d);
                 }
             }
         }
-        output_shape[dim] = total_dim_size;
-        let numel: i64 = output_shape.iter().product();
-        let mut output_data = vec![0.0f32; numel as usize];
-        let mut out_strides: SmallVec<[i64; 8]> = SmallVec::new();
-        let mut s = 1i64;
-        for d in (0..ndim).rev() {
-            out_strides.push(s);
-            s *= output_shape[d];
-        }
-        out_strides.reverse();
-        let mut out_offset = 0i64;
-        for t in tensors {
-            let t_data = t.as_f32_slice();
-            let t_strides = &t.inner.strides;
-            let t_sizes = &t.inner.sizes;
-            let mut indices = vec![0i64; ndim];
-            let dim_size = t.inner.sizes[dim];
-            for _ in 0..t.numel() as usize {
-                let mut t_lin = 0i64;
-                let mut o_lin = out_offset;
-                for d in 0..ndim {
-                    t_lin += indices[d] * t_strides[d];
-                    o_lin += indices[d] * out_strides[d];
-                }
-                output_data[o_lin as usize] = t_data[t_lin as usize];
-                for d in (0..ndim).rev() {
-                    indices[d] += 1;
-                    if indices[d] < t_sizes[d] {
-                        break;
-                    }
-                    indices[d] = 0;
-                }
-            }
-            out_offset += dim_size * out_strides[dim];
-        }
-        let output = Tensor::from_vec(output_data, output_shape.into_vec());
+
+        let inputs: Vec<&Tensor> = tensors.iter().collect();
+        let output = Tensor::exec_aot(&inputs, |g, ins| {
+            let refs: Vec<_> = ins.iter().collect();
+            vec![g.concat(&refs, dim)]
+        })
+        .expect("Tensor::cat: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap();
 
         if autograd::is_grad_enabled() && tensors.iter().any(|t| t.requires_grad()) {
             let _split_sizes: Vec<usize> = tensors
@@ -330,47 +301,12 @@ impl Tensor {
         if repeats.len() < self.ndim() {
             panic!("repeat: number of repeats must be >= number of dimensions");
         }
-        let mut new_shape: SmallVec<[i64; 8]> = SmallVec::new();
-        let mut total: i64 = 1;
-        for (i, &r) in repeats.iter().enumerate() {
-            let orig = if i < repeats.len() - self.ndim() {
-                1
-            } else {
-                self.inner.sizes[i - (repeats.len() - self.ndim())]
-            };
-            new_shape.push(orig * r);
-            total *= orig * r;
-        }
-        let mut output_data = vec![0.0f32; total as usize];
-        let mut src = self.to_cpu();
-        if !src.is_contiguous() {
-            src = src.contiguous();
-        }
-        let src_data = src.as_f32_slice();
-        let src_strides = &src.inner.strides;
-        let src_sizes = &src.inner.sizes;
-        let ndim = src.ndim();
-        let offset = repeats.len() - ndim;
-        let mut src_indices = vec![0i64; ndim];
-        for out_idx in 0..total as usize {
-            let mut rep_indices: Vec<i64> = Vec::with_capacity(repeats.len());
-            let mut remaining = out_idx as i64;
-            for d in (0..repeats.len()).rev() {
-                let dim_size = new_shape[d];
-                rep_indices.push(remaining % dim_size);
-                remaining /= dim_size;
-            }
-            rep_indices.reverse();
-            for d in 0..ndim {
-                src_indices[d] = rep_indices[d + offset] % src_sizes[d];
-            }
-            let mut src_lin = 0i64;
-            for d in 0..ndim {
-                src_lin += src_indices[d] * src_strides[d];
-            }
-            output_data[out_idx] = src_data[src_lin as usize];
-        }
-        let output = Tensor::from_vec(output_data, new_shape.into_vec());
+        let reps: Vec<usize> = repeats.iter().map(|&r| r as usize).collect();
+        let output = Tensor::exec_aot(&[self], |g, ins| vec![g.repeat(&ins[0], &reps)])
+            .expect("Tensor::repeat: AOT failed")
+            .into_iter()
+            .next()
+            .unwrap();
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let _edges = autograd::make_edge(self);
@@ -382,34 +318,13 @@ impl Tensor {
     }
 
     pub fn where_tensor(&self, condition: &Tensor, other: &Tensor) -> Tensor {
-        let numel = self.numel() as usize;
-        let self_contig = if !self.is_contiguous() {
-            self.contiguous()
-        } else {
-            self.clone()
-        };
-        let cond_contig = if !condition.is_contiguous() {
-            condition.contiguous()
-        } else {
-            condition.clone()
-        };
-        let other_contig = if !other.is_contiguous() {
-            other.contiguous()
-        } else {
-            other.clone()
-        };
-        let self_data = self_contig.as_f32_slice();
-        let cond_data = cond_contig.as_f32_slice();
-        let other_data = other_contig.as_f32_slice();
-        let mut output_data = vec![0.0f32; numel];
-        for i in 0..numel {
-            output_data[i] = if cond_data[i] != 0.0 {
-                self_data[i]
-            } else {
-                other_data[i]
-            };
-        }
-        let output = Tensor::from_vec(output_data, self.shape());
+        let output = Tensor::exec_aot(&[condition, self, other], |g, ins| {
+            vec![g.where_tensor(&ins[0], &ins[1], &ins[2])]
+        })
+        .expect("Tensor::where_tensor: AOT failed")
+        .into_iter()
+        .next()
+        .unwrap();
 
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let _edges = autograd::make_edges(self, other);
@@ -421,90 +336,18 @@ impl Tensor {
     }
 
     pub fn gather(&self, axis: i64, indices: &Tensor) -> Tensor {
-        let indices_data = indices.as_i64_slice();
-        let self_contig = if !self.is_contiguous() {
-            self.contiguous()
+        let norm_axis = if axis < 0 {
+            (self.ndim() as i64 + axis) as usize
         } else {
-            self.clone()
+            axis as usize
         };
-        let x_data = self_contig.as_f32_slice();
-        let shape = self.shape_ref();
-        let axis = if axis < 0 {
-            shape.len() as i64 + axis
-        } else {
-            axis
-        } as usize;
-
-        // ONNX Gather semantics:
-        // - If indices is 0-D (scalar), the gathered dim is *removed*
-        //   (output rank = data.rank - 1).
-        // - If indices is 1+D, the gathered dim is *replaced* by the indices shape
-        //   (output rank = data.rank - 1 + indices.rank).
-        let indices_ndim = indices.ndim();
-        let scalar_idx = indices_ndim == 0;
-
-        let out_shape: Vec<i64> = if scalar_idx {
-            let mut s = shape.to_vec();
-            s.remove(axis);
-            s
-        } else {
-            let mut s = shape.to_vec();
-            if indices_ndim == 1 {
-                s[axis] = indices_data.len() as i64;
-            } else {
-                // N-D indices: replace gathered dim with all indices dims
-                s.remove(axis);
-                for d in (0..indices_ndim).rev() {
-                    s.insert(axis, indices.inner.sizes[d]);
-                }
-            }
-            s
-        };
-        let mut out_data = vec![0.0f32; out_shape.iter().product::<i64>() as usize];
-
-        let inner = if axis + 1 < shape.len() {
-            shape[axis + 1..].iter().product::<i64>() as usize
-        } else {
-            1
-        };
-        let outer = if axis > 0 {
-            shape[..axis].iter().product::<i64>() as usize
-        } else {
-            1
-        };
-
-        if scalar_idx {
-            let idx = indices_data[0] as usize;
-            if idx >= shape[axis] as usize {
-                panic!(
-                    "gather: index {} is out of bounds for dimension {} (size {})",
-                    idx, axis, shape[axis]
-                );
-            }
-            for o in 0..outer {
-                let src_off = (o * shape[axis] as usize + idx) * inner;
-                let dst_off = o * inner;
-                out_data[dst_off..dst_off + inner]
-                    .copy_from_slice(&x_data[src_off..src_off + inner]);
-            }
-        } else {
-            for o in 0..outer {
-                for (i, &idx) in indices_data.iter().enumerate() {
-                    if idx as usize >= shape[axis] as usize {
-                        panic!(
-                            "gather: index {} is out of bounds for dimension {} (size {})",
-                            idx, axis, shape[axis]
-                        );
-                    }
-                    let src_off = (o * shape[axis] as usize + idx as usize) * inner;
-                    let dst_off = (o * out_shape[axis] as usize + i) * inner;
-                    out_data[dst_off..dst_off + inner]
-                        .copy_from_slice(&x_data[src_off..src_off + inner]);
-                }
-            }
-        }
-
-        Tensor::from_vec(out_data, out_shape)
+        Tensor::exec_aot(&[self, indices], |g, ins| {
+            vec![g.gather(&ins[0], &ins[1], norm_axis)]
+        })
+        .expect("Tensor::gather: AOT failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     pub fn nonzero(&self) -> Vec<Vec<i64>> {

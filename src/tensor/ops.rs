@@ -1237,23 +1237,11 @@ impl Tensor {
     }
 
     pub fn erf(&self) -> Tensor {
-        let data = self.as_f32_slice();
-        let result_data: Vec<f32> = data
-            .iter()
-            .map(|&v| {
-                let sign = if v >= 0.0 { 1.0f32 } else { -1.0f32 };
-                let x = v.abs();
-                let t = 1.0 / (1.0 + 0.3275911 * x);
-                let y = 1.0
-                    - (((((1.061_405_4 * t - 1.453_152_1) * t) + 1.421_413_8) * t - 0.284_496_72)
-                        * t
-                        + 0.254_829_6)
-                        * t
-                        * (-x * x).exp();
-                sign * y
-            })
-            .collect();
-        Tensor::from_vec(result_data, self.shape_ref().to_vec())
+        let result = Tensor::exec_aot(&[self], |g, ins| {
+            vec![g.erf(&ins[0])]
+        })
+        .expect("Tensor::erf: AOT execution failed");
+        result.into_iter().next().unwrap()
     }
 }
 

@@ -330,6 +330,27 @@ fn try_gpu_dispatch(
         "argmax" => {
             argmax::dispatch_argmax_gpu(arena, input_slices, output_slice)
         }
+        "upsample_nearest2d" | "upsample_bilinear2d" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "adaptive_avg_pool2d" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "repeat" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "cumsum" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "erf_f32" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "flip" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "where_f32" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
         _ => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
     }
 }

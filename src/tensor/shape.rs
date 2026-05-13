@@ -473,40 +473,11 @@ impl Tensor {
         }
     }
 
-    pub fn flip(&self, dim: i32) -> Tensor {
-        let ndim = self.ndim() as i32;
-        let dim = if dim < 0 { ndim + dim } else { dim } as usize;
-        if dim >= self.ndim() {
-            panic!("flip: dimension out of range");
-        }
-        let size = self.inner.sizes[dim];
-        let mut result_data = vec![0.0f32; self.numel() as usize];
-        let src = self.to_cpu();
-        let src_data = src.as_f32_slice();
-        let ndim = self.ndim();
-        let strides = &self.inner.strides;
-        let sizes = &self.inner.sizes;
-        let mut indices = vec![0i64; ndim];
-        for out_idx in 0..self.numel() as usize {
-            let mut lin = 0i64;
-            for d in 0..ndim {
-                let idx = if d == dim {
-                    size - 1 - indices[d]
-                } else {
-                    indices[d]
-                };
-                lin += idx * strides[d];
-            }
-            result_data[out_idx] = src_data[lin as usize];
-            for d in (0..ndim).rev() {
-                indices[d] += 1;
-                if indices[d] < sizes[d] {
-                    break;
-                }
-                indices[d] = 0;
-            }
-        }
-        Tensor::from_vec(result_data, self.inner.sizes.clone().into_vec())
+    pub fn flip(&self, dims: &[usize]) -> Tensor {
+        let result = Tensor::exec_aot(&[self], |g, ins| {
+            vec![g.flip(&ins[0], dims)]
+        }).expect("Tensor::flip: AOT execution failed");
+        result.into_iter().next().unwrap()
     }
 
     pub(crate) fn broadcast_shapes(a: &[i64], b: &[i64]) -> FastnnResult<Vec<i64>> {

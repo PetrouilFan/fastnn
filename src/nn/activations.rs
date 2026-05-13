@@ -1,8 +1,6 @@
 #![allow(dead_code)]
-use crate::autograd::{AdaptiveAvgPool2dBackward, AutogradMeta};
 use crate::nn::Module;
 use crate::tensor::Tensor;
-use std::sync::Arc;
 
 /// Stateless activation macro — routes through the AOT pipeline via Tensor methods.
 macro_rules! impl_stateless_activation {
@@ -226,69 +224,25 @@ impl Module for Elu {
 }
 
 pub struct AdaptiveAvgPool2d {
-    pub output_size: (i64, i64),
+    pub output_h: usize,
+    pub output_w: usize,
 }
 
 impl AdaptiveAvgPool2d {
-    pub fn new(output_size: (i64, i64)) -> Self {
-        AdaptiveAvgPool2d { output_size }
+    pub fn new(output_h: usize, output_w: usize) -> Self {
+        AdaptiveAvgPool2d { output_h, output_w }
     }
 }
 
 impl Module for AdaptiveAvgPool2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let x_shape = x.shape_ref();
-        let batch = x_shape[0];
-        let channels = x_shape[1];
-        let in_h = x_shape[2];
-        let in_w = x_shape[3];
-        let out_h = self.output_size.0;
-        let out_w = self.output_size.1;
-
-        let mut output_data = vec![0.0f32; (batch * channels * out_h * out_w) as usize];
-        let x_data = x.as_f32_slice();
-
-        for b in 0..batch as usize {
-            for c in 0..channels as usize {
-                for oh in 0..out_h as usize {
-                    for ow in 0..out_w as usize {
-                        let h_start = (oh * in_h as usize) / out_h as usize;
-                        let h_end = ((oh + 1) * in_h as usize) / out_h as usize;
-                        let w_start = (ow * in_w as usize) / out_w as usize;
-                        let w_end = ((ow + 1) * in_w as usize) / out_w as usize;
-
-                        let mut sum = 0.0f32;
-                        let mut count = 0;
-                        for ih in h_start..h_end {
-                            for iw in w_start..w_end {
-                                sum +=
-                                    x_data[b * channels as usize * in_h as usize * in_w as usize
-                                        + c * in_h as usize * in_w as usize
-                                        + ih * in_w as usize
-                                        + iw];
-                                count += 1;
-                            }
-                        }
-                        output_data[b * channels as usize * out_h as usize * out_w as usize
-                            + c * out_h as usize * out_w as usize
-                            + oh * out_w as usize
-                            + ow] = sum / count as f32;
-                    }
-                }
-            }
-        }
-
-        let mut output = Tensor::from_vec(output_data, vec![batch, channels, out_h, out_w]);
-
-        if x.requires_grad() {
-            let backward = AdaptiveAvgPool2dBackward::new();
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
-        }
-
-        output
+        Tensor::exec_aot(&[x], |g, ins| {
+            vec![g.adaptive_avg_pool2d(&ins[0], self.output_h, self.output_w)]
+        })
+        .expect("AdaptiveAvgPool2d::forward: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     fn parameters(&self) -> Vec<Tensor> {
