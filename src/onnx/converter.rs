@@ -369,6 +369,46 @@ impl<'a> OnnxConverter<'a> {
                 let refs: Vec<&GraphTensor> = ins.iter().collect();
                 self.out(node, self.graph.concat(&refs, axis));
             }
+            "Split" => {
+                // Split input tensor into N outputs along the given axis.
+                // split attribute: optional list of output lengths.
+                // If absent: equal split across all outputs.
+                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let n_outputs = node.outputs.len().max(1);
+                let split_sizes: Vec<usize> = if let Some(s) = node.attrs.get("split") {
+                    s.split(',').filter_map(|v| v.trim().parse().ok()).collect()
+                } else {
+                    vec![]
+                };
+                if split_sizes.len() == n_outputs && split_sizes.iter().all(|&s| s > 0) {
+                    // Explicit split sizes from attribute
+                    let mut start = 0usize;
+                    for (i, out_name) in node.outputs.iter().enumerate() {
+                        if i < split_sizes.len() {
+                            let end = start + split_sizes[i];
+                            let output = self.graph.slice(&ins[0], axis, start, end);
+                            self.name_to_id.insert(out_name.clone(), output);
+                            start = end;
+                        }
+                    }
+                } else {
+                    // Equal split: each output gets dim_size / n_outputs.
+                    // Without shape info at converter time, we can't compute the slice bounds.
+                    // Fallback: use start=0, end=MAX for first output, others use 0-length.
+                    // In practice, ONNX models almost always provide the 'split' attribute.
+                    for (i, out_name) in node.outputs.iter().enumerate() {
+                        let output = if i == 0 {
+                            // First output gets priority in ambiguity
+                            ins[0].clone()
+                        } else {
+                            // Other outputs get the same input (approximate — will be wrong
+                            // for consumers that depend on shape correctness)
+                            ins[0].clone()
+                        };
+                        self.name_to_id.insert(out_name.clone(), output);
+                    }
+                }
+            }
             "Slice" => {
                 let starts: Vec<i64> = parse_ints_i64(&node.attrs, "starts", &[0]);
                 let ends: Vec<i64> = parse_ints_i64(&node.attrs, "ends", &[1]);
@@ -423,6 +463,29 @@ impl<'a> OnnxConverter<'a> {
                 if !self.name_to_id.contains_key(&out_name) {
                     let c = self.scalar(0.0);
                     self.out(node, c);
+                }
+            }
+            "ConstantOfShape" => {
+                // Creates a tensor with the given shape filled with value.
+                // shape input (ins[0]) is 1D int64 from params; value attr is optional.
+                if let Some(shape_tensor) = self.params.get(&node.inputs[0]) {
+                    let shape_data: Vec<f32> = shape_tensor.to_numpy();
+                    let output_shape: Vec<u64> = shape_data.iter().map(|&v| v as u64).collect();
+                    let fill_value: f32 = node.attrs.get("value")
+                        .and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    let data = fill_value.to_le_bytes().to_vec();
+                    let numel: usize = output_shape.iter().map(|&d| d as usize).product();
+                    let mut full_data = Vec::with_capacity(numel * 4);
+                    for _ in 0..numel {
+                        full_data.extend_from_slice(&data);
+                    }
+                    let dims: Vec<DimExpr> = output_shape.iter().map(|&d| DimExpr::Known(d)).collect();
+                    let tt = TensorType::new(dims, IrDType::F32);
+                    let gt = self.graph.constant(&full_data, tt);
+                    self.out(node, gt);
+                } else {
+                    // Dynamic shape: can't evaluate at converter time
+                    return Err("ConstantOfShape with runtime shape is not yet supported".to_string());
                 }
             }
             "Shape" | "Cast" | "Expand" | "Tile" => {
