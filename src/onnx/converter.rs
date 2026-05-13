@@ -203,11 +203,7 @@ impl<'a> OnnxConverter<'a> {
             "HardSigmoid" => {
                 let alpha: f32 = node.attrs.get("alpha").and_then(|a| a.parse().ok()).unwrap_or(0.16666667);
                 let beta: f32 = node.attrs.get("beta").and_then(|b| b.parse().ok()).unwrap_or(0.5);
-                let scal = self.scalar(alpha);
-                let added = self.scalar(beta);
-                let sc = self.graph.add_scalar(&ins[0], &scal);
-                self.out(node, self.graph.clamp(&sc, 0.0, 1.0));
-                // Actually HardSigmoid = clamp(x*alpha + beta, 0, 1)
+                // HardSigmoid = clamp(x*alpha + beta, 0, 1)
                 let xa = self.graph.mul(&ins[0], &self.scalar(alpha));
                 let xab = self.graph.add(&xa, &self.scalar(beta));
                 self.out(node, self.graph.clamp(&xab, 0.0, 1.0));
@@ -269,7 +265,6 @@ impl<'a> OnnxConverter<'a> {
                 let stride = *strides.first().unwrap_or(&1);
                 let padding = *pads.first().unwrap_or(&0);
                 let dilation = *dilations.first().unwrap_or(&1);
-                let bias = ins.get(2);
 
                 match strides.len() {
                     1 => self.out(node, self.graph.conv1d(&ins[0], &ins[1], stride, padding)),
@@ -294,7 +289,8 @@ impl<'a> OnnxConverter<'a> {
                 let padding: usize = node.attrs.get("pads")
                     .and_then(|s| s.split(',').next().and_then(|v| v.trim().parse().ok()))
                     .unwrap_or(0);
-                let groups: usize = node.attrs.get("group").and_then(|g| g.parse().ok()).unwrap_or(1);
+                let _groups: usize = node.attrs.get("group").and_then(|g| g.parse().ok()).unwrap_or(1);
+                // Note: groups > 1 not yet implemented for ConvTranspose
                 self.out(node, self.graph.conv_transpose2d(&ins[0], &ins[1], stride, padding));
             }
 
@@ -646,6 +642,12 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
         DType::I32 => IrDType::I32,
         DType::I64 => IrDType::I64,
         DType::Bool => IrDType::Bool,
-        _ => IrDType::F32,
+        DType::F16 => IrDType::F16,
+        DType::BF16 => IrDType::BF16,
+        // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
+        // not in the Tensor-level DType. Use default values here; the actual
+        // scales are filled in by the quantization compiler pass.
+        DType::U4 => IrDType::U4 { scales: vec![1.0], zero_points: vec![0.0] },
+        DType::U8 => IrDType::U8 { scales: vec![1.0], zero_points: vec![0.0] },
     }
 }
