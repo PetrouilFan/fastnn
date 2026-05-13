@@ -67,17 +67,22 @@ impl<'a> OnnxConverter<'a> {
     /// Convert the ONNX graph to a ComputeGraph.
     pub fn to_compute_graph(mut self) -> Result<ComputeGraph, String> {
         // Phase 1: Register all graph inputs.
+        let mut input_ids = Vec::new();
         for name in self.input_names {
-            let shape: Vec<u64> = if let Some(t) = self.params.get(name.as_str()) {
-                t.shape().iter().map(|&d| d as u64).collect()
+            if let Some(t) = self.params.get(name.as_str()) {
+                let shape: Vec<u64> = t.shape().iter().map(|&d| d as u64).collect();
+                let gt = self.graph.input(&shape, ir_dtype_from_dtype(t.dtype()));
+                input_ids.push(gt.node_id());
+                self.name_to_id.insert(name.clone(), gt);
             } else {
-                vec![]
-            };
-            let dtype = self.params.get(name.as_str())
-                .map(|t| ir_dtype_from_dtype(t.dtype()))
-                .unwrap_or(IrDType::F32);
-            let gt = self.graph.input(&shape, dtype);
-            self.name_to_id.insert(name.clone(), gt);
+                let bounded = DimExpr::Bounded {
+                    sym: name.clone(),
+                    max: 1_000_000,
+                };
+                let gt = self.graph.input_with_dims(&[bounded], IrDType::F32);
+                input_ids.push(gt.node_id());
+                self.name_to_id.insert(name.clone(), gt);
+            }
         }
 
         // Phase 2: Register all weight params as Constant nodes.
@@ -100,7 +105,19 @@ impl<'a> OnnxConverter<'a> {
             }
         }
 
-        let graph = self.graph.to_graph();
+        // Phase 4: Register graph outputs.
+        let mut output_ids = Vec::new();
+        for name in self.output_names {
+            if let Some(gt) = self.name_to_id.get(name.as_str()) {
+                output_ids.push(gt.node_id());
+            } else {
+                self.errors.push(format!("output '{}' not found", name));
+            }
+        }
+
+        let mut graph = self.graph.to_graph();
+        graph.inputs = input_ids;
+        graph.outputs = output_ids;
 
         if !self.errors.is_empty() {
             return Err(format!(
