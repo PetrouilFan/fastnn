@@ -2,6 +2,7 @@ use crate::autograd::{
     self, AutogradMeta, BatchNorm1dBackward, BatchNorm2dBackward, GroupNormBackward,
     RMSNormBackward,
 };
+use crate::ir::node::{DimExpr, IrDType, TensorType};
 use crate::tensor::Tensor;
 use crate::{
     impl_training_state,
@@ -416,26 +417,60 @@ impl Module for GroupNorm {
         let spatial: i64 = x_shape[2..].iter().product();
         let group_size = channels / self.num_groups;
 
-        // Compute forward in no_grad to avoid per-op graph, then attach fused backward
-        use crate::autograd::NoGradGuard;
-        let mut output = {
-            let _guard = NoGradGuard::new();
-            let x_reshaped = x.reshape(vec![batch, self.num_groups, group_size, spatial]);
-            let mean = x_reshaped.mean(2, true).mean(3, true);
-            let var = x_reshaped.sub(&mean).pow(2.0).mean(2, true).mean(3, true);
-            let x_norm = x_reshaped.sub(&mean).div(&var.add_scalar(self.eps).sqrt());
-            let x_norm = x_norm.reshape(x_shape.to_vec());
+        // Single fused AOT graph for GroupNorm forward
+        // Reduces overhead by compiling one graph instead of per-op exec_aot calls
+        let mut output = Tensor::exec_aot(&[x, &self.weight, &self.bias], |g, ins| {
+            let x = &ins[0];
+            let w = &ins[1];
+            let b = &ins[2];
 
-            let mut weight_shape: smallvec::SmallVec<[i64; 8]> = smallvec::SmallVec::new();
-            weight_shape.push(1);
-            weight_shape.push(self.num_channels);
+            // Reshape: [N, C, H, W] -> [N, G, C/G, H*W]
+            let reshaped = g.reshape(x, &[
+                DimExpr::Known(batch as u64),
+                DimExpr::Known(self.num_groups as u64),
+                DimExpr::Known(group_size as u64),
+                DimExpr::Known(spatial as u64),
+            ]);
+
+            // Scalar constants reused below
+            let scalar_tt = TensorType::new(vec![], IrDType::F32);
+            let two_data = 2.0f32.to_le_bytes().to_vec();
+            let two_c = g.constant(&two_data, scalar_tt.clone());
+            let eps_data = self.eps.to_le_bytes().to_vec();
+            let eps_c = g.constant(&eps_data, scalar_tt);
+
+            // Mean along dim 2 (group_size) and 3 (spatial)
+            let mean = g.reduce_mean(&reshaped, 2, true);
+            let mean = g.reduce_mean(&mean, 3, true);
+
+            // Variance: mean((x - mean)^2)
+            let centered = g.sub(&reshaped, &mean);
+            let two_data = 2.0f32.to_le_bytes().to_vec();
+            let two_tt = TensorType::new(vec![], IrDType::F32);
+            let two_c = g.constant(&two_data, two_tt);
+            let sq = g.pow(&centered, &two_c);
+            let var = g.reduce_mean(&sq, 2, true);
+            let var = g.reduce_mean(&var, 3, true);
+
+            // Normalize: (x - mean) / sqrt(var + eps)
+            let var_eps = g.add_scalar(&var, &eps_c);
+            let std = g.sqrt(&var_eps);
+            let x_norm = g.div(&centered, &std);
+
+            // Reshape back to original
+            let out_shape: Vec<DimExpr> = x_shape.iter().map(|&d| DimExpr::Known(d as u64)).collect();
+            let x_norm = g.reshape(&x_norm, &out_shape);
+
+            // Weight * norm + bias with broadcast shape [1, C, 1, ...]
+            let mut weight_shape: Vec<DimExpr> = vec![DimExpr::Known(1), DimExpr::Known(channels as u64)];
             for _ in 2..x_shape.len() {
-                weight_shape.push(1);
+                weight_shape.push(DimExpr::Known(1));
             }
-            let w = self.weight.reshape(weight_shape.clone().into_vec());
-            let b = self.bias.reshape(weight_shape.into_vec());
-            x_norm.mul(&w).add(&b)
-        };
+            let w_r = g.reshape(w, &weight_shape);
+            let b_r = g.reshape(b, &weight_shape);
+            let scaled = g.mul(&x_norm, &w_r);
+            vec![g.add(&scaled, &b_r)]
+        }).expect("GroupNorm::forward: AOT execution failed").into_iter().next().unwrap();
 
         if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
             let _edges = {
