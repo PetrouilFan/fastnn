@@ -492,19 +492,354 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
-            Opcode::LeakyRelu | Opcode::Elu | Opcode::Softplus
-            | Opcode::Hardswish | Opcode::Mish | Opcode::Clamp | Opcode::Sign
-            | Opcode::LogicalNot | Opcode::LogSoftmax | Opcode::Softmax => {
+            Opcode::LeakyRelu => {
+                // d_input = d_output * (x > 0 ? 1.0 : alpha)
+                if let Some(&input_id) = node.inputs.first() {
+                    let alpha: f32 = node.attrs.get("negative_slope")
+                        .and_then(|a| a.parse().ok()).unwrap_or(0.01);
+                    let zero = create_constant_scalar(0.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let alpha_c = create_constant_scalar(alpha, &[], IrDType::F32, &mut grad_graph);
+                    let mask = grad_graph.add_node(
+                        Opcode::GtScalar, vec![input_id, zero],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let neg_grad = grad_graph.add_node(
+                        Opcode::Mul, vec![grad_id, alpha_c],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Where, vec![mask, grad_id, neg_grad],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Elu => {
+                // d_input = d_output * (x > 0 ? 1 : alpha * exp(x))
+                if let Some(&input_id) = node.inputs.first() {
+                    let alpha: f32 = node.attrs.get("alpha")
+                        .and_then(|a| a.parse().ok()).unwrap_or(1.0);
+                    let zero = create_constant_scalar(0.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let alpha_c = create_constant_scalar(alpha, &[], IrDType::F32, &mut grad_graph);
+                    let exp_x = grad_graph.add_node(
+                        Opcode::Exp, vec![input_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let alpha_exp = grad_graph.add_node(
+                        Opcode::Mul, vec![alpha_c, exp_x],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let mask = grad_graph.add_node(
+                        Opcode::GtScalar, vec![input_id, zero],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Where, vec![mask, grad_id, alpha_exp],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Softplus => {
+                // d_input = d_output * sigmoid(x)
+                if let Some(&input_id) = node.inputs.first() {
+                    let sig = grad_graph.add_node(
+                        Opcode::Sigmoid, vec![input_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Mul, vec![grad_id, sig],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Hardswish => {
+                // hardswish(x) = x * clamp(x/3 + 0.5, 0, 1)  for x in [-3, 3]
+                // derivative: 2x/3 + 1/2 for x in [-3, 3], 0 for x <= -3, 1 for x >= 3
+                // Simplified: grad * (x > 3 ? 1 : (x < -3 ? 0 : 2*x/3 + 0.5))
+                if let Some(&input_id) = node.inputs.first() {
+                    let three = create_constant_scalar(3.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let neg_three = create_constant_scalar(-3.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let two_thirds = create_constant_scalar(2.0f32/3.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let half = create_constant_scalar(0.5f32, &[], IrDType::F32, &mut grad_graph);
+                    let one = create_constant_scalar(1.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let zero = create_constant_scalar(0.0f32, &[], IrDType::F32, &mut grad_graph);
+                    // mask_high = x > 3
+                    let mask_high = grad_graph.add_node(
+                        Opcode::GtScalar, vec![input_id, three],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    // mask_low = x < -3
+                    let mask_low = grad_graph.add_node(
+                        Opcode::LtScalar, vec![input_id, neg_three],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    // linear part: 2*x/3 + 0.5
+                    let x_23 = grad_graph.add_node(
+                        Opcode::Mul, vec![input_id, two_thirds],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let mid_deriv = grad_graph.add_node(
+                        Opcode::Add, vec![x_23, half],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    // not_low: grad * mid_deriv  (pass-through for masked region)
+                    let not_low_deriv = grad_graph.add_node(
+                        Opcode::Where, vec![mask_low, zero, mid_deriv],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    // deriv = 1 where x > 3, mid_deriv where -3 <= x <= 3, 0 where x < -3
+                    let deriv = grad_graph.add_node(
+                        Opcode::Where, vec![mask_high, one, not_low_deriv],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Mul, vec![grad_id, deriv],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Mish => {
+                // mish(x) = x * tanh(softplus(x))
+                // derivative: tanh(softplus(x)) + x * sech²(softplus(x)) * sigmoid(x)
+                // Simplified: use autograd-friendly decomposition via output node
+                // dmish/dx = mish_out * sigmoid(x) + mish_out / x ... actually
+                // Simplest correct approach: delta = tanh(sp) + x * (1-tanh²(sp)) * sigmoid(x)
+                if let Some(&input_id) = node.inputs.first() {
+                    let one = create_constant_scalar(1.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let sp = grad_graph.add_node(
+                        Opcode::Softplus, vec![input_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let tanh_sp = grad_graph.add_node(
+                        Opcode::Tanh, vec![sp],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let sig_x = grad_graph.add_node(
+                        Opcode::Sigmoid, vec![input_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    // sech²(sp) = 1 - tanh²(sp)
+                    let tanh_sq = grad_graph.add_node(
+                        Opcode::Mul, vec![tanh_sp, tanh_sp],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let sech2 = grad_graph.add_node(
+                        Opcode::Sub, vec![one, tanh_sq],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let x_times_sig = grad_graph.add_node(
+                        Opcode::Mul, vec![input_id, sig_x],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let x_sech2_sig = grad_graph.add_node(
+                        Opcode::Mul, vec![x_times_sig, sech2],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let deriv = grad_graph.add_node(
+                        Opcode::Add, vec![tanh_sp, x_sech2_sig],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Mul, vec![grad_id, deriv],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Clamp => {
+                // d_input = d_output where x in [min, max], else 0
+                if let Some(&input_id) = node.inputs.first() {
+                    let min_val: f32 = node.attrs.get("min").and_then(|m| m.parse().ok()).unwrap_or(f32::NEG_INFINITY);
+                    let max_val: f32 = node.attrs.get("max").and_then(|m| m.parse().ok()).unwrap_or(f32::INFINITY);
+                    let min_c = create_constant_scalar(min_val, &[], IrDType::F32, &mut grad_graph);
+                    let max_c = create_constant_scalar(max_val, &[], IrDType::F32, &mut grad_graph);
+                    let zero = create_constant_scalar(0.0f32, &[], IrDType::F32, &mut grad_graph);
+                    // mask = x >= min AND x <= max
+                    let ge_min = grad_graph.add_node(
+                        Opcode::GtScalar, vec![input_id, min_c],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let le_max = grad_graph.add_node(
+                        Opcode::LtScalar, vec![input_id, max_c],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    // For inclusive bounds, handle equality:
+                    let eq_min = grad_graph.add_node(
+                        Opcode::EqScalar, vec![input_id, min_c],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let eq_max = grad_graph.add_node(
+                        Opcode::EqScalar, vec![input_id, max_c],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let ge_or_eq = grad_graph.add_node(
+                        Opcode::Add, vec![ge_min, eq_min],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let le_or_eq = grad_graph.add_node(
+                        Opcode::Add, vec![le_max, eq_max],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let mask = grad_graph.add_node(
+                        Opcode::Mul, vec![ge_or_eq, le_or_eq],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Where, vec![mask, grad_id, zero],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Sign => {
+                // subgradient: 0 almost everywhere (pass-through for x != 0)
+                // d_input = d_output * 0 (stop gradients through sign)
+                if let Some(&input_id) = node.inputs.first() {
+                    let zero = create_constant_scalar(0.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Mul, vec![grad_id, zero],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::LogicalNot => {
+                // no gradient needed (boolean op)
+            }
+            Opcode::LogSoftmax => {
+                // log_softmax = x - log(sum(exp(x)))
+                // d_input = d_output - softmax(x) * sum(d_output)
+                // Simplified: grad - softmax * sum(grad)
+                if let Some(&input_id) = node.inputs.first() {
+                    // compute softmax(x) from log_softmax by exp
+                    let sm = grad_graph.add_node(
+                        Opcode::Exp, vec![node_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    // sum of grad along appropriate axis
+                    // For now, reduce all dims (same as softmax backward)
+                    let grad_sum = grad_graph.add_node(
+                        Opcode::ReduceSum, vec![grad_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_sm = grad_graph.add_node(
+                        Opcode::Mul, vec![sm, grad_sum],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Sub, vec![grad_id, grad_sm],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Softmax => {
+                // softmax backward: d_input = s * (d_output - sum(s * d_output))
+                // where s = softmax(x). s is the node's output (node_id).
+                if let Some(&input_id) = node.inputs.first() {
+                    let s_times_grad = grad_graph.add_node(
+                        Opcode::Mul, vec![node_id, grad_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let sum_sg = grad_graph.add_node(
+                        Opcode::ReduceSum, vec![s_times_grad],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_centered = grad_graph.add_node(
+                        Opcode::Sub, vec![grad_id, sum_sg],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Mul, vec![node_id, grad_centered],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::BatchNorm => {
+                // BN forward: y = gamma * (x - mean) / sqrt(var + eps) + beta
+                // Inputs: [x, gamma, beta, mean, var]
+                // dx = gamma * grad / sqrt(var + eps)
+                // dgamma = sum(grad * (x - mean) / sqrt(var + eps))
+                // dbeta = sum(grad)
+                // For simplicity: pass dx to input[0], accumulate dgamma/dbeta
+                if let Some(&input_id) = node.inputs.first() {
+                    let eps_val: f64 = node.attrs.get("eps").and_then(|e| e.parse().ok()).unwrap_or(1e-5);
+                    let eps_c = create_constant_scalar(eps_val as f32, &[], IrDType::F32, &mut grad_graph);
+                    // gamma = inputs[1] (weight), var = inputs[4]
+                    if node.inputs.len() >= 5 {
+                        let gamma_id = node.inputs[1];
+                        let var_id = node.inputs[4];
+                        // sqrt(var + eps)
+                        let var_eps = grad_graph.add_node(
+                            Opcode::Add, vec![var_id, eps_c],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        let std = grad_graph.add_node(
+                            Opcode::Sqrt, vec![var_eps],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        // gamma / std
+                        let gamma_div_std = grad_graph.add_node(
+                            Opcode::Div, vec![gamma_id, std],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        // dx = grad * gamma / std
+                        let grad_input = grad_graph.add_node(
+                            Opcode::Mul, vec![grad_id, gamma_div_std],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                        // dgamma: sum(grad * (x - mean) / std)
+                        if let Some(&mean_id) = node.inputs.get(3) {
+                            let x_minus_mean = grad_graph.add_node(
+                                Opcode::Sub, vec![input_id, mean_id],
+                                TensorType::new(vec![], IrDType::F32),
+                            );
+                            let x_minus_mean_div_std = grad_graph.add_node(
+                                Opcode::Div, vec![x_minus_mean, std],
+                                TensorType::new(vec![], IrDType::F32),
+                            );
+                            let grad_gamma_unreduced = grad_graph.add_node(
+                                Opcode::Mul, vec![grad_id, x_minus_mean_div_std],
+                                TensorType::new(vec![], IrDType::F32),
+                            );
+                            let grad_gamma = grad_graph.add_node(
+                                Opcode::ReduceSum, vec![grad_gamma_unreduced],
+                                TensorType::new(vec![], IrDType::F32),
+                            );
+                            accumulate_grad(&mut grad_graph, &mut grads, gamma_id, grad_gamma);
+                        }
+                        // dbeta: sum(grad)
+                        if let Some(&beta_id) = node.inputs.get(2) {
+                            let grad_beta = grad_graph.add_node(
+                                Opcode::ReduceSum, vec![grad_id],
+                                TensorType::new(vec![], IrDType::F32),
+                            );
+                            accumulate_grad(&mut grad_graph, &mut grads, beta_id, grad_beta);
+                        }
+                    }
+                }
+            }
+            Opcode::LayerNorm | Opcode::RMSNorm => {
+                // Pass grad to input[0] for now; full LN/RMSNorm backward is complex
                 if let Some(&input_id) = node.inputs.first() {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
-            Opcode::BatchNorm | Opcode::LayerNorm | Opcode::RMSNorm => {
+            Opcode::MaxPool => {
+                // d_input = scatter grad into positions that were max
+                // Simplified: pass through (approximate - only correct if no overlap)
                 if let Some(&input_id) = node.inputs.first() {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
-            Opcode::MaxPool | Opcode::AvgPool => {
+            Opcode::AvgPool => {
+                // d_input = grad / kernel_size^2 (broadcast back)
+                // Approximate: pass through (gradient shape different from input)
                 if let Some(&input_id) = node.inputs.first() {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
@@ -512,10 +847,56 @@ pub fn build_backward_graph(
             Opcode::Constant(_) | Opcode::Input
             | Opcode::GtScalar | Opcode::LtScalar | Opcode::EqScalar => {
             }
-            Opcode::Pad | Opcode::Slice | Opcode::Concat | Opcode::Gather | Opcode::ScatterNd
-            | Opcode::Transpose | Opcode::Maximum | Opcode::Minimum | Opcode::ReduceMax
-            | Opcode::ArgMax
-            | Opcode::Prelu | Opcode::Embedding | Opcode::Pow
+            Opcode::Transpose => {
+                // gradient of transpose is transpose with inverse permutation
+                if let Some(&input_id) = node.inputs.first() {
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Transpose, vec![grad_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Concat => {
+                // gradient of concat is split along the concat axis
+                // For now, pass gradients to all inputs (correct split shape requires axis info)
+                for &input_id in &node.inputs {
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                }
+            }
+            Opcode::Slice => {
+                // gradient of slice is scatter with zeros at sliced-out positions
+                // For now, pass grad to first input (scatter requires attrs)
+                if let Some(&input_id) = node.inputs.first() {
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                }
+            }
+            Opcode::Pad => {
+                // gradient of pad is crop
+                if let Some(&input_id) = node.inputs.first() {
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                }
+            }
+            Opcode::Gather | Opcode::ScatterNd => {
+                // scatter-add for gather's inverse, gather for scatter's inverse
+                for &input_id in &node.inputs {
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                }
+            }
+            Opcode::Maximum | Opcode::Minimum => {
+                // d_input = grad where input is the max/min, else 0
+                // For now pass through to both (approximate)
+                for &input_id in &node.inputs {
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                }
+            }
+            Opcode::ReduceMax | Opcode::ArgMax => {
+                // pass grad to first input (argmax has no gradient, max needs argmax mask)
+                if let Some(&input_id) = node.inputs.first() {
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                }
+            }
+            Opcode::Prelu | Opcode::Embedding | Opcode::Pow
             | Opcode::AddScalar | Opcode::MulScalar | Opcode::DivScalar
             | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
             | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
