@@ -1,10 +1,63 @@
 # Changelog
 
+## v2.0.0 — AOT Compiler Pipeline & Native Quantization
+
+This is a major release that replaces the legacy DAG/layer dispatch architecture with a complete IR-based AOT compiler pipeline, and adds native 4-bit/8-bit weight quantization as a first-class compiler pass.
+
+### IR & Compiler Pipeline
+
+- **`ComputeGraph` IR** — New first-class intermediate representation with 30+ opcodes (MatMul, Conv2d, Softmax, Reduce, Transpose, etc.), symbolic dimension support (`DimExpr::Symbol`, `Bounded`, `Known`), and per-node `TensorType` carrying dtype + shape.
+- **`GraphBuilder`** — Fluent Rust API for constructing `ComputeGraph` instances. Supports `input()`, `constant()`, `matmul()`, `conv2d_with_params()`, `relu()`, `softmax()`, `add()`, `sub()`, `mul()`, `reshape()`, `transpose()`, and more.
+- **`GraphExecutor`** — Ties the IR, compiler passes, and backend together. Compile once, execute many times with arena-based memory management.
+- **Shape inference pass** — Resolves symbolic dimensions at compile time using `DimExpr::evaluate_with_env`. Falls back to bounded estimates (`DimExpr::Bounded`) with runtime resolution via `ShapeEnv`.
+- **Operator fusion pass** — Merges `MatMul + Add → FusedMatMulAdd`, `MatMul + Add + ReLU → FusedMatMulAddRelu`, `Conv2d + Add → FusedConv2dAdd`, `Conv2d + Add + ReLU → FusedConv2dAddRelu`.
+- **Memory planning pass** — Greedy first-fit arena allocator with live-range analysis. Reuses arena slots for non-overlapping tensors. `tighten()` available for runtime shape resolution.
+- **ONNX → IR converter** — `OnnxConverter` maps 30+ ONNX operator types to `ComputeGraph` with `with_input_shapes()` builder for explicit dimension specification.
+
+### Native Weight Quantization (U4/U8)
+
+- **Quantization compiler pass** — `quantize_weights(graph, bit_width)` scans for f32 Constant weight nodes feeding MatMul/Conv2d and replaces them with packed U4/U8 data carrying per-channel scale/zero_point metadata.
+- **IrDType::U4 / IrDType::U8** — Packed precision types carry per-channel `Vec<f32>` scales and zero_points. `DType::U4` / `DType::U8` are simple unit variants for the storage layer.
+- **Per-channel quantization** — One (scale, zero_point) pair per output channel. `PackedTensor::from_f32_per_channel()` computes symmetric scales and packs into U4x8 (8 values per u32) or U8x4 (4 values per u32).
+- **2D weight transposition** — MatMul weights are transposed from `[K, N]` to `[N, K]` before packing to match the GEMM row-output convention (`gemm_packed_batched`).
+- **4D weight flattening** — Conv2d weights `[OC, IC, KH, KW]` are flattened to `[OC, IC*KH*KW]` for the im2col+GEMM dispatch.
+- **CPU backend dispatch** — `matmul_u4`, `matmul_u8`, `conv2d_u4`, `conv2d_u8` kernels with per-channel dequantization fused into GEMM.
+- **WGPU backend fallback** — Quantized ops return `UnsupportedOp` and fall back to CPU; WGPU packed shaders planned for v2.1.
+- **Memory planning for packed types** — `IrDType::packed_byte_size()` accounts for word-level packing overhead and SIMD margin (16 extra u32 words per PackedTensor).
+- **Arena alignment** — Packed weight data is copied to a u32-aligned buffer before dispatch to avoid alignment panics.
+
+### Backend & Execution
+
+- **CpuBackend** — Arena-based dispatch with `f32`, `fused_matmul_add`, `fused_matmul_add_relu`, `fused_conv2d_add`, `fused_conv2d_add_relu`, `matmul_u4`, `matmul_u8`, `conv2d_u4`, `conv2d_u8`, `softmax`, `reduce`, `concat`, `gather`, `reshape`, `transpose`, and more.
+- **WgpuBackend** — GPU compute for supported ops with `UnsupportedOp` fallback for quantized kernels.
+- **ExecutablePlan / MemoryPlan** — Compiled plans carry per-instruction slots, offsets, and parameters. `MemoryPlan::tighten()` available for runtime shape resolution.
+
+### Python API
+
+- **`AotExecutor(quantize=4|8|None)`** — Compile ONNX models through the AOT pipeline with optional weight quantization.
+- **`AotExecutor(input_shapes={...})`** — Supply explicit input dimension shapes for dynamic ONNX models.
+- **`DAGModel(quantize=)`** — Pass quantization parameter through the Python model load path.
+- **`build_dag_model(quantize=)`** — Quantization support in the `graph_builder.py` helper.
+- **`OnnxConverter::with_input_shapes()`** — Builder method for explicit shape specification on dynamic inputs.
+
+### Integration Tests
+
+- **`tests/quantized_pipeline.rs`** — 10 end-to-end integration tests covering MatMul U4/U8, Conv2d U4/U8, shape correctness, sign preservation, invalid bit-width rejection, and GraphBuilder API.
+- **135 unit tests** pass including all existing packed precision, shape inference, and compiler pass tests.
+
+### Breaking Changes
+
+- **`DAGExecutor`** is replaced by `AotExecutor` for the v2.0 pipeline. The legacy `DAGExecutor` and `PackedLinear`/`PackedConv2d` layer classes remain available for backward compatibility but the v2.0 IR path is recommended for all new code.
+- **`IrDType::U4 { scales, zero_points }` / `IrDType::U8 { scales, zero_points }`** — New dtype variants for the IR. Code that pattern-matches on `IrDType` must handle these new variants.
+- **`DType::U4` / `DType::U8`** — New unit variants in the storage-layer dtype enum.
+
+---
+
 ## [Unreleased] — Next
 
 ### Added
 
-- Placeholder for upcoming features beyond the v1.3.0 precision-system release.
+- Placeholder for upcoming features beyond the v2.0.0 AOT pipeline release.
 
 ---
 
