@@ -12,7 +12,6 @@ Key v2.0.0 APIs:
 
 Legacy APIs (v1.x) remain available for backward compatibility:
   - PackedLinear, PackedConv2d, PackedTensor — eager mode packed inference
-  - DAGExecutor — legacy graph execution
 """
 
 import numpy as np
