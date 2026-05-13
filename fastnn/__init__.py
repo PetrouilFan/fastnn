@@ -236,7 +236,7 @@ __all__ = [
     "PReLU",
     "AvgPool2d",
     # Phase 1 additions
-    "DAGExecutor",
+    "AotExecutor",
     # Phase 3 additions
     "where",
     "gather",
@@ -572,8 +572,8 @@ class _TensorModuleWrapper:
 PReLU = _core.PReLU
 AvgPool2d = _core.AvgPool2d
 
-# Phase 1: DAG executor
-DAGExecutor = _core.DAGExecutor
+# Phase 1: AOT graph executor (replaces DAGExecutor from v1.x)
+AotExecutor = _core.AotExecutor if hasattr(_core, 'AotExecutor') else None
 
 # Phase 3: New tensor operation functions
 where = _core.where_
