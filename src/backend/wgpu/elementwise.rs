@@ -39,6 +39,7 @@ pub(super) fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
         "mul_relu_f32" => Some(33),
         "div_relu_f32" => Some(34),
         "mish_f32" => Some(35),
+        "erf_f32" => Some(36),
         _ => None,
     }
 }
@@ -152,6 +153,12 @@ fn gelu_impl(x: f32) -> f32 {
     return 0.5 * x * (1.0 + tanh(tanh_arg));
 }
 
+fn erf_impl(x: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.3275911 * abs(x));
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x);
+    return select(y, -y, x < 0.0);
+}
+
 fn hardswish_impl(x: f32) -> f32 {
     return x * max(min(x + 3.0, 6.0), 0.0) / 6.0;
 }
@@ -202,6 +209,7 @@ fn apply_op(a: f32, b: f32, op: u32, e0: f32, e1: f32) -> f32 {
         case 33u: { return max(a * b, 0.0); } // mul_relu
         case 34u: { return max(a / b, 0.0); } // div_relu
         case 35u: { let sp = log(1.0 + exp(a)); return a * tanh(sp); } // mish
+        case 36u: { return erf_impl(a); }
         default: { return a; }
     }
 }

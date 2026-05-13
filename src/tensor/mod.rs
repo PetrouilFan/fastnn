@@ -953,7 +953,7 @@ mod tests {
     #[test]
     fn test_flip() {
         let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
-        let y = x.flip(0);
+        let y = x.flip(&[0]);
         let data = y.as_f32_slice();
         assert!((data[0] - 3.0).abs() < 1e-5);
         assert!((data[1] - 4.0).abs() < 1e-5);
