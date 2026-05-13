@@ -345,6 +345,8 @@ from fastnn.io.export import save_fnn_model
 from fastnn.io.onnx import import_onnx
 from fastnn.io.graph_builder import build_model_from_fnn
 from fastnn.io.dag_model import DAGModel
+import fastnn._core as _core
+AotExecutor = getattr(_core, 'AotExecutor', None)
 
 
 def save(model, path: str, format: str = "fnn-v2") -> None:
@@ -425,4 +427,5 @@ __all__ = [
     "load_onnx_model",
     "build_model_from_fnn",
     "DAGModel",
+    "AotExecutor",
 ]

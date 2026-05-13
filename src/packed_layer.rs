@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::backends::cpu;
 use crate::dtypes::PackedWord;
-use crate::kernels::gpu::{get_context, GpuBuffer, GpuContext};
+use crate::backend::wgpu::context::{get_wgpu_context, GpuBuffer, GpuContext};
 use crate::packed_tensor::PackedTensor;
 
 /// Global backend selector
@@ -170,7 +170,7 @@ impl<T: PackedWord> PackedLinear<T> {
     /// Forward pass on GPU (requires wgpu context).
     pub fn forward_wgpu(&self, input: &[f32]) -> Vec<f32> {
         use crate::backends::wgpu::gemv_wgpu_persistent;
-        let ctx = get_context(0);
+        let ctx = get_wgpu_context(0);
         let (weight_buf, output_buf, params_buf, activation_buf) = self.ensure_gpu_bufs(&ctx);
 
         let mut output = gemv_wgpu_persistent::<T>(

@@ -23,7 +23,7 @@ pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], ou
             let w = unsafe {
                 &*(weights as *const PackedTensor<T> as *const PackedTensor<crate::dtypes::U8x4>)
             };
-            crate::kernels::cpu::arm_neon::gemv_u8x4_neon(w, activation, output);
+            crate::backends::arm_neon::gemv_u8x4_neon(w, activation, output);
             return;
         }
         if T::BIT_WIDTH == 4 && !T::IS_FLOAT {
@@ -31,7 +31,7 @@ pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], ou
             let w = unsafe {
                 &*(weights as *const PackedTensor<T> as *const PackedTensor<crate::dtypes::U4x8>)
             };
-            crate::kernels::cpu::arm_neon::gemv_u4x8_neon(w, activation, output);
+            crate::backends::arm_neon::gemv_u4x8_neon(w, activation, output);
             return;
         }
     }

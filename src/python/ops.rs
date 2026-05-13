@@ -687,7 +687,7 @@ fn im2col(
     let out_width = (in_width + 2 * padding_us - kernel_w) / stride_us + 1;
 
     let col_tensor = unsafe {
-        crate::kernels::cpu::im2col_kernel(
+        crate::backend::cpu::im2col::im2col_kernel(
             x_inner,
             kernel_h,
             kernel_w,

@@ -11,7 +11,9 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::Ordering;
 
 pub mod blas;
+pub mod im2col;
 pub mod microkernels;
+pub mod reductions_fast;
 
 /// Resolve kernel dimension params at dispatch time using the runtime shape
 /// environment. Returns `params` unchanged if no symbolic dims are present.

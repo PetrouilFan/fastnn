@@ -21,7 +21,7 @@ impl Tensor {
                 let shape = self.shape();
                 let dim_size = shape[dim_normalized] as usize;
                 let num_rows = shape[0] as usize;
-                let output = crate::kernels::cpu::sum_last_dim_contiguous(self, dim_size, num_rows);
+                let output = crate::backend::cpu::reductions_fast::sum_last_dim_contiguous(self, dim_size, num_rows);
                 if autograd::is_grad_enabled() && self.requires_grad() {
                     let mut output = output;
                     let _edges = autograd::make_edge(self);

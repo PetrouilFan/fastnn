@@ -33,8 +33,6 @@ pub fn gemv_u8x4_neon(
 
     for row in 0..m {
         let row_offset = row * k_packed;
-        // SAFETY: NEON is available (checked by cfg). Pointers are valid
-        // and bounds are verified by loop conditions.
         unsafe {
             output[row] = gemv_row_u8x4_neon(weights_u32, activation, row_offset, k, k_packed)
                 * weights.scale_for_row(row)
@@ -60,7 +58,6 @@ unsafe fn gemv_row_u8x4_neon(
     let mut p = 0;
     let mut act_idx = 0;
 
-    // Process 4 u32 words (16 int8 values) at a time
     while p + 4 <= k_packed && act_idx + 16 <= k {
         let ptr = weights_u32.as_ptr().add(row_offset + p);
         let wvec = vld1q_u32(ptr);
@@ -97,7 +94,6 @@ unsafe fn gemv_row_u8x4_neon(
     let sum23 = vaddq_f32(acc2, acc3);
     let mut total = hsum_f32x4(vaddq_f32(sum01, sum23));
 
-    // 2-word tail: 8 int8 values
     if p + 2 <= k_packed && act_idx + 8 <= k {
         let w0 = weights_u32[row_offset + p];
         let w1 = weights_u32[row_offset + p + 1];
@@ -111,7 +107,6 @@ unsafe fn gemv_row_u8x4_neon(
         act_idx += 8;
     }
 
-    // Scalar tail
     while p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
         let bytes = w.to_le_bytes();
@@ -150,8 +145,6 @@ pub fn gemv_u4x8_neon(
 
     for row in 0..m {
         let row_offset = row * k_packed;
-        // SAFETY: NEON is available (checked by cfg). Pointers are valid
-        // and bounds are verified by loop conditions.
         unsafe {
             output[row] = gemv_row_u4x8_neon(weights_u32, activation, row_offset, k, k_packed)
                 * weights.scale_for_row(row)
@@ -176,27 +169,21 @@ unsafe fn gemv_row_u4x8_neon(
     let mut p = 0;
     let mut act_idx = 0;
 
-    // Process 1 u32 word (8 nibbles) at a time
-    // First 4 nibbles → acc0 with activation[act_idx..act_idx+4]
-    // Next 4 nibbles  → acc1 with activation[act_idx+4..act_idx+8]
     while p < k_packed && act_idx + 8 <= k {
         let w = weights_u32[row_offset + p];
 
-        // Build vector of first 4 nibbles [n0, n1, n2, n3]
         let mut nib_lo = vdupq_n_u32(0);
         nib_lo = vsetq_lane_u32(w & 0xF, nib_lo, 0);
         nib_lo = vsetq_lane_u32((w >> 4) & 0xF, nib_lo, 1);
         nib_lo = vsetq_lane_u32((w >> 8) & 0xF, nib_lo, 2);
         nib_lo = vsetq_lane_u32((w >> 12) & 0xF, nib_lo, 3);
 
-        // Build vector of next 4 nibbles [n4, n5, n6, n7]
         let mut nib_hi = vdupq_n_u32(0);
         nib_hi = vsetq_lane_u32((w >> 16) & 0xF, nib_hi, 0);
         nib_hi = vsetq_lane_u32((w >> 20) & 0xF, nib_hi, 1);
         nib_hi = vsetq_lane_u32((w >> 24) & 0xF, nib_hi, 2);
         nib_hi = vsetq_lane_u32((w >> 28) & 0xF, nib_hi, 3);
 
-        // Sign-extend via xor-sub: (x ^ 8) - 8
         let s_ext = |v: uint32x4_t| -> int32x4_t {
             let xored = veorq_u32(v, sign_ext);
             let subbed = vsubq_u32(xored, sign_ext);
@@ -218,7 +205,6 @@ unsafe fn gemv_row_u4x8_neon(
 
     let mut total = hsum_f32x4(vaddq_f32(acc0, acc1));
 
-    // Scalar tail
     while p < k_packed && act_idx < k {
         let w = weights_u32[row_offset + p];
         for j in 0..8 {
