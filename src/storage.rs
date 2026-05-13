@@ -78,7 +78,6 @@ impl DType {
             "bf16" | "bfloat16" => Some(DType::BF16),
             "u4" | "uint4" | "int4" => Some(DType::U4),
             "u8" | "uint8" | "int8" => Some(DType::U8),
-            "bf16" | "bfloat16" => Some(DType::BF16),
             _ => None,
         }
     }
