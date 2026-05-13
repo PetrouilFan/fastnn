@@ -1538,6 +1538,19 @@ impl GraphBuilder {
         outputs: &[&GraphTensor],
         backend: B,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
+        self.compile_with_quantize(outputs, backend, None)
+    }
+
+    /// Compile the graph with optional quantization.
+    ///
+    /// Pass `quantize = Some(4)` for 4-bit (U4x8) or `Some(8)` for 8-bit (U8x4) quantization.
+    /// Pass `None` for no quantization (default f32).
+    pub fn compile_with_quantize<B: Backend>(
+        &self,
+        outputs: &[&GraphTensor],
+        backend: B,
+        quantize: Option<u8>,
+    ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         let mut graph: ComputeGraph;
         let recorded_inputs: Vec<NodeId>;
         {
@@ -1551,7 +1564,7 @@ impl GraphBuilder {
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
         let executor = GraphExecutor::new(backend);
-        let (plan, memory_plan, compiled_graph) = executor.compile_with_plan(&graph)?;
+        let (plan, memory_plan, compiled_graph) = executor.compile_with_plan_and_quantize(&graph, quantize)?;
 
         Ok((plan, memory_plan, compiled_graph))
     }
@@ -1566,6 +1579,17 @@ impl GraphBuilder {
         backend: B,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
+        self.compile_and_execute_with_quantize(outputs, backend, inputs, None)
+    }
+
+    /// Convenience: compile with optional quantization and execute the graph in one call.
+    pub fn compile_and_execute_with_quantize<B: Backend>(
+        &self,
+        outputs: &[&GraphTensor],
+        backend: B,
+        inputs: &[&[u8]],
+        quantize: Option<u8>,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
         let mut graph: ComputeGraph;
         let recorded_inputs: Vec<NodeId>;
         {
@@ -1577,7 +1601,7 @@ impl GraphBuilder {
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
         let executor = GraphExecutor::new(backend);
-        let (plan, memory_plan, compiled_graph) = executor.compile_with_plan(&graph)?;
+        let (plan, memory_plan, compiled_graph) = executor.compile_with_plan_and_quantize(&graph, quantize)?;
         executor.execute(&compiled_graph, &plan, &memory_plan, inputs)
     }
 

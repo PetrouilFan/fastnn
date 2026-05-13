@@ -111,10 +111,17 @@ def fuse_silu(graph: dict) -> dict:
     return graph
 
 
-def build_dag_model(header: dict, path: str) -> Any:
+def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any:
     """Build a Rust AotExecutor from an ONNX-imported .fnn file.
 
     Uses the high-performance Rust AotExecutor for graph execution.
+
+    Args:
+        header: The .fnn file header dict containing graph metadata.
+        path: Path to the .fnn parameters file.
+        quantize: Optional quantization bit width. Pass 4 for U4x8
+            (4-bit packed) or 8 for U8x4 (8-bit packed) quantization.
+            None means no quantization (default f32).
     """
     import fastnn as fnn
 
@@ -293,6 +300,7 @@ def build_dag_model(header: dict, path: str) -> Any:
     # Build the Rust AotExecutor (replaces DAGExecutor)
     executor = fnn.AotExecutor(
         dag_nodes, fnn_params, input_names, output_names,
+        quantize=quantize,
     )
     return executor
 
