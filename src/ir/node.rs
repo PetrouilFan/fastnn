@@ -490,7 +490,8 @@ impl IrDType {
 
     /// Actual packed storage size in bytes for a given logical element
     /// count.  For F32/F16/etc. this equals `numel * byte_size()`.
-    /// For packed types it computes word-level packing.
+    /// For packed types it computes word-level packing plus the SIMD margin
+    /// that [`PackedTensor`] allocates (16 extra u32 words = 64 bytes).
     pub fn packed_byte_size(&self, numel: usize) -> usize {
         match self {
             IrDType::F32 => numel * 4,
@@ -498,14 +499,16 @@ impl IrDType {
             IrDType::I32 => numel * 4,
             IrDType::I64 => numel * 8,
             IrDType::Bool => numel,
-            // U4x8: 8 nibbles per u32 word (4 bytes)  => 0.5 bytes/elem
+            // U4x8: 8 nibbles per u32 word (4 bytes)
+            // packed_len = ceil(numel / 8) words + SIMD_MARGIN(16)
             IrDType::U4 { .. } => {
-                let words = (numel + 7) / 8;
+                let words = (numel + 7) / 8 + 16; // +16 SIMD_MARGIN
                 words * 4
             }
-            // U8x4: 4 bytes per u32 word  => 1 byte/elem
+            // U8x4: 4 values per u32 word (4 bytes)
+            // packed_len = ceil(numel / 4) words + SIMD_MARGIN(16)
             IrDType::U8 { .. } => {
-                let words = (numel + 3) / 4;
+                let words = (numel + 3) / 4 + 16; // +16 SIMD_MARGIN
                 words * 4
             }
         }
@@ -583,6 +586,9 @@ impl TensorType {
     /// dimensions against the provided [`ShapeEnv`] when available.
     /// Pure [`DimExpr::Symbol`] dimensions (not [`DimExpr::Bounded`]) still
     /// fall back to `SYMBOL_DIM_MAX`.
+    ///
+    /// For packed types (U4/U8), this computes the actual packed storage size
+    /// including the SIMD margin, which is needed for correct arena allocation.
     pub fn byte_size_with_env(&self, env: Option<&ShapeEnv>) -> usize {
         let symbol_max = SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize;
         let numel: usize = self
@@ -597,7 +603,16 @@ impl TensorType {
                 },
             })
             .product();
-        numel * self.dtype.byte_size()
+        // For packed types, use the actual packed byte size (accounts for
+        // word-level packing and SIMD margin) rather than the logical per-element
+        // overestimate.  The packed data stored in TensorValue::Data already
+        // includes the SIMD margin, so the slot must be large enough to hold it.
+        match &self.dtype {
+            IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                self.dtype.packed_byte_size(numel)
+            }
+            _ => numel * self.dtype.byte_size(),
+        }
     }
 }
 

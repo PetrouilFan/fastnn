@@ -228,7 +228,9 @@ impl Backend for CpuBackend {
                         .get(1)
                         .and_then(|s| s.last().cloned())
                         .unwrap_or(DimExpr::Known(n as u64));
-                    // Extract weight metadata for quantized matmul kernels
+                    // Extract weight metadata for quantized matmul kernels.
+                    // For 2D weights, the quantized data is stored transposed
+                    // ([N, K] instead of [K, N]) so the shape must match.
                     let weight_meta = if is_quantized {
                         node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
@@ -237,9 +239,14 @@ impl Backend for CpuBackend {
                                     IrDType::U8 { scales, zero_points } => (8usize, scales.clone(), zero_points.clone()),
                                     _ => (0usize, vec![], vec![]),
                                 };
-                                let w_shape: Vec<usize> = wn.output_type.shape.iter()
+                                let mut w_shape: Vec<usize> = wn.output_type.shape.iter()
                                     .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
                                     .collect();
+                                // The quantization pass transposes 2D weights from
+                                // [K, N] to [N, K] for gemm_packed_batched convention.
+                                if w_shape.len() == 2 {
+                                    w_shape.reverse();
+                                }
                                 crate::backend::QuantizedWeightMeta { bit_width, scales, zero_points, shape: w_shape }
                             })
                         })
@@ -1435,7 +1442,14 @@ impl Backend for CpuBackend {
                                 let (activations, packed_bytes) = {
                                     let d = arena.data_mut();
                                     (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
-                                     bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec())
+                                     {
+                                        let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                                        // Copy to u32-aligned buffer (arena may not be u32-aligned)
+                                        let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                                        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                                        byte_slice[..raw.len()].copy_from_slice(raw);
+                                        aligned
+                                    })
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u4: expected params [M,K,N]".into())); };
@@ -1468,7 +1482,14 @@ impl Backend for CpuBackend {
                                 let (activations, packed_bytes) = {
                                     let d = arena.data_mut();
                                     (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
-                                     bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec())
+                                     {
+                                        let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                                        // Copy to u32-aligned buffer (arena may not be u32-aligned)
+                                        let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                                        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                                        byte_slice[..raw.len()].copy_from_slice(raw);
+                                        aligned
+                                    })
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
                                 let &[m, k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_u8: expected params [M,K,N]".into())); };
@@ -1840,7 +1861,14 @@ impl Backend for CpuBackend {
                                 let (input_data, packed_bytes) = {
                                     let d = arena.data_mut();
                                     (bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec(),
-                                     bytemuck::cast_slice::<_, u32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec())
+                                     {
+                                        let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                                        // Copy to u32-aligned buffer (arena may not be u32-aligned)
+                                        let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                                        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                                        byte_slice[..raw.len()].copy_from_slice(raw);
+                                        aligned
+                                    })
                                 };
                                 let bias_data: Vec<f32> = if input_slices.len() >= 3 {
                                     let b_slice = &input_slices[2];
@@ -1859,9 +1887,17 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Weight shape: [OC, IC_per_group * KH * KW]
-                                let oc = meta.shape.first().copied().unwrap_or(1);
-                                let inner = meta.shape.get(1).copied().unwrap_or(1);
+                                // Flatten conv2d weight shape [OC, IC, KH, KW] → [OC, IC*KH*KW]
+                                // so the GEMM dispatch sees 2D weight with inner = IC*KH*KW.
+                                let flat_shape = if meta.shape.len() >= 4 {
+                                    let oc = meta.shape[0];
+                                    let inner: usize = meta.shape[1..].iter().product();
+                                    vec![oc, inner]
+                                } else {
+                                    meta.shape.clone()
+                                };
+                                let oc = flat_shape.first().copied().unwrap_or(1);
+                                let inner = flat_shape.get(1).copied().unwrap_or(1);
                                 let ni = input_data.len();
                                 if groups == 0 { return Err(BackendError::Dispatch("conv2d_u4/u8: groups=0".into())); }
                                 // Infer (N, C, H, W, kernel_size) from tensor sizes and conv params.
@@ -1904,7 +1940,7 @@ impl Backend for CpuBackend {
                                 macro_rules! dispatch_conv2d_quant {
                                     ($PackedType:ty, $byte_cast:expr) => {{
                                         let packed_data: Vec<$PackedType> = bytemuck::cast_slice(&packed_bytes).to_vec();
-                                        let pt = PackedTensor::from_raw(packed_data, meta.shape.clone(), meta.scales, meta.zero_points);
+                                        let pt = PackedTensor::from_raw(packed_data, flat_shape.clone(), meta.scales, meta.zero_points);
                                         let col_w = c_per_g * kernel_size * kernel_size;
                                         for nn in 0..n {
                                             let num_pixels = h_out * w_out;
