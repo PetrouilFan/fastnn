@@ -1480,6 +1480,79 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, out_tt)
     }
 
+    // ── Optimizer ops (v2.1 training via IR) ───────────────────────────────
+
+    /// SGD weight update: weight -= lr * (grad + weight_decay * weight)
+    pub fn apply_sgd(
+        &self, weight: &GraphTensor, grad: &GraphTensor, lr: f32,
+    ) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("lr".to_string(), lr.to_string());
+        let tt = weight.tensor_type().clone();
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::SgdUpdate,
+                vec![weight.node_id, grad.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Adam weight update: full Adam optimizer step.
+    /// weight -= lr * (m / (1 - beta1^t)) / (sqrt(v / (1 - beta2^t)) + eps)
+    pub fn apply_adam(
+        &self, weight: &GraphTensor, grad: &GraphTensor,
+        m: &GraphTensor, v: &GraphTensor,
+        lr: f32, beta1: f32, beta2: f32, eps: f32, t: u64,
+    ) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("lr".to_string(), lr.to_string());
+        attrs.insert("beta1".to_string(), beta1.to_string());
+        attrs.insert("beta2".to_string(), beta2.to_string());
+        attrs.insert("eps".to_string(), eps.to_string());
+        attrs.insert("t".to_string(), t.to_string());
+        let tt = weight.tensor_type().clone();
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::AdamUpdate,
+                vec![weight.node_id, grad.node_id, m.node_id, v.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// AdamW weight update: Adam with decoupled weight decay.
+    pub fn apply_adamw(
+        &self, weight: &GraphTensor, grad: &GraphTensor,
+        m: &GraphTensor, v: &GraphTensor,
+        lr: f32, beta1: f32, beta2: f32, eps: f32, t: u64, weight_decay: f32,
+    ) -> GraphTensor {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("lr".to_string(), lr.to_string());
+        attrs.insert("beta1".to_string(), beta1.to_string());
+        attrs.insert("beta2".to_string(), beta2.to_string());
+        attrs.insert("eps".to_string(), eps.to_string());
+        attrs.insert("t".to_string(), t.to_string());
+        attrs.insert("weight_decay".to_string(), weight_decay.to_string());
+        let tt = weight.tensor_type().clone();
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::AdamWUpdate,
+                vec![weight.node_id, grad.node_id, m.node_id, v.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
     // ── Autograd / Backward ───────────────────────────────────────────────
 
     /// Build the backward graph for a given loss tensor.
