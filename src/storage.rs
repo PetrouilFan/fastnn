@@ -16,6 +16,12 @@ pub enum DType {
     Bool,
     F16,
     BF16,
+    /// Packed 4-bit (U4x8): 8 values per u32 word.
+    /// Per-channel scales/zero_points are stored in the IR node metadata.
+    U4,
+    /// Packed 8-bit (U8x4): 4 values per u32 word.
+    /// Per-channel scales/zero_points are stored in the IR node metadata.
+    U8,
 }
 
 impl DType {
@@ -25,6 +31,25 @@ impl DType {
             DType::F64 | DType::I64 => 8,
             DType::F16 | DType::BF16 => 2,
             DType::Bool => 1,
+            DType::U4 => 1,
+            DType::U8 => 1,
+        }
+    }
+
+    pub fn packed_size(&self, numel: usize) -> usize {
+        match self {
+            DType::F32 | DType::I32 => numel * 4,
+            DType::F64 | DType::I64 => numel * 8,
+            DType::F16 | DType::BF16 => numel * 2,
+            DType::Bool => numel,
+            DType::U4 => {
+                let words = (numel + 7) / 8;
+                words * 4
+            }
+            DType::U8 => {
+                let words = (numel + 3) / 4;
+                words * 4
+            }
         }
     }
 
@@ -37,6 +62,8 @@ impl DType {
             DType::Bool => "bool",
             DType::F16 => "f16",
             DType::BF16 => "bf16",
+            DType::U4 => "u4",
+            DType::U8 => "u8",
         }
     }
 
@@ -48,6 +75,9 @@ impl DType {
             "i64" | "int64" => Some(DType::I64),
             "bool" => Some(DType::Bool),
             "f16" | "float16" => Some(DType::F16),
+            "bf16" | "bfloat16" => Some(DType::BF16),
+            "u4" | "uint4" | "int4" => Some(DType::U4),
+            "u8" | "uint8" | "int8" => Some(DType::U8),
             "bf16" | "bfloat16" => Some(DType::BF16),
             _ => None,
         }

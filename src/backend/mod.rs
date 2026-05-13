@@ -36,6 +36,22 @@ impl BufferSlice {
     }
 }
 
+/// Quantized weight metadata for packed precision kernels.
+/// Carries per-channel scales, zero-points, shape, and bit-width
+/// so the backend dispatch can construct a [`PackedTensor`] for SIMD
+/// or GPU compute shaders.
+#[derive(Debug, Clone)]
+pub struct QuantizedWeightMeta {
+    /// Bit width of the packed type: 4 or 8.
+    pub bit_width: usize,
+    /// Per-output-channel scale factors.
+    pub scales: Vec<f32>,
+    /// Per-output-channel zero points.
+    pub zero_points: Vec<f32>,
+    /// Logical shape of the weight tensor.
+    pub shape: Vec<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Instruction {
     CallKernel {
@@ -52,9 +68,7 @@ pub enum Instruction {
         /// that were not known at compile time.
         param_dims: Option<Vec<DimExpr>>,
         /// Optional weight metadata for quantized matmul kernels.
-        /// Stores (scale, zero_point, shape) from the weight's IrDType::U4/U8
-        /// so dispatch can construct a [`PackedTensor`] for SIMD microkernels.
-        weight_meta: Option<(f32, f32, Vec<usize>)>,
+        weight_meta: Option<QuantizedWeightMeta>,
     },
     MemCopy {
         dst: BufferSlice,

@@ -228,6 +228,9 @@ impl Tensor {
                             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr(), numel) };
                         slice.fill(1);
                     }
+                    DType::U4 | DType::U8 => {
+                        panic!("ones(): packed U4/U8 tensors are not supported. Use the IR quantization pass to create packed weights.")
+                    }
                 }
                 t
             }
