@@ -226,11 +226,11 @@ impl<'a> OnnxConverter<'a> {
 
             // ── Softmax / LogSoftmax ────────────────────────────────
             "Softmax" => {
-                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(1);
+                let axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(1);
                 self.out(node, self.graph.softmax(&ins[0], axis));
             }
             "LogSoftmax" => {
-                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(1);
+                let axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(1);
                 let sm = self.graph.softmax(&ins[0], axis);
                 self.out(node, self.graph.log(&sm));
             }
