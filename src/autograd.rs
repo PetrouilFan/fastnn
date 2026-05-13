@@ -845,7 +845,8 @@ pub fn build_backward_graph(
                 }
             }
             Opcode::Constant(_) | Opcode::Input
-            | Opcode::GtScalar | Opcode::LtScalar | Opcode::EqScalar => {
+            | Opcode::GtScalar | Opcode::LtScalar | Opcode::EqScalar
+            | Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate => {
             }
             Opcode::Transpose => {
                 // gradient of transpose is transpose with inverse permutation

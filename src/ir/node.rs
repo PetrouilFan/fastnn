@@ -81,6 +81,13 @@ pub enum Opcode {
     Flip,
     /// Element-wise where(condition, x, y) — selects from x or y based on condition
     Where,
+    // ── v2.1 optimizer opcodes (CPU training via IR) ──────────────────
+    /// SGD weight update: weight -= lr * (grad + weight_decay * weight)
+    SgdUpdate,
+    /// Adam weight update: full Adam optimizer step
+    AdamUpdate,
+    /// AdamW weight update: Adam with decoupled weight decay
+    AdamWUpdate,
 }
 
 /// Default maximum extent assumed for a purely symbolic dimension (no Bounded bound).

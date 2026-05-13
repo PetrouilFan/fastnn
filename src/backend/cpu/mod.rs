@@ -844,6 +844,49 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                // ── Optimizer ops ──────────────────────────────────
+                Opcode::SgdUpdate => {
+                    let lr: f32 = node.attrs.get("lr").and_then(|s| s.parse().ok()).unwrap_or(0.01);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "sgd_update_f32".to_string(),
+                        input_slices,  // [weight, grad] — weight must be same slot as output
+                        output_slice,
+                        params: vec![lr.to_bits() as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::AdamUpdate => {
+                    let lr: f32 = node.attrs.get("lr").and_then(|s| s.parse().ok()).unwrap_or(0.001);
+                    let beta1: f32 = node.attrs.get("beta1").and_then(|s| s.parse().ok()).unwrap_or(0.9);
+                    let beta2: f32 = node.attrs.get("beta2").and_then(|s| s.parse().ok()).unwrap_or(0.999);
+                    let eps: f32 = node.attrs.get("eps").and_then(|s| s.parse().ok()).unwrap_or(1e-8);
+                    let t: u64 = node.attrs.get("t").and_then(|s| s.parse().ok()).unwrap_or(1);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "adam_update_f32".to_string(),
+                        input_slices,  // [weight, grad, m, v]
+                        output_slice,
+                        params: vec![lr.to_bits() as usize, beta1.to_bits() as usize, beta2.to_bits() as usize, eps.to_bits() as usize, t as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::AdamWUpdate => {
+                    let lr: f32 = node.attrs.get("lr").and_then(|s| s.parse().ok()).unwrap_or(0.001);
+                    let beta1: f32 = node.attrs.get("beta1").and_then(|s| s.parse().ok()).unwrap_or(0.9);
+                    let beta2: f32 = node.attrs.get("beta2").and_then(|s| s.parse().ok()).unwrap_or(0.999);
+                    let eps: f32 = node.attrs.get("eps").and_then(|s| s.parse().ok()).unwrap_or(1e-8);
+                    let t: u64 = node.attrs.get("t").and_then(|s| s.parse().ok()).unwrap_or(1);
+                    let wd: f32 = node.attrs.get("weight_decay").and_then(|s| s.parse().ok()).unwrap_or(0.01);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "adamw_update_f32".to_string(),
+                        input_slices,  // [weight, grad, m, v]
+                        output_slice,
+                        params: vec![lr.to_bits() as usize, beta1.to_bits() as usize, beta2.to_bits() as usize, eps.to_bits() as usize, t as usize, wd.to_bits() as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
                 #[allow(unreachable_patterns)]
                 _ => {
                     if let Some(&input_id) = node.inputs.first() {
@@ -2930,6 +2973,92 @@ impl Backend for CpuBackend {
                                     };
                                 }
                             }
+                        }
+                        // ── Optimizer kernels ───────────────────────
+                        "sgd_update_f32" => {
+                            let (w_init, grad, lr) = {
+                                let d = arena.data_mut();
+                                let d_ref: &[u8] = &*d;
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
+                                let lr = f32::from_bits(params[0] as u32);
+                                (w_init, grad, lr)
+                            };
+                            let w_new: Vec<f32> = w_init.iter().enumerate().map(|(i, &wi)| {
+                                wi - lr * grad.get(i % grad.len()).copied().unwrap_or(0.0)
+                            }).collect();
+                            let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
+                        }
+                        "adam_update_f32" => {
+                            let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
+                                let d = arena.data_mut();
+                                let d_ref: &[u8] = &*d;
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                let m_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).to_vec();
+                                let v_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).to_vec();
+                                let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
+                                let lr = f32::from_bits(params[0] as u32);
+                                let beta1 = f32::from_bits(params[1] as u32);
+                                let beta2 = f32::from_bits(params[2] as u32);
+                                let eps = f32::from_bits(params[3] as u32);
+                                let t = params[4] as f32;
+                                (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t)
+                            };
+                            let bias_corr1 = 1.0 - beta1.powi(t as i32);
+                            let bias_corr2 = 1.0 - beta2.powi(t as i32);
+                            let len = w_init.len();
+                            let mut w_new = w_init.clone();
+                            let mut m_new = m_init.clone();
+                            let mut v_new = v_init.clone();
+                            for i in 0..len {
+                                let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                let m_hat = m_new[i] / bias_corr1;
+                                let v_hat = v_new[i] / bias_corr2;
+                                w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+                            }
+                            let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&m_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).copy_from_slice(&v_new);
+                        }
+                        "adamw_update_f32" => {
+                            let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd) = {
+                                let d = arena.data_mut();
+                                let d_ref: &[u8] = &*d;
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                let m_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).to_vec();
+                                let v_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).to_vec();
+                                let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
+                                let lr = f32::from_bits(params[0] as u32);
+                                let beta1 = f32::from_bits(params[1] as u32);
+                                let beta2 = f32::from_bits(params[2] as u32);
+                                let eps = f32::from_bits(params[3] as u32);
+                                let t = params[4] as f32;
+                                let wd = f32::from_bits(params[5] as u32);
+                                (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd)
+                            };
+                            let bias_corr1 = 1.0 - beta1.powi(t as i32);
+                            let bias_corr2 = 1.0 - beta2.powi(t as i32);
+                            let len = w_init.len();
+                            let mut w_new = w_init.clone();
+                            let mut m_new = m_init.clone();
+                            let mut v_new = v_init.clone();
+                            for i in 0..len {
+                                w_new[i] -= lr * wd * w_init[i];
+                                let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                let m_hat = m_new[i] / bias_corr1;
+                                let v_hat = v_new[i] / bias_corr2;
+                                w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+                            }
+                            let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&m_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).copy_from_slice(&v_new);
                         }
                         _ => {
                             return Err(BackendError::UnsupportedOp(kernel_name.clone()));

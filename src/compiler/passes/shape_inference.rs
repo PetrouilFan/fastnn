@@ -310,7 +310,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             Opcode::Constant(_) | Opcode::Input
             | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
             | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
-            | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where => None,
+            | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where
+            | Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate => None,
         };
 
         if let Some(shape) = inferred {
