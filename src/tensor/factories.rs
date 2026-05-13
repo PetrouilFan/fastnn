@@ -1,6 +1,6 @@
 // Tensor factory/constructor methods
 
-use crate::kernels::gpu::get_context;
+use crate::backend::wgpu::context::get_wgpu_context;
 use crate::storage::{DType, Device, GpuStorage, Storage};
 use crate::storage_pool::get_storage_pool;
 use parking_lot::RwLock;
@@ -104,7 +104,7 @@ impl Tensor {
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
             Device::Wgpu(device_id) => {
-                let ctx = get_context(device_id);
+                let ctx = get_wgpu_context(device_id);
                 let buffer = ctx.create_buffer(nbytes, "zeros");
                 Arc::new(Storage::Wgpu(GpuStorage {
                     buffer: buffer.buffer,
@@ -136,7 +136,7 @@ impl Tensor {
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
             Device::Wgpu(device_id) => {
-                let ctx = get_context(device_id);
+                let ctx = get_wgpu_context(device_id);
                 let buffer = ctx.create_buffer(nbytes, "empty");
                 Arc::new(Storage::Wgpu(GpuStorage {
                     buffer: buffer.buffer,
@@ -306,7 +306,7 @@ impl Tensor {
                 }
             }
             Device::Wgpu(device_id) => {
-                let ctx = get_context(device_id);
+                let ctx = get_wgpu_context(device_id);
                 let numel = t.inner.numel() as usize;
                 let data = vec![value; numel];
                 let buffer = ctx.create_gpu_buffer_from_data(&data, "full");

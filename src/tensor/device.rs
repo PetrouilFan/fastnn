@@ -204,8 +204,8 @@ impl Tensor {
                     .new_on_device(self.inner.storage.clone(), Device::Cpu),
             ),
             Storage::Wgpu(gpu) => {
-                use crate::kernels::gpu::get_context;
-                let ctx = get_context(gpu.device_id);
+                use crate::backend::wgpu::context::get_wgpu_context;
+                let ctx = get_wgpu_context(gpu.device_id);
                 let data = ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
                 let storage = Arc::new(Storage::Cpu(CpuStorage {
                     data: Arc::new(bytemuck::cast_slice(&data).to_vec()),
@@ -221,12 +221,12 @@ impl Tensor {
         match self.inner.storage.as_ref() {
             Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),
             Storage::Wgpu(gpu) => {
-                use crate::kernels::gpu::get_context;
-                let src_ctx = get_context(gpu.device_id);
+                use crate::backend::wgpu::context::get_wgpu_context;
+                let src_ctx = get_wgpu_context(gpu.device_id);
                 let f32_data = src_ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
                 let byte_data = bytemuck::cast_slice(&f32_data);
 
-                let Some(dst_ctx) = crate::kernels::gpu::try_get_context(device_id) else {
+                let Some(dst_ctx) = crate::backend::wgpu::context::try_get_wgpu_context(device_id) else {
                     let cpu_data: Vec<f32> = bytemuck::cast_slice(&f32_data).to_vec();
                     return Tensor::from_vec(cpu_data, self.shape().to_vec());
                 };
@@ -243,7 +243,7 @@ impl Tensor {
             }
             _ => {
                 let cpu_data = self.as_f32_slice().to_vec();
-                let Some(ctx) = crate::kernels::gpu::try_get_context(device_id) else {
+                let Some(ctx) = crate::backend::wgpu::context::try_get_wgpu_context(device_id) else {
                     return self.clone();
                 };
                 let buffer = ctx.create_gpu_buffer_from_data(&cpu_data, "to_gpu");

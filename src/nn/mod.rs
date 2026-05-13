@@ -6,7 +6,6 @@ pub mod embedding;
 pub mod fused;
 #[macro_use]
 pub mod linear;
-pub mod dag;
 pub mod norm;
 pub mod pooling;
 pub mod sequential;

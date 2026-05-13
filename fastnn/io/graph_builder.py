@@ -23,7 +23,7 @@ def build_model_from_fnn(path: str) -> Any:
         path: Path to .fnn file.
 
     Returns:
-        A fastnn model (Sequential for PyTorch-exported, DAGExecutor for ONNX-imported).
+        A fastnn model (Sequential for PyTorch-exported, AotExecutor for ONNX-imported).
     """
     with open(path, "rb") as f:
         magic, file_version, header, num_params = read_fnn_header(f)
@@ -112,9 +112,9 @@ def fuse_silu(graph: dict) -> dict:
 
 
 def build_dag_model(header: dict, path: str) -> Any:
-    """Build a Rust DAGExecutor from an ONNX-imported .fnn file.
+    """Build a Rust AotExecutor from an ONNX-imported .fnn file.
 
-    Uses the high-performance Rust DAGExecutor for graph execution.
+    Uses the high-performance Rust AotExecutor for graph execution.
     """
     import fastnn as fnn
 
@@ -261,7 +261,7 @@ def build_dag_model(header: dict, path: str) -> Any:
     graph = header.get("graph", {})
     onnx_nodes = graph.get("nodes", [])
 
-    # Convert ONNX nodes to DAGExecutor's node format
+    # Convert ONNX nodes to AotExecutor's node format
     dag_nodes = []
     for node in onnx_nodes:
         dag_node = {
@@ -290,11 +290,9 @@ def build_dag_model(header: dict, path: str) -> Any:
         if init_name not in fnn_params and param_name in fnn_params:
             fnn_params[init_name] = fnn_params[param_name]
 
-    # Build the Rust DAGExecutor (with packed params for type-aware dispatch)
-    packed_params_kwargs = packed_params_dict if packed_params_dict else None
-    executor = fnn.DAGExecutor(
+    # Build the Rust AotExecutor (replaces DAGExecutor)
+    executor = fnn.AotExecutor(
         dag_nodes, fnn_params, input_names, output_names,
-        packed_params=packed_params_kwargs,
     )
     return executor
 
