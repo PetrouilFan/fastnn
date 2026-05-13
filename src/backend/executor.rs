@@ -398,8 +398,14 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 if weight.len() < 4 {
                     return Err(format!("Conv2d node {}: weight must have 4 dims [F,C,KH,KW], got {:?}", node_id, weight));
                 }
-                if inp[1] != weight[1] {
-                    return Err(format!("Conv2d node {}: input channels {} != weight channels {}", node_id, inp[1], weight[1]));
+                let groups: u64 = node.attrs.get("groups")
+                    .and_then(|g| g.parse().ok())
+                    .unwrap_or(1);
+                if inp[1] != weight[1] * groups {
+                    return Err(format!(
+                        "Conv2d node {}: input channels {} != weight channels {} * groups {} (groups={})",
+                        node_id, inp[1], weight[1], weight[1] * groups, groups
+                    ));
                 }
             }
             Opcode::Transpose => {

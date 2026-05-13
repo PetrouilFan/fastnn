@@ -140,8 +140,25 @@ impl Module for Conv2d {
             .next()
             .unwrap();
             if let Some(bias) = &self.bias {
-                let bias_shape = vec![1, self.out_channels, 1, 1];
-                conv.add(&bias.reshape(bias_shape))
+                // Manually expand bias to full spatial dims to avoid
+                // broadcasting issues in the element-wise add kernel.
+                let conv_shape = conv.shape();
+                let h_out = if conv_shape.len() > 2 { conv_shape[2] as usize } else { 1 };
+                let w_out = if conv_shape.len() > 3 { conv_shape[3] as usize } else { 1 };
+                let bias_vals = bias.as_f32_slice();
+                let out_c = self.out_channels as usize;
+                let mut expanded = Vec::with_capacity(out_c * h_out * w_out);
+                for c in 0..out_c {
+                    let bv = bias_vals[c.min(bias_vals.len().saturating_sub(1))];
+                    for _ in 0..h_out * w_out {
+                        expanded.push(bv);
+                    }
+                }
+                let expanded_t = Tensor::from_vec(
+                    expanded,
+                    vec![1, self.out_channels as i64, h_out as i64, w_out as i64],
+                );
+                conv.add(&expanded_t)
             } else {
                 conv
             }

@@ -21,7 +21,11 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     Some(broadcast_shapes(
                         &inputs[0].output_type.shape,
                         &inputs[1].output_type.shape,
-                    )?)
+                    ).map_err(|e| format!("node {} ({:?}) shapes {:?} vs {:?}: {}", 
+                        node_id, node.opcode, 
+                        inputs[0].output_type.shape, 
+                        inputs[1].output_type.shape, 
+                        e))?)
                 } else if inputs.len() == 1 {
                     Some(inputs[0].output_type.shape.clone())
                 } else {

@@ -1125,7 +1125,7 @@ impl Tensor {
     }
 
     pub fn softmax(&self, dim: i32) -> Tensor {
-        let output = Tensor::exec_aot(&[self], |g, ins| vec![g.softmax(&ins[0], dim as usize)])
+        let output = Tensor::exec_aot(&[self], |g, ins| vec![g.softmax(&ins[0], dim as i64)])
             .expect("Tensor::softmax: AOT execution failed")
             .into_iter()
             .next()
