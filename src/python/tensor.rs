@@ -259,7 +259,7 @@ impl PyTensor {
     }
 
     fn flip(&self, dim: i32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.flip(dim))
+        PyTensor::from_tensor(self.inner.flip(&[dim as usize]))
     }
 
     fn maximum(&self, other: &PyTensor) -> PyTensor {

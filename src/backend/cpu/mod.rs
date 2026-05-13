@@ -706,6 +706,95 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d => {
+                    let scale_h: usize = node.attrs.get("scale_h").and_then(|s| s.parse().ok()).unwrap_or(2);
+                    let scale_w: usize = node.attrs.get("scale_w").and_then(|s| s.parse().ok()).unwrap_or(2);
+                    let kernel_name = match node.opcode {
+                        Opcode::UpsampleNearest2d => "upsample_nearest2d",
+                        _ => "upsample_bilinear2d",
+                    };
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: kernel_name.to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![scale_h, scale_w],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::AdaptiveAvgPool2d => {
+                    let out_h: usize = node.attrs.get("output_h").and_then(|s| s.parse().ok()).unwrap_or(1);
+                    let out_w: usize = node.attrs.get("output_w").and_then(|s| s.parse().ok()).unwrap_or(1);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "adaptive_avg_pool2d".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![out_h, out_w],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Repeat => {
+                    let repeats_str = node.attrs.get("repeats").cloned().unwrap_or_default();
+                    let repeats: Vec<usize> = repeats_str.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "repeat".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: repeats,
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::CumSum => {
+                    let dim: usize = node.attrs.get("dim").and_then(|d| d.parse().ok()).unwrap_or(0);
+                    let exclusive: usize = node.attrs.get("exclusive").and_then(|e| e.parse().ok()).unwrap_or(0);
+                    let rev: usize = node.attrs.get("reverse").and_then(|r| r.parse().ok()).unwrap_or(0);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "cumsum".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![dim, exclusive, rev],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Erf => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "erf_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Flip => {
+                    let dims_str = node.attrs.get("dims").cloned().unwrap_or_default();
+                    let dims: Vec<usize> = dims_str.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                    let input_shape: Vec<u64> = input_shapes.first().cloned().unwrap_or_default();
+                    let mut params = vec![dims.len()];
+                    params.extend_from_slice(&dims);
+                    params.extend(input_shape.iter().map(|&s| s as usize));
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "flip".to_string(),
+                        input_slices,
+                        output_slice,
+                        params,
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Where => {
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "where_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
                 #[allow(unreachable_patterns)]
                 _ => {
                     if let Some(&input_id) = node.inputs.first() {
@@ -2381,6 +2470,297 @@ impl Backend for CpuBackend {
                                             *v = max_idx;
                                         }
                                     }
+                                }
+                            }
+                        }
+                        "upsample_nearest2d" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let scale_h = params.first().copied().unwrap_or(2);
+                                let scale_w = params.get(1).copied().unwrap_or(2);
+                                let out_len = out_f32.len();
+                                let in_len = input.len();
+                                if scale_h > 0 && scale_w > 0 && out_len == in_len * scale_h * scale_w && in_len > 0 {
+                                    let hw = in_len / (out_len / (scale_h * scale_w));
+                                    let mut h = (hw as f64).sqrt() as usize;
+                                    while h > 0 && hw % h != 0 { h -= 1; }
+                                    let w = hw / h;
+                                    if h > 0 && w > 0 {
+                                        let nc = in_len / hw;
+                                        for nci in 0..nc {
+                                            for hi in 0..h {
+                                                for wi in 0..w {
+                                                    let val = input[nci * hw + hi * w + wi];
+                                                    for sh in 0..scale_h {
+                                                        for sw in 0..scale_w {
+                                                            let out_idx = nci * hw * scale_h * scale_w
+                                                                + (hi * scale_h + sh) * (w * scale_w)
+                                                                + (wi * scale_w + sw);
+                                                            if out_idx < out_len {
+                                                                out_f32[out_idx] = val;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "upsample_bilinear2d" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let scale_h = params.first().copied().unwrap_or(2);
+                                let scale_w = params.get(1).copied().unwrap_or(2);
+                                let out_len = out_f32.len();
+                                let in_len = input.len();
+                                if scale_h > 0 && scale_w > 0 && out_len == in_len * scale_h * scale_w {
+                                    let hw = in_len / (out_len / (scale_h * scale_w));
+                                    let mut h = (hw as f64).sqrt() as usize;
+                                    while h > 0 && hw % h != 0 { h -= 1; }
+                                    let w = hw / h;
+                                    if h > 0 && w > 0 {
+                                        let nc = in_len / hw;
+                                        for nci in 0..nc {
+                                            for hi in 0..h * scale_h {
+                                                for wi in 0..w * scale_w {
+                                                    let src_h = (hi as f64 / scale_h as f64).min((h - 1) as f64);
+                                                    let src_w = (wi as f64 / scale_w as f64).min((w - 1) as f64);
+                                                    let h0 = src_h.floor() as usize;
+                                                    let w0 = src_w.floor() as usize;
+                                                    let h1 = (h0 + 1).min(h - 1);
+                                                    let w1 = (w0 + 1).min(w - 1);
+                                                    let dh = src_h - h0 as f64;
+                                                    let dw = src_w - w0 as f64;
+                                                    let v00 = input[nci * hw + h0 * w + w0];
+                                                    let v01 = input[nci * hw + h0 * w + w1];
+                                                    let v10 = input[nci * hw + h1 * w + w0];
+                                                    let v11 = input[nci * hw + h1 * w + w1];
+                                                    let v0 = v00 * (1.0 - dw as f32) + v01 * dw as f32;
+                                                    let v1 = v10 * (1.0 - dw as f32) + v11 * dw as f32;
+                                                    let val = v0 * (1.0 - dh as f32) + v1 * dh as f32;
+                                                    let out_idx = nci * h * scale_h * w * scale_w + hi * w * scale_w + wi;
+                                                    if out_idx < out_len { out_f32[out_idx] = val; }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "adaptive_avg_pool2d" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_h = params.first().copied().unwrap_or(1);
+                                let out_w = params.get(1).copied().unwrap_or(1);
+                                let out_len = out_f32.len();
+                                if out_len > 0 {
+                                    let in_len = input.len();
+                                    let nc = if out_h > 0 && out_w > 0 { out_len / (out_h * out_w) } else { 0 };
+                                    if nc > 0 && in_len > 0 && in_len % nc == 0 {
+                                        let hw = in_len / nc;
+                                        let mut h = (hw as f64).sqrt() as usize;
+                                        while h > 0 && hw % h != 0 { h -= 1; }
+                                        let w = hw / h;
+                                        if h >= out_h && w >= out_w && h > 0 && w > 0 {
+                                            for nci in 0..nc {
+                                                for ohi in 0..out_h {
+                                                    for owi in 0..out_w {
+                                                        let h_start = ohi * h / out_h;
+                                                        let h_end = (ohi + 1) * h / out_h;
+                                                        let w_start = owi * w / out_w;
+                                                        let w_end = (owi + 1) * w / out_w;
+                                                        let mut sum = 0.0f32;
+                                                        let mut count = 0;
+                                                        for hi in h_start..h_end {
+                                                            for wi in w_start..w_end {
+                                                                sum += input[nci * hw + hi * w + wi];
+                                                                count += 1;
+                                                            }
+                                                        }
+                                                        let out_idx = nci * out_h * out_w + ohi * out_w + owi;
+                                                        if out_idx < out_len {
+                                                            out_f32[out_idx] = if count > 0 { sum / count as f32 } else { 0.0 };
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "repeat" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let in_len = input.len();
+                                let out_len = out_f32.len();
+                                if in_len > 0 && out_len >= in_len && out_len % in_len == 0 {
+                                    let factor = out_len / in_len;
+                                    for i in 0..in_len {
+                                        let val = input[i];
+                                        for f in 0..factor {
+                                            out_f32[i * factor + f] = val;
+                                        }
+                                    }
+                                } else if in_len > 0 {
+                                    for i in 0..out_len {
+                                        out_f32[i] = input[i % in_len];
+                                    }
+                                }
+                            }
+                        }
+                        "cumsum" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let _dim = params.first().copied().unwrap_or(0);
+                                let exclusive = params.get(1).copied().unwrap_or(0);
+                                let rev = params.get(2).copied().unwrap_or(0);
+                                let len = out_f32.len().min(input.len());
+                                if rev == 0 {
+                                    let mut s = 0.0f32;
+                                    for i in 0..len {
+                                        s += input[i];
+                                        out_f32[i] = if exclusive != 0 { s - input[i] } else { s };
+                                    }
+                                } else {
+                                    let mut s = 0.0f32;
+                                    for i in (0..len).rev() {
+                                        s += input[i];
+                                        out_f32[i] = if exclusive != 0 { s - input[i] } else { s };
+                                    }
+                                }
+                            }
+                        }
+                        "erf_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                for i in 0..out_f32.len().min(input.len()) {
+                                    let x = input[i];
+                                    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+                                    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
+                                    out_f32[i] = x.signum() * y;
+                                }
+                            }
+                        }
+                        "flip" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                if params.is_empty() {
+                                    let len = out_f32.len().min(input.len());
+                                    for i in 0..len {
+                                        out_f32[i] = input[len - 1 - i];
+                                    }
+                                } else {
+                                    let num_dims = params[0];
+                                    let flip_dims: Vec<usize> = params[1..1 + num_dims].to_vec();
+                                    let shape: Vec<usize> = params[1 + num_dims..].to_vec();
+                                    let ndim = shape.len();
+                                    let len = out_f32.len().min(input.len());
+                                    let mut indices = vec![0i64; ndim];
+                                    let mut strides = vec![0i64; ndim];
+                                    let mut stride = 1i64;
+                                    for d in (0..ndim).rev() {
+                                        strides[d] = stride;
+                                        stride *= shape[d] as i64;
+                                    }
+                                    for out_idx in 0..len {
+                                        let mut src_idx = 0i64;
+                                        for d in 0..ndim {
+                                            let idx = if flip_dims.contains(&d) {
+                                                shape[d] as i64 - 1 - indices[d]
+                                            } else {
+                                                indices[d]
+                                            };
+                                            src_idx += idx * strides[d];
+                                        }
+                                        out_f32[out_idx] = input[src_idx as usize];
+                                        for d in (0..ndim).rev() {
+                                            indices[d] += 1;
+                                            if indices[d] < shape[d] as i64 {
+                                                break;
+                                            }
+                                            indices[d] = 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "where_f32" => {
+                            if input_slices.len() >= 3 {
+                                let cond_slice = &input_slices[0];
+                                let x_slice = &input_slices[1];
+                                let y_slice = &input_slices[2];
+                                let (cond, x, y) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[cond_slice.offset..cond_slice.offset + cond_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[x_slice.offset..x_slice.offset + x_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[y_slice.offset..y_slice.offset + y_slice.size]).to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let len = out_f32.len();
+                                for i in 0..len {
+                                    let c = cond.get(i % cond.len()).copied().unwrap_or(0.0);
+                                    out_f32[i] = if c != 0.0 {
+                                        x.get(i % x.len()).copied().unwrap_or(0.0)
+                                    } else {
+                                        y.get(i % y.len()).copied().unwrap_or(0.0)
+                                    };
                                 }
                             }
                         }
