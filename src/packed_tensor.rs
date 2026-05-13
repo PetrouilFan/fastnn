@@ -358,26 +358,6 @@ impl<T: PackedWord> PackedTensor<T> {
         unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const u32, self.data.len()) }
     }
 
-    pub fn add(&self, other: &Self) -> Self {
-        crate::backends::cpu::add_cpu(self, other)
-    }
-
-    pub fn sub(&self, other: &Self) -> Self {
-        crate::backends::cpu::sub_cpu(self, other)
-    }
-
-    pub fn max(&self, other: &Self) -> Self {
-        crate::backends::cpu::max_cpu(self, other)
-    }
-
-    pub fn min(&self, other: &Self) -> Self {
-        crate::backends::cpu::min_cpu(self, other)
-    }
-
-    pub fn relu_backward_inplace(&mut self, pre_relu: &Self) {
-        crate::backends::cpu::relu_backward_cpu(self, pre_relu);
-    }
-
     pub fn compute_scale(data: &[f32]) -> f32 {
         if T::IS_FLOAT {
             return 1.0;
