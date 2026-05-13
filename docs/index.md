@@ -26,6 +26,7 @@ FastNN provides:
 - [Models](models.md) - Pre-built model architectures
 - [IO & Serialization](io.md) - Saving and loading models
 - [API Reference](api-reference.md) - Complete API documentation
+- [Architecture](architecture.md) - v2.0 AOT compiler pipeline overview
 - [Development Architecture](development.md) - Internal module layout and contribution workflow
 - [Performance Roadmap](performance-roadmap.md) - GPU, fusion, optimizer, and packed precision roadmap
 
@@ -34,31 +35,69 @@ FastNN provides:
 - Python 3.12+
 - numpy >= 1.24
 
-## Quick Example
+## Quick Start — v2.0 AOT Compiler Pipeline
+
+The AOT pipeline compiles models through shape inference, operator fusion, optional weight quantization, and memory planning before execution — zero runtime graph traversal overhead.
+
+### Python: ONNX Import with Quantization
 
 ```python
 import fastnn as fnn
 
-# Create tensors
+# Import an ONNX model and compile with 4-bit weight quantization
+executor = fnn.AotExecutor(
+    nodes=model_nodes,       # from onnx import
+    params=model_params,     # weight tensors
+    input_names=["input"],
+    output_names=["output"],
+    quantize=4,              # 4-bit or 8-bit quantization (None for f32)
+)
+
+# Run inference
+outputs = executor.forward({"input": input_tensor})
+print(outputs["output"])
+```
+
+### Rust: GraphBuilder API
+
+```rust
+use fastnn::ir::builder::GraphBuilder;
+use fastnn::ir::node::{DimExpr, IrDType};
+use fastnn::backend::cpu::CpuBackend;
+
+let gb = GraphBuilder::new();
+let input = gb.input_with_dims(&[DimExpr::Known(1), DimExpr::Known(784)], IrDType::F32);
+let weight = gb.parameter(&[784, 10], IrDType::F32);
+let bias = gb.parameter(&[10], IrDType::F32);
+let mm = gb.matmul(&input, &weight);
+let output = gb.add(&mm, &bias);
+
+// Compile with 8-bit quantization and execute
+let result = gb.compile_and_execute_with_quantize(
+    &[&output], CpuBackend, Some(8),
+    &[input_data, weight_data, bias_data],
+);
+```
+
+### v1.x Eager Mode (Legacy)
+
+The v1.x eager-mode API is still available for backward compatibility:
+
+```python
+import fastnn as fnn
+
+# Tensor operations with autograd
 x = fnn.tensor([1.0, 2.0, 3.0, 4.0], [2, 2])
 y = fnn.tensor([5.0, 6.0, 7.0, 8.0], [2, 2])
-
-# Operations with autograd
-z = fnn.matmul(x, y)  # matrix multiply
-z = (x * 2).relu()
-
-# Build a model
-model = fnn.models.MLP(input_dim=2, hidden_dims=[16, 16], output_dim=1)
+z = fnn.matmul(x, y)
 
 # Training
+model = fnn.models.MLP(input_dim=2, hidden_dims=[16, 16], output_dim=1)
 optimizer = fnn.Adam(model.parameters(), lr=1e-2)
-
-# Training loop
 for epoch in range(100):
-    for batch_x, batch_y in loader:
-        pred = model(batch_x)
-        loss = fnn.mse_loss(pred, batch_y)
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+    pred = model(batch_x)
+    loss = fnn.mse_loss(pred, batch_y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
 ```

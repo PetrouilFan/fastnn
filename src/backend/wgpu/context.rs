@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::dtypes::PackedWord;
 use crate::error::{FastnnError, FastnnResult};
-use crate::storage::{DType, Device as TensorDevice, GpuStorage, Storage};
-use crate::tensor::Tensor;
+use crate::storage::DType;
 use parking_lot::RwLock;
 
 /// Global wgpu context — lazily initialized.

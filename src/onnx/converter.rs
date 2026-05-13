@@ -507,6 +507,55 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, r);
             }
 
+            // ── Additional ops ──────────────────────────────────────
+            "Erf" => {
+                self.out(node, self.graph.erf(&ins[0]));
+            }
+            "Where" => {
+                // ONNX Where: cond (bool), x (T), y (T) → output elementwise select
+                if ins.len() < 3 {
+                    return Err("Where needs 3 inputs: cond, x, y".to_string());
+                }
+                self.out(node, self.graph.where_tensor(&ins[0], &ins[1], &ins[2]));
+            }
+            "CumSum" => {
+                let dim: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let exclusive: bool = node.attrs.get("exclusive").and_then(|e| e.parse().ok()).unwrap_or(false);
+                let reverse: bool = node.attrs.get("reverse").and_then(|r| r.parse().ok()).unwrap_or(false);
+                self.out(node, self.graph.cumsum(&ins[0], dim, exclusive, reverse));
+            }
+            "Resize" => {
+                let mode = node.attrs.get("mode").map(|s| s.as_str()).unwrap_or("nearest");
+                // Resize in ONNX takes scales or sizes as tensor inputs (indices 2 and 3).
+                // Try to extract scales from the constant scales input.
+                let (scale_h, scale_w) = if node.inputs.len() > 2 {
+                    let scales_name = &node.inputs[2];
+                    if let Some(scale_tensor) = self.params.get(scales_name.as_str()) {
+                        let data: Vec<f32> = scale_tensor.to_numpy();
+                        if data.len() >= 4 {
+                            (data[2] as usize, data[3] as usize)
+                        } else {
+                            // Fallback: uniform 2x upsampling
+                            let s = data.last().copied().unwrap_or(2.0) as usize;
+                            (s, s)
+                        }
+                    } else if node.inputs.len() > 3 {
+                        // Try sizes input instead
+                        // (sizes handling skipped for now — would need i64 tensor parsing)
+                        (2, 2)
+                    } else {
+                        (2, 2)
+                    }
+                } else {
+                    (2, 2)
+                };
+                match mode {
+                    "nearest" => self.out(node, self.graph.upsample_nearest2d(&ins[0], scale_h, scale_w)),
+                    "linear" | "bilinear" => self.out(node, self.graph.upsample_bilinear2d(&ins[0], scale_h, scale_w)),
+                    other => return Err(format!("Resize mode '{}' not supported (only nearest/linear)", other)),
+                }
+            }
+
             // ── Quantized ops (decomposed to f32) ──────────────────
             "QuantizeLinear" => {
                 // y = saturate(round(x / y_scale) + y_zero_point, 0, 255)
