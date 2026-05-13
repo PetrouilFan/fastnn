@@ -1113,6 +1113,130 @@ impl DAGExecutor {
     }
 }
 
+// ---- AotExecutor (ONNX graph execution via AOT compiler pipeline) ----
+
+#[pyclass]
+pub struct AotExecutor {
+    plan: crate::backend::ExecutablePlan,
+    memory_plan: crate::compiler::passes::memory_planning::MemoryPlan,
+    graph: crate::ir::node::ComputeGraph,
+    executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
+    input_names: Vec<String>,
+    output_map: Vec<(String, usize)>,
+}
+
+#[pymethods]
+impl AotExecutor {
+    #[new]
+    #[pyo3(signature = (nodes, params, input_names, output_names))]
+    fn new(
+        nodes: Vec<std::collections::HashMap<String, String>>,
+        params: std::collections::HashMap<String, PyTensor>,
+        input_names: Vec<String>,
+        output_names: Vec<String>,
+    ) -> pyo3::PyResult<Self> {
+        // Convert Python node dicts to OnnxNodes
+        let onnx_nodes: Vec<crate::onnx::converter::OnnxNode> = nodes
+            .into_iter()
+            .map(|m| {
+                let name = m.get("name").cloned().unwrap_or_default();
+                let op_type = m.get("op_type").cloned().unwrap_or_default();
+                let inputs: Vec<String> = m
+                    .get("inputs")
+                    .map(|s| {
+                        s.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let outputs: Vec<String> = m
+                    .get("outputs")
+                    .map(|s| {
+                        s.trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let attrs: std::collections::HashMap<String, String> = m
+                    .into_iter()
+                    .filter(|(k, _)| {
+                        *k != "name" && *k != "op_type" && *k != "inputs" && *k != "outputs"
+                    })
+                    .collect();
+                crate::onnx::converter::OnnxNode {
+                    name,
+                    op_type,
+                    inputs,
+                    outputs,
+                    attrs,
+                }
+            })
+            .collect();
+
+        let rust_params: std::collections::HashMap<String, Tensor> = params
+            .into_iter()
+            .map(|(k, v)| (k, v.inner))
+            .collect();
+
+        let converter = crate::onnx::converter::OnnxConverter::new(
+            &onnx_nodes, &rust_params, &input_names, &output_names,
+        );
+        let graph = converter
+            .to_compute_graph()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+        let executor = crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
+        let (plan, memory_plan, compiled_graph) = executor
+            .compile_with_plan(&graph)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let output_map: Vec<(String, usize)> = output_names
+            .iter().enumerate().map(|(i, name)| (name.clone(), i)).collect();
+
+        Ok(AotExecutor { plan, memory_plan, graph: compiled_graph, executor, input_names, output_map })
+    }
+
+    fn forward(
+        &self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let mut input_bytes: Vec<Vec<u8>> = Vec::with_capacity(self.input_names.len());
+        for name in &self.input_names {
+            match inputs.get(name.as_str()) {
+                Some(t) => input_bytes.push(t.inner.as_bytes().to_vec()),
+                None => return Err(pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                )),
+            }
+        }
+
+        let input_refs: Vec<&[u8]> = input_bytes.iter().map(|v| v.as_slice()).collect();
+
+        let output_data = self.executor
+            .execute(&self.graph, &self.plan, &self.memory_plan, &input_refs)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let mut result = std::collections::HashMap::new();
+        for (name, idx) in &self.output_map {
+            if let Some(data) = output_data.get(*idx) {
+                let num_f32 = data.len() / 4;
+                let f32_vals: Vec<f32> = data.chunks_exact(4)
+                    .map(|chunk| {
+                        f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                    })
+                    .collect();
+                let tensor = Tensor::from_vec(f32_vals, vec![num_f32 as i64]);
+                result.insert(name.clone(), PyTensor::from_tensor(tensor));
+            }
+        }
+        Ok(result)
+    }
+}
+
 // ---- PackedMultiHeadAttention (4-bit, U4x8) ----
 
 #[pyclass]
