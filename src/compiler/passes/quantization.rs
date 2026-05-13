@@ -170,7 +170,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorValue};
+    use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorValue};
     use crate::ir::builder::GraphBuilder;
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
