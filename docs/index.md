@@ -5,6 +5,9 @@ A Python deep learning library with a Rust core, inspired by NVLabs/vibetensor a
 ## Overview
 
 FastNN provides:
+- **AOT compiler pipeline (v2.0)** — Compile computation graphs through shape inference, operator fusion, weight quantization, and memory planning before execution
+- **Native weight quantization** — 4-bit (U4x8) and 8-bit (U8x4) with per-channel scales, fused into GEMM/conv kernels
+- **IR-based execution** — `ComputeGraph` with 30+ opcodes, `GraphBuilder` fluent API, `GraphExecutor` for compile+run
 - **Tensor operations** with full autograd support
 - **Neural network modules**: Linear, Conv2d, BatchNorm, LayerNorm, Dropout, Embedding, activations, fused layers
 - **Optimizers**: SGD, Adam, AdamW, Muon, Lion, RMSprop

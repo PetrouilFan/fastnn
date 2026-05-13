@@ -1,12 +1,87 @@
 # fastnn
 
-**fastnn** is a high-performance neural network library built from scratch in Rust, with seamless Python bindings. It is designed to be a drop-in PyTorch replacement for CPU-based deep learning — achieving **14–25× speedup over PyTorch** on common Conv+BN+Activation pipelines, up to **7.4× faster GEMV with 8× memory savings** via native packed precision, with **quantized ONNX runtime support** for Q/DQ, QLinearConv, and MatMulInteger ops, plus **ARM NEON SIMD** and **batch GEMM** acceleration for packed inference.
+**fastnn** is a high-performance neural network inference library built from scratch in Rust, with seamless Python bindings. The v2.0.0 release introduces a complete **ahead-of-time (AOT) compiler pipeline** built on a first-class IR — replacing the legacy DAG/layer dispatch with a unified graph-based compilation path that supports **operator fusion, shape inference, memory planning, and native 4-bit/8-bit weight quantization** as first-class compiler passes.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
 [![Rust: stable](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
 
-> **Version:** v1.3.0 — Packed precision expansion, quantized ONNX, fused packed layers, batch GEMM, ARM NEON & WGPU packed conv
+> **Version:** v2.0.0 — AOT compiler pipeline, IR-based execution, native U4/U8 quantization
+
+---
+
+## What's New in v2.0.0
+
+### AOT Compiler Pipeline
+
+The v2.0.0 release replaces the old DAG/layer dispatch with a **fully compiled execution path**:
+
+```
+ComputeGraph → Shape Inference → Operator Fusion → Quantization (opt.) → Memory Planning → Backend Compile → Execute
+```
+
+- **`ComputeGraph`** — First-class IR representation with 30+ opcodes (MatMul, Conv2d, Softmax, etc.), symbolic dimension support (`DimExpr::Symbol`, `Bounded`, `Known`), and per-node tensor types carrying dtype + shape.
+- **`GraphBuilder`** — Ergonomic Rust API for building graphs: `input()`, `constant()`, `matmul()`, `conv2d_with_params()`, `relu()`, `softmax()`, etc.
+- **`GraphExecutor`** — Compiles a `ComputeGraph` through the full pipeline and dispatches execution on a `CpuBackend` (or `WgpuBackend` for supported ops).
+- **Shape inference** — Resolves symbolic dimensions at compile time; falls back to bounded estimates with runtime tightening via `ShapeEnv`.
+- **Operator fusion** — Merges `MatMul + Add`, `MatMul + Add + ReLU`, `Conv2d + Add`, `Conv2d + Add + ReLU` into single fused kernels.
+- **Memory planning** — Greedy first-fit allocator with live-range analysis; reuses arena slots for non-overlapping tensors.
+
+### Native Weight Quantization (U4x8 / U8x4)
+
+Weights are quantized at **compile time** — no runtime overhead:
+
+```python
+from fastnn.io import AotExecutor
+
+# Build and compile with 4-bit quantization
+executor = AotExecutor(nodes, params, input_names, output_names, quantize=4)
+output = executor.forward(*inputs)
+
+# Or 8-bit quantization
+executor = AotExecutor(nodes, params, input_names, output_names, quantize=8)
+```
+
+From Rust:
+
+```rust
+use fastnn::ir::builder::GraphBuilder;
+use fastnn::backend::cpu::CpuBackend;
+
+let gb = GraphBuilder::new();
+let input = gb.input(&[1, 784], IrDType::F32);
+let weight = gb.constant(&weight_bytes, weight_tt);
+let output = gb.matmul(&input, &weight);
+
+// Compile with 4-bit quantization
+let (plan, mem, graph) = gb.compile_with_quantize(&[&output], CpuBackend, Some(4))?;
+```
+
+Key properties:
+- **Per-channel quantization** — One (scale, zero_point) pair per output channel for U4/U8 weights.
+- **Packed representation** — U4x8 (8 values per u32) and U8x4 (4 values per u32) with SWAR/SIMD dequantization inside GEMM/conv kernels.
+- **f32 output** — Dequantization is fused into the GEMM/conv kernel; no separate dequant step.
+- **MatMul + Conv2d** — Both support U4 and U8 quantized inference on CPU.
+- **WGPU fallback** — Quantized ops fall back to CPU with explicit `UnsupportedOp`; GPU packed shaders planned for v2.1.
+
+### IR-Based Architecture
+
+| Component | Description |
+|-----------|-------------|
+| `ir::node` | `ComputeGraph`, `Opcode`, `IrDType` (F32/F16/BF16/I32/I64/Bool/U4/U8), `DimExpr`, `TensorType`, `TensorValue` |
+| `ir::builder` | `GraphBuilder` + `GraphTensor` — fluent API for graph construction |
+| `compiler::passes` | `shape_inference`, `operator_fusion`, `quantization`, `memory_planning` |
+| `backend::cpu` | `CpuBackend` — kernel selection, arena-based dispatch, fused kernels |
+| `backend::wgpu` | `WgpuBackend` — GPU compute with `UnsupportedOp` fallback for quantized ops |
+| `backend::executor` | `GraphExecutor` — ties IR, compiler passes, and backend together |
+| `onnx::converter` | `OnnxConverter` — ONNX → `ComputeGraph` with 30+ op mappings |
+
+### Python API Changes
+
+- **`AotExecutor`** now accepts an optional `quantize` parameter (`4`, `8`, or `None`).
+- **`DAGModel(quantize=)`** and **`build_dag_model(quantize=)`** pass quantization through to the AOT pipeline.
+- **`GraphBuilder.compile_with_quantize()`** and **`compile_and_execute_with_quantize()`** exposed in Rust.
+- Existing `DAGExecutor` / packed layer APIs remain available for backward compatibility.
 
 ---
 
@@ -23,7 +98,7 @@
 Install Rust via [rustup](https://rustup.rs):
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl --proto '=https' --tlsv1.2 -sSSf https://sh.rustup.rs | sh
 ```
 
 ### Build & Install
@@ -50,210 +125,148 @@ fastnn automatically selects the best available instruction set at runtime:
 
 ## Quick Start
 
-### Training a model
+### Inference with the AOT pipeline
+
+```python
+import fastnn as fnn
+from fastnn.io import AotExecutor
+
+# Build an ONNX model into a compiled executor with 4-bit quantization
+executor = AotExecutor(nodes, params, input_names, output_names, quantize=4)
+output = executor.forward(*inputs)
+
+# Or without quantization (f32 default)
+executor = AotExecutor(nodes, params, input_names, output_names)
+output = executor.forward(*inputs)
+```
+
+### Training (eager mode)
 
 ```python
 import fastnn as fnn
 
-# Generate XOR training data
 X = fnn.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], [4, 2])
 y = fnn.tensor([0.0, 1.0, 1.0, 0.0], [4, 1])
 
-# Build model
 model = fnn.Sequential(
     fnn.Linear(2, 16),
-    fnn.ReLU(),
-    fnn.Linear(16, 16),
     fnn.ReLU(),
     fnn.Linear(16, 1),
 )
 
 optimizer = fnn.Adam(model.parameters(), lr=1e-2)
-ds = fnn.TensorDataset(X, y)
-loader = fnn.DataLoader(ds, batch_size=4, shuffle=True)
-
-model.train()
 for epoch in range(200):
-    for batch_x, batch_y in loader:
-        pred = model(batch_x)
-        loss = fnn.mse_loss(pred, batch_y)
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-    loader.reset_sampler()
+    pred = model(X)
+    loss = fnn.mse_loss(pred, y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
 
-# Inference
 model.eval()
 with fnn.no_grad():
-    preds = model(X)
-    print(preds.numpy().round(2))
-# ≈ [[0.], [1.], [1.], [0.]]
+    print(model(X).numpy().round(2))  # ≈ [[0.], [1.], [1.], [0.]]
 ```
 
-### Creating and manipulating tensors
+### Rust: Compile and execute a quantized graph
 
-```python
-import fastnn as fnn
+```rust
+use fastnn::ir::builder::GraphBuilder;
+use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+use fastnn::backend::cpu::CpuBackend;
 
-a = fnn.randn([1000, 1000])
-b = fnn.randn([1000, 1000])
-c = fnn.matmul(a, b)   # Optimized GEMM — 88 GFLOP/s
+let gb = GraphBuilder::new();
+let input = gb.input_with_dims(&[DimExpr::Known(1), DimExpr::Known(784)], IrDType::F32);
+let weight_tt = TensorType::new(vec![DimExpr::Known(784), DimExpr::Known(10)], IrDType::F32);
+let weight = gb.constant(&weight_bytes, weight_tt);
+let output = gb.matmul(&input, &weight);
 
-x = fnn.tensor([1.0, 2.0, 3.0], [3])
-y = x * 2
-z = y.sum()
-z.backward()            # Automatic differentiation
-print(x.grad)           # tensor([2., 2., 2.])
+// Compile with 4-bit quantization
+let (plan, mem, graph) = gb.compile_with_quantize(&[&output], CpuBackend, Some(4))?;
+let executor = GraphExecutor::new(CpuBackend);
+let results = executor.execute(&graph, &plan, &mem, &[&input_bytes])?;
 ```
 
 ---
 
-## Why fastnn?
+## Performance
 
-fastnn is built for **one job**: running neural networks fast on CPU hardware — from desktop x86 to ARM edge devices — with no dependency on PyTorch, CUDA, or any external framework.
-
-### 1. Fused kernels: 14–25× faster Conv+BN+Activation
-
-Single-pass `fused_conv_bn_silu` replaces three separate PyTorch operations:
-
-| Configuration | PyTorch (separate) | fastnn (fused) | Speedup |
-|---------------|-------------------|----------------|---------|
-| Conv2d(32→64) + BN + SiLU (64×64) | 81.81 ms | 3.27 ms | **25.0×** |
-| Conv2d(64→128) + BN + SiLU (32×32) | 42.55 ms | 2.01 ms | **21.2×** |
-| Conv2d(128→256) + BN + SiLU (16×16) | 26.24 ms | 1.82 ms | **14.4×** |
-
-### 2. Native packed precision: 7.4× faster GEMV, 8× memory savings
-
-Weights stored packed in u32 words (4-bit, 8-bit, 16-bit). SIMD/SWAR kernels operate directly on the packed representation — no unpacking needed.
+### Packed precision GEMV
 
 | Implementation | Time | GFLOP/s | vs PyTorch f32 | Memory |
 |---------------|------|---------|----------------|--------|
 | PyTorch f32 (MKL) | 4.04 ms | 8.3 | 1.0× | 64 MB |
-| fastnn F16x2 | 1.80 ms | 18.6 | **2.2×** | 32 MB |
-| fastnn U8x4 | 0.76 ms | 44.4 | **5.3×** | 16 MB |
-| fastnn U4x8 | 0.55 ms | 61.1 | **7.4×** | 8 MB |
+| fastnn F16x2 | 1.80 ms | 18.6 | 2.2× | 32 MB |
+| fastnn U8x4 | 0.76 ms | 44.4 | 5.3× | 16 MB |
+| fastnn U4x8 | 0.55 ms | 61.1 | 7.4× | 8 MB |
 
 > Measured on AMD Ryzen 7 3700X, 8 threads. PyTorch uses MKL BLAS. fastnn uses Rayon + AVX2.
 
-### 3. Pure Rust, zero external dependencies
+### Fused kernels
 
-The entire core — tensor operations, autograd, convolutions, optimizers — is implemented in Rust with no bindings to C/C++ libraries. Python bindings are generated via [PyO3](https://pyo3.rs), and the only way to use fastnn from Python is through its clean, PyTorch-compatible API.
+| Configuration | PyTorch (separate) | fastnn (fused) | Speedup |
+|---------------|-------------------|----------------|---------|
+| Conv2d(32→64) + BN + SiLU (64×64) | 81.81 ms | 3.27 ms | 25.0× |
+| Conv2d(64→128) + BN + SiLU (32×32) | 42.55 ms | 2.01 ms | 21.2× |
+| Conv2d(128→256) + BN + SiLU (16×16) | 26.24 ms | 1.82 ms | 14.4× |
+
+### General benchmarks
+
+| Operation | Size | fastnn | GFLOP/s |
+|-----------|------|--------|---------|
+| MatMul | 1024×1024 | 24.2 ms | 88.6 |
+| GEMM (quantized U4) | 1024×1024 | 8.7 ms | — |
+| Conv2d | 2×8×32×32 → 16 | 1.64 ms | — |
 
 ---
 
 ## Features
 
-- **Native packed precision** — 4-bit, 8-bit, 16-bit, 32-bit inference with SWAR and SIMD-accelerated GEMV/ReLU operating directly on packed u32 words
-- **Vectorized CPU kernels** — Runtime-dispatched SIMD: AVX-512 → AVX2 → NEON → scalar fallback. Cephes-style fast approximations for `exp`, `log`
-- **Fast GEMM** — Pure-Rust matrix multiplication via `matrixmultiply`: **88 GFLOP/s** at 1024×1024
+- **AOT compiler pipeline** — Shape inference → Operator fusion → Quantization → Memory planning → Backend compile. Compile once, run many times.
+- **Native packed precision** — 4-bit (U4x8), 8-bit (U8x4), 16-bit (F16x2), 32-bit (F32x1) inference with SWAR/SIMD-accelerated GEMV/GEMM operating directly on packed u32 words
+- **Per-channel quantization** — Scale/zero_point per output channel for U4 and U8; fused dequantization inside GEMM/conv kernels
+- **IR-based execution** — `ComputeGraph` with 30+ opcodes, symbolic dimensions, and `GraphBuilder` fluent API
+- **Operator fusion** — MatMul+Add, MatMul+Add+ReLU, Conv2d+Add, Conv2d+Add+ReLU fused at compile time
+- **Vectorized CPU kernels** — Runtime-dispatched SIMD: AVX-512 → AVX2 → NEON → scalar fallback
 - **Autograd engine** — Built-in automatic differentiation with operation tracking and `no_grad` context
-- **Convolutions** — Conv1d, Conv2d, Conv3d, ConvTranspose2d with im2col and specialized 1×1, 3×3, and depthwise kernels; packed dispatch for MatMul, ConvTranspose, Embedding
-- **Fused layers** — `FusedConvBn`, `FusedConvBnReLU`, `FusedConvBnGELU`, `PackedConvRelu`, `PackedLinearGelu`, `LayerNorm+GELU`, `RMSNorm+GELU`; BN folding into packed conv
+- **Convolutions** — Conv1d, Conv2d, Conv3d, ConvTranspose2d with im2col and specialized 1×1, 3×3, and depthwise kernels
+- **ONNX model import** — Load and run models from PyTorch, YOLO, and other frameworks (30+ ops supported)
+- **GPU acceleration** *(experimental)* — Cross-platform compute via wgpu (Vulkan, Metal, DX12)
 - **Optimizers** — SGD, Adam, AdamW, Muon, Lion, RMSprop with fused update steps
 - **Data loading** — Multi-threaded DataLoader with automatic resource tuning and prefetch
-- **GPU acceleration** *(experimental)* — Cross-platform compute via [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12); WGPU packed convolution compute shader
-- **ONNX model import** — Load and run models from PyTorch, YOLO, and other frameworks (50 ops supported); Q/DQ folding, NonZero, Unique, Tril, Triu, Pad v2
-- **Calibration & profiling** — `ActivationCalibrator` for activation statistics with KL-divergence scale refinement; `PrecisionProfiler` for per-layer sensitivity analysis and automatic mixed-precision configuration
-- **Fused linear+activation** — `fused_linear_relu` and `fused_linear_gelu` single-pass operations for matmul + activation fusion; used internally by `TransformerBlock`
-- **Packed attention & transformer** — `PackedMultiHeadAttention` and `PackedTransformerEncoder` in U4/U8 precision (via Python bindings)
+- **Calibration & profiling** — `ActivationCalibrator` for KL-divergence scale refinement; `PrecisionProfiler` for per-layer sensitivity analysis
 
 ---
 
-## New Features (feat/precision-system)
+## Architecture
 
-### Quantized Dispatch
-
-- **Packed dispatch for additional ops** — `MatMul`, `ConvTranspose`, and `Embedding` operations now support packed (U4/U8) weight dispatch through the DAG executor, falling back to f32 when weights aren't packed.
-- **QuantizeLinear / DequantizeLinear** — ONNX-standard quantization operators (`OpCode::QuantizeLinear`, `OpCode::DequantizeLinear`) for DAG execution, enabling quantized runtime with scale+round+clamp quantization and (v−zp)×scale dequantization.
-- **QLinearConv / MatMulInteger** — Quantized integer matrix ops: `QLinearConv` dequantizes quantized input and weight, runs f32 conv, and requantizes the output; `MatMulInteger` dequantizes both quantized inputs and runs f32 matmul.
-
-### ONNX Import
-
-- **Q/DQ folding** — The ONNX importer (`onnx.py`) detects `QuantizeLinear → DequantizeLinear` patterns around `Conv`/`MatMul` nodes and folds them, converting weights to packed storage during import for zero-cost quantized inference.
-- **4 new ONNX ops** — `NonZero`, `Unique`, `Tril`, `Triu`.
-- **Pad v2** — Tensor-based pad sizes with 4 padding modes (constant, reflect, replicate, edge).
-
-### Calibration & Profiling
-
-- **`ActivationCalibrator`** (`fastnn.io.act_calibrate`) — Runs calibration data through the model, collects per-layer activation distributions, and refines quantization scales using weighted KL-divergence (NVIDIA's method). Integrates with the existing `Calibrator` infrastructure and `fastnn-convert` CLI.
-- **`PrecisionProfiler`** (`fastnn.io.profiler`) — Per-layer sensitivity analysis: quantizes each layer in isolation, measures output MSE perturbation, and sorts by sensitivity. `auto_config()` generates a `PrecisionConfig` that assigns U4 to least-sensitive layers, U8 to mid, and F32 to most-sensitive given a target memory budget.
-
-### Fused Layers
-
-- **`PackedConvRelu`** — Standalone fused packed convolution + in-place ReLU in all 4 precisions (U4/U8/U16/F32), exposed via Python.
-- **`PackedLinearGelu`** — Fused packed linear + GELU with Abramowitz & Stegun erf approximation, all 4 precisions.
-- **BN folding** — `fold_bn_into_packed_conv()` dequantizes packed weights to f32, applies `W_fused = W × γ / √(σ² + ε)`, and requantizes per-channel — enabling BN fusion in quantized conv layers.
-
-### Performance Kernels
-
-- **Batch GEMM for packed MatMul** — K-tiled batch GEMM (`gemm_batch_packed()`) processes all batch rows within each K-tile before moving to the next, improving L2 cache reuse significantly (~5–6× speedup over per-row GEMV).
-- **ARM NEON SIMD** — `gemv_u4x8_neon()` and `gemv_u8x4_neon()` kernels using full SIMD widening chain (int8 → int16 → int32 → f32 → FMA) for aarch64 targets. Gated behind a `neon` feature flag in `Cargo.toml`.
-- **WGPU packed conv** — Experimental `conv_packed.wgsl` compute shader implementing packed convolution on GPU with per-channel scaling and bias, plus full Rust scaffolding (`conv2d_packed_wgpu()`) for pipeline creation, buffer management, and dispatch.
-
----
-
-## Model Import
-
-fastnn can load pretrained models from PyTorch and ONNX:
-
-```python
-# From PyTorch
-from fastnn.io import convert_from_pytorch
-convert_from_pytorch(torch_model, "model.fnn")
-
-# From ONNX
-from fastnn.io import convert_from_onnx
-info = convert_from_onnx("model.onnx", "model.fnn")
-
-# YOLO object detection
-model = fnn.YOLO("yolov8n.onnx")
-detections = model("image.jpg")
 ```
-
-See [Model I/O](docs/io.md) and [ONNX support](docs/onnx.md) for details.
-
----
-
-## Benchmarks
-
-All benchmarks measured on AMD Ryzen 7 3700X (Arch Linux). Steady-state medians with warmup.
-
-| Operation | Size | fastnn | GFLOP/s |
-|-----------|------|--------|---------|
-| MatMul | 1024×1024 | 24.2 ms | **88.6** |
-| ReLU | 1024×1024 | 0.30 ms | — |
-| GELU | 1024×1024 | 1.06 ms | — |
-| Conv2d | 2×8×32×32 → 16 | 1.64 ms | — |
-
-See [Performance Roadmap](docs/performance-roadmap.md) for packed precision benchmarks, GPU results, and the complete benchmark suite.
-
----
-
-## API Reference
-
-The full API reference is maintained in [`docs/api-reference.md`](docs/api-reference.md). It covers:
-
-- **Tensor creation** — `zeros`, `ones`, `randn`, `arange`, `linspace`, `eye`, `full`, and `tensor_from_numpy`
-- **Tensor operations** — `matmul`, `einsum`, `cat`, `stack`, `repeat`, `gather`, `where`, `expand`, `topk`, `flip`, `transpose`, `permute`, `reshape`, `view`, `squeeze`, `unsqueeze`
-- **Reductions** — `sum`, `mean`, `max`, `min`, `argmax`, `argmin`, `softmax`, `log_softmax`, `cumsum`
-- **Activations** — `relu`, `gelu`, `sigmoid`, `tanh`, `silu`, `leaky_relu`, `elu`, `softplus`, `hardswish`, `mish`
-- **Math** — `abs`, `exp`, `log`, `sqrt`, `pow`, `clamp`, `neg`, `erf`, `maximum`, `minimum`
-- **Neural network modules** — `Linear`, `Conv1d/2d/3d`, `ConvTranspose2d`, `BatchNorm1d/2d`, `LayerNorm`, `RMSNorm`, `GroupNorm`, `Dropout`, `Dropout2d`, `Embedding`, `MultiHeadAttention`, `TransformerBlock`, `TransformerEncoder`, `MaxPool2d`, `AvgPool2d`, `AdaptiveAvgPool2d`, `Upsample`, `Flatten`, `ResidualBlock`, `PReLU`, `FusedConvBn`, `FusedConvBnRelu`, `FusedConvBnGelu`, `Sequential`, `ModuleList`
-- **Optimizers** — `SGD`, `Adam`, `AdamW`, `Muon`, `Lion`, `RMSprop`
-- **Loss functions** — `mse_loss`, `cross_entropy_loss`, `bce_with_logits`, `huber_loss`
-- **Learning rate schedulers** — `StepLR`, `CosineAnnealingLR`, `ExponentialLR`, `ReduceLROnPlateau`
-- **Data** — `Dataset`, `TensorDataset`, `DataLoader` (with multi-threaded auto-tuning)
-- **Model I/O** — `save`, `load`, `convert_from_pytorch`, `convert_from_onnx`, `load_state_dict`
-- **Packed precision Python API** — `Linear4/8/16/32`, `PackedConvRelu4/8/16/32`, `PackedLinearGelu4/8/16/32`, `PackedTensor4/8/16/32`, `MasterWeightOptimizer4/8/16/32`, `packed_tensor`, `packed_tensor_from_f32`
-- **Calibration & profiling** — `ActivationCalibrator` (KL-divergence scale refinement), `PrecisionProfiler` (per-layer sensitivity analysis, automatic mixed-precision config)
-- **Packed attention & transformer** — `PackedMultiHeadAttention4/8`, `PackedTransformerEncoder4/8` (packed U4/U8 quantized transformer)
-- **DAG Executor** — `DAGExecutor` (native Rust topological graph executor for ONNX models)
-- **Fused linear+activation** — `fused_linear_relu`, `fused_linear_gelu` (single-pass matmul + activation)
-- **Weight initialization** — `fastnn.init` module: `kaiming_uniform_`, `kaiming_normal_`, `xavier_uniform_`, `xavier_normal_`, `orthogonal_`, `uniform_`, `normal_`, `constant_`, `eye_`, `dirac_`, `calculate_gain`
-- **Functional API** — `fastnn.functional`: `conv2d`, `conv1d`, `max_pool2d`, `avg_pool2d`, `batch_norm`, `layer_norm`, `linear`, `dropout`, `interpolate` (analogous to `torch.nn.functional`)
-- **Neural network modules** (additional) — `PReLU`, `AvgPool1d`, `MaxPool1d`, `AvgPool2d`, `CachedDataset`
-- **YOLO utilities** — `nms`, `yolo_decode`, `yolo_dfl_decode`, `xywh2xyxy`, `scale_boxes`
-- **Utilities** — `no_grad`, `set_seed`, `set_num_threads`, `set_default_device`, `clip_grad_norm_`, `clip_grad_value_`, `flash_attention`, `allocator_stats`, `list_registered_ops`, `batched_mlp_forward`, `clear_storage_pool`, `use_wgpu`, `use_cpu`, `is_wgpu`, `from_numpy`, `load_state_dict`, `import_onnx`
+┌──────────────┐     ┌──────────────────────────────────────────┐
+│  Python API  │────▶│             Rust Core                    │
+│  (PyO3)      │     │                                          │
+│  AotExecutor │     │  ┌────────────────────────────────────┐  │
+│  DAGModel    │     │  │        ComputeGraph (IR)           │  │
+│  Tensor API  │     │  │  Opcode · DimExpr · IrDType       │  │
+│              │     │  │  MatMul · Conv2d · Softmax …      │  │
+│              │     │  └─────────────┬──────────────────────┘  │
+│              │     │                │                          │
+│              │     │  ┌─────────────▼──────────────────────┐  │
+│              │     │  │      Compiler Passes              │  │
+│              │     │  │  Shape Inference → Operator Fusion  │  │
+│              │     │  │  → Quantization → Memory Planning  │  │
+│              │     │  └─────────────┬──────────────────────┘  │
+│              │     │                │                          │
+│              │     │  ┌─────────────▼──────────────────────┐  │
+│              │     │  │        Backend Dispatch             │  │
+│              │     │  │  CpuBackend · WgpuBackend           │  │
+│              │     │  │  Arena-based execution              │  │
+│              │     │  └────────────────────────────────────┘  │
+│              │     │                                          │
+│              │     │  ┌────────────────────────────────────┐  │
+│              │     │  │     Eager Mode (training)          │  │
+│              │     │  │  Tensor · Autograd · Optimizers     │  │
+│              │     │  └────────────────────────────────────┘  │
+└──────────────┘     └──────────────────────────────────────────┘
+```
 
 ---
 
@@ -268,8 +281,6 @@ The full API reference is maintained in [`docs/api-reference.md`](docs/api-refer
 | `openblas`    | Link against OpenBLAS for large matmul            | off     |
 | `blas`        | BLAS-accelerated matmul (requires system cblas)   | off     |
 
-> **Note:** The `blas` feature is disabled by default because the system BLAS reference implementation is very slow. The default `matrixmultiply` pure-Rust GEMM is faster on most systems.
-
 ---
 
 ## Testing
@@ -278,11 +289,14 @@ The full API reference is maintained in [`docs/api-reference.md`](docs/api-refer
 # Rust unit and integration tests
 cargo test
 
+# Quantized pipeline integration tests
+cargo test --test quantized_pipeline
+
+# Packed precision integration tests
+cargo test --test packed_integration
+
 # Python tests
 uv run pytest tests/ -v
-
-# Packed precision benchmarks
-cargo bench --bench packed_bench
 ```
 
 ---
@@ -293,14 +307,11 @@ cargo bench --bench packed_bench
 - [x] v1.1 — Packed precision, SWAR ops, GPU backend, modular architecture
 - [x] v1.2 — Fused kernels (Conv+BN+Activation, LayerNorm+GELU), ONNX import, YOLO support
 - [x] v1.3 — Packed precision expansion, quantized ONNX, fused packed layers, batch GEMM, ARM NEON, WGPU packed conv
-- [x] v1.4 — TBA
+- [x] **v2.0** — AOT compiler pipeline, IR-based execution, native U4/U8 quantization, operator fusion, memory planning
+- [ ] v2.1 — Training through the IR pipeline, WGPU packed shaders, ONNX quantized op exporters (QLinearMatMul, QLinearConv)
 - [ ] FlashAttention SIMD optimization (AVX2/AVX512 block kernels)
 - [ ] Raspberry Pi benchmark suite (ARM NEON validation)
 - [ ] Multi-GPU training via wgpu
-- [ ] Process-based multiprocessing for DataLoader
-- [ ] Full fused GPU optimizer kernels
-- [ ] `residual + add + norm` fusion
-- [ ] ONNX training export support
 
 ---
 
@@ -308,10 +319,10 @@ cargo bench --bench packed_bench
 
 fastnn is developed in two layers:
 
-1. **Rust core** (`src/`) — Tensors, kernels, autograd, neural network modules, optimizers
+1. **Rust core** (`src/`) — IR nodes, compiler passes, backends, tensor ops, autograd, neural network modules, optimizers
 2. **Python facade** (`fastnn/`) — Public API, data loading, model I/O, ONNX pipeline
 
-See [`docs/development.md`](docs/development.md) for the internal architecture, GPU synchronization policy, and step-by-step guides for adding tensor operations, fused kernels, and ONNX ops.
+See [`docs/development.md`](docs/development.md) for the internal architecture, GPU synchronization policy, and step-by-step guides.
 
 ---
 
