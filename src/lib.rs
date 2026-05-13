@@ -43,8 +43,8 @@ pub mod tensor;
 pub use error::{FastnnError, FastnnResult};
 pub use storage_quantized::QuantizedTensor;
 
-// Legacy v1.x dispatcher + kernels — deleted in v2.0.0.
-// All operations now route through the AOT pipeline (ir/ + backend/ + compiler/).
+// v2.0.0: The old `kernels` module and DAG dispatcher have been removed.
+// All operations route through the AOT pipeline (ir/ + backend/ + compiler/).
 
 // Re-export core types
 pub use storage::{DType, Device};
