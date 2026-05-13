@@ -3,6 +3,7 @@
 pub mod error;
 pub mod io;
 pub mod iterator;
+pub mod onnx;
 // DEPRECATED: legacy v1.x kernel implementations — kept for dag.rs backward compat
 pub mod kernels;
 pub mod nn;
