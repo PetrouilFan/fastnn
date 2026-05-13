@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
-use crate::compiler::passes::{memory_planning, operator_fusion, shape_inference};
+use crate::compiler::passes::{memory_planning, operator_fusion, quantization, shape_inference};
 use crate::ir::node::{ComputeGraph, DimExpr, Opcode, ShapeEnv};
 use std::sync::atomic::Ordering;
 
@@ -56,9 +56,25 @@ impl<B: Backend> GraphExecutor<B> {
     /// The returned graph reflects any node re-writes from operator fusion,
     /// so callers must use it (rather than the original graph) when calling
     /// [`execute`](Self::execute).
+    ///
+    /// If `quantize` is `Some(bit_width)`, the quantization pass is applied
+    /// after operator fusion and before memory planning. Valid values are
+    /// `4` (U4x8) and `8` (U8x4).
     pub fn compile_with_plan(
         &self,
         graph: &ComputeGraph,
+    ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
+        self.compile_with_plan_and_quantize(graph, None)
+    }
+
+    /// Same as [`compile_with_plan`] but with optional weight quantization.
+    ///
+    /// Pass `Some(4)` or `Some(8)` to quantize f32 weight constants to
+    /// packed 4-bit or 8-bit precision.
+    pub fn compile_with_plan_and_quantize(
+        &self,
+        graph: &ComputeGraph,
+        quantize: Option<u8>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         let mut graph = graph.clone();
 
@@ -69,6 +85,18 @@ impl<B: Backend> GraphExecutor<B> {
         // ── Phase 2: Operator fusion ──────────────────────────────────────
         operator_fusion::fuse_operators(&mut graph)
             .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
+
+        // ── Phase 2.5: Quantization (optional) ───────────────────────────
+        if let Some(bit_width) = quantize {
+            if bit_width != 4 && bit_width != 8 {
+                return Err(BackendError::Compilation(format!(
+                    "unsupported quantization bit width: {} (expected 4 or 8)",
+                    bit_width
+                )));
+            }
+            quantization::quantize_weights(&mut graph, bit_width)
+                .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+        }
 
         // ── Phase 3: Memory planning ──────────────────────────────────────
         let memory_plan = memory_planning::plan_memory(&graph)
