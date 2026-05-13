@@ -50,6 +50,7 @@ ONNX_TO_IR_OP = {
     "GroupQueryAttention": "GroupQueryAttention",
     "EmbedLayerNormalization": "EmbedLayerNormalization",
     "QuantizeLinear": "QuantizeLinear", "DequantizeLinear": "DequantizeLinear",
+    "QLinearMatMul": "QLinearMatMul", "QLinearConv": "QLinearConv",
     "RMSNormalization": "RmsNorm", "RotaryEmbedding": "RotaryEmbedding",
     "SkipLayerNormalization": "SkipLayerNorm",
     "ConstantOfShape": "ConstantOfShape", "LRN": "LRN",
@@ -155,6 +156,7 @@ _OP_ATTRS = {
     "InstanceNormalization": ["epsilon"],
     "QuantizeLinear": ["axis"],
     "DequantizeLinear": ["axis"],
+    "QLinearConv": ["strides", "pads", "dilations", "group", "kernel_shape"],
     "NonMaxSuppression": ["center_point_box"],
     "Clip": ["min", "max"],
 }
@@ -167,6 +169,8 @@ _OP_PARAM_SLOTS = {
     "ConvTranspose": [("weight", 1), ("bias", 2)],
     "GRU": [("weight", 1), ("recurrent_weight", 2), ("bias", 3)],
     "LSTM": [("weight", 1), ("recurrent_weight", 2), ("bias", 3)],
+    "QLinearMatMul": [("weight", 3)],
+    "QLinearConv": [("weight", 3)],
 }
 
 
