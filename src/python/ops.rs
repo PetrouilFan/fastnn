@@ -332,8 +332,10 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
         "sum" => reduce_sum_all(&squared),
         _ => reduce_mean_all(&squared),
     };
-    Ok(wrap_loss_with_autograd(output, &pred.inner, || {
-        std::sync::Arc::new(autograd::MSELossBackward::new())
+    let edges = autograd::make_edges(&pred.inner, &target.inner);
+    let inputs = vec![pred.inner.clone(), target.inner.clone()];
+    Ok(wrap_loss_with_autograd(output, &pred.inner, move || {
+        std::sync::Arc::new(autograd::MSELossBackward::new(edges, inputs))
     }))
 }
 
@@ -351,8 +353,10 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
         "sum" => reduce_sum_all(&nll),
         _ => reduce_mean_all(&nll),
     };
-    Ok(wrap_loss_with_autograd(output, &pred.inner, || {
-        std::sync::Arc::new(autograd::CrossEntropyBackward::new())
+    let edges = autograd::make_edges(&pred.inner, &target.inner);
+    let inputs = vec![pred.inner.clone(), target.inner.clone()];
+    Ok(wrap_loss_with_autograd(output, &pred.inner, move || {
+        std::sync::Arc::new(autograd::CrossEntropyBackward::new(edges, inputs))
     }))
 }
 
@@ -593,8 +597,10 @@ fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyResult<PyTensor> {
     let term3 = one.add(&input.inner.abs().neg().exp()).ln();
     let output = term1.sub(&term2).add(&term3);
 
-    Ok(wrap_loss_with_autograd(output, &input.inner, || {
-        std::sync::Arc::new(autograd::BCEWithLogitsBackward::new())
+    let edges = autograd::make_edges(&input.inner, &target.inner);
+    let inputs = vec![input.inner.clone(), target.inner.clone()];
+    Ok(wrap_loss_with_autograd(output, &input.inner, move || {
+        std::sync::Arc::new(autograd::BCEWithLogitsBackward::new(edges, inputs))
     }))
 }
 
@@ -610,8 +616,10 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTen
     let correction = excess.pow(2.0) * half;
     let output = quadratic - correction;
 
-    Ok(wrap_loss_with_autograd(output, &input.inner, || {
-        std::sync::Arc::new(autograd::HuberLossBackward::new())
+    let edges = autograd::make_edges(&input.inner, &target.inner);
+    let inputs = vec![input.inner.clone(), target.inner.clone()];
+    Ok(wrap_loss_with_autograd(output, &input.inner, move || {
+        std::sync::Arc::new(autograd::HuberLossBackward::new(edges, inputs))
     }))
 }
 

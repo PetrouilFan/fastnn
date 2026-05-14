@@ -40,7 +40,7 @@ fn fuse_op_relu(graph: &mut ComputeGraph) -> Result<bool, String> {
             _ => {}
         }
         // Skip if already fused (don't re-fuse)
-        if op_node.attrs.get("fused_op").is_some() {
+        if op_node.attrs.contains_key("fused_op") {
             continue;
         }
 

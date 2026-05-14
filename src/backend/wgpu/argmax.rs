@@ -27,7 +27,7 @@ pub(super) fn dispatch_argmax_gpu(
     let result = with_wgpu_context(|ctx| -> Result<Vec<u64>, BackendError> {
         let shader = build_argmax_shader();
         ensure_compute_pipeline(ctx, "argmax", &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_in = ctx.create_buffer(bytemuck::cast_slice(&input), "am_input");
         let output_size = (numel as u64) * 8;

@@ -1,7 +1,7 @@
 //! Im2col kernel for CPU convolution.
 use crate::tensor::Tensor;
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 pub unsafe fn im2col_kernel(
     x: &Tensor,
     kernel_height: usize,

@@ -119,7 +119,7 @@ impl<'a> OnnxConverter<'a> {
                     ir_dtype_from_dtype(tensor.dtype()),
                 );
                 let data = tensor.as_bytes();
-                let gt = self.graph.constant(&data, tensor_type);
+                let gt = self.graph.constant(data, tensor_type);
                 self.name_to_id.insert(name.clone(), gt);
             }
         }
@@ -257,30 +257,39 @@ impl<'a> OnnxConverter<'a> {
             }
 
             // ── Convolution ─────────────────────────────────────────
-            "Conv" => {
-                let strides: Vec<usize> = parse_ints(&node.attrs, "strides", &[1, 1]);
-                let pads: Vec<usize> = parse_ints(&node.attrs, "pads", &[0, 0]);
-                let dilations: Vec<usize> = parse_ints(&node.attrs, "dilations", &[1, 1]);
+            // Note: "Conv" is the ONNX name, "Conv2d" is what the Python
+            // ONNX_TO_IR mapping sends. Accept both.
+            "Conv" | "Conv2d" => {
+                // The Python _extract_attrs renames ONNX "strides" → "stride",
+                // "pads" → "padding", "dilations" → "dilation", and takes
+                // the first element for symmetric padding.
+                // Try both the Python-renamed name and the ONNX name.
+                let stride: usize = node.attrs.get("stride")
+                    .or_else(|| node.attrs.get("strides"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                let padding: usize = node.attrs.get("padding")
+                    .or_else(|| node.attrs.get("pads"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let dilation: usize = node.attrs.get("dilation")
+                    .or_else(|| node.attrs.get("dilations"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
                 let group: usize = node.attrs.get("group").and_then(|g| g.parse().ok()).unwrap_or(1);
-                let stride = *strides.first().unwrap_or(&1);
-                let padding = *pads.first().unwrap_or(&0);
-                let dilation = *dilations.first().unwrap_or(&1);
 
-                match strides.len() {
-                    1 => self.out(node, self.graph.conv1d(&ins[0], &ins[1], stride, padding)),
-                    2 => {
-                        let r = self.graph.conv2d_with_params(&ins[0], &ins[1], stride, padding, dilation, group);
-                        // Bias is handled separately via bias_add
-                        let r = if let Some(b) = ins.get(2) {
-                            self.graph.add(&r, b)
-                        } else {
-                            r
-                        };
-                        self.out(node, r);
-                    }
-                    3 => self.out(node, self.graph.conv3d(&ins[0], &ins[1], stride, padding)),
-                    _ => return Err(format!("unsupported Conv dims: {}", strides.len())),
-                }
+                // All YOLO convs are 2D; use conv2d_with_params.
+                // (1D/3D would need separate dispatch from ONNX attrs.)
+                let r = self.graph.conv2d_with_params(&ins[0], &ins[1], stride, padding, dilation, group);
+                // Bias addition: ONNX Conv bias is 1D [C] which broadcasts
+                // channel-wise over [N, C, H, W]. Use bias_add, NOT add,
+                // because numpy-style broadcasting would fail (C vs H).
+                let r = if let Some(b) = ins.get(2) {
+                    self.graph.bias_add(&r, b)
+                } else {
+                    r
+                };
+                self.out(node, r);
             }
             "ConvTranspose" => {
                 let stride: usize = node.attrs.get("strides")
@@ -295,13 +304,21 @@ impl<'a> OnnxConverter<'a> {
             }
 
             // ── Pooling ─────────────────────────────────────────────
+            // Note: Python _extract_attrs renames "kernel_shape" → "kernel_size",
+            // "strides" → "stride" for pooling ops. Try both.
             "MaxPool" => {
-                let ks = parse_ints(&node.attrs, "kernel_shape", &[2, 2]);
-                let st = parse_ints(&node.attrs, "strides", &ks);
-                let pd = parse_ints(&node.attrs, "pads", &[0, 0]);
-                let k = *ks.first().unwrap_or(&2);
-                let s = *st.first().unwrap_or(&k);
-                let p = *pd.first().unwrap_or(&0);
+                let k: usize = node.attrs.get("kernel_size")
+                    .or_else(|| node.attrs.get("kernel_shape"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2);
+                let s: usize = node.attrs.get("stride")
+                    .or_else(|| node.attrs.get("strides"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(k);
+                let p: usize = node.attrs.get("padding")
+                    .or_else(|| node.attrs.get("pads"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
                 let (_values, indices) = self.graph.max_pool2d(&ins[0], k, s, p);
                 self.out(node, _values);
                 if let Some(idx_out) = node.outputs.get(1) {
@@ -309,12 +326,18 @@ impl<'a> OnnxConverter<'a> {
                 }
             }
             "AveragePool" => {
-                let ks = parse_ints(&node.attrs, "kernel_shape", &[2, 2]);
-                let st = parse_ints(&node.attrs, "strides", &ks);
-                let pd = parse_ints(&node.attrs, "pads", &[0, 0]);
-                let k = *ks.first().unwrap_or(&2);
-                let s = *st.first().unwrap_or(&k);
-                let p = *pd.first().unwrap_or(&0);
+                let k: usize = node.attrs.get("kernel_size")
+                    .or_else(|| node.attrs.get("kernel_shape"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2);
+                let s: usize = node.attrs.get("stride")
+                    .or_else(|| node.attrs.get("strides"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(k);
+                let p: usize = node.attrs.get("padding")
+                    .or_else(|| node.attrs.get("pads"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
                 self.out(node, self.graph.avg_pool2d(&ins[0], k, s, p));
             }
             "GlobalAveragePool" => {
@@ -353,6 +376,22 @@ impl<'a> OnnxConverter<'a> {
                         else { DimExpr::Known(d as u64) }
                     }).collect();
                     self.out(node, self.graph.reshape(&ins[0], &dims));
+                } else if ins.len() >= 2 {
+                    // Opset 11+: shape comes from a tensor input (ins[1]).
+                    // Try to resolve it from params first (compile-time constant).
+                    let shape_name = &node.inputs[1];
+                    if let Some(shape_tensor) = self.params.get(shape_name) {
+                        let shape_data: Vec<f32> = shape_tensor.to_numpy();
+                        let dims: Vec<DimExpr> = shape_data.iter().map(|&v| {
+                            let d = v as i64;
+                            if d == -1 { DimExpr::Symbol("N".to_string()) }
+                            else { DimExpr::Known(d as u64) }
+                        }).collect();
+                        self.out(node, self.graph.reshape(&ins[0], &dims));
+                    } else {
+                        // Shape is dynamic; keep as pass-through for now.
+                        self.out(node, ins[0].clone());
+                    }
                 } else {
                     self.out(node, ins[0].clone());
                 }
@@ -360,11 +399,14 @@ impl<'a> OnnxConverter<'a> {
             "Flatten" => self.out(node, self.graph.flatten(&ins[0])),
             "Transpose" => {
                 let perm: Vec<usize> = parse_ints(&node.attrs, "perm", &[1, 0]);
-                // For 2D swap, use transpose. For general, use multiple permute calls.
                 if perm.len() == 2 && perm[0] == 1 && perm[1] == 0 {
+                    // Simple 2D swap: use the legacy transpose (reverse)
                     self.out(node, self.graph.transpose(&ins[0]));
+                } else if perm.len() == ins[0].shape().len() {
+                    // General N-D permute: use perm-aware transpose
+                    self.out(node, self.graph.transpose_with_perm(&ins[0], &perm));
                 } else {
-                    // Simulate permute via reshape + transpose where possible
+                    // Perm length doesn't match: fallback to legacy reverse
                     self.out(node, self.graph.transpose(&ins[0]));
                 }
             }
@@ -391,6 +433,9 @@ impl<'a> OnnxConverter<'a> {
                         if i < split_sizes.len() {
                             let end = start + split_sizes[i];
                             let output = self.graph.slice(&ins[0], axis, start, end);
+                            if !node.name.is_empty() {
+                                self.graph.set_node_name(output.node_id, &node.name);
+                            }
                             self.name_to_id.insert(out_name.clone(), output);
                             start = end;
                         }
@@ -409,6 +454,9 @@ impl<'a> OnnxConverter<'a> {
                                     start + part
                                 };
                                 let output = self.graph.slice(&ins[0], axis, start, end);
+                                if !node.name.is_empty() {
+                                    self.graph.set_node_name(output.node_id, &node.name);
+                                }
                                 self.name_to_id.insert(out_name.clone(), output);
                                 start = end;
                             }
@@ -506,9 +554,62 @@ impl<'a> OnnxConverter<'a> {
                     return Err("ConstantOfShape with runtime shape is not yet supported".to_string());
                 }
             }
-            "Shape" | "Cast" | "Expand" | "Tile" => {
-                // Passthrough
-                self.out(node, ins[0].clone());
+            "Range" => {
+                // Range(start, limit, step) — produces a 1D F32 tensor.
+                // All 3 inputs are 0D scalars in the ONNX model.
+                if ins.len() >= 3 {
+                    eprintln!("[converter] Range node '{}': ins shapes={:?} {:?} {:?}",
+                        node.name,
+                        ins[0].shape(),
+                        ins[1].shape(),
+                        ins[2].shape(),
+                    );
+                    let gt = self.graph.range_op(&ins[0], &ins[1], &ins[2]);
+                    eprintln!("[converter] Range node '{}': output shape={:?}",
+                        node.name, gt.shape());
+                    self.out(node, gt);
+                } else {
+                    return Err("Range needs 3 inputs (start, limit, step)".to_string());
+                }
+            }
+            "Shape" => {
+                // Shape returns a 1D I64 tensor containing the shape of the input.
+                let gt = self.graph.shape_op(&ins[0]);
+                self.out(node, gt);
+            }
+            "Cast" => {
+                // Cast to target type. ONNX "to" attr is an int enum:
+                //   1=FLOAT, 7=INT64, 10=INT32, 11=BOOL, etc.
+                let to: i64 = node.attrs.get("to")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1); // default FLOAT
+                let target_dtype = match to {
+                    1 | 6 => IrDType::F32,   // FLOAT
+                    7 => IrDType::I64,
+                    10 => IrDType::I32,
+                    11 => IrDType::Bool,
+                    _ => ins[0].dtype(), // fallback: keep input dtype
+                };
+                let gt = self.graph.cast_op(&ins[0], target_dtype);
+                self.out(node, gt);
+            }
+            "Expand" => {
+                // Expand broadcasts data to the shape specified by the second input.
+                let gt = if ins.len() >= 2 {
+                    self.graph.expand_op(&ins[0], &ins[1])
+                } else {
+                    ins[0].clone()
+                };
+                self.out(node, gt);
+            }
+            "Tile" => {
+                // Tile repeats the input along each axis.
+                let gt = if ins.len() >= 2 {
+                    self.graph.tile_op(&ins[0], &ins[1])
+                } else {
+                    ins[0].clone()
+                };
+                self.out(node, gt);
             }
 
             // ── Embedding ───────────────────────────────────────────
@@ -716,7 +817,10 @@ impl<'a> OnnxConverter<'a> {
                 let k: usize = node.attrs.get("k").and_then(|s| s.parse().ok()).unwrap_or(1);
                 let axis: i64 = node.attrs.get("axis").and_then(|s| s.parse().ok()).unwrap_or(-1);
                 let (values, indices) = self.graph.topk(&ins[0], k, axis);
-                if let Some(out_name) = node.outputs.get(0) {
+                if !node.name.is_empty() {
+                    self.graph.set_node_name(values.node_id(), &node.name);
+                }
+                if let Some(out_name) = node.outputs.first() {
                     self.name_to_id.insert(out_name.clone(), values);
                 }
                 if let Some(out_name) = node.outputs.get(1) {
@@ -805,7 +909,7 @@ impl<'a> OnnxConverter<'a> {
                 let bias_c = extract_bias(self, 3*chunk);
 
                 // Get seq_len from X shape
-                let seq_len = x.shape().get(0).and_then(|d| d.evaluate()).unwrap_or(1) as usize;
+                let seq_len = x.shape().first().and_then(|d| d.evaluate()).unwrap_or(1) as usize;
 
                 let mut h_prev = h_prev;
                 let mut c_prev = c_prev;
@@ -852,7 +956,7 @@ impl<'a> OnnxConverter<'a> {
                 let y_refs: Vec<&GraphTensor> = h_outputs.iter().collect();
                 let y = self.graph.concat(&y_refs, 0);
 
-                if let Some(out_name) = node.outputs.get(0) {
+                if let Some(out_name) = node.outputs.first() {
                     self.name_to_id.insert(out_name.clone(), y);
                 }
                 if let Some(out_name) = node.outputs.get(1) {
@@ -933,7 +1037,7 @@ impl<'a> OnnxConverter<'a> {
                 let (bias_h_w, bias_h_r) = extract_gru_bias(self, 2*chunk);
 
                 // Get seq_len from X shape
-                let seq_len = x.shape().get(0).and_then(|d| d.evaluate()).unwrap_or(1) as usize;
+                let seq_len = x.shape().first().and_then(|d| d.evaluate()).unwrap_or(1) as usize;
 
                 let mut h_prev = h_prev;
                 let mut h_outputs: Vec<GraphTensor> = Vec::with_capacity(seq_len);
@@ -977,7 +1081,7 @@ impl<'a> OnnxConverter<'a> {
                 let y_refs: Vec<&GraphTensor> = h_outputs.iter().collect();
                 let y = self.graph.concat(&y_refs, 0);
 
-                if let Some(out_name) = node.outputs.get(0) {
+                if let Some(out_name) = node.outputs.first() {
                     self.name_to_id.insert(out_name.clone(), y);
                 }
                 if let Some(out_name) = node.outputs.get(1) {
@@ -1003,6 +1107,10 @@ impl<'a> OnnxConverter<'a> {
     fn out(&mut self, node: &OnnxNode, output: GraphTensor) {
         for out_name in &node.outputs {
             self.name_to_id.insert(out_name.clone(), output.clone());
+        }
+        // Set the ONNX node name on the IR node for debugging / error messages
+        if !node.name.is_empty() {
+            self.graph.set_node_name(output.node_id, &node.name);
         }
     }
 

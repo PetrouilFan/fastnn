@@ -21,8 +21,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     Some(broadcast_shapes(
                         &inputs[0].output_type.shape,
                         &inputs[1].output_type.shape,
-                    ).map_err(|e| format!("node {} ({:?}) shapes {:?} vs {:?}: {}", 
-                        node_id, node.opcode, 
+                    ).map_err(|e| format!("node {} ({:?} '{}') shapes {:?} vs {:?}: {}", 
+                        node_id, node.opcode, node.name,
                         inputs[0].output_type.shape, 
                         inputs[1].output_type.shape, 
                         e))?)
@@ -56,7 +56,11 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     Some(matmul_output_shape(
                         &inputs[0].output_type.shape,
                         &inputs[1].output_type.shape,
-                    )?)
+                    ).map_err(|e| format!("node {} (MatMul '{}') shapes {:?} vs {:?}: {}",
+                        node_id, node.name,
+                        inputs[0].output_type.shape,
+                        inputs[1].output_type.shape,
+                        e))?)
                 } else {
                     None
                 }
@@ -74,9 +78,25 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             }
             Opcode::Reshape => node.attrs.get("shape").map(|s| parse_shape_attr(s)),
             Opcode::Transpose => inputs.first().map(|i| {
-                let mut s = i.output_type.shape.clone();
-                s.reverse();
-                s
+                if let Some(perm_str) = node.attrs.get("perm") {
+                    // Use explicit permutation if available
+                    let perm: Vec<usize> = perm_str.split(',')
+                        .filter_map(|v| v.trim().parse().ok())
+                        .collect();
+                    if perm.len() == i.output_type.shape.len() {
+                        perm.iter().map(|&p| i.output_type.shape[p].clone()).collect()
+                    } else {
+                        // Fallback: if perm length doesn't match, reverse
+                        let mut s = i.output_type.shape.clone();
+                        s.reverse();
+                        s
+                    }
+                } else {
+                    // No perm attribute: reverse all dims (legacy behavior)
+                    let mut s = i.output_type.shape.clone();
+                    s.reverse();
+                    s
+                }
             }),
             Opcode::Flatten => inputs.first().map(|i| {
                 let shape = &i.output_type.shape;
@@ -95,7 +115,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     shape.clone()
                 }
             }),
-            Opcode::TopKValues | Opcode::TopKIndices | Opcode::TopK => inputs.first().map(|i| {
+            Opcode::TopK => inputs.first().map(|i| {
                 i.output_type.shape.clone()
             }),
             Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => inputs.first().map(|i| {
@@ -135,7 +155,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                 inputs.first().map(|i| i.output_type.shape.clone())
             }
             Opcode::MaxPool | Opcode::AvgPool => {
-                if inputs.len() >= 1 {
+                if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let kernel: i64 = node
                         .attrs
@@ -147,6 +167,31 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                         .get("stride")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(2);
+                    // Parse padding: ONNX pads = [top, left, bottom, right] for 2D.
+                    // If absent, assume 0 (valid padding).
+                    // The builder stores symmetric `padding` as a single int; fall back
+                    // to the ONNX `pads` CSV format when `padding` is absent.
+                    let symmetric_pad: i64 = node.attrs
+                        .get("padding")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let pads: Vec<i64> = if symmetric_pad > 0 {
+                        // Symmetric padding: total pad = 2 * per-side padding
+                        vec![symmetric_pad; 4]
+                    } else {
+                        node.attrs
+                            .get("pads")
+                            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+                            .unwrap_or_default()
+                    };
+                    let pad_h = pads.first().copied().unwrap_or(0)
+                        + pads.get(2).copied().unwrap_or(0);
+                    let pad_w = pads.get(1).copied().unwrap_or(0)
+                        + pads.get(3).copied().unwrap_or(0);
+                    eprintln!(
+                        "[shape_inference] Pool node={} name='{}' kernel={} stride={} pads={:?} pad_h={} pad_w={}",
+                        node_id, node.name, kernel, stride, pads, pad_h, pad_w
+                    );
                     Some(
                         input_shape
                             .iter()
@@ -155,7 +200,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                                 if i >= 2 {
                                     match dim {
                                         DimExpr::Known(w) => {
-                                            DimExpr::Known(((*w as i64 - kernel) / stride + 1) as u64)
+                                            let total_pad = if i == 2 { pad_h } else { pad_w };
+                                            DimExpr::Known(((*w as i64 + total_pad - kernel) / stride + 1).max(1) as u64)
                                         }
                                         other => other.clone(),
                                     }
@@ -170,7 +216,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                 }
             }
             Opcode::Slice => {
-                if inputs.len() >= 1 {
+                if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let mut shape = input_shape.clone();
                     if let Some(dim_str) = node.attrs.get("dim") {
@@ -220,7 +266,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                 shape
             }),
             Opcode::Pad => {
-                if inputs.len() >= 1 {
+                if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let mut shape = input_shape.clone();
                     if let Some(pads_str) = node.attrs.get("pads") {
@@ -240,7 +286,23 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     None
                 }
             }
-            Opcode::Gather | Opcode::ScatterNd => {
+            Opcode::Gather => {
+                // ONNX Gather output shape: data_shape[:axis] + indices_shape + data_shape[axis+1:]
+                if inputs.len() >= 2 {
+                    let axis: usize = node.attrs.get("axis")
+                        .and_then(|a| a.parse().ok())
+                        .unwrap_or(0);
+                    let data_shape = &inputs[0].output_type.shape;
+                    let indices_shape = &inputs[1].output_type.shape;
+                    let mut new_shape: Vec<DimExpr> = data_shape[..axis].to_vec();
+                    new_shape.extend_from_slice(indices_shape);
+                    new_shape.extend_from_slice(&data_shape[axis + 1..]);
+                    Some(new_shape)
+                } else {
+                    inputs.first().map(|i| i.output_type.shape.clone())
+                }
+            }
+            Opcode::ScatterNd => {
                 inputs.first().map(|i| i.output_type.shape.clone())
             }
             Opcode::Conv1d => {
@@ -310,6 +372,66 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             | Opcode::AddScalar
             | Opcode::MulScalar
             | Opcode::DivScalar => inputs.first().map(|i| i.output_type.shape.clone()),
+            Opcode::Shape => {
+                // Shape output: 1D tensor of length = rank(input)
+                inputs.first().map(|i| {
+                    let rank = i.output_type.shape.len();
+                    vec![DimExpr::Known(rank as u64)]
+                })
+            }
+            Opcode::Cast => {
+                // Cast preserves shape, changes dtype (handled by output_type)
+                inputs.first().map(|i| i.output_type.shape.clone())
+            }
+            Opcode::Quantize | Opcode::Dequantize => {
+                // Quantize/Dequantize preserve shape (only dtype changes)
+                inputs.first().map(|i| i.output_type.shape.clone())
+            }
+            Opcode::ToF16 | Opcode::ToF32 => {
+                // Half-precision conversion preserves shape
+                inputs.first().map(|i| i.output_type.shape.clone())
+            }
+            Opcode::QuantizeActivations | Opcode::DequantizeActivations => {
+                // Activation quantization/dequantization preserve shape
+                inputs.first().map(|i| i.output_type.shape.clone())
+            }
+            Opcode::Expand => {
+                // Expand output shape: from the second input (target shape) if available,
+                // or broadcast the first input shape.
+                if inputs.len() >= 2 {
+                    // Try to resolve the second input's values if it's a constant
+                    let target_shape = &inputs[1].output_type.shape;
+                    if target_shape.len() == 1 {
+                        // Shape is a 1D tensor; output rank = value[0], but we
+                        // can only use the known dims if they're Known values.
+                        // For dynamic shapes, fall back to the data shape.
+                        // Since we can't read constant values here without evaluation,
+                        // just use the data shape as fallback.
+                        Some(inputs[0].output_type.shape.clone())
+                    } else {
+                        Some(inputs[0].output_type.shape.clone())
+                    }
+                } else {
+                    inputs.first().map(|i| i.output_type.shape.clone())
+                }
+            }
+            Opcode::Tile => {
+                // Tile output shape: data_shape[i] * repeats[i]
+                // For now, just use data shape (repeats are usually 1 for most dims)
+                inputs.first().map(|i| i.output_type.shape.clone())
+            }
+            Opcode::Range => {
+                // Range(start, limit, step) — always produces a 1D F32 tensor.
+                // The length is dynamic (set by the builder as Symbol("N")).
+                eprintln!("[shape_inference] Range node={} name='{}' inputs={}",
+                    node_id, node.name, inputs.len());
+                for (i, inp) in inputs.iter().enumerate() {
+                    eprintln!("  input[{}]: shape={:?}", i, inp.output_type.shape);
+                }
+                inputs.first().map(|_| {
+                    vec![DimExpr::Symbol("N".to_string())]
+                })
+            }
             Opcode::Constant(_) | Opcode::Input
             | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
             | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
@@ -318,6 +440,12 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
         };
 
         if let Some(shape) = inferred {
+            if shape.is_empty() {
+                eprintln!(
+                    "[shape_inference] node={} op={:?} name='{}' -> RANK-0 (scalar) output",
+                    node_id, node.opcode, node.name
+                );
+            }
             if let Some(node_mut) = graph.get_node_mut(node_id) {
                 node_mut.output_type.shape = shape;
             }

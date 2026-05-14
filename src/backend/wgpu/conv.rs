@@ -39,7 +39,7 @@ pub(super) fn dispatch_conv_gpu(
     with_wgpu_context(|ctx| -> Result<(), BackendError> {
         let shader = build_conv_shader();
         super::pipeline::ensure_compute_pipeline(ctx, "conv2d", &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "conv_input");
         let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "conv_weight");
@@ -143,34 +143,34 @@ fn infer_conv_dims(
     groups: usize,
 ) -> Option<(usize, usize, usize, usize, usize, usize, usize)> {
     for &n in &[1, 2, 4, 8, 16, 32, 64] {
-        if ni % n != 0 || no % n != 0 {
+        if !ni.is_multiple_of(n) || !no.is_multiple_of(n) {
             continue;
         }
         let c_hw = ni / n;
         let f_hout_wout = no / n;
         for cg in 1..=c_hw.min(4096) {
             let c = cg * groups;
-            if c_hw % c != 0 {
+            if !c_hw.is_multiple_of(c) {
                 continue;
             }
             let hw = c_hw / c;
-            if nw % cg != 0 {
+            if !nw.is_multiple_of(cg) {
                 continue;
             }
             let f_kh_kw = nw / cg;
             for f in 1..=f_hout_wout.min(f_kh_kw) {
-                if f_hout_wout % f != 0 || f_kh_kw % f != 0 {
+                if !f_hout_wout.is_multiple_of(f) || !f_kh_kw.is_multiple_of(f) {
                     continue;
                 }
                 let hout_wout = f_hout_wout / f;
                 let kh_kw = f_kh_kw / f;
                 for &kh in &[1, 3, 5, 7, 11] {
-                    if kh > kh_kw || kh_kw % kh != 0 {
+                    if kh > kh_kw || !kh_kw.is_multiple_of(kh) {
                         continue;
                     }
                     let kw = kh_kw / kh;
                     for h in 1..=hw {
-                        if hw % h != 0 {
+                        if !hw.is_multiple_of(h) {
                             continue;
                         }
                         let w = hw / h;

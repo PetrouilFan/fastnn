@@ -9,7 +9,7 @@ pub(super) fn dispatch_softmax_gpu(
     with_wgpu_context(|ctx| -> Result<Vec<f32>, BackendError> {
         let shader = build_softmax_shader();
         super::pipeline::ensure_compute_pipeline(ctx, "softmax", &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_in = ctx.create_buffer(bytemuck::cast_slice(input), "sf_input");
         let output_size = (numel * 4) as u64;
@@ -26,7 +26,7 @@ pub(super) fn dispatch_softmax_gpu(
             numel: u32,
             row_size: u32,
         }
-        let row_size = if numel > 0 { input.len() / numel } else { 1 };
+        let row_size = input.len().checked_div(numel).unwrap_or(1);
         let params = SfParams {
             numel: numel as u32,
             row_size: row_size as u32,
