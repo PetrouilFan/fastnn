@@ -43,11 +43,11 @@ impl DType {
             DType::F16 | DType::BF16 => numel * 2,
             DType::Bool => numel,
             DType::U4 => {
-                let words = (numel + 7) / 8;
+                let words = numel.div_ceil(8);
                 words * 4
             }
             DType::U8 => {
-                let words = (numel + 3) / 4;
+                let words = numel.div_ceil(4);
                 words * 4
             }
         }

@@ -54,7 +54,9 @@ impl Module for MaxPool2d {
 
         if x.requires_grad() {
             // Backward stub — AOT backward with argmax not yet implemented
-            let backward = MaxPool2dBackward::new();
+            let edges = crate::autograd::make_edge(x);
+            let inputs = vec![x.clone()];
+            let backward = MaxPool2dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =
@@ -243,7 +245,9 @@ impl Module for AvgPool2d {
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() {
-            let backward = AvgPool2dBackward::new();
+            let edges = crate::autograd::make_edge(x);
+            let inputs = vec![x.clone()];
+            let backward = AvgPool2dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =

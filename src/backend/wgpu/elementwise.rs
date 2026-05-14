@@ -55,7 +55,7 @@ pub(super) fn dispatch_elementwise_gpu(
     with_wgpu_context(|ctx| -> Result<Vec<f32>, BackendError> {
         let shader_src = build_elementwise_shader();
         super::pipeline::ensure_compute_pipeline(ctx, &format!("element_wise_{}", opcode), &shader_src)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf0 = ctx.create_buffer(bytemuck::cast_slice(input0), "ew_input0");
         let buf1 = ctx.create_buffer(bytemuck::cast_slice(input1), "ew_input1");

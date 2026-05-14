@@ -43,7 +43,7 @@ pub(super) fn dispatch_pool_gpu(
     with_wgpu_context(|ctx| -> Result<(), BackendError> {
         let shader = build_pool_shader();
         super::pipeline::ensure_compute_pipeline(ctx, "pool", &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "pool_input");
 
@@ -138,19 +138,19 @@ fn infer_pool_dims(
     padding: usize,
 ) -> Option<(usize, usize, usize, usize)> {
     for &n in &[1, 2, 4, 8, 16, 32] {
-        if input_len % n != 0 || output_len % n != 0 {
+        if !input_len.is_multiple_of(n) || !output_len.is_multiple_of(n) {
             continue;
         }
         let nc_hw = input_len / n;
         let nc_hout_wout = output_len / n;
         for &c in &[1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
-            if nc_hw % c != 0 || nc_hout_wout % c != 0 {
+            if !nc_hw.is_multiple_of(c) || !nc_hout_wout.is_multiple_of(c) {
                 continue;
             }
             let hw = nc_hw / c;
             let hout_wout = nc_hout_wout / c;
             for h in 1..=hw {
-                if hw % h != 0 {
+                if !hw.is_multiple_of(h) {
                     continue;
                 }
                 let w = hw / h;

@@ -37,7 +37,7 @@ pub(super) fn dispatch_embed_gpu(
     with_wgpu_context(|ctx| -> Result<(), BackendError> {
         let shader = build_embed_shader();
         super::pipeline::ensure_compute_pipeline(ctx, "embed", &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_indices = ctx.create_buffer(&indices_raw, "embed_indices");
         let buf_weight = ctx.create_buffer(&weight_raw, "embed_weight");

@@ -50,7 +50,9 @@ impl Module for Dropout {
             let mut out = x.mul(&mask);
 
             if x.requires_grad() {
-                let backward = crate::autograd::DropoutBackward::new();
+                let edges = crate::autograd::make_edge(x);
+                let inputs = vec![x.clone()];
+                let backward = crate::autograd::DropoutBackward::new(edges, inputs);
                 let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
                 meta.grad_fn = Some(std::sync::Arc::new(backward));
                 std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
@@ -116,7 +118,9 @@ impl Module for Dropout2d {
             let mut out = x.mul(&channel_mask);
 
             if x.requires_grad() {
-                let backward = crate::autograd::Dropout2dBackward::new();
+                let edges = crate::autograd::make_edge(x);
+                let inputs = vec![x.clone()];
+                let backward = crate::autograd::Dropout2dBackward::new(edges, inputs);
                 let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
                 meta.grad_fn = Some(std::sync::Arc::new(backward));
                 std::sync::Arc::make_mut(&mut out.inner).autograd_meta =

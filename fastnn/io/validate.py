@@ -82,7 +82,7 @@ def validate_against_onnx(
     """Compare FastNN model output against ONNX Runtime.
 
     Args:
-        fnn_model: A FastNN model (DAGExecutor or callable).
+        fnn_model: A FastNN model (AotExecutor or callable).
         onnx_path: Path to the .onnx file.
         input_data: Input data as numpy array.
         output_names: Optional list of output tensor names to compare.

@@ -9,10 +9,10 @@ pub(super) fn dispatch_reduce_gpu(
     with_wgpu_context(|ctx| -> Result<Vec<f32>, BackendError> {
         let shader = build_reduce_shader();
         super::pipeline::ensure_compute_pipeline(ctx, "reduce", &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_in = ctx.create_buffer(bytemuck::cast_slice(input), "rd_input");
-        let num_groups = if group_size > 0 { input.len() / group_size } else { 1 };
+        let num_groups = input.len().checked_div(group_size).unwrap_or(1);
         let output_size = (num_groups * 4) as u64;
         let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rd_output"),

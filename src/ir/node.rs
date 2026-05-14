@@ -81,12 +81,32 @@ pub enum Opcode {
     Flip,
     /// Element-wise where(condition, x, y) — selects from x or y based on condition
     Where,
-    /// Top-K values: returns the top-k values from the input along the given axis.
-    TopKValues,
-    /// Top-K indices: returns the indices of the top-k values along the given axis.
-    TopKIndices,
     /// Fused Top-K: produces both values and indices in one kernel.
     TopK,
+    // ── v2.1 shape + metadata ops ────────────────────────────────────
+    /// Returns the shape of the input tensor as a 1D I64 tensor.
+    Shape,
+    /// Casts the input tensor to a target dtype (specified via `"to"` attr).
+    Cast,
+    // ── v2.1 type conversion ops (quantization + precision) ──────────
+    /// Quantize F32 → U4/U8 with per-channel scales/zero_points (attribute `"bit_width"`).
+    Quantize,
+    /// Dequantize U4/U8 → F32 using scales/zero_points from input dtype.
+    Dequantize,
+    /// Convert F32 → F16 (half-precision).
+    ToF16,
+    /// Convert F16 → F32 (half-precision).
+    ToF32,
+    /// Quantize activations F32 → INT8 (per-tensor symmetric, attribute `"scale"`).
+    QuantizeActivations,
+    /// Dequantize activations INT8 → F32 (per-tensor symmetric).
+    DequantizeActivations,
+    /// Broadcasts the input tensor to a target shape (second input).
+    Expand,
+    /// Repeats the input tensor along each axis (repeats from second input).
+    Tile,
+    /// Range(start, limit, step) — produces a 1D F32 tensor [start, start+step, ..., limit).
+    Range,
     // ── v2.1 optimizer opcodes (CPU training via IR) ──────────────────
     /// SGD weight update: weight -= lr * (grad + weight_decay * weight)
     SgdUpdate,
@@ -480,6 +500,8 @@ pub enum IrDType {
     I32,
     I64,
     Bool,
+    /// Signed 8-bit integer (used for INT8 activation quantization).
+    I8,
     /// Packed 4-bit (U4x8): 8 values per u32 word.
     /// `scales` and `zero_points` are per-output-channel vectors.
     U4 { scales: Vec<f32>, zero_points: Vec<f32> },
@@ -501,6 +523,7 @@ impl IrDType {
             IrDType::I32 => 4,
             IrDType::I64 => 8,
             IrDType::Bool => 1,
+            IrDType::I8 => 1,
             // Conservative logical overestimate (packed data fits in 1 byte/elem).
             IrDType::U4 { .. } => 1,
             IrDType::U8 { .. } => 1,
@@ -518,16 +541,17 @@ impl IrDType {
             IrDType::I32 => numel * 4,
             IrDType::I64 => numel * 8,
             IrDType::Bool => numel,
+            IrDType::I8 => numel,
             // U4x8: 8 nibbles per u32 word (4 bytes)
             // packed_len = ceil(numel / 8) words + SIMD_MARGIN(16)
             IrDType::U4 { .. } => {
-                let words = (numel + 7) / 8 + 16; // +16 SIMD_MARGIN
+                let words = numel.div_ceil(8) + 16; // +16 SIMD_MARGIN
                 words * 4
             }
             // U8x4: 4 values per u32 word (4 bytes)
             // packed_len = ceil(numel / 4) words + SIMD_MARGIN(16)
             IrDType::U8 { .. } => {
-                let words = (numel + 3) / 4 + 16; // +16 SIMD_MARGIN
+                let words = numel.div_ceil(4) + 16; // +16 SIMD_MARGIN
                 words * 4
             }
         }
@@ -541,6 +565,7 @@ impl IrDType {
             IrDType::I32 => "i32",
             IrDType::I64 => "i64",
             IrDType::Bool => "bool",
+            IrDType::I8 => "i8",
             IrDType::U4 { .. } => "u4",
             IrDType::U8 { .. } => "u8",
         }
@@ -553,6 +578,7 @@ impl IrDType {
             IrDType::BF16 => 16,
             IrDType::I32 => 32,
             IrDType::I64 => 64,
+            IrDType::I8 => 8,
             IrDType::Bool => 1,
             IrDType::U4 { .. } => 4,
             IrDType::U8 { .. } => 8,
@@ -566,6 +592,7 @@ impl IrDType {
             IrDType::BF16 => 2,
             IrDType::I32 => 1,
             IrDType::I64 => 1,
+            IrDType::I8 => 4,
             IrDType::Bool => 32,
             IrDType::U4 { .. } => 8,
             IrDType::U8 { .. } => 4,
@@ -678,6 +705,7 @@ pub struct ComputeGraph {
 }
 
 impl ComputeGraph {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         ComputeGraph {
             nodes: Vec::new(),

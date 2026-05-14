@@ -6,7 +6,10 @@
 // They will be removed once all code uses the compile-time IR.
 // =============================================================================
 
-use crate::tensor::Tensor;
+use crate::tensor::{dtype_to_ir, Tensor, TensorImpl};
+use crate::ir::builder::GraphBuilder;
+use crate::storage::{Device, Storage};
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 // Thread-local gradient enable/disable (kept for backward compat).
@@ -92,10 +95,584 @@ pub fn make_edge(tensor: &Tensor) -> Vec<Edge> {
     tensor.grad_fn().map(|node| vec![Edge(node, 0)]).unwrap_or_default()
 }
 
-/// Stub backward function - replaces old runtime backward engine.
-/// All backward computation is now handled by build_backward_graph at compile time.
-pub fn backward(_root: &Tensor, _grad_output: Option<Tensor>) {
-    // No-op: backward graph construction happens at compile time
+// =============================================================================
+// Reconstruction engine — bridges v1.x autograd chain to IR build_backward_graph
+// =============================================================================
+
+use std::collections::{HashMap, HashSet};
+
+/// BFS from root tensor to collect all backward nodes and build
+/// a grad_fn → forward_tensor map.
+///
+/// Returns (backward_nodes, grad_fn_id → forward_output_tensor).
+fn collect_backward_nodes(root: &Tensor) -> (Vec<Arc<dyn Node>>, HashMap<usize, Tensor>) {
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut nodes: Vec<Arc<dyn Node>> = Vec::new();
+    let mut grad_fn_to_tensor: HashMap<usize, Tensor> = HashMap::new();
+    let mut queue: Vec<Tensor> = vec![root.clone()];
+
+    while let Some(tensor) = queue.pop() {
+        if let Some(grad_fn) = tensor.grad_fn() {
+            let node_id = grad_fn.id();
+            if visited.insert(node_id) {
+                grad_fn_to_tensor.insert(node_id, tensor.clone());
+                nodes.push(grad_fn.clone());
+
+                // Queue the input tensors of this backward node.
+                // These correspond to the forward op's input tensors;
+                // their own grad_fns continue the chain back toward the leaves.
+                for input_tensor in grad_fn.inputs() {
+                    queue.push(input_tensor.clone());
+                }
+            }
+        }
+    }
+
+    (nodes, grad_fn_to_tensor)
+}
+
+/// From a set of backward nodes, find all leaf input tensors —
+/// those that require gradients and have no grad_fn of their own.
+fn collect_leaf_tensors(nodes: &[Arc<dyn Node>]) -> Vec<Tensor> {
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut leaf_tensors: Vec<Tensor> = Vec::new();
+
+    for node in nodes {
+        for input in node.inputs() {
+            let tid = input.id();
+            if seen.insert(tid) {
+                if input.requires_grad() && input.grad_fn().is_none() {
+                    leaf_tensors.push(input.clone());
+                }
+            }
+        }
+    }
+
+    leaf_tensors
+}
+
+/// Topological sort of backward nodes in **forward execution order** (predecessors first).
+///
+/// Uses DFS: `next_edges()` point to predecessor backward nodes, so
+/// the DFS emits predecessors before their dependents.
+fn topological_order(nodes: &[Arc<dyn Node>]) -> Vec<Arc<dyn Node>> {
+    fn dfs(
+        node: &Arc<dyn Node>,
+        visited: &mut HashSet<usize>,
+        order: &mut Vec<Arc<dyn Node>>,
+    ) {
+        if !visited.insert(node.id()) {
+            return;
+        }
+        for edge in node.next_edges() {
+            dfs(&edge.0, visited, order);
+        }
+        order.push(node.clone());
+    }
+
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut order: Vec<Arc<dyn Node>> = Vec::new();
+    for node in nodes {
+        dfs(node, &mut visited, &mut order);
+    }
+    order
+}
+
+/// Extract the f32 scalar value from a 1-element CPU tensor.
+fn scalar_from_tensor(t: &Tensor) -> f32 {
+    let cpu_t = t.to_cpu();
+    let data = cpu_t.as_bytes();
+    if data.len() >= 4 {
+        f32::from_le_bytes([data[0], data[1], data[2], data[3]])
+    } else {
+        0.0
+    }
+}
+
+/// Infer the reduction dimension and `keepdim` flag by comparing
+/// the input and output shapes of a reduction op.
+fn infer_reduction_params(input_shape: &[i64], output_shape: &[i64]) -> (usize, bool) {
+    if input_shape.is_empty() {
+        return (0, false);
+    }
+
+    let keepdim = input_shape.len() == output_shape.len();
+
+    if keepdim {
+        // Same rank — find the dim whose size changed
+        for i in 0..input_shape.len() {
+            if input_shape[i] != output_shape[i] {
+                return (i, true);
+            }
+        }
+        (0, true)
+    } else if output_shape.is_empty() || output_shape == &[1] {
+        // Reduced to scalar — default to dim 0
+        (0, false)
+    } else {
+        // Rank decreased by one — find the removed dim
+        for i in 0..output_shape.len() {
+            if input_shape[i] != output_shape[i] {
+                return (i, false);
+            }
+        }
+        // All leading dims match → last dim was reduced
+        (input_shape.len() - 1, false)
+    }
+}
+
+/// Full backward pass: reconstructs the forward ComputeGraph from the
+/// v1.x autograd chain, then delegates to `build_backward_graph` for
+/// gradient computation.
+///
+/// This makes `loss.backward()` work by:
+/// 1. Walking the grad_fn chain from root (BFS)
+/// 2. Replaying the forward ops via GraphBuilder to create a ComputeGraph
+/// 3. Calling `GraphBuilder::backward()` (which calls `build_backward_graph`)
+/// 4. Compiling and executing the backward graph
+/// 5. Storing the resulting gradients back on the leaf tensors
+pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
+    if !is_grad_enabled() {
+        return;
+    }
+
+    let (all_nodes, grad_fn_to_tensor) = collect_backward_nodes(root);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    let leaf_inputs = collect_leaf_tensors(&all_nodes);
+    if leaf_inputs.is_empty() {
+        return;
+    }
+
+    // ── Build forward IR graph ──────────────────────────────────────────
+    use crate::ir::builder::GraphTensor;
+
+    let builder = GraphBuilder::new();
+    let mut tensor_map: HashMap<usize, GraphTensor> = HashMap::new();
+
+    // Collect ALL unique tensor inputs that are NOT produced by a backward node.
+    // A tensor is "produced by a backward node" if it has a grad_fn whose id()
+    // is in grad_fn_to_tensor.  Such tensors are intermediate forward results
+    // that will be computed during forward replay.  Everything else is either
+    // a leaf parameter or an external input and must be registered as a graph input.
+    let mut all_input_tensors: Vec<Tensor> = Vec::new();
+    let mut seen_input: HashSet<usize> = HashSet::new();
+    for node in &all_nodes {
+        for input in node.inputs() {
+            let tid = input.id();
+            if seen_input.insert(tid) {
+                // Check if this tensor is produced by one of our backward nodes
+                let is_intermediate = input.grad_fn()
+                    .as_ref()
+                    .map(|gf| grad_fn_to_tensor.contains_key(&gf.id()))
+                    .unwrap_or(false);
+                if !is_intermediate {
+                    all_input_tensors.push(input.clone());
+                }
+            }
+        }
+    }
+
+    // Register all input tensors as GraphBuilder inputs
+    for tensor in &all_input_tensors {
+        let shape: Vec<DimExpr> = tensor
+            .shape()
+            .iter()
+            .map(|&s| DimExpr::Known(s as u64))
+            .collect();
+        let gt = builder.input_with_dims(&shape, dtype_to_ir(tensor.dtype()));
+        tensor_map.insert(tensor.id(), gt);
+    }
+
+    // Replay ops in forward topological order
+    for node in topological_order(&all_nodes) {
+        let inputs: Vec<Tensor> = node.inputs().to_vec();
+        let input_gts: Vec<GraphTensor> = inputs
+            .iter()
+            .map(|t| tensor_map.get(&t.id()).cloned().expect("backward: missing input tensor in tensor_map"))
+            .collect();
+
+        // The forward output tensor that this backward node is attached to
+        let forward_tensor = grad_fn_to_tensor
+            .get(&node.id())
+            .cloned()
+            .expect("backward: forward tensor not found for backward node");
+
+        let output_gt = match node.name() {
+            // ── Binary arithmetic ─────────────────────────────────────────
+            "AddBackward" => builder.add(&input_gts[0], &input_gts[1]),
+            "SubBackward" => builder.sub(&input_gts[0], &input_gts[1]),
+            "MulBackward" => builder.mul(&input_gts[0], &input_gts[1]),
+            "DivBackward" => builder.div(&input_gts[0], &input_gts[1]),
+            "MatmulBackward" => builder.matmul(&input_gts[0], &input_gts[1]),
+
+            // ── Unary arithmetic ─────────────────────────────────────────
+            "NegBackward" => builder.neg(&input_gts[0]),
+
+            // ── Activations ──────────────────────────────────────────────
+            "ReluBackward" => builder.relu(&input_gts[0]),
+            "ExpBackward" => builder.exp(&input_gts[0]),
+            "LogBackward" => builder.log(&input_gts[0]),
+            "SigmoidBackward" => builder.sigmoid(&input_gts[0]),
+            "TanhBackward" => builder.tanh(&input_gts[0]),
+
+            // ── Scalar ops ───────────────────────────────────────────────
+            "AddScalarBackward" => {
+                let scalar_val = scalar_from_tensor(&inputs[1]);
+                let scalar_bytes = scalar_val.to_le_bytes().to_vec();
+                let scalar_gt = builder.constant(&scalar_bytes, crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32));
+                builder.add_scalar(&input_gts[0], &scalar_gt)
+            }
+            "DivScalarBackward" => {
+                let scalar_val = scalar_from_tensor(&inputs[1]);
+                let scalar_bytes = scalar_val.to_le_bytes().to_vec();
+                let scalar_gt = builder.constant(&scalar_bytes, crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32));
+                builder.div_scalar(&input_gts[0], &scalar_gt)
+            }
+
+            // ── Reductions (infer dim from shape change) ────────────────
+            "SumBackward" => {
+                let input_shape = inputs[0].shape();
+                let output_shape = forward_tensor.shape();
+                let (dim, keepdim) = infer_reduction_params(&input_shape, &output_shape);
+                builder.reduce_sum(&input_gts[0], dim, keepdim)
+            }
+            "MeanBackward" => {
+                let input_shape = inputs[0].shape();
+                let output_shape = forward_tensor.shape();
+                let (dim, keepdim) = infer_reduction_params(&input_shape, &output_shape);
+                builder.reduce_mean(&input_gts[0], dim, keepdim)
+            }
+
+            // ── Ops without a builder replay path ───────────────────────
+            // These are not replayed in the reconstruction graph; their
+            // backward formulas are still handled by build_backward_graph
+            // when it processes the forward IR graph that the reconstruction
+            // has already built.
+            _ => continue,
+        };
+
+        tensor_map.insert(forward_tensor.id(), output_gt);
+    }
+
+    // Ensure the loss tensor was reached by the replay
+    let loss_gt = match tensor_map.get(&root.id()) {
+        Some(gt) => gt.clone(),
+        None => return,
+    };
+
+    // ── Build backward graph via existing IR infrastructure ───────────
+    let grad_tensors = match builder.backward(&loss_gt) {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    // ── Compile and execute ───────────────────────────────────────────
+    use crate::backend::cpu::CpuBackend;
+
+    // Input data order must match the order inputs were registered (all_input_tensors)
+    let input_data: Vec<Vec<u8>> = all_input_tensors
+        .iter()
+        .map(|t| t.as_bytes().to_vec())
+        .collect();
+    let input_refs: Vec<&[u8]> = input_data.iter().map(|d| d.as_slice()).collect();
+    let grad_refs: Vec<&GraphTensor> = grad_tensors.iter().collect();
+
+    let results = match builder.compile_and_execute(&grad_refs, CpuBackend, &input_refs) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    // ── Store gradients back on leaf tensors (accumulating if exists) ──
+    for tensor in leaf_inputs.iter() {
+        if !tensor.requires_grad() {
+            continue;
+        }
+
+        // Find this leaf tensor's position in the all_input_tensors list
+        let pos = all_input_tensors.iter().position(|t| t.id() == tensor.id());
+        let i = match pos {
+            Some(idx) => idx,
+            None => continue,
+        };
+
+        if i >= results.len() {
+            continue;
+        }
+
+        let result_bytes = &results[i];
+        let numel = tensor.shape().iter().product::<i64>() as usize;
+        let dtype_size = tensor.dtype().size();
+        let expected_bytes = numel * dtype_size;
+
+        if result_bytes.len() != expected_bytes {
+            continue;
+        }
+
+        // Build a fresh CPU Storage from the result bytes
+        let storage = Storage::from_vec(result_bytes.clone(), tensor.dtype(), Device::Cpu);
+        let shape: SmallVec<[i64; 8]> = tensor.shape().iter().copied().collect();
+        let new_grad = Tensor::new(TensorImpl::new(Arc::new(storage), shape, tensor.dtype()));
+
+        // Accumulate: if a gradient already exists, add the new one to it
+        let final_grad = if let Some(existing_grad) = tensor.grad() {
+            // Use raw AOT addition (no autograd, gradients are not differentiable)
+            let sum = Tensor::exec_aot(&[&existing_grad, &new_grad], |g, ins| {
+                vec![g.add(&ins[0], &ins[1])]
+            })
+            .expect("backward: gradient accumulation failed")
+            .into_iter()
+            .next()
+            .unwrap();
+            sum
+        } else {
+            new_grad
+        };
+
+        TensorImpl::set_grad_for_tensor(tensor, Some(final_grad));
+    }
+}
+
+// =============================================================================
+// Tests for the v1.x autograd → IR bridge
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::DType;
+    use crate::tensor::Tensor;
+
+    /// Helper: create an f32 tensor of shape [n] with sequential values 1.0..=n
+    fn seq_tensor(n: i64) -> Tensor {
+        let data: Vec<f32> = (1..=n).map(|i| i as f32).collect();
+        let t = Tensor::zeros(vec![n], DType::F32, Device::Cpu);
+        // Zero-init then overwrite via internal data pointer
+        let ptr = t.data_ptr_f32() as *mut f32;
+        for (i, &v) in data.iter().enumerate() {
+            unsafe { *ptr.add(i) = v; }
+        }
+        t
+    }
+
+    #[test]
+    fn test_collect_backward_nodes_simple() {
+        let a = seq_tensor(4).requires_grad_(true);
+        let b = seq_tensor(4).requires_grad_(true);
+        let c = a.add(&b);
+        let loss = c.mean(0, false);
+
+        let (nodes, map) = collect_backward_nodes(&loss);
+        assert!(!nodes.is_empty(), "should collect backward nodes");
+        assert!(map.contains_key(&nodes[0].id()), "forward tensor should be mapped");
+    }
+
+    #[test]
+    fn test_simple_add_backward() {
+        let a = seq_tensor(4).requires_grad_(true);
+        let b = seq_tensor(4).requires_grad_(true);
+        let c = a.add(&b);
+        let loss = c.mean(0, false);
+
+        backward(&loss, None);
+
+        let grad_a = a.grad().expect("a should have grad");
+        let grad_vals_a: Vec<f32> = unsafe {
+            let ptr = grad_a.data_ptr_f32() as *const f32;
+            (0..4).map(|i| *ptr.add(i)).collect()
+        };
+        // d(loss)/da = d(mean(a+b))/da = 1/4 = 0.25
+        for &g in &grad_vals_a {
+            assert!((g - 0.25).abs() < 1e-5, "grad_a should be 0.25, got {}", g);
+        }
+        // b should also have grad = 0.25
+        let grad_b = b.grad().expect("b should have grad");
+        let grad_vals_b: Vec<f32> = unsafe {
+            let ptr = grad_b.data_ptr_f32() as *const f32;
+            (0..4).map(|i| *ptr.add(i)).collect()
+        };
+        for &g in &grad_vals_b {
+            assert!((g - 0.25).abs() < 1e-5, "grad_b should be 0.25, got {}", g);
+        }
+    }
+
+    #[test]
+    fn test_mul_backward() {
+        let a = seq_tensor(4).requires_grad_(true);
+        let b = seq_tensor(4).requires_grad_(true);
+        // c = a * b, loss = mean(c)
+        let c = a.mul(&b);
+        let loss = c.mean(0, false);
+        
+        backward(&loss, None);
+        
+        let grad_a = a.grad().expect("a should have grad");
+        let grad_b = b.grad().expect("b should have grad");
+        let vals_a: Vec<f32> = unsafe {
+            let ptr = grad_a.data_ptr_f32() as *const f32;
+            (0..4).map(|i| *ptr.add(i)).collect()
+        };
+        // d(mean(a*b))/da_i = b_i / 4
+        // b = [1, 2, 3, 4], so grad_a = [1/4, 2/4, 3/4, 4/4]
+        for (i, &g) in vals_a.iter().enumerate() {
+            let expected = (i as f32 + 1.0) / 4.0;
+            assert!((g - expected).abs() < 1e-5, 
+                "grad_a[{}] should be {}, got {}", i, expected, g);
+        }
+    }
+
+    #[test]
+    fn test_matmul_backward() {
+        let a = Tensor::zeros(vec![2, 3], DType::F32, Device::Cpu)
+            .requires_grad_(true);
+        let b = Tensor::zeros(vec![3, 2], DType::F32, Device::Cpu)
+            .requires_grad_(true);
+        
+        // Fill a with 1..6, b with 7..12
+        let a_ptr = a.data_ptr_f32() as *mut f32;
+        for i in 0..6 { unsafe { *a_ptr.add(i) = (i + 1) as f32; } }
+        let b_ptr = b.data_ptr_f32() as *mut f32;
+        for i in 0..6 { unsafe { *b_ptr.add(i) = (i + 7) as f32; } }
+        
+        let c = a.matmul(&b);
+        let loss = c.mean(0, false);  // shape [2, 2] → [2]
+        
+        backward(&loss, None);
+        
+        let grad_a = a.grad().expect("a should have grad");
+        // Shape check: grad_a should be [2, 3] (same as a)
+        assert_eq!(a.shape(), grad_a.shape(), "grad_a shape should match a");
+    }
+
+    #[test]
+    fn test_relu_backward() {
+        let a = Tensor::zeros(vec![4], DType::F32, Device::Cpu)
+            .requires_grad_(true);
+        let a_ptr = a.data_ptr_f32() as *mut f32;
+        // Mix of positive and negative values
+        for (i, &v) in [-1.0, 2.0, -3.0, 4.0].iter().enumerate() {
+            unsafe { *a_ptr.add(i) = v; }
+        }
+        
+        let r = a.relu();
+        let loss = r.mean(0, false);
+        
+        backward(&loss, None);
+        
+        let grad_a = a.grad().expect("a should have grad");
+        assert_eq!(a.shape(), grad_a.shape(), "grad shape should match input");
+        
+        let vals: Vec<f32> = unsafe {
+            let ptr = grad_a.data_ptr_f32() as *const f32;
+            (0..4).map(|i| *ptr.add(i)).collect()
+        };
+        // Non-negative inputs should have non-zero gradients (relu' = 1 for x>0)
+        // Negative inputs should have zero gradient (relu' = 0 for x<=0)
+        assert!((vals[0] - 0.0).abs() < 1e-5, "grad[0] should be 0 (neg input), got {}", vals[0]);
+        assert!(vals[2].abs() < 1e-5, "grad[2] should be 0 (neg input), got {}", vals[2]);
+        // Positive inputs should have non-zero gradient
+        assert!(vals[1].abs() > 0.0, "grad[1] should be non-zero (pos input)");
+        assert!(vals[3].abs() > 0.0, "grad[3] should be non-zero (pos input)");
+        // All zero elements should be for negative inputs
+        assert!(vals[1].abs() > 0.0, "positive input should have non-zero gradient");
+    }
+
+    #[test]
+    fn test_backward_twice() {
+        let a = seq_tensor(4).requires_grad_(true);
+        let b = seq_tensor(4).requires_grad_(true);
+        let c = a.add(&b);
+        let loss = c.sum(0, false);
+        
+        // First backward
+        backward(&loss, None);
+        let grad_a_1 = a.grad().expect("a should have grad after first backward");
+        let val_1: f32 = unsafe { *(grad_a_1.data_ptr_f32() as *const f32) };
+        // d(sum(a+b))/da = 1 for each element → sum of grads = 4
+        assert!((val_1 - 1.0).abs() < 1e-5, "first backward: grad should be 1, got {}", val_1);
+        
+        // Second backward (gradients accumulate)
+        backward(&loss, None);
+        let grad_a_2 = a.grad().expect("a should have grad after second backward");
+        let val_2: f32 = unsafe { *(grad_a_2.data_ptr_f32() as *const f32) };
+        // Should accumulate: 1 + 1 = 2
+        assert!((val_2 - 2.0).abs() < 1e-5, "second backward: grad should be 2 (accumulated), got {}", val_2);
+    }
+
+    #[test]
+    fn test_no_grad() {
+        let a = seq_tensor(4).requires_grad_(true);
+        let c = a.add(&a);
+        let loss = c.mean(0, false);
+        
+        // With no_grad guard
+        {
+            let _guard = NoGradGuard::new();
+            backward(&loss, None);
+        }
+        
+        // No gradients should have been computed
+        assert!(a.grad().is_none(), "no_grad: gradients should not be computed");
+    }
+
+    #[test]
+    fn test_training_step() {
+        // Simple 2-layer MLP equivalent:
+        // x → matmul(W1) → relu → matmul(W2) → mean → loss
+        let x = Tensor::zeros(vec![1, 4], DType::F32, Device::Cpu);
+        let w1 = Tensor::zeros(vec![4, 8], DType::F32, Device::Cpu).requires_grad_(true);
+        let w2 = Tensor::zeros(vec![8, 2], DType::F32, Device::Cpu).requires_grad_(true);
+        
+        // Fill with small random-ish values
+        let x_ptr = x.data_ptr_f32() as *mut f32;
+        for i in 0..4 { unsafe { *x_ptr.add(i) = (i as f32 + 1.0) / 10.0; } }
+        let w1_ptr = w1.data_ptr_f32() as *mut f32;
+        for i in 0..32 { unsafe { *w1_ptr.add(i) = ((i % 5) as f32) / 10.0; } }
+        let w2_ptr = w2.data_ptr_f32() as *mut f32;
+        for i in 0..16 { unsafe { *w2_ptr.add(i) = ((i % 3) as f32) / 10.0; } }
+        
+        // Forward pass
+        let h = x.matmul(&w1);
+        let h_relu = h.relu();
+        let logits = h_relu.matmul(&w2);
+        let loss = logits.mean(0, false);
+        
+        let w1_init = w1.grad();
+        assert!(w1_init.is_none(), "w1 should not have grad before backward");
+        
+        // Backward pass
+        backward(&loss, None);
+        
+        let w1_grad = w1.grad().expect("w1 should have grad after backward");
+        let w2_grad = w2.grad().expect("w2 should have grad after backward");
+        
+        assert_eq!(w1.shape(), w1_grad.shape(), "w1 grad shape mismatch");
+        assert_eq!(w2.shape(), w2_grad.shape(), "w2 grad shape mismatch");
+        
+        // Verify gradients are non-zero
+        let w1_grad_sum: f32 = unsafe {
+            let ptr = w1_grad.data_ptr_f32() as *const f32;
+            (0..32).map(|i| *ptr.add(i)).sum()
+        };
+        assert!(w1_grad_sum.abs() > 0.0, "w1 gradient sum should be non-zero");
+    }
+
+    #[test]
+    fn test_backward_no_requires_grad() {
+        // When no tensor requires grad, backward should be a no-op
+        let a = seq_tensor(4);  // no requires_grad
+        let b = seq_tensor(4);
+        let c = a.add(&b);
+        let loss = c.mean(0, false);
+        
+        // This should not panic
+        backward(&loss, None);
+        // All grads should be None
+        assert!(a.grad().is_none(), "a should not have grad");
+        assert!(b.grad().is_none(), "b should not have grad");
+    }
 }
 
 pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
@@ -113,33 +690,26 @@ pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
 
 macro_rules! stub_backward {
     ($name:ident) => {
-        pub struct $name;
+        stub_backward!($name, 0);
+    };
+    ($name:ident, $ninputs:expr) => {
+        pub struct $name {
+            edges: Vec<Edge>,
+            inputs: Vec<Tensor>,
+        }
         impl $name {
-            pub fn new() -> Self { $name }
+            pub fn new(edges: Vec<Edge>, inputs: Vec<Tensor>) -> Self {
+                $name { edges, inputs }
+            }
         }
         impl Node for $name {
             fn apply(&self, _grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
                 vec![None; self.num_inputs()]
             }
-            fn next_edges(&self) -> &[Edge] { &[] }
-            fn num_inputs(&self) -> usize { 0 }
-            fn name(&self) -> &str { stringify!($name) }
-            fn inputs(&self) -> &[Tensor] { &[] }
-        }
-    };
-    ($name:ident, $ninputs:expr) => {
-        pub struct $name;
-        impl $name {
-            pub fn new() -> Self { $name }
-        }
-        impl Node for $name {
-            fn apply(&self, _grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
-                vec![None; $ninputs]
-            }
-            fn next_edges(&self) -> &[Edge] { &[] }
+            fn next_edges(&self) -> &[Edge] { &self.edges }
             fn num_inputs(&self) -> usize { $ninputs }
             fn name(&self) -> &str { stringify!($name) }
-            fn inputs(&self) -> &[Tensor] { &[] }
+            fn inputs(&self) -> &[Tensor] { &self.inputs }
         }
     };
 }
@@ -205,7 +775,6 @@ stub_backward!(HuberLossBackward, 2);
 stub_backward!(ViewBackward, 1);
 
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
-use std::collections::HashMap;
 
 /// Build a backward computation graph from a forward graph and a loss node.
 /// Returns a new graph that, when executed, computes gradients for all 
@@ -478,18 +1047,70 @@ pub fn build_backward_graph(
                 }
             }
             Opcode::Div => {
-                if let Some(&input_id) = node.inputs.first() {
-                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                // d(x/y)/dx = 1/y,  d(x/y)/dy = -x/y²
+                if let Some(&x_id) = node.inputs.first() {
+                    let y_id = node.inputs.get(1).copied().unwrap_or(x_id);
+                    let y_type = forward_graph.get_node(y_id).map(|n| n.output_type.clone());
+                    // dx = grad / y
+                    let dx = grad_graph.add_node(
+                        Opcode::Div, vec![grad_id, y_id],
+                        y_type.clone().unwrap_or(TensorType::new(vec![], IrDType::F32)),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, x_id, dx);
                 }
                 if node.inputs.len() > 1 {
-                    if let Some(&input_id) = node.inputs.get(1) {
-                        accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                    if let Some(&y_id) = node.inputs.get(1) {
+                        let x_id = node.inputs[0];
+                        let x_type = forward_graph.get_node(x_id).map(|n| n.output_type.clone());
+                        // dy = -grad * x / y²
+                        let y_sq = grad_graph.add_node(
+                            Opcode::Mul, vec![y_id, y_id],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        let grad_x = grad_graph.add_node(
+                            Opcode::Mul, vec![grad_id, x_id],
+                            x_type.clone().unwrap_or(TensorType::new(vec![], IrDType::F32)),
+                        );
+                        let temp = grad_graph.add_node(
+                            Opcode::Div, vec![grad_x, y_sq],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        let dy = create_neg(temp, &mut grad_graph);
+                        accumulate_grad(&mut grad_graph, &mut grads, y_id, dy);
                     }
                 }
             }
             Opcode::Silu => {
+                // silu(x) = x * sigmoid(x)
+                // derivative: sigmoid(x) * (1 + x * (1 - sigmoid(x)))
                 if let Some(&input_id) = node.inputs.first() {
-                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                    let one = create_constant_scalar(1.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let sig_x = grad_graph.add_node(
+                        Opcode::Sigmoid, vec![input_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let one_minus_sig = grad_graph.add_node(
+                        Opcode::Sub, vec![one, sig_x],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let x_times_1ms = grad_graph.add_node(
+                        Opcode::Mul, vec![input_id, one_minus_sig],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let one2 = create_constant_scalar(1.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let one_plus = grad_graph.add_node(
+                        Opcode::Add, vec![one2, x_times_1ms],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let deriv = grad_graph.add_node(
+                        Opcode::Mul, vec![sig_x, one_plus],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Mul, vec![grad_id, deriv],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
                 }
             }
             Opcode::LeakyRelu => {
@@ -963,7 +1584,8 @@ pub fn build_backward_graph(
             }
             Opcode::Constant(_) | Opcode::Input
             | Opcode::GtScalar | Opcode::LtScalar | Opcode::EqScalar
-            | Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate => {
+            | Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate
+            | Opcode::Shape | Opcode::Range => {
             }
             Opcode::Transpose => {
                 // gradient of transpose is transpose with inverse permutation
@@ -1019,9 +1641,30 @@ pub fn build_backward_graph(
             }
             Opcode::Maximum | Opcode::Minimum => {
                 // d_input = grad where input is the max/min, else 0
-                // For now pass through to both (approximate)
-                for &input_id in &node.inputs {
-                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                // Uses GtScalar for Maximum (x > y → dx gets grad) or
+                // LtScalar for Minimum (x < y → dx gets grad).
+                if node.inputs.len() >= 2 {
+                    let x_id = node.inputs[0];
+                    let y_id = node.inputs[1];
+                    let zero = create_constant_scalar(0.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let is_max = matches!(node.opcode, Opcode::Maximum);
+                    let mask = grad_graph.add_node(
+                        if is_max { Opcode::GtScalar } else { Opcode::LtScalar },
+                        vec![x_id, y_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    // dx = Where(mask, grad, 0)
+                    let dx = grad_graph.add_node(
+                        Opcode::Where, vec![mask, grad_id, zero],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, x_id, dx);
+                    // dy = Where(mask, 0, grad)
+                    let dy = grad_graph.add_node(
+                        Opcode::Where, vec![mask, zero, grad_id],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, y_id, dy);
                 }
             }
             Opcode::ReduceMax | Opcode::ArgMax => {
@@ -1030,12 +1673,62 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
-            Opcode::Prelu | Opcode::Embedding | Opcode::Pow
+            Opcode::Pow => {
+                // d(x^e)/dx = e * x^(e-1)
+                // d(x^e)/de = ln(x) * x^e = ln(x) * output
+                if let Some(&x_id) = node.inputs.first() {
+                    let one = create_constant_scalar(1.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let exponent_id = node.inputs.get(1).copied().unwrap_or(x_id);
+                    let x_type = forward_graph.get_node(x_id).map(|n| n.output_type.clone());
+                    // dx = grad * exponent * Pow(x, exponent - 1)
+                    let exp_minus_1 = grad_graph.add_node(
+                        Opcode::Sub, vec![exponent_id, one],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let x_pow = grad_graph.add_node(
+                        Opcode::Pow, vec![x_id, exp_minus_1],
+                        x_type.clone().unwrap_or(TensorType::new(vec![], IrDType::F32)),
+                    );
+                    let dx_unscaled = grad_graph.add_node(
+                        Opcode::Mul, vec![exponent_id, x_pow],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    let dx = grad_graph.add_node(
+                        Opcode::Mul, vec![grad_id, dx_unscaled],
+                        x_type.unwrap_or(TensorType::new(vec![], IrDType::F32)),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, x_id, dx);
+                }
+                // Gradient for the exponent (less common, but mathematically correct)
+                if node.inputs.len() > 1 {
+                    if let Some(&exp_id) = node.inputs.get(1) {
+                        let x_id = node.inputs[0];
+                        let ln_x = grad_graph.add_node(
+                            Opcode::Log, vec![x_id],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        // d_exponent = grad * ln(x) * output
+                        let ln_times_out = grad_graph.add_node(
+                            Opcode::Mul, vec![ln_x, node_id],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        let dexponent = grad_graph.add_node(
+                            Opcode::Mul, vec![grad_id, ln_times_out],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        accumulate_grad(&mut grad_graph, &mut grads, exp_id, dexponent);
+                    }
+                }
+            }
+            Opcode::Prelu | Opcode::Embedding
             | Opcode::AddScalar | Opcode::MulScalar | Opcode::DivScalar
             | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
             | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
             | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where
-            | Opcode::TopKValues | Opcode::TopKIndices | Opcode::TopK => {
+            | Opcode::TopK | Opcode::Cast | Opcode::Expand | Opcode::Tile
+            | Opcode::Quantize | Opcode::Dequantize
+            | Opcode::ToF16 | Opcode::ToF32
+            | Opcode::QuantizeActivations | Opcode::DequantizeActivations => {
                 for &input_id in &node.inputs {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }

@@ -1066,6 +1066,7 @@ pub fn ir_to_dtype(idt: IrDType) -> DType {
         IrDType::I32 => DType::I32,
         IrDType::I64 => DType::I64,
         IrDType::Bool => DType::Bool,
+        IrDType::I8 => panic!("ir_to_dtype: I8 is IR-only, not a Tensor-level DType"),
         // U4/U8 round-trips back to simple DType::U4/U8. Per-channel metadata
         // stays in the IR node; Tensor-level storage uses the packed dtype.
         IrDType::U4 { .. } => DType::U4,

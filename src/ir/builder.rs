@@ -685,24 +685,6 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Return the top-k values along the given axis.
-    /// k is the number of values to select.
-    /// axis: -1 means the last dimension.
-    pub fn topk_values(&self, input: &GraphTensor, k: usize, axis: i64) -> GraphTensor {
-        let output_type = TensorType::new(input.shape().to_vec(), input.dtype());
-        let mut attrs = HashMap::new();
-        attrs.insert("k".to_string(), k.to_string());
-        attrs.insert("axis".to_string(), axis.to_string());
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node_with_attrs(
-            Opcode::TopKValues,
-            vec![input.node_id],
-            output_type.clone(),
-            attrs,
-        );
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
     /// Fused Top-K: returns (values, indices) from a single sort.
     /// Both output tensors have the same shape as the input.
     pub fn topk(&self, input: &GraphTensor, k: usize, axis: i64) -> (GraphTensor, GraphTensor) {
@@ -728,23 +710,6 @@ impl GraphBuilder {
             self.clone(), node_id, idx_type, 1,
         );
         (values, indices)
-    }
-
-    /// Return the indices of the top-k values along the given axis.
-    /// Output dtype is I64 (indices).
-    pub fn topk_indices(&self, input: &GraphTensor, k: usize, axis: i64) -> GraphTensor {
-        let output_type = TensorType::new(input.shape().to_vec(), IrDType::I64);
-        let mut attrs = HashMap::new();
-        attrs.insert("k".to_string(), k.to_string());
-        attrs.insert("axis".to_string(), axis.to_string());
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node_with_attrs(
-            Opcode::TopKIndices,
-            vec![input.node_id],
-            output_type.clone(),
-            attrs,
-        );
-        GraphTensor::new(self.clone(), node_id, output_type)
     }
 
     /// Reshape tensor.
@@ -773,6 +738,29 @@ impl GraphBuilder {
             Opcode::Transpose,
             vec![input.node_id],
             output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Transpose with an explicit permutation of dimensions.
+    /// The perm vector specifies the source dimension for each output position.
+    /// E.g. perm=[0,2,1] on a 3D tensor swaps dims 1 and 2.
+    /// Sets the "perm" attribute on the IR node so shape inference can use it.
+    pub fn transpose_with_perm(&self, input: &GraphTensor, perm: &[usize]) -> GraphTensor {
+        let input_shape = input.shape();
+        let output_shape: Vec<DimExpr> = perm.iter().map(|&i| {
+            input_shape.get(i).cloned().unwrap_or(DimExpr::Known(0))
+        }).collect();
+        let output_type = TensorType::new(output_shape, input.dtype());
+        let mut attrs = std::collections::HashMap::new();
+        let perm_str: Vec<String> = perm.iter().map(|d| d.to_string()).collect();
+        attrs.insert("perm".to_string(), perm_str.join(","));
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Transpose,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
         );
         GraphTensor::new(self.clone(), node_id, output_type)
     }
@@ -1093,7 +1081,16 @@ impl GraphBuilder {
 
     /// Gather elements along an axis.
     pub fn gather(&self, input: &GraphTensor, indices: &GraphTensor, axis: usize) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
+        // ONNX Gather output shape: data_shape[:axis] + indices_shape + data_shape[axis+1:]
+        let data_shape = &input.tensor_type.shape;
+        let indices_shape = &indices.tensor_type.shape;
+        let new_shape: Vec<DimExpr> = data_shape[..axis]
+            .iter()
+            .chain(indices_shape.iter())
+            .chain(data_shape[axis + 1..].iter())
+            .cloned()
+            .collect();
+        let output_type = TensorType::new(new_shape, input.tensor_type.dtype.clone());
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), axis.to_string());
         let mut inner = self.inner.borrow_mut();
@@ -1113,6 +1110,169 @@ impl GraphBuilder {
         let node_id = inner.graph.add_node(
             Opcode::ScatterNd,
             vec![input.node_id, indices.node_id, updates.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Returns the shape of the input tensor as a 1D I64 tensor.
+    pub fn shape_op(&self, input: &GraphTensor) -> GraphTensor {
+        let input_rank = input.shape().len();
+        let output_shape = vec![DimExpr::Known(input_rank as u64)];
+        let output_type = TensorType::new(output_shape, IrDType::I64);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Shape,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Cast tensor to a target dtype.
+    pub fn cast_op(&self, input: &GraphTensor, to: IrDType) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, to.clone());
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("to".to_string(), to.as_str().to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Cast,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Quantize F32 → U4/U8 with per-channel scales/zero_points.
+    ///
+    /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::U4` or
+    /// `IrDType::U8` with per-channel scale/zero-point metadata.
+    pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_dtype = match bit_width {
+            4 => IrDType::U4 { scales: vec![], zero_points: vec![] },
+            8 => IrDType::U8 { scales: vec![], zero_points: vec![] },
+            _ => panic!("quantize: bit_width must be 4 or 8, got {}", bit_width),
+        };
+        let output_type = TensorType::new(output_shape, output_dtype);
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("bit_width".to_string(), bit_width.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Quantize,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Dequantize U4/U8 → F32 using the scales/zero_points from the input dtype.
+    pub fn dequantize(&self, input: &GraphTensor) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Dequantize,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Convert F32 → F16 (half-precision).
+    pub fn to_f16(&self, input: &GraphTensor) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::F16);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::ToF16,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Convert F16 → F32 (half-precision).
+    pub fn to_f32(&self, input: &GraphTensor) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::ToF32,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Quantize activations F32 → INT8 (symmetric per-tensor quantization).
+    /// The scale is stored inline in the output buffer and is determined
+    /// at dispatch time from the input data's dynamic range.
+    pub fn quantize_activations(&self, input: &GraphTensor) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::I8);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::QuantizeActivations,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Dequantize activations INT8 → F32 (symmetric per-tensor).
+    /// Reads the scale from the inline buffer produced by [`quantize_activations`].
+    pub fn dequantize_activations(&self, input: &GraphTensor) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::DequantizeActivations,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Expand (broadcast) tensor to a target shape.
+    pub fn expand_op(&self, input: &GraphTensor, shape: &GraphTensor) -> GraphTensor {
+        let output_type = TensorType::new(input.shape().to_vec(), input.dtype());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Expand,
+            vec![input.node_id, shape.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Tile (repeat) tensor along each axis.
+    pub fn tile_op(&self, input: &GraphTensor, repeats: &GraphTensor) -> GraphTensor {
+        let output_type = TensorType::new(input.shape().to_vec(), input.dtype());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Tile,
+            vec![input.node_id, repeats.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Range(start, limit, step) — produces a 1D F32 tensor.
+    /// All three inputs must be 0D (scalar) tensors.
+    /// Output is a 1D F32 tensor of dynamic length.
+    pub fn range_op(&self, start: &GraphTensor, limit: &GraphTensor, step: &GraphTensor) -> GraphTensor {
+        let output_type = TensorType::new(
+            vec![DimExpr::Symbol("N".to_string())],
+            IrDType::F32,
+        );
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::Range,
+            vec![start.node_id, limit.node_id, step.node_id],
             output_type.clone(),
         );
         GraphTensor::new(self.clone(), node_id, output_type)
@@ -1585,6 +1745,7 @@ impl GraphBuilder {
 
     /// Adam weight update: full Adam optimizer step.
     /// weight -= lr * (m / (1 - beta1^t)) / (sqrt(v / (1 - beta2^t)) + eps)
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_adam(
         &self, weight: &GraphTensor, grad: &GraphTensor,
         m: &GraphTensor, v: &GraphTensor,
@@ -1610,6 +1771,7 @@ impl GraphBuilder {
     }
 
     /// AdamW weight update: Adam with decoupled weight decay.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_adamw(
         &self, weight: &GraphTensor, grad: &GraphTensor,
         m: &GraphTensor, v: &GraphTensor,
@@ -1768,6 +1930,14 @@ impl GraphBuilder {
     /// Return the number of recorded inputs.
     pub fn num_inputs(&self) -> usize {
         self.inner.borrow().recorded_inputs.len()
+    }
+
+    /// Set the name of an existing node (for debugging / error messages).
+    pub fn set_node_name(&self, node_id: NodeId, name: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(node) = inner.graph.get_node_mut(node_id) {
+            node.name = name.to_string();
+        }
     }
 
     /// Clone the underlying `ComputeGraph`.

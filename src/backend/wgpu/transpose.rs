@@ -9,7 +9,7 @@ pub(super) fn dispatch_transpose_gpu(
     with_wgpu_context(|ctx| -> Result<Vec<f32>, BackendError> {
         let shader = build_transpose_shader();
         super::pipeline::ensure_compute_pipeline(ctx, "transpose", &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_in = ctx.create_buffer(bytemuck::cast_slice(input), "tp_input");
         let output_size = (m * n * 4) as u64;

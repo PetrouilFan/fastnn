@@ -1062,7 +1062,7 @@ impl AotExecutor {
         .with_input_shapes(&rust_input_shapes);
         let graph = converter
             .to_compute_graph()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         let executor = crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
         let (plan, memory_plan, compiled_graph) = executor
@@ -1103,6 +1103,14 @@ impl AotExecutor {
                 let output_node = self.graph.get_node(output_node_id)
                     .expect("AotExecutor: output node not found in graph");
                 let ir_dtype = output_node.output_type.dtype.clone();
+                // Extract quantization metadata before ir_to_dtype strips it
+                let (q_scales, q_zero_points) = match &ir_dtype {
+                    crate::ir::node::IrDType::U4 { scales, zero_points }
+                    | crate::ir::node::IrDType::U8 { scales, zero_points } => {
+                        (scales.clone(), zero_points.clone())
+                    }
+                    _ => (vec![], vec![]),
+                };
                 let dtype: crate::storage::DType = crate::tensor::ir_to_dtype(ir_dtype);
                 // Resolve shape from DimExpr (all should be Known after compilation).
                 let shape: Vec<i64> = output_node.output_type.shape.iter()
@@ -1154,14 +1162,42 @@ impl AotExecutor {
                         let f32_vals: Vec<f32> = bf16_vals.iter().map(|v| v.to_f32()).collect();
                         Tensor::from_vec(f32_vals, shape)
                     }
-                    // Packed types need dequantization — for now, convert raw bytes to f32 numerically.
-                    // Proper dequantization with scales/zero_points will be added in the quantization pass.
-                    crate::storage::DType::U4 | crate::storage::DType::U8 => {
-                        // TODO: Proper dequantization using per-channel scales from IrDType metadata.
-                        // For now, treat packed bytes as raw f32 reinterpretation.
-                        let f32_vals: Vec<f32> = data.chunks_exact(4)
-                            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    // Packed U4/U8 outputs: unpack nibbles/bytes and dequantize per-channel.
+                    // In the normal pipeline, MatMul/Conv2d outputs remain F32 (dequant happens
+                    // inside the SIMD kernel). This path is a safety net for ops whose IR output
+                    // type is U4/U8.
+                    crate::storage::DType::U4 => {
+                        let words: Vec<u32> = data.chunks_exact(4)
+                            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                             .collect();
+                        let num_elements = words.len() * 8; // 8 nibbles per u32
+                        let mut f32_vals = Vec::with_capacity(num_elements);
+                        for (word_idx, &word) in words.iter().enumerate() {
+                            for nibble in 0..8 {
+                                let val = (word >> (nibble * 4)) & 0xF;
+                                let ch = word_idx * 8 + nibble;
+                                let s = q_scales.get(ch % q_scales.len().max(1)).copied().unwrap_or(1.0);
+                                let zp = q_zero_points.get(ch % q_zero_points.len().max(1)).copied().unwrap_or(0.0);
+                                f32_vals.push(val as f32 * s + zp);
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::U8 => {
+                        let words: Vec<u32> = data.chunks_exact(4)
+                            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                            .collect();
+                        let num_elements = words.len() * 4; // 4 bytes per u32
+                        let mut f32_vals = Vec::with_capacity(num_elements);
+                        for (word_idx, &word) in words.iter().enumerate() {
+                            for byte in 0..4 {
+                                let val = (word >> (byte * 8)) & 0xFF;
+                                let ch = word_idx * 4 + byte;
+                                let s = q_scales.get(ch % q_scales.len().max(1)).copied().unwrap_or(1.0);
+                                let zp = q_zero_points.get(ch % q_zero_points.len().max(1)).copied().unwrap_or(0.0);
+                                f32_vals.push(val as f32 * s + zp);
+                            }
+                        }
                         Tensor::from_vec(f32_vals, shape)
                     }
                     crate::storage::DType::F64 => {

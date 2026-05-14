@@ -294,6 +294,12 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("node {}: {e}", node_id))?;
 
+        // DEBUG: Log every node through validation
+        eprintln!(
+            "[validate_shapes] node={} op={:?} name='{}' input_shapes={:?}",
+            node_id, node.opcode, node.name, input_shapes
+        );
+
         match &node.opcode {
             Opcode::MatMul => {
                 if input_shapes.len() < 2 {
@@ -342,7 +348,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     ));
                 }
                 let rank = input_shapes[0].len();
-                let axis = resolve_axis(&node.attrs, "axis", rank)?;
+                let axis = resolve_axis(&node.attrs, "axis", rank)
+                    .map_err(|e| format!("Concat node {}: {e}", node_id))?;
                 for (i, s) in input_shapes.iter().enumerate().skip(1) {
                     if s.len() != rank {
                         return Err(format!(
@@ -457,12 +464,10 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     }
                 }
             }
-            Opcode::Softmax => {
-                if !input_shapes.is_empty() {
-                    let rank = input_shapes[0].len();
-                    let _ = resolve_axis(&node.attrs, "axis", rank)
-                        .map_err(|e| format!("Softmax node {}: {e}", node_id))?;
-                }
+            Opcode::Softmax if !input_shapes.is_empty() => {
+                let rank = input_shapes[0].len();
+                let _ = resolve_axis(&node.attrs, "axis", rank)
+                    .map_err(|e| format!("Softmax node {}: {e}", node_id))?;
             }
             Opcode::BatchNorm | Opcode::LayerNorm => {
                 if input_shapes.len() < 2 {
@@ -471,7 +476,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 // Channel dim must match between data and weight for 1D/2D norm
                 let data = &input_shapes[0];
                 let w = &input_shapes[1];
-                if data.len() >= 2 && w.len() >= 1 && data[1] != w[0] {
+                if data.len() >= 2 && !w.is_empty() && data[1] != w[0] {
                     return Err(format!(
                         "Norm node {}: data channels {} != weight features {}",
                         node_id, data[1], w[0]
@@ -551,13 +556,13 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             }
             Opcode::Neg | Opcode::Abs | Opcode::Exp | Opcode::Log
             | Opcode::Sqrt | Opcode::Relu | Opcode::Gelu | Opcode::Silu
-            | Opcode::Sigmoid | Opcode::Tanh => {
-                if input_shapes.len() != 1 {
-                    return Err(format!(
-                        "Unary op {:?} node {}: expected 1 input, got {}",
-                        node.opcode, node_id, input_shapes.len()
-                    ));
-                }
+            | Opcode::Sigmoid | Opcode::Tanh
+                if input_shapes.len() != 1 =>
+            {
+                return Err(format!(
+                    "Unary op {:?} node {}: expected 1 input, got {}",
+                    node.opcode, node_id, input_shapes.len()
+                ));
             }
             _ => {}
         }
