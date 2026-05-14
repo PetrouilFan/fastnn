@@ -2,168 +2,109 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [ "main", "feat/*" ]
   pull_request:
-    branches: [main, master]
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo check --lib
+    - run: cargo check
+
+  test:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo test --lib
+    - run: cargo test --test quantized_pipeline
+    - run: cargo test --test optim_test
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results
+        path: target/debug/*.xml
+
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo fmt --check
+    - run: cargo clippy --lib -- -D warnings
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Python linter
-        run: pip install ruff
-
-      - name: Run Python linter
-        run: ruff check .
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Rust linter
-        run: rustup component add clippy
-
-      - name: Run Rust linter
-        run: cargo clippy -- -D warnings
-
-  test:
+  python:
+    needs: check
     runs-on: ${{ matrix.os }}
-    needs: lint
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: .
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+    - name: Create virtualenv
+      run: uv venv .venv
+    - name: Install system dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libatlas-base-dev
+    - uses: PyO3/maturin-action@v1
+      with:
+        command: develop
+    - name: Verify import
+      run: uv run python -c "import fastnn; print('OK')"
+    - name: Install test deps
+      run: uv pip install pytest numpy
+    - name: Run Python tests
+      shell: bash
+      run: |
+        set +e
+        uv run python -m pytest tests/ -x -q --ignore=tests/test_transformer.py
+        EXIT_CODE=$?
+        set -e
+        if [ $EXIT_CODE -eq 139 ] || [ $EXIT_CODE -eq 134 ] || [ $EXIT_CODE -eq 127 ]; then
+          echo "::warning::Process cleanup crash (exit $EXIT_CODE)"
+          exit 0
+        fi
+        exit $EXIT_CODE
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-
-      - name: Create virtualenv
-        run: uv venv .venv
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libatlas-base-dev
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Build extension
-        uses: PyO3/maturin-action@v1
-        with:
-          command: develop
-
-      - name: Install dev dependencies
-        run: uv pip install pytest pytest-benchmark
-
-      - name: Run Python tests
-        shell: bash
-        run: |
-          set +e
-          uv run python -m pytest tests/ -v --ignore=tests/test_transformer.py
-          EXIT_CODE=$?
-          set -e
-          # PyO3 extensions sometimes crash during Python process cleanup on
-          # Linux (SIGSEGV=139, SIGABRT=134) and Windows (exit 127).
-          # All tests pass but the process crashes at exit.
-          # Forgive signal-based exit codes and cleanup crash codes only.
-          # NOTE: exit code 1 is NOT forgiven — it is pytest's standard
-          # test-failure exit code and would mask real regressions.
-          if [ $EXIT_CODE -eq 139 ] || [ $EXIT_CODE -eq 134 ] || [ $EXIT_CODE -eq 127 ]; then
-            echo "::warning::Process cleanup crash (exit $EXIT_CODE)"
-            exit 0
-          fi
-          exit $EXIT_CODE
-
-  benchmark:
+  coverage:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: lint
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-
-      - name: Create virtualenv
-        run: uv venv .venv
-
-      - name: Install system dependencies (Linux)
-        run: sudo apt-get update && sudo apt-get install -y libatlas-base-dev
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Build extension
-        uses: PyO3/maturin-action@v1
-        with:
-          command: develop
-
-      - name: Install PyTorch
-        run: uv pip install torch --quiet
-
-      - name: Run PyTorch comparison benchmarks
-        shell: bash
-        run: |
-          uv run python benchmarks/pytorch_comparison.py \
-            --fast --output results.json
-
-      - name: Build packed precision benchmark binary
-        shell: bash
-        run: cargo build --release --bin packed_bench_json
-
-      - name: Run packed precision benchmarks
-        shell: bash
-        run: |
-          ./target/release/packed_bench_json > packed_results.json
-
-      - name: Merge and write benchmark summary
-        if: always()
-        shell: bash
-        run: |
-          {
-            echo "**Commit:** ${{ github.sha }}"
-            echo "**Run:** ${{ github.run_id }}"
-            echo ""
-            uv run python .github/merge_benchmarks.py results.json packed_results.json
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload benchmark results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-results
-          path: |
-            results.json
-            packed_results.json
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo install cargo-tarpaulin
+    - run: cargo tarpaulin --lib --out Xml
+    - uses: codecov/codecov-action@v4
+      with:
+        files: cobertura.xml

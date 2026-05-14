@@ -85,6 +85,8 @@ pub enum Opcode {
     TopKValues,
     /// Top-K indices: returns the indices of the top-k values along the given axis.
     TopKIndices,
+    /// Fused Top-K: produces both values and indices in one kernel.
+    TopK,
     // ── v2.1 optimizer opcodes (CPU training via IR) ──────────────────
     /// SGD weight update: weight -= lr * (grad + weight_decay * weight)
     SgdUpdate,
@@ -649,8 +651,22 @@ pub struct IRNode {
     pub opcode: Opcode,
     pub inputs: Vec<NodeId>,
     pub output_type: TensorType,
+    pub secondary_output_type: Option<TensorType>,
     pub attrs: HashMap<String, String>,
     pub name: String,
+}
+
+impl IRNode {
+    pub fn num_outputs(&self) -> usize {
+        if self.secondary_output_type.is_some() { 2 } else { 1 }
+    }
+    pub fn output_type_for_index(&self, idx: usize) -> &TensorType {
+        match idx {
+            0 => &self.output_type,
+            1 => self.secondary_output_type.as_ref().expect("secondary output requested but not set"),
+            _ => panic!("output index {} out of range (max 1)", idx),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -684,6 +700,7 @@ impl ComputeGraph {
             opcode,
             inputs,
             output_type,
+            secondary_output_type: None,
             attrs: HashMap::new(),
             name: String::new(),
         });
@@ -704,6 +721,7 @@ impl ComputeGraph {
             opcode,
             inputs,
             output_type,
+            secondary_output_type: None,
             attrs: HashMap::new(),
             name: name.to_string(),
         });
@@ -725,6 +743,7 @@ impl ComputeGraph {
             opcode,
             inputs,
             output_type,
+            secondary_output_type: None,
             attrs,
             name: String::new(),
         });
@@ -738,6 +757,27 @@ impl ComputeGraph {
             TensorValue::Data { tensor_type, .. } => tensor_type.clone(),
         };
         self.add_node(Opcode::Constant(value), Vec::new(), tensor_type)
+    }
+
+    pub fn add_node_with_secondary_output(
+        &mut self,
+        opcode: Opcode,
+        inputs: Vec<NodeId>,
+        primary_type: TensorType,
+        secondary_type: TensorType,
+    ) -> NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.nodes.push(IRNode {
+            id,
+            opcode,
+            inputs,
+            output_type: primary_type,
+            secondary_output_type: Some(secondary_type),
+            attrs: HashMap::new(),
+            name: String::new(),
+        });
+        id
     }
 
     pub fn get_node(&self, id: NodeId) -> Option<&IRNode> {

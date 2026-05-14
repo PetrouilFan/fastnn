@@ -191,16 +191,13 @@ impl<B: Backend> GraphExecutor<B> {
             })?;
 
             // Re-evaluate output size with shape_env to handle symbolic dims.
-            // Error if the resolved size exceeds the allocated slot (would read
-            // past the end of valid data) or if any dim is unresolved.
             let actual_size = if let Some(node) = graph.get_node(output_node_id) {
                 let resolved_shape = resolve_shape(&node.output_type.shape, &shape_env)
                     .map_err(|e| BackendError::Dispatch(format!(
                         "output node {}: {e}", output_node_id
                     )))?;
                 let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-                let elem_size = node.output_type.dtype.byte_size();
-                let computed = actual_numel * elem_size;
+                let computed = actual_numel * node.output_type.dtype.byte_size();
                 if computed > slot.size {
                     return Err(BackendError::Dispatch(format!(
                         "output node {}: resolved size {} exceeds allocated slot size {} \

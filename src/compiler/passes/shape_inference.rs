@@ -95,7 +95,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     shape.clone()
                 }
             }),
-            Opcode::TopKValues | Opcode::TopKIndices => inputs.first().map(|i| {
+            Opcode::TopKValues | Opcode::TopKIndices | Opcode::TopK => inputs.first().map(|i| {
                 i.output_type.shape.clone()
             }),
             Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => inputs.first().map(|i| {
