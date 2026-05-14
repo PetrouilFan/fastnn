@@ -194,21 +194,242 @@ pub(super) fn dispatch_quantized_matmul_gpu(
 // ─============================================================================
 
 /// Dispatch `conv2d_u4` or `conv2d_u8` via CPU im2col + GPU quantized matmul.
+///
+/// `params = [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]`
+/// `input_slices[0]` — f32 activations, shape `[N, C, H, W]`
+/// `input_slices[1]` — packed u4/u8 weights, shape `[OC, C*KH*KW]` (packed row-major)
 pub(super) fn dispatch_quantized_conv_gpu(
-    _arena: &super::WgpuBuffer,
-    _input_slices: &[crate::backend::BufferSlice],
-    _output_slice: crate::backend::BufferSlice,
-    _params: &[usize],
-    _bit_width: usize,
-    _scales: &[f32],
+    arena: &super::WgpuBuffer,
+    input_slices: &[crate::backend::BufferSlice],
+    output_slice: crate::backend::BufferSlice,
+    params: &[usize],
+    bit_width: usize,
+    scales: &[f32],
     _zero_points: &[f32],
 ) -> Result<(), BackendError> {
-    // Fall back to CPU for conv2d — the im2col + GPU quantized matmul path
-    // requires restructuring the dispatch to allow temporary buffers.
-    // This path is deferred to v2.3.
-    Err(BackendError::UnsupportedOp(format!(
-        "quantized conv2d GPU dispatch deferred to v2.3 (CPU fallback active)"
-    )))
+    if params.len() < 9 {
+        return Err(BackendError::Dispatch(
+            "quantized_conv: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into(),
+        ));
+    }
+    let stride = params[0];
+    let padding = params[1];
+    let dilation = params[2];
+    let groups = params[3].max(1);
+    let input_c = params[4];
+    let input_h = params[5];
+    let input_w = params[6];
+    let kernel_h = params[7];
+    let kernel_w = params[8];
+
+    let read_f32 = |idx: usize| -> Vec<f32> {
+        if idx < input_slices.len() {
+            let s = &input_slices[idx];
+            let d = arena.data_mut();
+            bytemuck::cast_slice::<_, f32>(&d[s.offset..s.offset + s.size]).to_vec()
+        } else {
+            Vec::new()
+        }
+    };
+
+    let input_data = read_f32(0);
+    if input_data.is_empty() {
+        return Err(BackendError::Dispatch("quantized_conv: empty activation input".into()));
+    }
+
+    let packed_bytes = if 1 < input_slices.len() {
+        let s = &input_slices[1];
+        // Copy to u32-aligned buffer (arena may not be u32-aligned)
+        let raw = &arena.data_mut()[s.offset..s.offset + s.size];
+        let mut aligned = vec![0u8; raw.len().div_ceil(4) * 4];
+        aligned[..raw.len()].copy_from_slice(raw);
+        aligned
+    } else {
+        return Err(BackendError::Dispatch(
+            "quantized_conv: missing packed weight input".into(),
+        ));
+    };
+
+    let c = input_c;
+    let h = input_h;
+    let w = input_w;
+    let n = input_data.len() / (c * h * w).max(1);
+    let c_per_group = c / groups;
+
+    // Output dimensions with dilation
+    let dk_h = (kernel_h - 1) * dilation + 1;
+    let dk_w = (kernel_w - 1) * dilation + 1;
+    let output_h = if h + 2 * padding >= dk_h { (h + 2 * padding - dk_h) / stride + 1 } else { 0 };
+    let output_w = if w + 2 * padding >= dk_w { (w + 2 * padding - dk_w) / stride + 1 } else { 0 };
+    if output_h == 0 || output_w == 0 {
+        return Ok(());
+    }
+
+    let items = if bit_width == 4 { 8usize } else { 4usize };
+    let col_w = c * kernel_h * kernel_w;
+    let col_h = n * output_h * output_w;
+    let f = packed_bytes.len() * 8 / (col_w * bit_width).max(1);
+    if f == 0 {
+        return Err(BackendError::Dispatch("quantized_conv: computed zero output channels".into()));
+    }
+
+    // CPU im2col: [N, C, H, W] → [N*H_out*W_out, C*KH*KW]
+    let mut col_matrix = vec![0.0f32; col_h * col_w];
+    for nn in 0..n {
+        for hh in 0..output_h {
+            for ww in 0..output_w {
+                let row = (nn * output_h + hh) * output_w + ww;
+                for g in 0..groups {
+                    for cc in 0..c_per_group {
+                        for kh in 0..kernel_h {
+                            for kw in 0..kernel_w {
+                                let h_in = (hh * stride + kh * dilation) as i64 - padding as i64;
+                                let w_in = (ww * stride + kw * dilation) as i64 - padding as i64;
+                                if h_in >= 0 && h_in < h as i64 && w_in >= 0 && w_in < w as i64 {
+                                    let src = nn * (c * h * w)
+                                        + (g * c_per_group + cc) * (h * w)
+                                        + h_in as usize * w + w_in as usize;
+                                    let dst = row * col_w
+                                        + (g * c_per_group + cc) * (kernel_h * kernel_w)
+                                        + kh * kernel_w + kw;
+                                    if src < input_data.len() && dst < col_matrix.len() {
+                                        col_matrix[dst] = input_data[src];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // GPU quantized GEMM (inlined from dispatch_quantized_matmul_gpu)
+    let m = col_h;
+    let k = col_w;
+    let n_out = f;
+
+    let padded_k = ((k + items - 1) / items) * items;
+    let k_packed = padded_k / items;
+    let output_bytes = m * n_out * 4;
+
+    with_wgpu_context(|ctx| -> Result<(), BackendError> {
+        let shader_src = build_quantized_gemm_shader(items);
+        let shader = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(&format!("conv_qgemm_{}bit", bit_width)),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+        });
+
+        let pipeline_layout = ctx.device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
+                label: Some(&format!("conv_qgemm_{}bit_layout", bit_width)),
+                bind_group_layouts: &[&ctx.bind_group_layout],
+                push_constant_ranges: &[],
+            },
+        );
+
+        let pipeline = ctx.device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label: Some(&format!("conv_qgemm_{}bit", bit_width)),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+
+        // Pad col_matrix to [M, padded_k] for safe GPU reads
+        let mut act_padded = col_matrix;
+        if padded_k > k {
+            act_padded.resize(m * padded_k, 0.0f32);
+        }
+
+        let buf_act = ctx.create_buffer(bytemuck::cast_slice(&act_padded), "qconv_act");
+        let buf_weight = ctx.create_buffer(&packed_bytes, "qconv_weight");
+        let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("qconv_output"),
+            size: output_bytes as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        #[allow(non_snake_case)]
+        struct QuantParams {
+            M: u32,
+            N: u32,
+            K: u32,
+            K_packed: u32,
+        }
+        let qparams = QuantParams {
+            M: m as u32,
+            N: n_out as u32,
+            K: padded_k as u32,
+            K_packed: k_packed as u32,
+        };
+        let buf_params = ctx.create_uniform_buffer(&qparams, "qconv_params");
+
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("qconv_bg"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf_weight.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf_act.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf_params.as_entire_binding(),
+                },
+            ],
+        });
+
+        let total_work = (m * n_out) as u32;
+        let workgroups = (total_work + 255) / 256;
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("qconv_encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("qconv_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups.max(1), 1, 1);
+        }
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+
+        let raw = ctx.read_buffer(&buf_out, output_bytes);
+        let result: &[f32] = bytemuck::cast_slice(&raw);
+
+        let out = arena.data_mut();
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
+            &mut out[output_slice.offset..output_slice.offset + output_slice.size],
+        );
+        let len = out_f32.len().min(result.len());
+
+        // The shader computes raw dot product (no scale). Apply per-channel scale on CPU.
+        for i in 0..len {
+            let n_idx = i % n_out;
+            let s = scales.get(n_idx).copied().unwrap_or(1.0);
+            out_f32[i] = result[i] * s;
+        }
+
+        Ok(())
+    })
 }
 // ─============================================================================
 // Quantized GEMM WGSL shader
