@@ -739,10 +739,6 @@ impl<'a> OnnxConverter<'a> {
                 let w = &ins[1];
                 let r = &ins[2];
 
-                // Extract current timestep (first timestep for single-step)
-                let x_t = self.graph.slice(x, 0, 0, 1);   // [1, batch, input_size]
-                let x_t = self.graph.squeeze(&x_t, 0);     // [batch, input_size]
-
                 // Squeeze num_directions dim from W and R
                 let w_sq = self.graph.squeeze(w, 0);  // [4*hidden, input_size]
                 let r_sq = self.graph.squeeze(r, 0);  // [4*hidden, hidden_size]
@@ -789,10 +785,10 @@ impl<'a> OnnxConverter<'a> {
                     self.graph.constant(&zero_bytes, zero_tt)
                 };
 
-                // Bias extraction helper
+                // Extract biases outside the loop
                 let extract_bias = |conv: &OnnxConverter, gate_offset: usize| -> GraphTensor {
                     if ins.len() > 3 {
-                        let b_sq = conv.graph.squeeze(&ins[3], 0);  // [8*hidden]
+                        let b_sq = conv.graph.squeeze(&ins[3], 0);
                         let wb = conv.graph.slice(&b_sq, 0, gate_offset, gate_offset + chunk);
                         let rb = conv.graph.slice(&b_sq, 0, gate_offset + 4*chunk, gate_offset + 4*chunk + chunk);
                         conv.graph.add(&wb, &rb)
@@ -800,49 +796,67 @@ impl<'a> OnnxConverter<'a> {
                         conv.scalar(0.0)
                     }
                 };
-
-                // Gate computations
-                let x_w_i = self.graph.matmul(&x_t, &w_i_t);
-                let h_r_i = self.graph.matmul(&h_prev, &r_i_t);
                 let bias_i = extract_bias(self, 0);
-                let gate_i = self.graph.add(&self.graph.add(&x_w_i, &h_r_i), &bias_i);
-                let i_t = self.graph.sigmoid(&gate_i);
-
-                let x_w_o = self.graph.matmul(&x_t, &w_o_t);
-                let h_r_o = self.graph.matmul(&h_prev, &r_o_t);
                 let bias_o = extract_bias(self, chunk);
-                let gate_o = self.graph.add(&self.graph.add(&x_w_o, &h_r_o), &bias_o);
-                let o_t = self.graph.sigmoid(&gate_o);
-
-                let x_w_f = self.graph.matmul(&x_t, &w_f_t);
-                let h_r_f = self.graph.matmul(&h_prev, &r_f_t);
                 let bias_f = extract_bias(self, 2*chunk);
-                let gate_f = self.graph.add(&self.graph.add(&x_w_f, &h_r_f), &bias_f);
-                let f_t = self.graph.sigmoid(&gate_f);
-
-                let x_w_c = self.graph.matmul(&x_t, &w_c_t);
-                let h_r_c = self.graph.matmul(&h_prev, &r_c_t);
                 let bias_c = extract_bias(self, 3*chunk);
-                let gate_c = self.graph.add(&self.graph.add(&x_w_c, &h_r_c), &bias_c);
-                let c_tilde = self.graph.tanh(&gate_c);
 
-                // Cell & hidden update: C = f * C_prev + i * c̃, H = o * tanh(C)
-                let f_c_prev = self.graph.mul(&f_t, &c_prev);
-                let i_ct = self.graph.mul(&i_t, &c_tilde);
-                let c_new = self.graph.add(&f_c_prev, &i_ct);
-                let tanh_c = self.graph.tanh(&c_new);
-                let h_new = self.graph.mul(&o_t, &tanh_c);
+                // Get seq_len from X shape
+                let seq_len = x.shape().get(0).and_then(|d| d.evaluate()).unwrap_or(1) as usize;
 
-                // Outputs: Y (all steps), Y_h (final hidden), Y_c (final cell)
-                let y = self.graph.unsqueeze(&h_new, 0);  // [1, batch, hidden]
+                let mut h_prev = h_prev;
+                let mut c_prev = c_prev;
+                let mut h_outputs: Vec<GraphTensor> = Vec::with_capacity(seq_len);
+
+                for t in 0..seq_len {
+                    let x_t = self.graph.slice(x, 0, t, t + 1);
+                    let x_t = self.graph.squeeze(&x_t, 0);
+
+                    // Gate computations
+                    let x_w_i = self.graph.matmul(&x_t, &w_i_t);
+                    let h_r_i = self.graph.matmul(&h_prev, &r_i_t);
+                    let gate_i = self.graph.add(&self.graph.add(&x_w_i, &h_r_i), &bias_i);
+                    let i_t = self.graph.sigmoid(&gate_i);
+
+                    let x_w_o = self.graph.matmul(&x_t, &w_o_t);
+                    let h_r_o = self.graph.matmul(&h_prev, &r_o_t);
+                    let gate_o = self.graph.add(&self.graph.add(&x_w_o, &h_r_o), &bias_o);
+                    let o_t = self.graph.sigmoid(&gate_o);
+
+                    let x_w_f = self.graph.matmul(&x_t, &w_f_t);
+                    let h_r_f = self.graph.matmul(&h_prev, &r_f_t);
+                    let gate_f = self.graph.add(&self.graph.add(&x_w_f, &h_r_f), &bias_f);
+                    let f_t = self.graph.sigmoid(&gate_f);
+
+                    let x_w_c = self.graph.matmul(&x_t, &w_c_t);
+                    let h_r_c = self.graph.matmul(&h_prev, &r_c_t);
+                    let gate_c = self.graph.add(&self.graph.add(&x_w_c, &h_r_c), &bias_c);
+                    let c_tilde = self.graph.tanh(&gate_c);
+
+                    // Cell & hidden update: C = f * C_prev + i * c̃, H = o * tanh(C)
+                    let f_c_prev = self.graph.mul(&f_t, &c_prev);
+                    let i_ct = self.graph.mul(&i_t, &c_tilde);
+                    let c_new = self.graph.add(&f_c_prev, &i_ct);
+                    let tanh_c = self.graph.tanh(&c_new);
+                    let h_new = self.graph.mul(&o_t, &tanh_c);
+
+                    h_outputs.push(h_new.clone());
+                    h_prev = h_new;
+                    c_prev = c_new;
+                }
+
+                // Concat all timesteps into Y: [seq_len, batch, hidden]
+                let y_refs: Vec<&GraphTensor> = h_outputs.iter().collect();
+                let y = self.graph.concat(&y_refs, 0);
+
                 if let Some(out_name) = node.outputs.get(0) {
                     self.name_to_id.insert(out_name.clone(), y);
                 }
                 if let Some(out_name) = node.outputs.get(1) {
-                    self.name_to_id.insert(out_name.clone(), h_new.clone());
+                    self.name_to_id.insert(out_name.clone(), h_prev);
                 }
                 if let Some(out_name) = node.outputs.get(2) {
-                    self.name_to_id.insert(out_name.clone(), c_new);
+                    self.name_to_id.insert(out_name.clone(), c_prev);
                 }
             }
 
@@ -864,10 +878,6 @@ impl<'a> OnnxConverter<'a> {
                 let x = &ins[0];
                 let w = &ins[1];
                 let r = &ins[2];
-
-                // Extract current timestep
-                let x_t = self.graph.slice(x, 0, 0, 1);
-                let x_t = self.graph.squeeze(&x_t, 0);
 
                 // Squeeze num_directions dim from W and R
                 let w_sq = self.graph.squeeze(w, 0);  // [3*hidden, input_size]
@@ -904,10 +914,10 @@ impl<'a> OnnxConverter<'a> {
                     self.graph.constant(&zero_bytes, zero_tt)
                 };
 
-                // Bias extraction for GRU (layout: [W_bz, W_br, W_bh, R_bz, R_br, R_bh])
+                // Extract biases outside the loop
                 let extract_gru_bias = |conv: &OnnxConverter, gate_offset: usize| -> (GraphTensor, GraphTensor) {
                     if ins.len() > 3 {
-                        let b_sq = conv.graph.squeeze(&ins[3], 0);  // [6*hidden]
+                        let b_sq = conv.graph.squeeze(&ins[3], 0);
                         let wb = conv.graph.slice(&b_sq, 0, gate_offset, gate_offset + chunk);
                         let rb = conv.graph.slice(&b_sq, 0, gate_offset + 3*chunk, gate_offset + 3*chunk + chunk);
                         (wb, rb)
@@ -915,44 +925,60 @@ impl<'a> OnnxConverter<'a> {
                         (conv.scalar(0.0), conv.scalar(0.0))
                     }
                 };
+                let (bias_z_w, bias_z_r) = extract_gru_bias(self, 0);
+                let (bias_r_w, bias_r_r) = extract_gru_bias(self, chunk);
+                let (bias_h_w, bias_h_r) = extract_gru_bias(self, 2*chunk);
 
-                // z = sigmoid(x @ W_z^T + h @ R_z^T + b_z)
-                let (wb_z, rb_z) = extract_gru_bias(self, 0);
-                let x_w_z = self.graph.matmul(&x_t, &w_z_t);
-                let h_r_z = self.graph.matmul(&h_prev, &r_z_t);
-                let gate_z = self.graph.add(&self.graph.add(&x_w_z, &h_r_z), &self.graph.add(&wb_z, &rb_z));
-                let z_t = self.graph.sigmoid(&gate_z);
+                // Get seq_len from X shape
+                let seq_len = x.shape().get(0).and_then(|d| d.evaluate()).unwrap_or(1) as usize;
 
-                // r = sigmoid(x @ W_r^T + h @ R_r^T + b_r)
-                let (wb_r, rb_r) = extract_gru_bias(self, chunk);
-                let x_w_r = self.graph.matmul(&x_t, &w_r_t);
-                let h_r_r = self.graph.matmul(&h_prev, &r_r_t);
-                let gate_r = self.graph.add(&self.graph.add(&x_w_r, &h_r_r), &self.graph.add(&wb_r, &rb_r));
-                let r_t = self.graph.sigmoid(&gate_r);
+                let mut h_prev = h_prev;
+                let mut h_outputs: Vec<GraphTensor> = Vec::with_capacity(seq_len);
 
-                // n = tanh(x @ W_h^T + r * (h @ R_h^T + R_bh) + W_bh)
-                let (wb_h, rb_h) = extract_gru_bias(self, 2*chunk);
-                let x_w_h = self.graph.matmul(&x_t, &w_h_t);
-                let h_r_h = self.graph.matmul(&h_prev, &r_h_t);
-                let h_r_h_bias = self.graph.add(&h_r_h, &rb_h);
-                let r_h_r = self.graph.mul(&r_t, &h_r_h_bias);
-                let gate_n = self.graph.add(&self.graph.add(&x_w_h, &r_h_r), &wb_h);
-                let n_t = self.graph.tanh(&gate_n);
+                for t in 0..seq_len {
+                    let x_t = self.graph.slice(x, 0, t, t + 1);
+                    let x_t = self.graph.squeeze(&x_t, 0);
 
-                // H = (1 - z) * n + z * h
-                let one = self.scalar(1.0);
-                let one_minus_z = self.graph.sub(&one, &z_t);
-                let on = self.graph.mul(&one_minus_z, &n_t);
-                let zh = self.graph.mul(&z_t, &h_prev);
-                let h_new = self.graph.add(&on, &zh);
+                    // z = sigmoid(x @ W_z^T + h @ R_z^T + b_z)
+                    let x_w_z = self.graph.matmul(&x_t, &w_z_t);
+                    let h_r_z = self.graph.matmul(&h_prev, &r_z_t);
+                    let gate_z = self.graph.add(&self.graph.add(&x_w_z, &h_r_z), &self.graph.add(&bias_z_w, &bias_z_r));
+                    let z_t = self.graph.sigmoid(&gate_z);
 
-                // Outputs
-                let y = self.graph.unsqueeze(&h_new, 0);  // [1, batch, hidden]
+                    // r = sigmoid(x @ W_r^T + h @ R_r^T + b_r)
+                    let x_w_r = self.graph.matmul(&x_t, &w_r_t);
+                    let h_r_r = self.graph.matmul(&h_prev, &r_r_t);
+                    let gate_r = self.graph.add(&self.graph.add(&x_w_r, &h_r_r), &self.graph.add(&bias_r_w, &bias_r_r));
+                    let r_t = self.graph.sigmoid(&gate_r);
+
+                    // n = tanh(x @ W_h^T + r * (h @ R_h^T + R_bh) + W_bh)
+                    let x_w_h = self.graph.matmul(&x_t, &w_h_t);
+                    let h_r_h = self.graph.matmul(&h_prev, &r_h_t);
+                    let h_r_h_bias = self.graph.add(&h_r_h, &bias_h_r);
+                    let r_h_r = self.graph.mul(&r_t, &h_r_h_bias);
+                    let gate_n = self.graph.add(&self.graph.add(&x_w_h, &r_h_r), &bias_h_w);
+                    let n_t = self.graph.tanh(&gate_n);
+
+                    // H = (1 - z) * n + z * h
+                    let one = self.scalar(1.0);
+                    let one_minus_z = self.graph.sub(&one, &z_t);
+                    let on = self.graph.mul(&one_minus_z, &n_t);
+                    let zh = self.graph.mul(&z_t, &h_prev);
+                    let h_new = self.graph.add(&on, &zh);
+
+                    h_outputs.push(h_new.clone());
+                    h_prev = h_new;
+                }
+
+                // Concat all timesteps into Y: [seq_len, batch, hidden]
+                let y_refs: Vec<&GraphTensor> = h_outputs.iter().collect();
+                let y = self.graph.concat(&y_refs, 0);
+
                 if let Some(out_name) = node.outputs.get(0) {
                     self.name_to_id.insert(out_name.clone(), y);
                 }
                 if let Some(out_name) = node.outputs.get(1) {
-                    self.name_to_id.insert(out_name.clone(), h_new);
+                    self.name_to_id.insert(out_name.clone(), h_prev);
                 }
             }
 
