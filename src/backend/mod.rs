@@ -58,6 +58,8 @@ pub enum Instruction {
         kernel_name: String,
         input_slices: Vec<BufferSlice>,
         output_slice: BufferSlice,
+        /// Optional secondary output slice for multi-output kernels (e.g. MaxPool indices).
+        secondary_output_slice: Option<BufferSlice>,
         /// Optional shape/dimension parameters for kernels that need them
         /// (e.g., matmul stores [M, K, N], transpose stores [M, N]).
         params: Vec<usize>,

@@ -161,6 +161,11 @@ impl Backend for CpuBackend {
                     ))
                 })?;
 
+            let secondary_output_slice = memory_plan
+                .secondary_slots
+                .get(&(node_id, 1))
+                .map(|slot| BufferSlice::new(slot.offset, slot.size));
+
             match &node.opcode {
                 Opcode::Constant(val) => {
                     match val {
@@ -257,6 +262,7 @@ impl Backend for CpuBackend {
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![m, k, n],
                         param_dims: Some(vec![m_dim, k_dim, n_dim]),
                         weight_meta,
@@ -287,6 +293,7 @@ impl Backend for CpuBackend {
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -354,6 +361,7 @@ impl Backend for CpuBackend {
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: extra_params,
                         param_dims: None,
                         weight_meta: None,
@@ -419,6 +427,7 @@ impl Backend for CpuBackend {
                         kernel_name,
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         // params: [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]
                         params: vec![stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w],
                         param_dims: None,
@@ -432,6 +441,7 @@ impl Backend for CpuBackend {
                         kernel_name: "norm_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![eps.to_bits() as usize, is_batch_norm],
                         param_dims: None,
                         weight_meta: None,
@@ -473,6 +483,7 @@ impl Backend for CpuBackend {
                         kernel_name: "softmax".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![axis_dim, stride],
                         param_dims: Some(vec![axis_dim_dim, DimExpr::Known(stride as u64)]),
                         weight_meta: None,
@@ -483,6 +494,7 @@ impl Backend for CpuBackend {
                         kernel_name: "biasadd".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -494,21 +506,39 @@ impl Backend for CpuBackend {
                         kernel_name: "concat".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![axis],
                         param_dims: None,
                         weight_meta: None,
                     });
                 }
-                Opcode::MaxPool | Opcode::AvgPool => {
+                Opcode::MaxPool => {
                     let kernel_size: usize = node.attrs.get("kernel_size").and_then(|k| k.parse().ok()).unwrap_or(2);
                     let stride: usize = node.attrs.get("stride").and_then(|s| s.parse().ok()).unwrap_or(2);
                     let padding: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
-                    let is_max = if matches!(node.opcode, Opcode::MaxPool) { 1 } else { 0 };
+                    let secondary_output_slice = memory_plan.secondary_slots.get(&(node_id, 1)).map(|slot| {
+                        BufferSlice::new(slot.offset, slot.size)
+                    });
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "pool_f32".to_string(),
                         input_slices,
                         output_slice,
-                        params: vec![kernel_size, stride, padding, is_max],
+                        secondary_output_slice,
+                        params: vec![kernel_size, stride, padding, 1],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::AvgPool => {
+                    let kernel_size: usize = node.attrs.get("kernel_size").and_then(|k| k.parse().ok()).unwrap_or(2);
+                    let stride: usize = node.attrs.get("stride").and_then(|s| s.parse().ok()).unwrap_or(2);
+                    let padding: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "pool_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![kernel_size, stride, padding, 0],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -520,6 +550,7 @@ impl Backend for CpuBackend {
                         kernel_name: "pad_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: pads,
                         param_dims: None,
                         weight_meta: None,
@@ -531,6 +562,7 @@ impl Backend for CpuBackend {
                         kernel_name: "gather".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![axis],
                         param_dims: None,
                         weight_meta: None,
@@ -544,6 +576,7 @@ impl Backend for CpuBackend {
                         kernel_name: "slice_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![dim, start, end],
                         param_dims: None,
                         weight_meta: None,
@@ -554,6 +587,7 @@ impl Backend for CpuBackend {
                         kernel_name: "scatter_nd".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -583,6 +617,7 @@ impl Backend for CpuBackend {
                         kernel_name: "reduce_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![group_size, is_mean],
                         // Pass the group_size as a symbolic DimExpr so dispatch
                         // can re-evaluate it when shape_env is available (e.g.
@@ -613,6 +648,7 @@ impl Backend for CpuBackend {
                         kernel_name: "transpose_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![m, n],
                         param_dims: Some(vec![m_dim, n_dim]),
                         weight_meta: None,
@@ -631,6 +667,7 @@ impl Backend for CpuBackend {
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![stride, padding],
                         param_dims: None,
                         weight_meta: None,
@@ -641,6 +678,7 @@ impl Backend for CpuBackend {
                         kernel_name: "prelu".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -652,6 +690,7 @@ impl Backend for CpuBackend {
                         kernel_name: "rms_norm".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![eps.to_bits() as usize],
                         param_dims: None,
                         weight_meta: None,
@@ -662,6 +701,7 @@ impl Backend for CpuBackend {
                         kernel_name: "embedding".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -672,6 +712,7 @@ impl Backend for CpuBackend {
                         kernel_name: "pow_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -682,6 +723,7 @@ impl Backend for CpuBackend {
                         kernel_name: "gt_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -692,6 +734,7 @@ impl Backend for CpuBackend {
                         kernel_name: "lt_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -702,6 +745,7 @@ impl Backend for CpuBackend {
                         kernel_name: "eq_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -712,6 +756,7 @@ impl Backend for CpuBackend {
                         kernel_name: "add_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -722,6 +767,7 @@ impl Backend for CpuBackend {
                         kernel_name: "mul_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -732,6 +778,7 @@ impl Backend for CpuBackend {
                         kernel_name: "div_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -750,6 +797,7 @@ impl Backend for CpuBackend {
                         kernel_name: "argmax".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![axis as usize],
                         param_dims: None,
                         weight_meta: None,
@@ -766,6 +814,7 @@ impl Backend for CpuBackend {
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![scale_h, scale_w],
                         param_dims: None,
                         weight_meta: None,
@@ -778,6 +827,7 @@ impl Backend for CpuBackend {
                         kernel_name: "adaptive_avg_pool2d".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![out_h, out_w],
                         param_dims: None,
                         weight_meta: None,
@@ -790,6 +840,7 @@ impl Backend for CpuBackend {
                         kernel_name: "repeat".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: repeats,
                         param_dims: None,
                         weight_meta: None,
@@ -803,6 +854,7 @@ impl Backend for CpuBackend {
                         kernel_name: "cumsum".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![dim, exclusive, rev],
                         param_dims: None,
                         weight_meta: None,
@@ -813,6 +865,7 @@ impl Backend for CpuBackend {
                         kernel_name: "erf_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
@@ -829,6 +882,7 @@ impl Backend for CpuBackend {
                         kernel_name: "flip".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params,
                         param_dims: None,
                         weight_meta: None,
@@ -839,22 +893,25 @@ impl Backend for CpuBackend {
                         kernel_name: "where_f32".to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
                     });
                 }
-                Opcode::TopKValues | Opcode::TopKIndices => {
+                Opcode::TopKValues | Opcode::TopKIndices | Opcode::TopK => {
                     let k: usize = node.attrs.get("k").and_then(|s| s.parse().ok()).unwrap_or(1);
                     let axis: i64 = node.attrs.get("axis").and_then(|s| s.parse().ok()).unwrap_or(-1);
-                    let kernel_name = match node.opcode {
-                        Opcode::TopKValues => "topk_values",
-                        _ => "topk_indices",
+                    let (kernel_name, sec_slice) = match node.opcode {
+                        Opcode::TopK => ("topk_fused", secondary_output_slice),
+                        Opcode::TopKValues => ("topk_values", None),
+                        _ => ("topk_indices", None),
                     };
                     instructions.push(Instruction::CallKernel {
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
+                        secondary_output_slice: sec_slice,
                         params: vec![k, axis as usize],
                         param_dims: None,
                         weight_meta: None,
@@ -867,6 +924,7 @@ impl Backend for CpuBackend {
                         kernel_name: "sgd_update_f32".to_string(),
                         input_slices,  // [weight, grad] — weight must be same slot as output
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![lr.to_bits() as usize],
                         param_dims: None,
                         weight_meta: None,
@@ -882,6 +940,7 @@ impl Backend for CpuBackend {
                         kernel_name: "adam_update_f32".to_string(),
                         input_slices,  // [weight, grad, m, v]
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![lr.to_bits() as usize, beta1.to_bits() as usize, beta2.to_bits() as usize, eps.to_bits() as usize, t as usize],
                         param_dims: None,
                         weight_meta: None,
@@ -898,6 +957,7 @@ impl Backend for CpuBackend {
                         kernel_name: "adamw_update_f32".to_string(),
                         input_slices,  // [weight, grad, m, v]
                         output_slice,
+                        secondary_output_slice: None,
                         params: vec![lr.to_bits() as usize, beta1.to_bits() as usize, beta2.to_bits() as usize, eps.to_bits() as usize, t as usize, wd.to_bits() as usize],
                         param_dims: None,
                         weight_meta: None,
@@ -935,6 +995,7 @@ impl Backend for CpuBackend {
                     kernel_name,
                     input_slices,
                     output_slice,
+                    secondary_output_slice,
                     params,
                     param_dims,
                     weight_meta,
@@ -2080,11 +2141,23 @@ impl Backend for CpuBackend {
                                 let (n, c, h, w) = dims.ok_or_else(|| BackendError::Dispatch("pool_f32: could not infer dimensions".into()))?;
                                 let h_out = (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                 let w_out = (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
+                                let mut indices_out: Option<&mut [i64]> = if is_max == 1 {
+                                    secondary_output_slice.as_ref().map(|sec_slice| {
+                                        let d = arena.data_mut();
+                                        bytemuck::cast_slice_mut::<_, i64>(
+                                            &mut d[sec_slice.offset..sec_slice.offset + sec_slice.size]
+                                        )
+                                    })
+                                } else {
+                                    None
+                                };
                                 for nn in 0..n {
                                     for cc in 0..c {
                                         for hh in 0..h_out {
                                             for ww in 0..w_out {
                                                 let mut val = if is_max == 1 { f32::NEG_INFINITY } else { 0.0f32 };
+                                                let mut best_kh = 0usize;
+                                                let mut best_kw = 0usize;
                                                 let mut count = 0usize;
                                                 for kh in 0..kernel {
                                                     for kw in 0..kernel {
@@ -2096,7 +2169,15 @@ impl Backend for CpuBackend {
                                                             if h_in_s < h && w_in_s < w {
                                                                 let idx = nn * (c * h * w) + cc * (h * w) + h_in_s * w + w_in_s;
                                                                 if idx < input.len() {
-                                                                    if is_max == 1 { val = val.max(input[idx]); } else { val += input[idx]; }
+                                                                    if is_max == 1 {
+                                                                        if input[idx] > val {
+                                                                            val = input[idx];
+                                                                            best_kh = kh;
+                                                                            best_kw = kw;
+                                                                        }
+                                                                    } else {
+                                                                        val += input[idx];
+                                                                    }
                                                                     count += 1;
                                                                 }
                                                             }
@@ -2107,6 +2188,12 @@ impl Backend for CpuBackend {
                                                 let out_idx = nn * (c * h_out * w_out) + cc * (h_out * w_out) + hh * w_out + ww;
                                                 if out_idx < out_f32.len() {
                                                     out_f32[out_idx] = val;
+                                                }
+                                                // Write argmax index if this is max pooling
+                                                if let Some(ref mut idx_out) = indices_out {
+                                                    if out_idx < idx_out.len() {
+                                                        idx_out[out_idx] = (best_kh * kernel + best_kw) as i64;
+                                                    }
                                                 }
                                             }
                                         }
@@ -2696,6 +2783,38 @@ impl Backend for CpuBackend {
                                             *v = max_idx;
                                         }
                                     }
+                                 }
+                             }
+                         }
+                         "topk_fused" => {
+                             if let Some(input_slice) = input_slices.first() {
+                                 let input = {
+                                     let d = arena.data_mut();
+                                     bytemuck::cast_slice::<_, f32>(
+                                         &d[input_slice.offset..input_slice.offset + input_slice.size]
+                                     ).to_vec()
+                                 };
+                                 let k = params.first().copied().unwrap_or(1);
+                                 let mut indexed: Vec<(usize, f32)> = input.iter().copied().enumerate().collect();
+                                 if input.len() > k {
+                                     indexed.select_nth_unstable_by(input.len().saturating_sub(k), |a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                                 }
+
+                                 // Write values (f32) to primary output
+                                 let d = arena.data_mut();
+                                 let out_slice = bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]);
+                                 for i in 0..k.min(out_slice.len()) {
+                                     out_slice[i] = indexed[input.len().saturating_sub(k) + i].1;
+                                 }
+
+                                 // Write indices (i64) to secondary output
+                                 if let Some(sec_slice) = secondary_output_slice {
+                                     let sec_start = sec_slice.offset;
+                                     let sec_end = sec_slice.offset + sec_slice.size;
+                                     let idx_slice = bytemuck::cast_slice_mut::<_, u64>(&mut d[sec_start..sec_end]);
+                                     for i in 0..k.min(idx_slice.len()) {
+                                         idx_slice[i] = indexed[input.len().saturating_sub(k) + i].0 as u64;
+                                     }
                                  }
                              }
                          }

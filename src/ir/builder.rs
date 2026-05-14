@@ -62,12 +62,20 @@ pub struct GraphTensor {
     pub(crate) builder: GraphBuilder,
     pub(crate) node_id: NodeId,
     pub(crate) tensor_type: TensorType,
+    /// For multi-output nodes, which output index this tensor corresponds to.
+    /// 0 = primary output, 1 = secondary output, etc.
+    pub(crate) output_index: usize,
 }
 
 impl GraphTensor {
-    /// Create a new graph tensor handle (internal).
+    /// Create a new graph tensor handle (internal) with output_index = 0.
     pub fn new(builder: GraphBuilder, node_id: NodeId, tensor_type: TensorType) -> Self {
-        Self { builder, node_id, tensor_type }
+        Self { builder, node_id, tensor_type, output_index: 0 }
+    }
+
+    /// Create a new graph tensor handle with a specific output index.
+    pub fn new_with_output_index(builder: GraphBuilder, node_id: NodeId, tensor_type: TensorType, output_index: usize) -> Self {
+        Self { builder, node_id, tensor_type, output_index }
     }
 
     /// The underlying `NodeId` in the `ComputeGraph`.
@@ -84,6 +92,9 @@ impl GraphTensor {
 
     /// Return a reference to the builder that owns this tensor.
     pub fn builder(&self) -> &GraphBuilder { &self.builder }
+
+    /// Return the output index of this tensor in a multi-output node.
+    pub fn output_index(&self) -> usize { self.output_index }
 }
 
 // =============================================================================
@@ -692,6 +703,33 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Fused Top-K: returns (values, indices) from a single sort.
+    /// Both output tensors have the same shape as the input.
+    pub fn topk(&self, input: &GraphTensor, k: usize, axis: i64) -> (GraphTensor, GraphTensor) {
+        let val_type = TensorType::new(input.shape().to_vec(), input.dtype());
+        let idx_type = TensorType::new(input.shape().to_vec(), IrDType::I64);
+        let mut attrs = HashMap::new();
+        attrs.insert("k".to_string(), k.to_string());
+        attrs.insert("axis".to_string(), axis.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_secondary_output(
+            Opcode::TopK,
+            vec![input.node_id],
+            val_type.clone(),
+            idx_type.clone(),
+        );
+        if let Some(n) = inner.graph.get_node_mut(node_id) {
+            n.attrs = attrs;
+        }
+        let values = GraphTensor::new_with_output_index(
+            self.clone(), node_id, val_type, 0,
+        );
+        let indices = GraphTensor::new_with_output_index(
+            self.clone(), node_id, idx_type, 1,
+        );
+        (values, indices)
+    }
+
     /// Return the indices of the top-k values along the given axis.
     /// Output dtype is I64 (indices).
     pub fn topk_indices(&self, input: &GraphTensor, k: usize, axis: i64) -> GraphTensor {
@@ -922,7 +960,10 @@ impl GraphBuilder {
     // =========================================================================
 
     /// Max pooling 2D.
-    pub fn max_pool2d(&self, input: &GraphTensor, kernel_size: usize, stride: usize, padding: usize) -> GraphTensor {
+    ///
+    /// Returns (pooled_values, argmax_indices).
+    /// The indices are flat offsets within each pooling window (I64).
+    pub fn max_pool2d(&self, input: &GraphTensor, kernel_size: usize, stride: usize, padding: usize) -> (GraphTensor, GraphTensor) {
         let a_shape = input.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let channels = a_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
@@ -936,19 +977,25 @@ impl GraphBuilder {
         } else {
             DimExpr::Known(1)
         };
-        let output_type = TensorType::new(vec![batch, channels, h_out, w_out], input.dtype());
+        let output_type = TensorType::new(vec![batch.clone(), channels.clone(), h_out.clone(), w_out.clone()], input.dtype());
+        let idx_type = TensorType::new(vec![batch, channels, h_out, w_out], IrDType::I64);
         let mut attrs = HashMap::new();
         attrs.insert("kernel_size".to_string(), kernel_size.to_string());
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node_with_attrs(
+        let node_id = inner.graph.add_node_with_secondary_output(
             Opcode::MaxPool,
             vec![input.node_id],
             output_type.clone(),
-            attrs,
+            idx_type.clone(),
         );
-        GraphTensor::new(self.clone(), node_id, output_type)
+        if let Some(n) = inner.graph.get_node_mut(node_id) {
+            n.attrs = attrs;
+        }
+        let values = GraphTensor::new_with_output_index(self.clone(), node_id, output_type, 0);
+        let indices = GraphTensor::new_with_output_index(self.clone(), node_id, idx_type, 1);
+        (values, indices)
     }
 
     /// Average pooling 2D.
