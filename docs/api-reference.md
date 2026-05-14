@@ -239,47 +239,13 @@ fnn.io.convert_from_pytorch(torch_model, "model.fnn")
 info = fnn.io.convert_from_onnx("model.onnx", "model.fnn")
 ```
 
-## Packed Precision Layers
+## AOT Compiler Pipeline
 
 ```python
-# Packed linear layers
-fnn.Linear4(in, out, bias)      # 4-bit packed linear
-fnn.Linear8(in, out, bias)      # 8-bit packed linear
-fnn.Linear16(in, out, bias)     # 16-bit packed linear
-fnn.Linear32(in, out, bias)     # 32-bit packed linear
+import fastnn as fnn
 
-# Packed fused layers
-fnn.PackedConvRelu4(ci, co, k, ...)   # Packed conv + ReLU (4-bit)
-fnn.PackedConvRelu8(ci, co, k, ...)   # Packed conv + ReLU (8-bit)
-fnn.PackedLinearGelu4(in, out)         # Packed linear + GELU (4-bit)
-fnn.PackedLinearGelu8(in, out)         # Packed linear + GELU (8-bit)
-
-# Packed conv2d
-fnn.PackedConv2d4(ci, co, k, ...)     # 4-bit packed conv
-fnn.PackedConv2d8(ci, co, k, ...)     # 8-bit packed conv
-
-# Packed tensors
-fnn.packed_tensor(data, shape, scale, zero, dtype="u4")
-fnn.packed_tensor_from_f32(data, shape, dtype="u4")
-fnn.PackedTensor4(data, shape, scale, zp)    # 4-bit packed tensor
-fnn.PackedTensor8(data, shape, scale, zp)    # 8-bit packed tensor
-fnn.QuantizedTensor(data, scale, zp, qdtype) # Quantized tensor
-
-# Packed multi-head attention & transformer
-fnn.PackedMultiHeadAttention4(d_model, n_heads)   # 4-bit packed MHA
-fnn.PackedMultiHeadAttention8(d_model, n_heads)   # 8-bit packed MHA
-fnn.PackedTransformerEncoder4(vocab, max_seq, ...) # 4-bit packed transformer
-fnn.PackedTransformerEncoder8(vocab, max_seq, ...) # 8-bit packed transformer
-
-# Master weight optimizers
-fnn.MasterWeightOptimizer4(params, lr)
-fnn.MasterWeightOptimizer8(params, lr)
-
-# Backend control
-fnn.use_wgpu()   # Switch to GPU backend
-fnn.use_cpu()    # Switch to CPU backend
-fnn.is_wgpu()    # Check if GPU backend is active
-```
+# Compile a model to an AOT execution plan
+# (all models use the AOT path automatically)
 
 ## YOLO & NMS Utilities
 
