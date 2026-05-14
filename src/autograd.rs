@@ -938,8 +938,11 @@ pub fn build_backward_graph(
                 }
             }
             Opcode::MaxPool => {
-                // d_input = scatter grad into positions that were max
-                // Simplified: pass through (approximate - only correct if no overlap)
+                // MaxPool now stores argmax indices as a secondary output
+                // (node_id, output_index=1). A proper backward would use these
+                // indices to scatter grad to the winning positions via ScatterNd.
+                // For now: pass gradient through (approximately correct for
+                // non-overlapping pools).
                 if let Some(&input_id) = node.inputs.first() {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
@@ -1032,7 +1035,7 @@ pub fn build_backward_graph(
             | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
             | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
             | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where
-            | Opcode::TopKValues | Opcode::TopKIndices => {
+            | Opcode::TopKValues | Opcode::TopKIndices | Opcode::TopK => {
                 for &input_id in &node.inputs {
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }

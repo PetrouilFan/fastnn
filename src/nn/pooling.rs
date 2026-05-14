@@ -41,12 +41,13 @@ impl MaxPool2d {
 impl Module for MaxPool2d {
     fn forward(&self, x: &Tensor) -> Tensor {
         let result = Tensor::exec_aot(&[x], |g, ins| {
-                vec![g.max_pool2d(
+                let (values, _indices) = g.max_pool2d(
                     &ins[0],
                     self.kernel_size as usize,
                     self.stride as usize,
                     self.padding as usize,
-                )]
+                );
+                vec![values]
             })
             .expect("MaxPool2d::forward: AOT execution failed");
         let mut output = result.into_iter().next().unwrap();
@@ -176,12 +177,13 @@ impl Module for MaxPool1d {
         let x_shape = x.shape_ref();
         let x_4d = x.reshape(vec![x_shape[0], x_shape[1], 1, x_shape[2]]);
         let out_4d = Tensor::exec_aot(&[&x_4d], |g, ins| {
-                vec![g.max_pool2d(
+                let (values, _indices) = g.max_pool2d(
                     &ins[0],
                     self.kernel_size as usize,
                     self.stride as usize,
                     self.padding as usize,
-                )]
+                );
+                vec![values]
             })
             .expect("MaxPool1d::forward: AOT execution failed")
             .into_iter()

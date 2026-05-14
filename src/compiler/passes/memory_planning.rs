@@ -9,6 +9,7 @@ pub struct AllocSlot {
     pub offset: usize,
     pub size: usize,
     pub node_id: NodeId,
+    pub output_index: usize,
 }
 
 /// The complete memory plan
@@ -16,6 +17,9 @@ pub struct AllocSlot {
 pub struct MemoryPlan {
     pub total_size: usize,
     pub slots: HashMap<NodeId, AllocSlot>,
+    /// Secondary output slots for multi-output nodes (e.g. MaxPool argmax indices).
+    /// Key is (node_id, output_index).
+    pub secondary_slots: HashMap<(NodeId, usize), AllocSlot>,
 }
 
 impl MemoryPlan {
@@ -27,6 +31,7 @@ impl MemoryPlan {
     /// plan was compiled with max-estimate sizes.
     pub fn tighten(&self, graph: &ComputeGraph, shape_env: &ShapeEnv) -> Self {
         let mut new_slots = self.slots.clone();
+        let mut new_secondary_slots = self.secondary_slots.clone();
         let mut max_end = 0usize;
         for (&node_id, slot) in &self.slots {
             let tight_size = graph
@@ -43,9 +48,26 @@ impl MemoryPlan {
             );
             max_end = max_end.max(slot.offset + clamped);
         }
+        for (&(node_id, _), slot) in &self.secondary_slots {
+            let tight_size = graph
+                .get_node(node_id)
+                .and_then(|n| n.secondary_output_type.as_ref())
+                .map(|t| t.byte_size_with_env(Some(shape_env)))
+                .unwrap_or(slot.size);
+            let clamped = tight_size.min(slot.size);
+            new_secondary_slots.insert(
+                (node_id, 1),
+                AllocSlot {
+                    size: clamped,
+                    ..*slot
+                },
+            );
+            max_end = max_end.max(slot.offset + clamped);
+        }
         MemoryPlan {
             total_size: max_end,
             slots: new_slots,
+            secondary_slots: new_secondary_slots,
         }
     }
 }
@@ -150,6 +172,7 @@ pub fn plan_memory_with_env(
         return Ok(MemoryPlan {
             total_size: 0,
             slots: HashMap::new(),
+            secondary_slots: HashMap::new(),
         });
     }
 
@@ -166,31 +189,58 @@ pub fn plan_memory_with_env(
             None => continue,
         };
 
+        // Primary output
         let size = tensor_byte_size(&node.output_type, shape_env);
-        if size == 0 { continue; }
-
-        let first_use = position.get(&node_id).copied().unwrap_or(0);
-
-        let consumers = graph.consumers(node_id);
-        let last_use = if consumers.is_empty() {
-            if graph.outputs.contains(&node_id) {
-                order.len() - 1
+        if size > 0 {
+            let first_use = position.get(&node_id).copied().unwrap_or(0);
+            let consumers = graph.consumers(node_id);
+            let last_use = if consumers.is_empty() {
+                if graph.outputs.contains(&node_id) {
+                    order.len() - 1
+                } else {
+                    first_use
+                }
             } else {
-                first_use
-            }
-        } else {
-            consumers.iter()
-                .filter_map(|cid| position.get(cid))
-                .copied()
-                .max()
-                .unwrap_or(first_use)
-        };
+                consumers.iter()
+                    .filter_map(|cid| position.get(cid))
+                    .copied()
+                    .max()
+                    .unwrap_or(first_use)
+            };
 
-        alloc_infos.push(AllocInfo {
-            node_id,
-            size,
-            live_range: LiveRange(first_use, last_use),
-        });
+            alloc_infos.push(AllocInfo {
+                node_id,
+                size,
+                live_range: LiveRange(first_use, last_use),
+            });
+        }
+
+        // Secondary output (if any)
+        if let Some(sec_type) = &node.secondary_output_type {
+            let sec_size = tensor_byte_size(sec_type, shape_env);
+            if sec_size > 0 {
+                let first_use = position.get(&node_id).copied().unwrap_or(0);
+                let consumers = graph.consumers(node_id);
+                let last_use = if consumers.is_empty() {
+                    if graph.outputs.contains(&node_id) {
+                        order.len() - 1
+                    } else {
+                        first_use
+                    }
+                } else {
+                    consumers.iter()
+                        .filter_map(|cid| position.get(cid))
+                        .copied()
+                        .max()
+                        .unwrap_or(first_use)
+                };
+                alloc_infos.push(AllocInfo {
+                    node_id,
+                    size: sec_size,
+                    live_range: LiveRange(first_use, last_use),
+                });
+            }
+        }
     }
 
     alloc_infos.sort_by(|a, b| {
@@ -199,6 +249,7 @@ pub fn plan_memory_with_env(
     });
 
     let mut slots: HashMap<NodeId, AllocSlot> = HashMap::new();
+    let mut secondary_slots: HashMap<(NodeId, usize), AllocSlot> = HashMap::new();
     let mut active: Vec<(usize, NodeId, usize)> = Vec::new();
     let mut free_list: Vec<FreeBlock> = Vec::new();
     let mut arena_top: usize = 0;
@@ -209,6 +260,9 @@ pub fn plan_memory_with_env(
             if active[i].0 < info.live_range.0 {
                 let (_, expired_id, _expired_size) = active.swap_remove(i);
                 if let Some(slot) = slots.get(&expired_id) {
+                    add_to_free_list(&mut free_list, slot.offset, slot.size);
+                }
+                if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
                     add_to_free_list(&mut free_list, slot.offset, slot.size);
                 }
             } else {
@@ -227,11 +281,25 @@ pub fn plan_memory_with_env(
             }
         };
 
-        slots.insert(info.node_id, AllocSlot {
+        let slot = AllocSlot {
             offset,
             size: info.size,
             node_id: info.node_id,
-        });
+            output_index: 0,
+        };
+
+        if slots.contains_key(&info.node_id) {
+            // This is a secondary output for a node that already has a primary slot
+            let sec_slot = AllocSlot {
+                offset,
+                size: info.size,
+                node_id: info.node_id,
+                output_index: 1,
+            };
+            secondary_slots.insert((info.node_id, 1), sec_slot);
+        } else {
+            slots.insert(info.node_id, slot);
+        }
 
         active.push((info.live_range.1, info.node_id, info.size));
     }
@@ -239,5 +307,6 @@ pub fn plan_memory_with_env(
     Ok(MemoryPlan {
         total_size: arena_top,
         slots,
+        secondary_slots,
     })
 }

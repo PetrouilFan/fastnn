@@ -169,6 +169,7 @@ fn fuse_matmul_add_relu(graph: &mut ComputeGraph) -> Result<bool, String> {
             opcode: Opcode::MatMul,
             inputs: fused_inputs,
             output_type: relu.output_type.clone(),
+            secondary_output_type: None,
             attrs,
             name: format!("fused_{}", matmul.name),
         };

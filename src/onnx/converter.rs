@@ -302,7 +302,11 @@ impl<'a> OnnxConverter<'a> {
                 let k = *ks.first().unwrap_or(&2);
                 let s = *st.first().unwrap_or(&k);
                 let p = *pd.first().unwrap_or(&0);
-                self.out(node, self.graph.max_pool2d(&ins[0], k, s, p));
+                let (_values, indices) = self.graph.max_pool2d(&ins[0], k, s, p);
+                self.out(node, _values);
+                if let Some(idx_out) = node.outputs.get(1) {
+                    self.name_to_id.insert(idx_out.clone(), indices);
+                }
             }
             "AveragePool" => {
                 let ks = parse_ints(&node.attrs, "kernel_shape", &[2, 2]);
@@ -711,8 +715,7 @@ impl<'a> OnnxConverter<'a> {
             "TopK" => {
                 let k: usize = node.attrs.get("k").and_then(|s| s.parse().ok()).unwrap_or(1);
                 let axis: i64 = node.attrs.get("axis").and_then(|s| s.parse().ok()).unwrap_or(-1);
-                let values = self.graph.topk_values(&ins[0], k, axis);
-                let indices = self.graph.topk_indices(&ins[0], k, axis);
+                let (values, indices) = self.graph.topk(&ins[0], k, axis);
                 if let Some(out_name) = node.outputs.get(0) {
                     self.name_to_id.insert(out_name.clone(), values);
                 }

@@ -121,6 +121,7 @@ impl Backend for WgpuBackend {
                     kernel_name,
                     input_slices,
                     output_slice,
+                    secondary_output_slice: _,
                     params,
                     param_dims,
                     weight_meta,
