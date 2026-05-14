@@ -69,6 +69,7 @@ impl WgpuBuffer {
     }
 
     /// Get a mutable slice to the arena data.
+    #[allow(clippy::mut_from_ref)]
     pub fn data_mut(&self) -> &mut [u8] {
         unsafe { &mut *self.0.get() }.as_mut_slice()
     }
@@ -213,7 +214,7 @@ impl Backend for WgpuBackend {
 
 /// Try to dispatch a kernel on GPU.  Returns `Err` if the kernel is not
 /// supported (caller will fall back to CPU).
-#[allow(unused_variables)]
+#[allow(unused_variables, clippy::too_many_arguments)]
 fn try_gpu_dispatch(
     arena: &WgpuBuffer,
     kernel_name: &str,

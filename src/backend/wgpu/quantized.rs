@@ -38,7 +38,7 @@ pub(super) fn dispatch_quantized_matmul_gpu(
     }
 
     let items = if bit_width == 4 { 8usize } else { 4usize };
-    let padded_k = ((k + items - 1) / items) * items; // round up for safe GPU reads
+    let padded_k = k.div_ceil(items) * items; // round up for safe GPU reads
     let k_packed = padded_k / items;
     let output_bytes = m * n * 4;
 
@@ -103,9 +103,8 @@ pub(super) fn dispatch_quantized_matmul_gpu(
 
         // Prepare scale buffer (used by shader as binding 2 alongside output)
         let mut scale_data = vec![1.0f32; n.max(1)];
-        for i in 0..n.min(scales.len()) {
-            scale_data[i] = scales[i];
-        }
+        let copy_len = n.min(scales.len());
+        scale_data[..copy_len].copy_from_slice(&scales[..copy_len]);
 
         let buf_act = ctx.create_buffer(bytemuck::cast_slice(&act_padded), "qmm_act");
         let buf_weight = ctx.create_buffer(&packed_bytes, "qmm_weight");
@@ -158,7 +157,7 @@ pub(super) fn dispatch_quantized_matmul_gpu(
         });
 
         let total_work = (m * n) as u32;
-        let workgroups = (total_work + 255) / 256;
+        let workgroups = total_work.div_ceil(256);
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -309,7 +308,7 @@ pub(super) fn dispatch_quantized_conv_gpu(
     let k = col_w;
     let n_out = f;
 
-    let padded_k = ((k + items - 1) / items) * items;
+    let padded_k = k.div_ceil(items) * items;
     let k_packed = padded_k / items;
     let output_bytes = m * n_out * 4;
 
@@ -395,7 +394,7 @@ pub(super) fn dispatch_quantized_conv_gpu(
         });
 
         let total_work = (m * n_out) as u32;
-        let workgroups = (total_work + 255) / 256;
+        let workgroups = total_work.div_ceil(256);
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {

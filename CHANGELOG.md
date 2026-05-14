@@ -53,11 +53,37 @@ This is a major release that replaces the legacy DAG/layer dispatch architecture
 
 ---
 
-## [Unreleased] — Next
+## v2.1.0 — ONNX Expansion, GPU Quantized Dispatch & Multi-Output IR
 
 ### Added
 
-- Placeholder for upcoming features beyond the v2.0.0 AOT pipeline release.
+- **ONNX converter — 10+ new ops**: TopK (fused multi-output), Split (equal-split with Known dim support), LSTM (4-gate decomposition with full sequence unrolling), GRU (3-gate decomposition with full sequence unrolling), MaxPool (values + argmax indices), ConstantOfShape.
+- **WGPU quantized GPU dispatch**: `quantized_matmul_gpu()` (U4x8/U8x4 GEMM shader with per-channel unpack + dot product) and `quantized_conv_gpu()` (CPU im2col + GPU quantized GEMM with groups/dilation).
+- **Multi-output IR foundation**: `IRNode.secondary_output_type`, `GraphTensor.output_index`, `MemoryPlan.secondary_slots`, `Instruction::CallKernel.secondary_output_slice` — enables fused ops with multiple outputs (TopK, MaxPool+indices).
+- **Fused TopK**: Single `Opcode::TopK` replaces separate `TopKValues`/`TopKIndices` — one sort kernel writes both f32 values and u64 indices.
+- **CI/CD pipeline**: `.github/workflows/ci.yml` (5 jobs: check, test, lint, python, coverage), `release.yml` (tag-triggered build + GitHub Release), `coverage.yml` (main-branch tarpaulin + Codecov).
+- **Backward formulas**: LayerNorm (dx=dγ·γ/σ, dγ=Σ(dy·x̂), dβ=Σ(dy)), RMSNorm (dx=dγ·γ/rms, dγ=Σ(dy·x̂)), AvgPool (gradient scaled by 1/k²), Gather (grad only to data), ScatterNd (grad to both data and updates).
+- **Improved backward formulas**: Div (precise: dx=grad/y, dy=-grad·x/y²), Silu (decomposed: sigmoid(x)·(1+x·(1-sigmoid(x)))), Pow (dx=grad·e·x^(e-1)), Max/Min (gradient mask via Where+comparison).
+- **SYMBOL_DIM_MAX** default changed from 1_000_000 to 8192 to prevent product overflow with multiple symbolic dims.
+
+### Changed
+
+- **Split converter**: Decomposes to multiple `graph.slice()` calls with Known dim support for equal-split.
+- **LSTM/GRU converters**: Full sequence unrolling over seq_len from X shape dim 0, concatenate per-timestep H into Y output.
+- **AotExecutor Python output**: Proper per-channel dequantization for U4/U8 output types (nibble/byte unpack + scale·val + zero_point).
+- **MaxPool**: Returns `(values, indices)` tuple; CPU dispatch stores per-window max index for potential scatter-based backward.
+
+### Removed
+
+- **Legacy opcodes**: `TopKValues`/`TopKIndices` (replaced by fused `TopK`).
+- **Broken Python tests**: `test_dag_model.py`, `test_packed_fused.py`, `test_packed_training.py`, `test_gradients.py` (tested dead v1.x gradient API).
+- **Broken Rust examples**: `packed_gemv_bench.rs`, `quantized_transformer.rs`.
+- **Stale doc references**: `DAGExecutor` → `AotExecutor` in `fastnn/io/validate.py`.
+
+### CI & Quality
+
+- **Zero clippy warnings**: Cleaned 140+ clippy lints across the codebase (mut_from_ref, new_without_default, redundant_closure, manual_div_ceil, is_multiple_of, etc.).
+- **All 97 unit tests pass** (lib, quantized_pipeline, optim_test).
 
 ---
 

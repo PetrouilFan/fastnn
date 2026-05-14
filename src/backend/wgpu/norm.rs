@@ -54,7 +54,7 @@ pub(super) fn dispatch_norm_gpu(
         let shader = build_norm_shader();
         let pipeline_key = format!("wgpu_backend_{}", kernel_name);
         ensure_norm_pipeline(ctx, &pipeline_key, &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "norm_input");
         let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "norm_weight");

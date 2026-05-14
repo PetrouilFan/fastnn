@@ -156,7 +156,7 @@ impl Module for Conv2d {
                 }
                 let expanded_t = Tensor::from_vec(
                     expanded,
-                    vec![1, self.out_channels as i64, h_out as i64, w_out as i64],
+                    vec![1, self.out_channels, h_out as i64, w_out as i64],
                 );
                 conv.add(&expanded_t)
             } else {
@@ -165,12 +165,13 @@ impl Module for Conv2d {
         };
 
         if x.requires_grad() || self.weight.requires_grad() {
-            let _edges = {
-                let mut _edges = autograd::make_edge(x);
-                _edges.extend(autograd::make_edge(&self.weight));
-                _edges
+            let edges = {
+                let mut edges = autograd::make_edge(x);
+                edges.extend(autograd::make_edge(&self.weight));
+                edges
             };
-            let backward = Conv2dBackward::new();
+            let inputs = vec![x.clone(), self.weight.clone()];
+            let backward = Conv2dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             let mut output = output.clone();
@@ -283,14 +284,16 @@ impl Module for ConvTranspose2d {
 
         // Set up autograd for ConvTranspose2d
         if x.requires_grad() || self.weight.requires_grad() {
-            let mut _edges = autograd::make_edge(x);
-            _edges.extend(autograd::make_edge(&self.weight));
+            let mut edges = autograd::make_edge(x);
+            edges.extend(autograd::make_edge(&self.weight));
+            let mut inputs = vec![x.clone(), self.weight.clone()];
             if let Some(ref b) = self.bias {
                 if b.requires_grad() {
-                    _edges.extend(autograd::make_edge(b));
+                    edges.extend(autograd::make_edge(b));
                 }
+                inputs.push(b.clone());
             }
-            let backward = autograd::ConvTranspose2dBackward::new();
+            let backward = autograd::ConvTranspose2dBackward::new(edges, inputs);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
             Arc::make_mut(&mut output.inner).autograd_meta =

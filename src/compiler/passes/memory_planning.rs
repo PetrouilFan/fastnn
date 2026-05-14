@@ -191,6 +191,12 @@ pub fn plan_memory_with_env(
 
         // Primary output
         let size = tensor_byte_size(&node.output_type, shape_env);
+        if size == 0 {
+            eprintln!(
+                "[memory_planning] SKIPPING node={} op={:?} name='{}' size=0 type={:?}",
+                node_id, node.opcode, node.name, node.output_type
+            );
+        }
         if size > 0 {
             let first_use = position.get(&node_id).copied().unwrap_or(0);
             let consumers = graph.consumers(node_id);
@@ -288,7 +294,9 @@ pub fn plan_memory_with_env(
             output_index: 0,
         };
 
-        if slots.contains_key(&info.node_id) {
+        if let std::collections::hash_map::Entry::Vacant(e) = slots.entry(info.node_id) {
+            e.insert(slot);
+        } else {
             // This is a secondary output for a node that already has a primary slot
             let sec_slot = AllocSlot {
                 offset,
@@ -297,8 +305,6 @@ pub fn plan_memory_with_env(
                 output_index: 1,
             };
             secondary_slots.insert((info.node_id, 1), sec_slot);
-        } else {
-            slots.insert(info.node_id, slot);
         }
 
         active.push((info.live_range.1, info.node_id, info.size));

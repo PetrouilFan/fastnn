@@ -581,9 +581,7 @@ impl<T: PackedWord> PackedTensor<T> {
             let src_row = m_aligned + local_row;
             let src_base = src_row * k_packed;
             let dst_base = block_words + local_row * k_packed;
-            for k in 0..k_packed {
-                reordered[dst_base + k] = self.data[src_base + k];
-            }
+            reordered[dst_base..(dst_base + k_packed)].copy_from_slice(&self.data[src_base..(src_base + k_packed)]);
         }
 
         // Copy remaining SIMD margin

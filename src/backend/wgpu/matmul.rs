@@ -28,7 +28,7 @@ pub(super) fn dispatch_matmul_gpu(
     with_wgpu_context(|ctx| -> Result<(), BackendError> {
         let shader = build_matmul_shader();
         super::pipeline::ensure_compute_pipeline(ctx, "matmul", &shader)
-            .map_err(|e| BackendError::Dispatch(e))?;
+            .map_err(BackendError::Dispatch)?;
 
         let buf_a = ctx.create_buffer(bytemuck::cast_slice(&a_data), "mm_a");
         let buf_b = ctx.create_buffer(bytemuck::cast_slice(&b_data), "mm_b");
