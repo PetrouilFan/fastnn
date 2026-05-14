@@ -50,4 +50,6 @@ This roadmap tracks backend work that should be implemented alongside the modula
 - **Packed precision expansion**: Per-row packing, batch GEMM, ARM NEON `gemv_u4x8_neon`/`gemv_u8x4_neon`, WGPU packed conv shader (since v1.3.0).
 - **Quantized dispatch**: Q/DQ folding in ONNX importer, `QLinearConv`, `MatMulInteger`, packed dispatch for MatMul/ConvTranspose/Embedding (since v1.3.0).
 - **Calibration & profiling**: `ActivationCalibrator` with KL-divergence scale refinement, `PrecisionProfiler` for per-layer sensitivity analysis and automatic mixed-precision config (since v1.3.0).
-- **Packed fused layers**: `PackedConvRelu`, `PackedLinearGelu` with BN folding (since v1.3.0).
+- **Packed fused layers**: Conv+ReLU, Linear+GELU fusions with BN folding (since v1.3.0).
+
+_Note: Legacy packed layer classes (`PackedLinear`, `PackedConv2d`, etc.) have been removed in v2.1. All quantization now goes through the AOT compiler's `QuantizationPass`._

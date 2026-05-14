@@ -1900,7 +1900,7 @@ impl Backend for CpuBackend {
                             }
                         }
                         "conv2d_u4" | "conv2d_u8" => {
-                            // Quantized conv2d using im2col + packed GEMM (same approach as PackedConv2d)
+                            // Quantized conv2d using im2col + packed GEMM
                             // input_slices: [activation (f32), weight (packed)]  optional: [bias (f32)]
                             // weight_meta carries bit_width, shape=[OC, IC_per_group*KH*KW], scales[], zero_points[]
                             // Approach: build im2col matrix [N*OH*OW, col_w], then call gemm_cpu per batch

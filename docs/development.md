@@ -1,6 +1,6 @@
 # Development Architecture (v2.0.0)
 
-FastNN v2.0.0 introduces an ahead-of-time (AOT) compilation pipeline backed by a graph IR, compiler passes, and backend code generation. The v1 eager-mode path (`PackedLinear`, `PackedConv2d`, `backends/`) is still available for backward compatibility but is considered legacy.
+FastNN v2.0.0+ uses an ahead-of-time (AOT) compilation pipeline backed by a graph IR, compiler passes, and backend code generation. The v1 eager-mode path (`PackedLinear`, `PackedConv2d`, `backends/`) has been removed in favor of the unified AOT pipeline.
 
 ## Rust Source Layout
 
@@ -14,10 +14,7 @@ src/
   storage.rs              # Memory backend and device allocation (DType, Device)
   storage_pool.rs         # Storage pooling for output tensor reuse
   storage_quantized.rs    # QuantizedTensor storage
-  packed_tensor.rs        # PackedTensor<T> — packed precision tensor
-  packed_layer.rs         # PackedLinear<T> — v1 eagremode packed linear layer
-  packed_conv.rs          # PackedConv2d<T> — v1 eagremode packed conv layer
-  packed_train.rs         # MasterWeightOptimizer — training with packed weights
+  packed_tensor.rs        # PackedTensor<T> — packed precision tensor (used by AOT quantized dispatch)
   ir/
     mod.rs                # IR module root
     node.rs               # ComputeGraph, IRNode, Opcode, IrDType, DimExpr, TensorType, ShapeEnv, QuantizedWeightMeta
@@ -112,10 +109,6 @@ src/
     nn.rs                 # Neural network + AotExecutor bindings (quantize param)
     optim.rs              # Optimizer class bindings
     io.rs                 # Save/load bindings
-    packed_tensor.rs      # Packed tensor Python bindings
-    packed_linear.rs      # Packed linear Python bindings
-    packed_conv.rs        # Packed conv Python bindings
-    packed_optim.rs       # Packed optimizer Python bindings
     packed_quantized.rs   # Quantized tensor Python bindings
   tensor/
     mod.rs                # Tensor and TensorImpl
@@ -161,20 +154,6 @@ ONNX model or GraphBuilder
    - `memory_planning` performs live-range analysis and emits an `MemoryPlan` that aliases output buffers to minimize peak memory.
 3. **Backend dispatch** — The compiled `ExecutablePlan` is handed to `CpuBackend` or `WgpuBackend`, each of which maps every `Opcode` variant to a concrete implementation.
 4. **Execution** — `GraphExecutor::run()` allocates arenas per the `MemoryPlan` and executes nodes in topological order.
-
-### Eager-mode path (v1, legacy)
-
-```
-PackedLinear<T> / PackedConv2d<T>
-        │
-        ▼
-  backends/ (dispatch to CPU simd / ARM NEON / WGPU)
-        │
-        ▼
-  PackedTensor<T> result
-```
-
-This is the original eager execution model using `PackedLinear`, `PackedConv2d`, and `MasterWeightOptimizer`. It remains available but is not under active development. New features should target the AOT path.
 
 ## Module Guide
 
@@ -240,21 +219,7 @@ The `Backend::execute_node` method receives a single `IRNode`, its input buffers
 - `microkernels.rs` for AVX2, AVX-512, and SWAR inner loops (including quantized matmul/conv)
 - `reductions_fast.rs` for optimized reduction kernels
 
-`WgpuBackend` dispatches through per-op shader modules (`matmul.rs`, `conv.rs`, `softmax.rs`, etc.) and manages a pipeline cache (`pipeline.rs`) and GPU context (`context.rs`).
-
-### `backends/` — v1 eagremode (legacy)
-
-This module contains the original v1 eager-mode backend for `PackedLinear<T>` and `PackedConv2d<T>`:
-
-| File | Purpose |
-|------|---------|
-| `cpu.rs` | CPU backend registration for packed ops |
-| `packed_simd.rs` | x86 SIMD-accelerated packed GEMV kernels |
-| `packed_blas.rs` | BLIS-style tiled packed micro-kernel |
-| `arm_neon.rs` | ARM NEON SIMD kernels for packed GEMV |
-| `wgpu/mod.rs`, `wgpu/mod_impl.rs` | WGPU compute shaders for packed layers |
-
-Do not add new features here. New ops and optimizations belong in `backend/`.
+`WgpuBackend` dispatches through per-op shader modules (`matmul.rs`, `conv.rs`, `softmax.rs`, `quantized.rs`, etc.) and manages a pipeline cache (`pipeline.rs`) and GPU context (`context.rs`).
 
 ### `onnx/` — ONNX import
 
@@ -263,8 +228,7 @@ Do not add new features here. New ops and optimizations belong in `backend/`.
 ### `autograd` — Automatic differentiation
 
 `autograd.rs` provides:
-- v1-compatible `AutogradEngine` for eager-mode operations
-- `build_backward_graph()` which constructs a `ComputeGraph` for the v2 IR path
+- `build_backward_graph()` which constructs a `ComputeGraph` for the v2 IR training path
 
 When using the AOT path, call `build_backward_graph` on the forward `ComputeGraph` to produce a joint forward+backward graph that can be compiled and executed by `GraphExecutor`.
 
@@ -336,14 +300,9 @@ To add a new packed precision type (e.g., `U2x16`):
 3. Add quantization support in `compiler/passes/quantization.rs` so that `QuantizationPass` can emit the new type's `QuantizedWeightMeta`.
 4. Add microkernels in `src/backend/cpu/microkernels.rs` for the new width.
 5. Add CpuBackend handlers for quantized matmul/conv with the new type in `src/backend/cpu/mod.rs`.
-6. If GPU support is desired, add WGPU shader variants in `src/backend/wgpu/`.
-7. Add `PackedTensor<T>` specialization in `src/packed_tensor.rs` (v1 legacy path).
-8. Add `PackedLinear<T>` specialization in `src/packed_layer.rs` (v1 legacy path).
-9. Add `PackedConv2d<T>` specialization in `src/packed_conv.rs` (v1 legacy path).
-10. Add `MasterWeightOptimizer<T>` in `src/packed_train.rs` (v1 legacy path).
-11. Add Python bindings in `src/python/packed_tensor.rs`, `src/python/packed_linear.rs`, `src/python/packed_conv.rs`, `src/python/packed_optim.rs`.
-12. Register the new dtype in `IrDType` (`ir/node.rs`) and in the `QuantizedWeightMeta` dispatch.
-13. Register in `src/lib.rs` and `src/python/mod.rs`.
+6. If GPU support is desired, add WGPU shader variants in `src/backend/wgpu/quantized.rs`.
+7. Register the new dtype in `IrDType` (`ir/node.rs`) and in the `QuantizedWeightMeta` dispatch.
+8. Register in `src/lib.rs`.
 
 ## Quantization Model
 
@@ -353,8 +312,6 @@ In v2.0.0, quantization is a **compiler pass**, not a layer-level operation. The
 2. Call `compile_with_quantize(bit_width)` (or `compile_with_plan_and_quantize`) which runs the full pipeline: shape inference → fusion → **quantization** → memory planning.
 3. The `QuantizationPass` identifies eligible `MatMul` and `Conv2d` nodes, replaces their weight inputs with quantized variants carrying `QuantizedWeightMeta` (per-channel scales, zero-points, and axis), and inserts `Dequantize` nodes where needed.
 4. `CpuBackend` and `WgpuBackend` dispatch to specialized `matmul_u4`/`matmul_u8` and `conv2d_u4`/`conv2d_u8` kernels that consume the quantized weights directly.
-
-The v1 path (`PackedLinear<U4x8>`, `PackedConv2d<U4x8>`) still works but is separate from the compiler pipeline.
 
 ## GPU Synchronization Policy
 
@@ -390,11 +347,11 @@ To add a new fusion, extend `OperatorFusionPass` with the pattern, add the new `
 | Aspect | v1.x | v2.0.0 |
 |--------|------|--------|
 | Kernel dispatch | `kernels/` with runtime dispatch | `backend/` with AOT-compiled `ExecutablePlan` |
-| Quantization | Per-layer `PackedLinear<T>`, `PackedConv2d<T>` | Compiler pass (`QuantizationPass`) with per-channel `QuantizedWeightMeta` |
+| Quantization | Compiler pass (`QuantizationPass`) with per-channel `QuantizedWeightMeta` | Compiler pass (`QuantizationPass`) with per-channel `QuantizedWeightMeta` |
 | Graph representation | None (eager mode) | `ComputeGraph` IR with `IRNode`, `Opcode`, `DimExpr` |
 | Shape handling | Runtime only | Symbolic `DimExpr` with `ShapeEnv` via `ShapeInferencePass` |
 | Memory management | Per-op allocation | Arena-based `MemoryPlan` with live-range aliasing |
 | Fusion | Fused layer types in `nn/fused.rs` | `OperatorFusionPass` in compiler pipeline |
 | Backend code | `kernels/cpu/`, `kernels/gpu/` | `backend/cpu/`, `backend/wgpu/` (structured per-op) |
 | ONNX import | Python-side `dag.py` | Rust `OnnxConverter` → `ComputeGraph` → compiler pipeline |
-| Legacy layer runtime | N/A | `backends/` (original `packed_simd`, `packed_blas`, `arm_neon`) |
+| Legacy layer runtime | _Removed_ | _Unified AOT pipeline_ |

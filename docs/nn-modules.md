@@ -338,35 +338,17 @@ fused_relu = fnn.FusedConvBnRelu(conv, bn)
 fused_gelu = fnn.FusedConvBnGelu(conv, bn)
 ```
 
-## Packed Precision Layers
+## Quantized Layers (AOT Compiler Pass)
 
-Quantized layers with packed weight storage (U4, U8, F16, F32 precisions):
+Quantization is handled by the AOT compiler's `QuantizationPass`. To compile a model with quantized weights:
 
 ```python
-# Packed linear layers
-fnn.Linear4(128, 64)    # 4-bit packed linear
-fnn.Linear8(128, 64)    # 8-bit packed linear
-fnn.Linear16(128, 64)   # 16-bit packed linear
-fnn.Linear32(128, 64)   # 32-bit (f32) packed linear
-
-# Packed fused conv + ReLU
-fnn.PackedConvRelu4(3, 64, 3, padding=1)
-fnn.PackedConvRelu8(3, 64, 3, padding=1)
-fnn.PackedConvRelu16(3, 64, 3, padding=1)
-fnn.PackedConvRelu32(3, 64, 3, padding=1)
-
-# Packed fused linear + GELU
-fnn.PackedLinearGelu4(128, 64)
-fnn.PackedLinearGelu8(128, 64)
-fnn.PackedLinearGelu16(128, 64)
-fnn.PackedLinearGelu32(128, 64)
-
-# Packed convolution layers
-fnn.PackedConv2d4(3, 64, 3, padding=1)
-fnn.PackedConv2d8(3, 64, 3, padding=1)
-fnn.PackedConv2d16(3, 64, 3, padding=1)
-fnn.PackedConv2d32(3, 64, 3, padding=1)
+# Compile with 4-bit or 8-bit quantization
+plan = model.compile_with_quantize(bit_width=4, backend=CpuBackend)
+plan = model.compile_with_quantize(bit_width=8, backend=CpuBackend)
 ```
+
+The compiler pass replaces eligible `MatMul` and `Conv2d` nodes with quantized variants carrying per-channel `QuantizedWeightMeta`. The v1 packed layer classes (`PackedLinear`, `PackedConv2d`, etc.) have been removed.
 
 ## Multi-Head Attention
 
@@ -374,11 +356,6 @@ fnn.PackedConv2d32(3, 64, 3, padding=1)
 # Standard attention
 mha = fnn.MultiHeadAttention(d_model=512, n_heads=8)
 output = mha(query, key, value)
-
-# Packed quantized attention (U4/U8)
-from fastnn import PackedMultiHeadAttention4, PackedMultiHeadAttention8
-mha4 = PackedMultiHeadAttention4(d_model=512, n_heads=8)
-mha8 = PackedMultiHeadAttention8(d_model=512, n_heads=8)
 ```
 
 ## Transformer
@@ -393,11 +370,6 @@ encoder = fnn.TransformerEncoder(
     d_model=512, n_heads=8, n_layers=6,
     ff_dim=2048, n_classes=10, dropout=0.1
 )
-
-# Packed quantized transformer encoder (U4/U8)
-from fastnn import PackedTransformerEncoder4, PackedTransformerEncoder8
-enc4 = PackedTransformerEncoder4(10000, 512, 512, 8, 6, 2048, 10)
-enc8 = PackedTransformerEncoder8(10000, 512, 512, 8, 6, 2048, 10)
 ```
 
 ## Sequential

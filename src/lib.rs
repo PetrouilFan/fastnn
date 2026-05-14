@@ -50,7 +50,7 @@ pub use storage_quantized::QuantizedTensor;
 pub use storage::{DType, Device};
 pub use tensor::Tensor;
 
-// v2.1: Legacy packed layer classes (PackedLinear, PackedConv2d, etc.)
+// v2.1 cleanup: legacy packed layer classes (PackedLinear, PackedConv2d, etc.)
 // and their kernel backends have been removed. The AOT pipeline's
 // quantized dispatch (matmul_u4, conv2d_u4) uses PackedTensor and
 // dtypes internally via backend/cpu/microkernels.rs.

@@ -201,12 +201,12 @@ For models with symbolic dimensions, `tightened()` recomputes arena offsets from
 
 ## v1 vs v2 Comparison
 
-| Aspect | v1.x (DAG) | v2.0.0 (AOT) |
+| Aspect | v1.x (removed) | v2.0.0 (AOT) |
 |--------|-----------|---------------|
 | Graph representation | Python DAG + Rust layers | ComputeGraph IR |
-| Quantization | Layer-level PackedLinear/PackedConv2d | Compiler pass |
+| Quantization | Layer-level (_removed_) | Compiler pass |
 | Memory | Per-tensor allocation | Arena-based memory plan |
 | Fusion | None (sequential ops) | MatMul+Add, Conv2d+Add, +ReLU |
 | Shape inference | Runtime only | Compile-time with DimExpr |
 | Backend dispatch | Dynamic at runtime | Compiled into ExecutablePlan |
-| ONNX import | Python DAGExecutor | Rust OnnxConverter → ComputeGraph |
+| ONNX import | Python DAG (_removed_) | Rust OnnxConverter → ComputeGraph |
