@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::ir::node::{ComputeGraph, DimExpr, ShapeEnv};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug)]
@@ -24,7 +25,7 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BufferSlice {
     pub offset: usize,
     pub size: usize,
@@ -40,7 +41,7 @@ impl BufferSlice {
 /// Carries per-channel scales, zero-points, shape, and bit-width
 /// so the backend dispatch can construct a [`PackedTensor`] for SIMD
 /// or GPU compute shaders.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizedWeightMeta {
     /// Bit width of the packed type: 4 or 8.
     pub bit_width: usize,
@@ -52,7 +53,7 @@ pub struct QuantizedWeightMeta {
     pub shape: Vec<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Instruction {
     CallKernel {
         kernel_name: String,
@@ -89,9 +90,26 @@ pub enum Instruction {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutablePlan {
     pub instructions: Vec<Instruction>,
     pub arena_size: usize,
+}
+
+impl ExecutablePlan {
+    /// Save the plan to a binary file using bincode serialization.
+    pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = bincode::serialize(self)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// Load a plan from a binary file created by [`save`](Self::save).
+    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let bytes = std::fs::read(path)?;
+        let plan: ExecutablePlan = bincode::deserialize(&bytes)?;
+        Ok(plan)
+    }
 }
 
 /// AOT graph executor (ties together IR → compiler passes → backend)

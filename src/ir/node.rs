@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -141,7 +142,7 @@ pub fn set_symbol_dim_max(val: u64) {
     SYMBOL_DIM_MAX.store(val, Ordering::Relaxed);
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DimExpr {
     Known(u64),
     Symbol(String),
