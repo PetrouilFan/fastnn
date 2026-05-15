@@ -268,6 +268,18 @@ fn resolve_shape(shape: &[DimExpr], env: &ShapeEnv) -> Result<Vec<u64>, String> 
         .collect()
 }
 
+/// Lenient shape resolution: unbound Symbol dims are replaced with
+/// [`SYMBOL_DIM_MAX`] instead of failing, so that validation checks
+/// can still run in the presence of symbols that will be resolved at
+/// runtime (e.g. the -1 dimension of a Reshape).
+fn resolve_shape_lenient(shape: &[DimExpr], env: &ShapeEnv) -> Vec<u64> {
+    let symbol_max = crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+    shape
+        .iter()
+        .map(|d| d.evaluate_with_env(env).unwrap_or(symbol_max))
+        .collect()
+}
+
 /// Parse an axis attribute, supporting negative values (ONNX-style).
 /// Returns a 0-based positive axis, or an error if out of range.
 fn resolve_axis(attrs: &std::collections::HashMap<String, String>, key: &str, rank: usize) -> Result<usize, String> {
@@ -302,9 +314,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             .inputs
             .iter()
             .filter_map(|&id| graph.get_node(id))
-            .map(|n| resolve_shape(&n.output_type.shape, shape_env))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("node {}: {e}", node_id))?;
+            .map(|n| resolve_shape_lenient(&n.output_type.shape, shape_env))
+            .collect();
 
         // DEBUG: Log every node through validation
         eprintln!(
@@ -362,19 +373,25 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 let rank = input_shapes[0].len();
                 let axis = resolve_axis(&node.attrs, "axis", rank)
                     .map_err(|e| format!("Concat node {}: {e}", node_id))?;
-                for (i, s) in input_shapes.iter().enumerate().skip(1) {
-                    if s.len() != rank {
-                        return Err(format!(
-                            "Concat node {}: rank mismatch input 0 ({}) vs input {} ({})",
-                            node_id, rank, i, s.len()
-                        ));
-                    }
-                    for j in 0..rank {
-                        if j != axis && s[j] != input_shapes[0][j] {
+                // Skip dim compatibility checks if any input contains
+                // unresolved Symbol dims (resolved to SYMBOL_DIM_MAX).
+                let symbol_max = crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+                let has_unresolved = input_shapes.iter().any(|s| s.contains(&symbol_max));
+                if !has_unresolved {
+                    for (i, s) in input_shapes.iter().enumerate().skip(1) {
+                        if s.len() != rank {
                             return Err(format!(
-                                "Concat node {}: dim {} mismatch at axis {}: {} vs {}",
-                                node_id, j, axis, s[j], input_shapes[0][j]
+                                "Concat node {}: rank mismatch input 0 ({}) vs input {} ({})",
+                                node_id, rank, i, s.len()
                             ));
+                        }
+                        for j in 0..rank {
+                            if j != axis && s[j] != input_shapes[0][j] {
+                                return Err(format!(
+                                    "Concat node {}: dim {} mismatch at axis {}: {} vs {}",
+                                    node_id, j, axis, s[j], input_shapes[0][j]
+                                ));
+                            }
                         }
                     }
                 }
@@ -463,17 +480,41 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 let in_numel: u64 = input_shapes[0].iter().product();
                 // For reshape, compute expected numel from attrs or output shape
                 if let Some(out_shape) = node.attrs.get("shape") {
-                    let parsed: Vec<u64> = out_shape.trim_matches(|c| c == '[' || c == ']')
+                    // Split the shape attr into tokens. Each token is either a
+                    // concrete u64 dim ("42") or a symbolic dim ("N", "-1", etc.)
+                    // that will be resolved at runtime.
+                    let tokens: Vec<&str> = out_shape.trim_matches(|c| c == '[' || c == ']')
                         .split(',')
-                        .filter_map(|s| s.trim().parse().ok())
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
                         .collect();
-                    let out_numel: u64 = parsed.iter().product();
-                    if in_numel != out_numel {
-                        return Err(format!(
-                            "Reshape node {}: element count mismatch {} vs {} (in {:?} -> {:?})",
-                            node_id, in_numel, out_numel, input_shapes[0], parsed
-                        ));
-                    }
+                    // Collect only the concrete (u64-parseable) dims.
+                    let concrete: Vec<u64> = tokens.iter()
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    let symbol_count = tokens.len() - concrete.len();
+                    if symbol_count == 0 {
+                        // All dims are concrete: the total element count must
+                        // match exactly.
+                        let out_numel: u64 = concrete.iter().product();
+                        if in_numel != out_numel {
+                            return Err(format!(
+                                "Reshape node {}: element count mismatch {} vs {} (in {:?} -> {:?})",
+                                node_id, in_numel, out_numel, input_shapes[0], concrete
+                            ));
+                        }
+                    } else if symbol_count == 1 {
+                        // Exactly one symbolic dim: the runtime will compute it
+                        // as in_numel / product(concrete_dims).  Validate that
+                        // the division is exact.
+                        let known_product: u64 = concrete.iter().product();
+                        if known_product == 0 || in_numel % known_product != 0 {
+                            return Err(format!(
+                                "Reshape node {}: element count {} not divisible by known dims product {} (shape={:?})",
+                                node_id, in_numel, known_product, tokens
+                            ));
+                        }
+                    } // Multiple symbolic dims: cannot validate statically, skip.
                 }
             }
             Opcode::Softmax if !input_shapes.is_empty() => {
