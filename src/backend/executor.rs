@@ -20,6 +20,7 @@ use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, MemoryP
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
 use crate::compiler::passes::{memory_planning, operator_fusion, quantization, shape_inference};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 /// An ahead-of-time graph executor that compiles and dispatches
@@ -268,6 +269,42 @@ impl<B: Backend> GraphExecutor<B> {
         }
         all_slots.sort_by_key(|(off, _, _, _)| *off);
 
+        // Build topological position lookup for live-range checks
+        let exec_order = graph.topological_sort();
+        let exec_pos: HashMap<NodeId, usize> = exec_order
+            .iter()
+            .enumerate()
+            .map(|(i, &nid)| (nid, i))
+            .collect();
+
+        // Compute live ranges: for each node, find its last consumer or output position
+        fn slot_live_range(
+            nid: NodeId,
+            exec_len: usize,
+            exec_pos: &HashMap<NodeId, usize>,
+            graph: &ComputeGraph,
+            required_nodes: &[NodeId],
+            outputs: &[NodeId],
+        ) -> (usize, usize) {
+            let first = exec_pos.get(&nid).copied().unwrap_or(0);
+            let consumers: Vec<NodeId> = graph.consumers(nid);
+            let is_output = outputs.contains(&nid);
+            let is_required = required_nodes.contains(&nid);
+            let last = if is_output || is_required {
+                exec_len - 1
+            } else if consumers.is_empty() {
+                first
+            } else {
+                consumers
+                    .iter()
+                    .filter_map(|c| exec_pos.get(c))
+                    .copied()
+                    .max()
+                    .unwrap_or(first)
+            };
+            (first, last)
+        }
+
         // Find if any slot overlaps with MaxPool primary slots
         let maxpool_primary: Vec<(usize, usize, NodeId)> = tightened_memory_plan
             .slots
@@ -283,26 +320,45 @@ impl<B: Backend> GraphExecutor<B> {
 
         for &(mp_off, mp_sz, mp_nid) in &maxpool_primary {
             let mp_end = mp_off + mp_sz;
+            let mp_lr = slot_live_range(
+                mp_nid,
+                exec_order.len(),
+                &exec_pos,
+                graph,
+                &graph.required_nodes,
+                &graph.outputs,
+            );
             for &(slot_off, slot_sz, slot_nid, is_sec) in &all_slots {
                 let slot_end = slot_off + slot_sz;
                 // Check if this slot overlaps with the MaxPool primary (excluding the MaxPool's own secondary)
                 if slot_nid == mp_nid {
                     continue;
                 }
-                let overlap = slot_off < mp_end && mp_off < slot_end;
-                if overlap {
-                    let op = graph
-                        .get_node(slot_nid)
-                        .map(|n| format!("{:?}", n.opcode))
-                        .unwrap_or_default();
-                    let mp_op = graph
-                        .get_node(mp_nid)
-                        .map(|n| format!("{:?}", n.opcode))
-                        .unwrap_or_default();
-                    eprintln!("[FNN_DBG_OVERLAP] MaxPool {} nid={} [{}, {}) overlaps with {} nid={}{} [{}, {})",
-                        mp_op, mp_nid, mp_off, mp_end,
-                        op, slot_nid, if is_sec { " SECONDARY" } else { "" }, slot_off, slot_end);
+                let addr_overlap = slot_off < mp_end && mp_off < slot_end;
+                if !addr_overlap {
+                    continue;
                 }
+                let slot_lr = slot_live_range(
+                    slot_nid,
+                    exec_order.len(),
+                    &exec_pos,
+                    graph,
+                    &graph.required_nodes,
+                    &graph.outputs,
+                );
+                let lr_overlap = slot_lr.0 <= mp_lr.1 && mp_lr.0 <= slot_lr.1;
+                let op = graph
+                    .get_node(slot_nid)
+                    .map(|n| format!("{:?}", n.opcode))
+                    .unwrap_or_default();
+                let mp_op = graph
+                    .get_node(mp_nid)
+                    .map(|n| format!("{:?}", n.opcode))
+                    .unwrap_or_default();
+                eprintln!("[FNN_DBG_OVERLAP] MaxPool {} nid={} [{}, {}) lr=({},{}) overlaps with {} nid={}{} [{}, {}) lr=({},{}) live_range_overlap={}",
+                    mp_op, mp_nid, mp_off, mp_end, mp_lr.0, mp_lr.1,
+                    op, slot_nid, if is_sec { " SECONDARY" } else { "" }, slot_off, slot_end, slot_lr.0, slot_lr.1,
+                    if lr_overlap { "YES *** BUG ***" } else { "no (safe reuse)" });
             }
         }
 
