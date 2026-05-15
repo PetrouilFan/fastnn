@@ -411,7 +411,21 @@ impl<'a> OnnxConverter<'a> {
                 }
             }
             "Concat" => {
-                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                // Parse axis as i64 (ONNX allows negative values like -1) and
+                // normalize to a positive index using the input tensor rank.
+                let raw_axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let rank = ins.first().map(|t| t.shape().len()).unwrap_or(1);
+                let axis = if raw_axis < 0 {
+                    let r = rank as i64;
+                    if raw_axis < -r {
+                        0usize // fallback: should not happen
+                    } else {
+                        (r + raw_axis) as usize
+                    }
+                } else {
+                    raw_axis as usize
+                };
+                let axis = axis.min(rank.saturating_sub(1));
                 let refs: Vec<&GraphTensor> = ins.iter().collect();
                 self.out(node, self.graph.concat(&refs, axis));
             }
@@ -419,7 +433,15 @@ impl<'a> OnnxConverter<'a> {
                 // Split input tensor into N outputs along the given axis.
                 // split attribute: optional list of output lengths.
                 // If absent: equal split across all outputs.
-                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let raw_axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let rank = ins.first().map(|t| t.shape().len()).unwrap_or(1);
+                let axis = if raw_axis < 0 {
+                    let r = rank as i64;
+                    if raw_axis < -r { 0usize } else { (r + raw_axis) as usize }
+                } else {
+                    raw_axis as usize
+                };
+                let axis = axis.min(rank.saturating_sub(1));
                 let n_outputs = node.outputs.len().max(1);
                 let split_sizes: Vec<usize> = if let Some(s) = node.attrs.get("split") {
                     s.split(',').filter_map(|v| v.trim().parse().ok()).collect()
@@ -595,8 +617,15 @@ impl<'a> OnnxConverter<'a> {
             }
             "Expand" => {
                 // Expand broadcasts data to the shape specified by the second input.
+                // When the DAG builder provides an "expand_shape" attr with concrete
+                // target dims, we pass it through to expand_op so it can compute the
+                // correct broadcast output shape for memory planning.
+                let mut expand_attrs = std::collections::HashMap::new();
+                if let Some(shape_str) = node.attrs.get("expand_shape") {
+                    expand_attrs.insert("expand_shape".to_string(), shape_str.clone());
+                }
                 let gt = if ins.len() >= 2 {
-                    self.graph.expand_op(&ins[0], &ins[1])
+                    self.graph.expand_op(&ins[0], &ins[1], expand_attrs)
                 } else {
                     ins[0].clone()
                 };

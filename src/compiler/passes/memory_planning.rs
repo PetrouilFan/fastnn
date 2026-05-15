@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::ir::node::{ComputeGraph, NodeId, ShapeEnv, TensorType};
+use crate::ir::node::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType};
 use std::collections::HashMap;
 
 /// A single allocation slot in the arena
@@ -83,6 +83,7 @@ struct AllocInfo {
     node_id: NodeId,
     size: usize,
     live_range: LiveRange,
+    is_secondary: bool,
 }
 
 /// A free memory block
@@ -93,6 +94,11 @@ struct FreeBlock {
 }
 
 /// Add a free block to the free list, merging adjacent blocks
+/// Align a value up to the next multiple of `alignment` (must be power of 2).
+fn align_up(val: usize, alignment: usize) -> usize {
+    (val + alignment - 1) & !(alignment - 1)
+}
+
 fn add_to_free_list(free_list: &mut Vec<FreeBlock>, offset: usize, size: usize) {
     let pos = free_list.binary_search_by(|b| b.offset.cmp(&offset)).unwrap_or_else(|e| e);
 
@@ -198,7 +204,19 @@ pub fn plan_memory_with_env(
             );
         }
         if size > 0 {
-            let first_use = position.get(&node_id).copied().unwrap_or(0);
+            // Input nodes have their data written by the executor before any
+            // instruction runs, so their lifetime starts at position 0 — not
+            // at their own position in the topological sort.  Without this,
+            // the planner would incorrectly reuse an Input node's memory slot
+            // for a Constant or intermediate that is produced earlier in the
+            // execution order, corrupting the input data before all consumers
+            // have read it (see e.g. autograd Mul backward sharing a slot
+            // between Input b and Constant 0.25).
+            let first_use = if matches!(node.opcode, Opcode::Input) {
+                0
+            } else {
+                position.get(&node_id).copied().unwrap_or(0)
+            };
             let consumers = graph.consumers(node_id);
             let last_use = if consumers.is_empty() {
                 if graph.outputs.contains(&node_id) {
@@ -218,6 +236,7 @@ pub fn plan_memory_with_env(
                 node_id,
                 size,
                 live_range: LiveRange(first_use, last_use),
+                is_secondary: false,
             });
         }
 
@@ -244,13 +263,19 @@ pub fn plan_memory_with_env(
                     node_id,
                     size: sec_size,
                     live_range: LiveRange(first_use, last_use),
+                    is_secondary: true,
                 });
             }
         }
     }
 
+    // Sort by (start_time, primary-first, size-desc).
+    // The primary-first tiebreaker ensures that a node's primary output
+    // is always allocated to the main slot, even when the secondary output
+    // (e.g. MaxPool i64 indices) is larger than the primary (f32 data).
     alloc_infos.sort_by(|a, b| {
         a.live_range.0.cmp(&b.live_range.0)
+            .then_with(|| a.is_secondary.cmp(&b.is_secondary))
             .then_with(|| b.size.cmp(&a.size))
     });
 
@@ -276,13 +301,23 @@ pub fn plan_memory_with_env(
             }
         }
 
-        let offset = find_best_fit(&mut free_list, info.size);
+        let raw_offset = find_best_fit(&mut free_list, info.size);
 
-        let offset = match offset {
-            Some(off) => off,
+        let offset = match raw_offset {
+            Some(off) => {
+                // Align the free-list offset to 8 bytes (satisfies both
+                // f32 4-byte and i64 8-byte alignment requirements).
+                let aligned = align_up(off, 8);
+                // If alignment created a gap, return the excess to the free list.
+                if aligned > off {
+                    let gap = aligned - off;
+                    add_to_free_list(&mut free_list, off, gap);
+                }
+                aligned
+            }
             None => {
-                let off = arena_top;
-                arena_top += info.size;
+                let off = align_up(arena_top, 8);
+                arena_top = off + info.size;
                 off
             }
         };
@@ -294,10 +329,8 @@ pub fn plan_memory_with_env(
             output_index: 0,
         };
 
-        if let std::collections::hash_map::Entry::Vacant(e) = slots.entry(info.node_id) {
-            e.insert(slot);
-        } else {
-            // This is a secondary output for a node that already has a primary slot
+        if info.is_secondary {
+            // This is a secondary output (e.g. MaxPool indices)
             let sec_slot = AllocSlot {
                 offset,
                 size: info.size,
@@ -305,6 +338,9 @@ pub fn plan_memory_with_env(
                 output_index: 1,
             };
             secondary_slots.insert((info.node_id, 1), sec_slot);
+        } else {
+            // Primary output — use the main slot
+            slots.insert(info.node_id, slot);
         }
 
         active.push((info.live_range.1, info.node_id, info.size));

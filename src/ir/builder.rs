@@ -1238,15 +1238,73 @@ impl GraphBuilder {
     }
 
     /// Expand (broadcast) tensor to a target shape.
-    pub fn expand_op(&self, input: &GraphTensor, shape: &GraphTensor) -> GraphTensor {
-        let output_type = TensorType::new(input.shape().to_vec(), input.dtype());
+    /// `expand_attrs` may contain "expand_shape" with comma-separated concrete
+    /// target dims, allowing the converter / shape-inference to compute the
+    /// correct broadcast output shape.
+    pub fn expand_op(
+        &self,
+        input: &GraphTensor,
+        shape: &GraphTensor,
+        attrs: HashMap<String, String>,
+    ) -> GraphTensor {
+        eprintln!("[expand_op] input_shape={:?} target_shape={:?}",
+            input.shape(),
+            attrs.get("expand_shape"));
+        // If an "expand_shape" attr was provided by the DAG builder, compute
+        // the broadcast output shape already here, so the output TensorType
+        // is correct for memory planning.
+        let output_type = if let Some(shape_str) = attrs.get("expand_shape") {
+            let target: Vec<u64> = shape_str
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect();
+            if target.is_empty() {
+                TensorType::new(input.shape().to_vec(), input.dtype())
+            } else {
+                let data_shape = input.shape();
+                let data_rank = data_shape.len();
+                let target_rank = target.len();
+                let max_rank = data_rank.max(target_rank);
+                let mut broadcast_shape = Vec::with_capacity(max_rank);
+                for i in 0..max_rank {
+                    let data_dim = if i < max_rank - data_rank {
+                        1u64
+                    } else {
+                        let idx = i - (max_rank - data_rank);
+                        match data_shape[idx] {
+                            DimExpr::Known(v) => v,
+                            _ => 1u64,
+                        }
+                    };
+                    let target_dim = if i < max_rank - target_rank {
+                        1u64
+                    } else {
+                        target[i - (max_rank - target_rank)]
+                    };
+                    broadcast_shape.push(DimExpr::Known(data_dim.max(target_dim)));
+                }
+                eprintln!("[expand_op] computed broadcast shape={:?}", broadcast_shape);
+                TensorType::new(broadcast_shape, input.dtype())
+            }
+        } else {
+            TensorType::new(input.shape().to_vec(), input.dtype())
+        };
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
+        let node_id = inner.graph.add_node_with_attrs(
             Opcode::Expand,
             vec![input.node_id, shape.node_id],
             output_type.clone(),
+            attrs,
         );
         GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Set attributes on an existing graph node (e.g. for shape-inference hints).
+    pub fn set_node_attrs(&self, node_id: NodeId, attrs: HashMap<String, String>) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(n) = inner.graph.get_node_mut(node_id) {
+            n.attrs.extend(attrs);
+        }
     }
 
     /// Tile (repeat) tensor along each axis.
@@ -2904,13 +2962,15 @@ mod tests {
 
         // Loss scaling: multiply loss by scale factor
         let scale = 16.0f32;
-        let scale_t = g.constant_scalar(scale);
+        let scale_bytes = bytemuck::cast_slice::<_, u8>(&[scale]).to_vec();
+        let scale_t = g.constant(&scale_bytes, TensorType::new(vec![], IrDType::F32));
         let scaled_loss = g.mul_scalar(&loss, &scale_t);
         let grads = g.backward(&scaled_loss).unwrap();
         let dW_scaled = &grads[1];
 
         // Unscale: divide gradient by scale (multiply by 1/scale)
-        let inv_scale_t = g.constant_scalar(1.0 / scale);
+        let inv_scale_bytes = bytemuck::cast_slice::<_, u8>(&[1.0 / scale]).to_vec();
+        let inv_scale_t = g.constant(&inv_scale_bytes, TensorType::new(vec![], IrDType::F32));
         let dW = g.mul_scalar(dW_scaled, &inv_scale_t);
         let updated_W = g.apply_sgd(&W, &dW, 0.1);
 

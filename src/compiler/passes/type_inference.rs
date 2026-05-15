@@ -6,7 +6,7 @@
 //!
 //! # Algorithm
 //!
-//! ```
+//! ```ignore
 //! for node in topological_order(graph):
 //!     for (i, input) in node.inputs.enumerate():
 //!         expected = expected_input_dtype(node.opcode, i)
