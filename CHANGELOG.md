@@ -1,5 +1,57 @@
 # Changelog
 
+## v2.1.0 — Multi-Threaded Dispatch, Serialization, ONNX Export & Runtime
+
+This release adds multi-threaded CPU dispatch (40+ kernels parallelized via rayon),
+plan/graph serialization (save/load compiled models), ONNX export, and a standalone
+runtime for deploying pre-compiled models without the compiler stack.
+
+### Multi-Threaded Dispatch (Phase 4b)
+
+- **40+ CPU kernels parallelized** using `rayon::par_iter_mut()` and `par_chunks_mut()`
+  under the `parallel` feature flag (enabled by default)
+- **MatMul, fused MatMul+ReLU, all elementwise ops, reduce, transpose, activations,
+  and optimizers** now use all available CPU cores
+- **BLAS threshold tuned** — crossover raised from 32 to 16384 when parallelism is
+  enabled (parallel scalar handles medium matrices competitively)
+- **Softmax and layer norm** parallelized per-row using safe raw-pointer dispatch
+- **rayon made optional** — tied to the `parallel` feature for minimal builds
+
+### Backward Gradient Formula Fixes
+
+- **ReduceSum/ReduceMean** — now scale by the incoming gradient (`grad_id`) instead
+  of ignoring it; `ReduceMean` n-factor correctly computed as `input_numel / output_numel`
+- **MulScalar backward** — proper `da = dy * b, db = dy * a` (was pass-through)
+- **GradientScale backward** — output type uses the actual input shape (not empty scalar)
+
+### Memory Planner Fixes
+
+- **Input node lifetime** starts at position 0 (not the node's topological position),
+  preventing Constants/intermediates from reusing Input slots prematurely
+- **find_best_fit refactored** — returns `(index, offset)` tuple; free-list mutation
+  moved to caller for proper alignment tracking
+
+### Optimizer Kernel Fix
+
+- **All 5 optimizer kernels** — fixed to read weight values from `input_slices[0]`
+  (the weight's slot) instead of `out_start..out_end` (the output slot), which
+  contained stale/uninitialized data from arena reuse
+
+### Serialization & Export
+
+- **ExecutablePlan save/load** — binary format via bincode (`save()`, `load()`)
+- **ComputeGraph save/load** — `.fnn` binary format via bincode (`save_fnn()`, `load_fnn()`)
+- **ONNX export** — walk ComputeGraph → ONNX JSON (`export_to_onnx_json()`,
+  `export_to_onnx_file()`), maps 30+ IR opcodes, exports weights
+- **Standalone runtime** — `Runtime<B: Backend>` loads pre-compiled plans and
+  executes without the compiler stack (`load()`, `save()`, `run()`)
+
+### Build System
+
+- Updated `pyproject.toml` version to 2.1.0
+- Removed `pip>=26.0.1` from runtime dependencies
+- Moved `torch>=2.11.0` to optional extras
+
 ## v2.0.0 — AOT Compiler Pipeline & Native Quantization
 
 This is a major release that replaces the legacy DAG/layer dispatch architecture with a complete IR-based AOT compiler pipeline, and adds native 4-bit/8-bit weight quantization as a first-class compiler pass.
