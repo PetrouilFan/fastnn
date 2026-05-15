@@ -96,6 +96,7 @@ unsafe impl Send for CpuBuffer {}
 unsafe impl Sync for CpuBuffer {}
 
 /// CPU execution context. Zero allocation during dispatch.
+#[derive(Clone)]
 pub struct CpuBackend;
 
 impl Backend for CpuBackend {
@@ -496,12 +497,18 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::BiasAdd => {
+                    // Channel stride = product of spatial dims (H*W for 4D NCHW).
+                    // This is needed for correct NCHW channel-wise broadcast:
+                    //   bias_idx = (flat_idx / channel_stride) % num_channels
+                    let channel_stride = input_shapes.first()
+                        .map(|s| s.iter().skip(2).product::<u64>())
+                        .unwrap_or(1) as usize;
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "biasadd".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![],
+                        params: vec![channel_stride],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -578,12 +585,18 @@ impl Backend for CpuBackend {
                     let dim: usize = node.attrs.get("dim").and_then(|d| d.parse().ok()).unwrap_or(0);
                     let start: usize = node.attrs.get("start").and_then(|s| s.parse().ok()).unwrap_or(0);
                     let end: usize = node.attrs.get("end").and_then(|e| e.parse().ok()).unwrap_or(1);
+                    // Compute the stride (product of dim sizes after `dim`)
+                    // so the kernel can correctly compute the offset for non-batch dims.
+                    let stride = input_shapes.first()
+                        .filter(|s| dim < s.len())
+                        .map(|s| s[dim + 1..].iter().product::<u64>() as usize)
+                        .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "slice_f32".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![dim, start, end],
+                        params: vec![dim, start, end, stride],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -1306,13 +1319,15 @@ impl Backend for CpuBackend {
                                         &mut d[out_start..out_end]
                                     )
                                 };
-                                let len = out_f32.len().min(a.len()).min(b.len());
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = a[i] + b[i]; } }
+                                { for i in 0..out_len { out_f32[i] = a[i % a_len] + b[i % b_len]; } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i] + b[i]);
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i % a_len] + b[i % b_len]);
                                 }
                             }
                         }
@@ -1334,13 +1349,15 @@ impl Backend for CpuBackend {
                                         &mut d[out_start..out_end]
                                     )
                                 };
-                                let len = out_f32.len().min(a.len()).min(b.len());
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = a[i] - b[i]; } }
+                                { for i in 0..out_len { out_f32[i] = a[i % a_len] - b[i % b_len]; } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i] - b[i]);
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i % a_len] - b[i % b_len]);
                                 }
                             }
                         }
@@ -1362,13 +1379,15 @@ impl Backend for CpuBackend {
                                         &mut d[out_start..out_end]
                                     )
                                 };
-                                let len = out_f32.len().min(a.len()).min(b.len());
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = a[i] * b[i]; } }
+                                { for i in 0..out_len { out_f32[i] = a[i % a_len] * b[i % b_len]; } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i] * b[i]);
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i % a_len] * b[i % b_len]);
                                 }
                             }
                         }
@@ -1390,13 +1409,15 @@ impl Backend for CpuBackend {
                                         &mut d[out_start..out_end]
                                     )
                                 };
-                                let len = out_f32.len().min(a.len()).min(b.len());
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = a[i] / b[i]; } }
+                                { for i in 0..out_len { out_f32[i] = a[i % a_len] / b[i % b_len]; } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i] / b[i]);
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i % a_len] / b[i % b_len]);
                                 }
                             }
                         }
@@ -2224,13 +2245,15 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let len = out_f32.len().min(a.len()).min(b.len());
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = (a[i] + b[i]).max(0.0); } }
+                                { for i in 0..out_len { out_f32[i] = (a[i % a_len] + b[i % b_len]).max(0.0); } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (a[i] + b[i]).max(0.0));
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (a[i % a_len] + b[i % b_len]).max(0.0));
                                 }
                             }
                         }
@@ -2245,13 +2268,15 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let len = out_f32.len().min(a.len()).min(b.len());
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = (a[i] - b[i]).max(0.0); } }
+                                { for i in 0..out_len { out_f32[i] = (a[i % a_len] - b[i % b_len]).max(0.0); } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (a[i] - b[i]).max(0.0));
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (a[i % a_len] - b[i % b_len]).max(0.0));
                                 }
                             }
                         }
@@ -2266,13 +2291,15 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let len = out_f32.len().min(a.len()).min(b.len());
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = (a[i] * b[i]).max(0.0); } }
+                                { for i in 0..out_len { out_f32[i] = (a[i % a_len] * b[i % b_len]).max(0.0); } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (a[i] * b[i]).max(0.0));
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (a[i % a_len] * b[i % b_len]).max(0.0));
                                 }
                             }
                         }
@@ -2368,14 +2395,18 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
+                                let &[channel_stride] = &params[..] else {
+                                    return Err(BackendError::Dispatch("biasadd: expected params [channel_stride]".into()));
+                                };
+                                let bias_len = bias.len().max(1);
                                 let len = out_f32.len().min(data.len());
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = data[i] + bias[i % bias.len()]; } }
+                                { for i in 0..len { out_f32[i] = data[i] + bias[(i / channel_stride) % bias_len]; } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
                                     let bias = &bias;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = data[i] + bias[i % bias.len()]);
+                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = data[i] + bias[(i / channel_stride) % bias_len]);
                                 }
                             }
                         }
@@ -2474,13 +2505,15 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let len = out_f32.len().min(a.len()).min(b.len());
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..len { out_f32[i] = (a[i] / b[i]).max(0.0); } }
+                                { for i in 0..out_len { out_f32[i] = (a[i % a_len] / b[i % b_len]).max(0.0); } }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (a[i] / b[i]).max(0.0));
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (a[i % a_len] / b[i % b_len]).max(0.0));
                                 }
                             }
                         }
@@ -2498,55 +2531,57 @@ impl Backend for CpuBackend {
                                      let d = arena.data_mut();
                                      bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec()
                                  } else { vec![] };
-                                 // params: [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]
-                                 let &[stride, padding, dilation, groups, c, h, w, kh, kw] = &params[..] else {
-                                     return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
-                                 };
-                                 let out_f32 = {
-                                     let d = arena.data_mut();
-                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                 };
-                                 let c_per_group = c / groups.max(1);
-                                 let n = input_data.len() / (c * h * w).max(1);
-                                 let f = weight_data.len() / (c_per_group * kh * kw).max(1);
-                                 let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
-                                 let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
-                                 for nn in 0..n {
-                                     for ff in 0..f {
-                                         let g = ff / (f / groups.max(1));
-                                         for hh in 0..h_out {
-                                             for ww in 0..w_out {
-                                                 let mut sum = 0.0f32;
-                                                 for cc in 0..c_per_group {
-                                                     for kkh in 0..kh {
-                                                         for kkw in 0..kw {
-                                                             let h_in = hh * stride + kkh;
-                                                             let w_in = ww * stride + kkw;
-                                                             if h_in >= padding && w_in >= padding {
-                                                                 let h_in_s = h_in - padding;
-                                                                 let w_in_s = w_in - padding;
-                                                                 if h_in_s < h && w_in_s < w {
-                                                                     let input_idx = nn * (c * h * w) + (g * c_per_group + cc) * (h * w) + h_in_s * w + w_in_s;
-                                                                     let weight_idx = ff * c_per_group * kh * kw + cc * kh * kw + kkh * kw + kkw;
-                                                                     if input_idx < input_data.len() && weight_idx < weight_data.len() {
-                                                                         sum += input_data[input_idx] * weight_data[weight_idx];
-                                                                     }
-                                                                 }
-                                                             }
-                                                         }
-                                                     }
-                                                 }
-                                                 if !bias_data.is_empty() {
-                                                     sum += bias_data[ff % bias_data.len()];
-                                                 }
-                                                 let out_idx = nn * (f * h_out * w_out) + ff * (h_out * w_out) + hh * w_out + ww;
-                                                 if out_idx < out_f32.len() {
-                                                     out_f32[out_idx] = sum;
-                                                 }
-                                             }
-                                         }
-                                     }
-                                 }
+                                  // params: [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]
+                                  let &[stride, padding, dilation, groups, c, h, w, kh, kw] = &params[..] else {
+                                      return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
+                                  };
+                                  let c_per_group = c / groups.max(1);
+                                  let n = input_data.len() / (c * h * w).max(1);
+                                  let f = weight_data.len() / (c_per_group * kh * kw).max(1);
+                                  let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
+                                  let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
+
+                                  let out_f32 = {
+                                      let d = arena.data_mut();
+                                      bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                  };
+                                  for nn in 0..n {
+                                      for ff in 0..f {
+                                          let g = ff / (f / groups.max(1));
+                                          for hh in 0..h_out {
+                                              for ww in 0..w_out {
+                                                  let mut sum = 0.0f32;
+                                                  for cc in 0..c_per_group {
+                                                      for kkh in 0..kh {
+                                                          for kkw in 0..kw {
+                                                              let h_in = hh * stride + kkh;
+                                                              let w_in = ww * stride + kkw;
+                                                              if h_in >= padding && w_in >= padding {
+                                                                  let h_in_s = h_in - padding;
+                                                                  let w_in_s = w_in - padding;
+                                                                  if h_in_s < h && w_in_s < w {
+                                                                      let input_idx = nn * (c * h * w) + (g * c_per_group + cc) * (h * w) + h_in_s * w + w_in_s;
+                                                                      let weight_idx = ff * c_per_group * kh * kw + cc * kh * kw + kkh * kw + kkw;
+                                                                      if input_idx < input_data.len() && weight_idx < weight_data.len() {
+                                                                          sum += input_data[input_idx] * weight_data[weight_idx];
+                                                                      }
+                                                                  }
+                                                              }
+                                                          }
+                                                      }
+                                                  }
+                                                  if !bias_data.is_empty() {
+                                                      sum += bias_data[ff % bias_data.len()];
+                                                  }
+                                                  let out_idx = nn * (f * h_out * w_out) + ff * (h_out * w_out) + hh * w_out + ww;
+
+                                                  if out_idx < out_f32.len() {
+                                                      out_f32[out_idx] = sum;
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
                              }
                          }
                         "conv2d_u4" | "conv2d_u8" => {
@@ -2705,6 +2740,16 @@ impl Backend for CpuBackend {
                                 let total_input = input.len();
                                 let total_output = out_f32.len();
                                 let dims = (|| -> Option<(usize,usize,usize,usize)> {
+                                    // Collect all valid (n,c,h,w) factorizations and pick the
+                                    // best one. The first-found heuristic (return Some(...) on first
+                                    // match) is ambiguous — for [1,128,20,20] it would return
+                                    // (1,1,1,51200), treating the 2D image as a flat row.
+                                    //
+                                    // Scoring: (1) minimum |h-w| (balanced spatial dims — typical
+                                    // for images), (2) maximum c (more channels is typical for deep
+                                    // NNs), (3) maximum n (larger batch).
+                                    let mut best: Option<(usize,usize,usize,usize)> = None;
+                                    let mut best_score: (usize, usize, usize) = (usize::MAX, 0, 0);
                                     for &n in &[1, 2, 4, 8, 16, 32, 64] {
                                         if total_input % n != 0 || total_output % n != 0 { continue; }
                                         let c_hw = total_input / n;
@@ -2720,12 +2765,17 @@ impl Backend for CpuBackend {
                                                 let h_out = (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                                 let w_out = (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                                 if h_out * w_out == hout_wout && h_out > 0 && w_out > 0 {
-                                                    return Some((n, c, h, w));
+                                                    let imbalance = if h > w { h - w } else { w - h };
+                                                    let score = (imbalance, c, n);
+                                                    if best.is_none() || score < best_score {
+                                                        best_score = score;
+                                                        best = Some((n, c, h, w));
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                    None
+                                    best
                                 })();
                                 let (n, c, h, w) = dims.ok_or_else(|| BackendError::Dispatch("pool_f32: could not infer dimensions".into()))?;
                                 let h_out = (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
@@ -2835,15 +2885,34 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
                                 };
-                                let &[dim, start, _end] = &params[..] else { return Err(BackendError::Dispatch("slice_f32: expected params [dim, start, end]".into())); };
+                                let &[dim, start, end, stride] = &params[..] else { return Err(BackendError::Dispatch("slice_f32: expected params [dim, start, end, stride]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let batch_stride = if dim == 0 { input.len() / out_f32.len().max(1) } else { 1 };
-                                let offset = start * batch_stride;
-                                let copy_len = out_f32.len().min(input.len().saturating_sub(offset));
-                                out_f32[..copy_len].copy_from_slice(&input[offset..(offset + copy_len)]);
+                                // General strided slice along dimension `dim`.
+                                // input layout (row-major): outer * dim_size * stride
+                                // output layout:             outer * (end-start) * stride
+                                let in_len = input.len();
+                                let out_len = out_f32.len();
+                                let range_len = (end - start).max(1);
+                                // dim_size = in_len * range_len / out_len
+                                let dim_size = if out_len > 0 {
+                                    (in_len * range_len) / out_len
+                                } else { 0 };
+                                let outer = if dim_size > 0 && stride > 0 {
+                                    in_len / dim_size / stride
+                                } else { 1 };
+                                let slice_elems = range_len * stride;
+                                for i in 0..outer {
+                                    let src_off = i * dim_size * stride + start * stride;
+                                    let dst_off = i * slice_elems;
+                                    let copy_len = slice_elems.min(in_len.saturating_sub(src_off));
+                                    if copy_len > 0 {
+                                        out_f32[dst_off..(dst_off + copy_len)]
+                                            .copy_from_slice(&input[src_off..(src_off + copy_len)]);
+                                    }
+                                }
                             }
                         }
                         "scatter_nd" => {
@@ -3790,6 +3859,9 @@ impl Backend for CpuBackend {
                                 wi - lr * grad.get(i % grad.len()).copied().unwrap_or(0.0)
                             }).collect();
                             let d = arena.data_mut();
+                            let w_off = input_slices[0].offset;
+                            let w_sz = input_slices[0].size;
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[w_off..w_off + w_sz]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new); }
                             #[cfg(feature = "parallel")]
                             {
@@ -3799,6 +3871,9 @@ impl Backend for CpuBackend {
                                     *w = w_init[i] - lr * grad.get(i % grad.len()).copied().unwrap_or(0.0);
                                 });
                                 let d = arena.data_mut();
+                                let w_off = input_slices[0].offset;
+                                let w_sz = input_slices[0].size;
+                                bytemuck::cast_slice_mut::<_, f32>(&mut d[w_off..w_off + w_sz]).copy_from_slice(&w_new);
                                 bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
                             }
                         }
@@ -3872,6 +3947,7 @@ impl Backend for CpuBackend {
                                     });
                             }
                             let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&m_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).copy_from_slice(&v_new);
@@ -3926,6 +4002,7 @@ impl Backend for CpuBackend {
                                     });
                             }
                             let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&m_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).copy_from_slice(&v_new);
@@ -3934,10 +4011,7 @@ impl Backend for CpuBackend {
                         // m and v are stored as F16 (2 bytes/elem), w and grad are F32 (4 bytes/elem).
                         // Read F16 state, convert to f32 internally, apply update, write back as F16.
                         "adam_update_f16_state" => {
-                            let n = {
-                                let w_bytes = out_end - out_start;
-                                w_bytes / 4
-                            };
+                            let n = input_slices[0].size / 4;
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
@@ -3988,6 +4062,7 @@ impl Backend for CpuBackend {
                                     });
                             }
                             let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
                             let m_bytes: Vec<u8> = m_new_f32.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();
                             let v_bytes: Vec<u8> = v_new_f32.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();
@@ -3997,10 +4072,7 @@ impl Backend for CpuBackend {
                             d[input_slices[3].offset..v_end].copy_from_slice(&v_bytes[..v_end - input_slices[3].offset]);
                         }
                         "adamw_update_f16_state" => {
-                            let n = {
-                                let w_bytes = out_end - out_start;
-                                w_bytes / 4
-                            };
+                            let n = input_slices[0].size / 4;
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
@@ -4054,6 +4126,7 @@ impl Backend for CpuBackend {
                                     });
                             }
                             let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
                             let m_bytes: Vec<u8> = m_new_f32.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();
                             let v_bytes: Vec<u8> = v_new_f32.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();

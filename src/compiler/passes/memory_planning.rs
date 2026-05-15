@@ -205,18 +205,31 @@ pub fn plan_memory_with_env(
                 position.get(&node_id).copied().unwrap_or(0)
             };
             let consumers = graph.consumers(node_id);
-            let last_use = if consumers.is_empty() {
+            let last_use = if graph.required_nodes.contains(&node_id) {
+                // Required nodes must stay alive until end of execution
+                order.len() - 1
+            } else if consumers.is_empty() {
                 if graph.outputs.contains(&node_id) {
                     order.len() - 1
                 } else {
                     first_use
                 }
             } else {
-                consumers.iter()
-                    .filter_map(|cid| position.get(cid))
-                    .copied()
-                    .max()
-                    .unwrap_or(first_use)
+                // When a node has consumers AND is also a graph output or
+                // required node, extend its lifetime to the end of execution
+                // so the memory slot is preserved for the final output read.
+                // Without this check the memory planner would free the slot
+                // after the last consumer, and a later node would reuse it —
+                // corrupting the output data before the executor reads it.
+                if graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id) {
+                    order.len() - 1
+                } else {
+                    consumers.iter()
+                        .filter_map(|cid| position.get(cid))
+                        .copied()
+                        .max()
+                        .unwrap_or(first_use)
+                }
             };
 
             alloc_infos.push(AllocInfo {

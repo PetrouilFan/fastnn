@@ -880,18 +880,53 @@ pub fn build_backward_graph(
                     let b_id = node.inputs[1];
                     let a_type = forward_graph.get_node(a_id).map(|n| n.output_type.clone());
                     let b_type = forward_graph.get_node(b_id).map(|n| n.output_type.clone());
-                    
+
+                    // Handle fused activation: if fused_op is set, chain activation
+                    // backward before the weight backward.
+                    //   fused_op="OpRelu":  forward was MatMul(x,W)→Relu
+                    //   fused_op="MatMulAddRelu":  forward was MatMul(x,W)→Add(,bias)→Relu
+                    // The node_id here refers to the fused forward output (post-activation),
+                    // so dRelu = Mul(grad, fwd_output) gives the gradient before activation.
+                    let effective_grad = match node.attrs.get("fused_op").map(|s| s.as_str()) {
+                        Some("OpRelu") | Some("MatMulAddRelu") => {
+                            let mut attrs = HashMap::new();
+                            attrs.insert("op".to_string(), "relu_backward".to_string());
+                            let grad_input = grad_graph.add_node(
+                                Opcode::Mul,
+                                vec![grad_id, node_id],
+                                node.output_type.clone(),
+                            );
+                            if let Some(n) = grad_graph.get_node_mut(grad_input) {
+                                n.attrs = attrs;
+                            }
+                            grad_input
+                        }
+                        _ => grad_id,
+                    };
+
                     let b_t = grad_graph.add_node(Opcode::Transpose, vec![b_id],
                         b_type.clone().unwrap_or(TensorType::new(vec![], IrDType::F32)));
-                    let da = grad_graph.add_node(Opcode::MatMul, vec![grad_id, b_t],
+                    let da = grad_graph.add_node(Opcode::MatMul, vec![effective_grad, b_t],
                         a_type.clone().unwrap_or(TensorType::new(vec![], IrDType::F32)));
                     accumulate_grad(&mut grad_graph, &mut grads, a_id, da);
-                    
+
                     let a_t = grad_graph.add_node(Opcode::Transpose, vec![a_id],
                         a_type.unwrap_or(TensorType::new(vec![], IrDType::F32)));
-                    let db = grad_graph.add_node(Opcode::MatMul, vec![a_t, grad_id],
+                    let db = grad_graph.add_node(Opcode::MatMul, vec![a_t, effective_grad],
                         b_type.unwrap_or(TensorType::new(vec![], IrDType::F32)));
                     accumulate_grad(&mut grad_graph, &mut grads, b_id, db);
+
+                    // For fused MatMulAddRelu: bias lives at input[2]
+                    if let Some("MatMulAddRelu") = node.attrs.get("fused_op").map(|s| s.as_str()) {
+                        if let Some(&bias_id) = node.inputs.get(2) {
+                            let dbias = grad_graph.add_node(
+                                Opcode::ReduceSum,
+                                vec![effective_grad],
+                                forward_graph.get_node(bias_id).map(|n| n.output_type.clone()).unwrap(),
+                            );
+                            accumulate_grad(&mut grad_graph, &mut grads, bias_id, dbias);
+                        }
+                    }
                 }
             }
             Opcode::Gelu => {
@@ -1083,13 +1118,24 @@ pub fn build_backward_graph(
                 }
             }
             Opcode::BiasAdd => {
+                let effective_grad = match node.attrs.get("fused_op").map(|s| s.as_str()) {
+                    Some("OpRelu") => {
+                        let grad_input = grad_graph.add_node(
+                            Opcode::Mul,
+                            vec![grad_id, node_id],
+                            node.output_type.clone(),
+                        );
+                        grad_input
+                    }
+                    _ => grad_id,
+                };
                 if let Some(&input_id) = node.inputs.first() {
-                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, effective_grad);
                 }
                 if let Some(&bias_id) = node.inputs.get(1) {
                     let grad_input = grad_graph.add_node(
                         Opcode::ReduceSum,
-                        vec![grad_id],
+                        vec![effective_grad],
                         forward_graph.get_node(bias_id).map(|n| n.output_type.clone()).unwrap(),
                     );
                     accumulate_grad(&mut grad_graph, &mut grads, bias_id, grad_input);
