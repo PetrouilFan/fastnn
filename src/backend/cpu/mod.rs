@@ -15,6 +15,12 @@ pub mod im2col;
 pub mod microkernels;
 pub mod reductions_fast;
 
+/// Minimum number of elements for a parallel dispatch loop to be beneficial.
+/// Below this threshold, sequential execution avoids rayon's task-spawning
+/// overhead without measurable throughput loss.
+#[cfg(feature = "parallel")]
+const PARALLEL_MIN_ELEMS: usize = 1024;
+
 /// Resolve kernel dimension params at dispatch time using the runtime shape
 /// environment. Returns `params` unchanged if no symbolic dims are present.
 ///
@@ -1830,10 +1836,21 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                for i in 0..out_f32.len().min(input.len()) {
+                                let len = out_f32.len().min(input.len());
+                                #[cfg(not(feature = "parallel"))]
+                                { for i in 0..len {
                                     let x = input[i];
                                     let sp = (1.0 + x.exp()).ln();
                                     out_f32[i] = x * sp.tanh();
+                                } }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
+                                        let x = input[i];
+                                        let sp = (1.0 + x.exp()).ln();
+                                        *o = x * sp.tanh();
+                                    });
                                 }
                             }
                         }
@@ -1849,8 +1866,12 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 let len = out_f32.len().min(a.len()).min(b.len());
-                                for i in 0..len {
-                                    out_f32[i] = a[i].max(b[i]);
+                                #[cfg(not(feature = "parallel"))]
+                                { for i in 0..len { out_f32[i] = a[i].max(b[i]); } }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i].max(b[i]));
                                 }
                             }
                         }
@@ -1866,8 +1887,12 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 let len = out_f32.len().min(a.len()).min(b.len());
-                                for i in 0..len {
-                                    out_f32[i] = a[i].min(b[i]);
+                                #[cfg(not(feature = "parallel"))]
+                                { for i in 0..len { out_f32[i] = a[i].min(b[i]); } }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = a[i].min(b[i]));
                                 }
                             }
                         }
@@ -1891,8 +1916,13 @@ impl Backend for CpuBackend {
                                         &mut d[out_start..out_end]
                                     )
                                 };
-                                // Use BLAS for large matrices, scalar triple-loop for small ones
-                                let threshold = 32; // cross-over where BLAS wins over O(n³) scalar
+                                // Use BLAS for large matrices, parallel scalar for medium, sequential scalar for tiny.
+                                // The parallel scalar loop (rayon par_chunks_mut) competes with BLAS for medium
+                                // sizes; sequential scalar is only used for the tiniest matmuls.
+                                #[cfg(not(feature = "parallel"))]
+                                let threshold = 32;
+                                #[cfg(feature = "parallel")]
+                                let threshold = 16384;
                                 if m * _k * n >= threshold {
                                     matmul_blas_into(&a, &b, out_f32, m, _k, n);
                                 } else {
@@ -2256,17 +2286,16 @@ impl Backend for CpuBackend {
                                 let axis_dim_size = softmax_params[0].max(1);
                                 let stride = softmax_params.get(1).copied().unwrap_or(1).max(1);
                                 let num_rows = input.len() / axis_dim_size.max(1);
-                                for r in 0..num_rows {
+                                #[cfg(not(feature = "parallel"))]
+                                { for r in 0..num_rows {
                                     let outer = r / stride;
                                     let inner = r % stride;
                                     let base = (outer * axis_dim_size * stride) + inner;
-                                    // Find max
                                     let mut max_val = f32::NEG_INFINITY;
                                     for i in 0..axis_dim_size {
                                         let idx = base + i * stride;
                                         if input[idx] > max_val { max_val = input[idx]; }
                                     }
-                                    // Compute exp sum
                                     let mut sum = 0.0f32;
                                     for i in 0..axis_dim_size {
                                         let idx = base + i * stride;
@@ -2274,13 +2303,48 @@ impl Backend for CpuBackend {
                                         out_f32[idx] = e;
                                         sum += e;
                                     }
-                                    // Normalize
                                     if sum > 0.0 {
                                         for i in 0..axis_dim_size {
                                             let idx = base + i * stride;
                                             out_f32[idx] /= sum;
                                         }
                                     }
+                                } }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    let stride = stride;
+                                    let axis_dim_size = axis_dim_size;
+                                    // SAFETY: each row writes to a disjoint set of output indices
+                                    // (different `idx` values per row), so writing through a raw
+                                    // pointer from multiple threads is safe.  Cast through `usize`
+                                    // to satisfy `Send` required by rayon's `for_each`.
+                                    let out_addr = out_f32.as_mut_ptr() as usize;
+                                    (0..num_rows).into_par_iter().for_each(|r| {
+                                        let out_ptr = out_addr as *mut f32;
+                                        let outer = r / stride;
+                                        let inner = r % stride;
+                                        let base = (outer * axis_dim_size * stride) + inner;
+                                        let mut max_val = f32::NEG_INFINITY;
+                                        for i in 0..axis_dim_size {
+                                            let idx = base + i * stride;
+                                            let v = input[idx];
+                                            if v > max_val { max_val = v; }
+                                        }
+                                        let mut sum = 0.0f32;
+                                        for i in 0..axis_dim_size {
+                                            let idx = base + i * stride;
+                                            let e = (input[idx] - max_val).exp();
+                                            unsafe { *out_ptr.add(idx) = e; }
+                                            sum += e;
+                                        }
+                                        if sum > 0.0 {
+                                            for i in 0..axis_dim_size {
+                                                let idx = base + i * stride;
+                                                unsafe { *out_ptr.add(idx) /= sum; }
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         }
