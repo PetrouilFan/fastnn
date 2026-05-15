@@ -63,7 +63,12 @@ class _BaseModule(Module):
             mask |= (1 << 2) if hasattr(layer, "train_mode") else 0
             mask |= (1 << 3) if hasattr(layer, "eval_mode") else 0
             mask |= (1 << 4) if hasattr(layer, "to_gpu") else 0
-            layer._fnn_cap_mask = mask
+            # Cache the mask on the layer object (may fail for slotted classes like
+            # Rust PyO3 types — that's fine; we'll recompute on next call via getattr).
+            try:
+                layer._fnn_cap_mask = mask
+            except AttributeError:
+                pass
         
         if mask & (1 << 0):
             self._param_layers.append(layer)
