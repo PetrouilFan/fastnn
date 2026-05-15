@@ -191,7 +191,11 @@ impl Storage {
         })
     }
 
-    pub fn from_vec_owned<T: bytemuck::Pod>(mut data: Vec<T>, _dtype: DType, device: Device) -> Self {
+    pub fn from_vec_owned<T: bytemuck::Pod>(
+        mut data: Vec<T>,
+        _dtype: DType,
+        device: Device,
+    ) -> Self {
         let nbytes = std::mem::size_of::<T>() * data.len();
         match device {
             Device::Cpu | Device::Wgpu(_) => {

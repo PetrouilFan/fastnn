@@ -113,8 +113,8 @@ pub(super) fn dispatch_conv_gpu(
             ],
         });
 
-        let wgc_x = ((h_out + 7) / 8).max(1);
-        let wgc_y = ((w_out + 7) / 8).max(1);
+        let wgc_x = h_out.div_ceil(8).max(1);
+        let wgc_y = w_out.div_ceil(8).max(1);
         let wgc_z = (oc * n).max(1);
         let mut encoder = ctx
             .device

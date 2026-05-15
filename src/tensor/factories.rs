@@ -244,7 +244,7 @@ impl Tensor {
                     device,
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
-            requires_grad: false,
+                    requires_grad: false,
                 })
             }
             Device::Wgpu(device_id) => {
@@ -321,7 +321,7 @@ impl Tensor {
                     device,
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
-            requires_grad: false,
+                    requires_grad: false,
                 })
             }
             Device::Wgpu(device_id) => {
@@ -346,7 +346,7 @@ impl Tensor {
                     device,
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
-            requires_grad: false,
+                    requires_grad: false,
                 })
             }
         }

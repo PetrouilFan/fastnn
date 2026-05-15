@@ -109,8 +109,8 @@ pub(super) fn dispatch_pool_gpu(
             ],
         });
 
-        let wgc_x = ((h_out + 7) / 8).max(1) as u32;
-        let wgc_y = ((w_out + 7) / 8).max(1) as u32;
+        let wgc_x = h_out.div_ceil(8).max(1) as u32;
+        let wgc_y = w_out.div_ceil(8).max(1) as u32;
         let wgc_z = (c * n).max(1) as u32;
         let mut encoder = ctx
             .device

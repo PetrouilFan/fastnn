@@ -32,7 +32,11 @@ impl FusionPass for OpRelu {
                 None => continue,
             };
             match op_node.opcode {
-                Opcode::Relu | Opcode::Gelu | Opcode::Silu | Opcode::Input | Opcode::Constant(_) => continue,
+                Opcode::Relu
+                | Opcode::Gelu
+                | Opcode::Silu
+                | Opcode::Input
+                | Opcode::Constant(_) => continue,
                 _ => {}
             }
             if op_node.attrs.contains_key("fused_op") {

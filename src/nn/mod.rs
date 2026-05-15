@@ -50,7 +50,9 @@ pub struct TrainingState(std::sync::atomic::AtomicBool);
 
 impl Clone for TrainingState {
     fn clone(&self) -> Self {
-        TrainingState(std::sync::atomic::AtomicBool::new(self.0.load(std::sync::atomic::Ordering::Relaxed)))
+        TrainingState(std::sync::atomic::AtomicBool::new(
+            self.0.load(std::sync::atomic::Ordering::Relaxed),
+        ))
     }
 }
 

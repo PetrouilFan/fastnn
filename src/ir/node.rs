@@ -910,7 +910,7 @@ impl ComputeGraph {
     pub fn get_node_mut(&mut self, id: NodeId) -> Option<&mut IRNode> {
         let cache_hit = self.node_index.get(&id).copied();
         if let Some(idx) = cache_hit {
-            if self.nodes.get(idx).map_or(false, |n| n.id == id) {
+            if self.nodes.get(idx).is_some_and(|n| n.id == id) {
                 return self.nodes.get_mut(idx);
             }
         }

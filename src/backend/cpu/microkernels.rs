@@ -2108,14 +2108,10 @@ pub fn conv2d_f32_tiled(
 ) {
     let c_per_group = c / groups.max(1);
     let f_per_group = f / groups.max(1);
-    let h_out = (h + 2 * padding)
-        .saturating_sub(dilation * (kh.saturating_sub(1)) + 1)
-        / stride
-        + 1;
-    let w_out = (w + 2 * padding)
-        .saturating_sub(dilation * (kw.saturating_sub(1)) + 1)
-        / stride
-        + 1;
+    let h_out =
+        (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1) / stride + 1;
+    let w_out =
+        (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1) / stride + 1;
 
     const OC_TILE: usize = 4;
 
@@ -2191,8 +2187,7 @@ pub fn conv2d_f32_tiled(
                                     continue;
                                 }
                                 let pos = pos_h * 2 + pos_w;
-                                let out_base =
-                                    nn * (f * h_out * w_out) + (oh * w_out + ow);
+                                let out_base = nn * (f * h_out * w_out) + (oh * w_out + ow);
                                 for oc in 0..oc_tile {
                                     let mut val = acc[pos][oc];
                                     if !bias.is_empty() {
