@@ -85,3 +85,4 @@ tests/test_threading.py
 *_SUMMARY.md
 *_REPORT.md
 .ruff_cache/
+fix_ops.py

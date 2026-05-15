@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::ir::node::{ComputeGraph, DimExpr, ShapeEnv};
+use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -64,6 +64,8 @@ pub enum Instruction {
         /// Optional shape/dimension parameters for kernels that need them
         /// (e.g., matmul stores [M, K, N], transpose stores [M, N]).
         params: Vec<usize>,
+        /// Node ID in the compute graph (used for tightening params at runtime).
+        node_id: Option<NodeId>,
         /// Symbolic dim expressions corresponding to `params`.
         /// When `Some`, the backend can re-evaluate these at dispatch time
         /// using a [`ShapeEnv`](crate::ir::node::ShapeEnv) to resolve

@@ -54,35 +54,25 @@ fn checkpoint_op(name: &str, inputs: &[&Tensor]) -> PyResult<Tensor> {
     }
 }
 
-/// Macro for unary operations: fn op(a) -> PyResult<PyTensor>
+/// Macro for unary operations: fn op(a) -> PyTensor
 macro_rules! unary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
-        fn $name(a: &PyTensor) -> PyResult<PyTensor> {
+        fn $name(a: &PyTensor) -> PyTensor {
             let a_inner = a.inner.clone();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                PyTensor::from_tensor(a_inner.$method())
-            }));
-            result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("{} operation failed", stringify!($name))
-            ))
+            PyTensor::from_tensor(a_inner.$method())
         }
     };
 }
 
-/// Macro for binary operations: fn op(a, b) -> PyResult<PyTensor>
+/// Macro for binary operations: fn op(a, b) -> PyTensor
 macro_rules! binary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
-        fn $name(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+        fn $name(a: &PyTensor, b: &PyTensor) -> PyTensor {
             let a_inner = a.inner.clone();
             let b_inner = b.inner.clone();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                PyTensor::from_tensor(a_inner.$method(&b_inner))
-            }));
-            result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("{} operation failed", stringify!($name))
-            ))
+            PyTensor::from_tensor(a_inner.$method(&b_inner))
         }
     };
 }
@@ -92,32 +82,22 @@ macro_rules! arg_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
         #[pyo3(signature = (a, dim = None))]
-        fn $name(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
+        fn $name(a: &PyTensor, dim: Option<i32>) -> PyTensor {
             let dim = dim.unwrap_or(0) as usize;
             let a_inner = a.inner.clone();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                PyTensor::from_tensor(a_inner.$method(Some(dim)))
-            }));
-            result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("{} operation failed", stringify!($name))
-            ))
+            PyTensor::from_tensor(a_inner.$method(Some(dim)))
         }
     };
 }
 
 #[pyfunction]
-fn full_like(tensor: &PyTensor, value: f32) -> PyResult<PyTensor> {
+fn full_like(tensor: &PyTensor, value: f32) -> PyTensor {
     let t_inner = tensor.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(Tensor::full(
-            t_inner.shape(),
-            value,
-            t_inner.dtype(),
-            t_inner.device(),
-        ))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "full_like operation failed"
+    PyTensor::from_tensor(Tensor::full(
+        t_inner.shape(),
+        value,
+        t_inner.dtype(),
+        t_inner.device(),
     ))
 }
 
@@ -128,51 +108,36 @@ binary_op!(mul, mul);
 binary_op!(div, div);
 
 #[pyfunction]
-fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
     let a_inner = a.inner.clone();
     let b_inner = b.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.add(&b_inner).relu())
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "fused_add_relu operation failed"
-    ))
+    PyTensor::from_tensor(a_inner.add(&b_inner).relu())
 }
 
 #[pyfunction]
-fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
+fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
     let x_inner = x.inner.clone();
     let w_inner = w.inner.clone();
     let b_inner = bias.map(|b| b.inner.clone());
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let out = x_inner.matmul(&w_inner);
-        let out = match &b_inner {
-            Some(b) => out.add(b),
-            None => out,
-        };
-        PyTensor::from_tensor(out.relu())
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "fused_linear_relu operation failed"
-    ))
+    let out = x_inner.matmul(&w_inner);
+    let out = match &b_inner {
+        Some(b) => out.add(b),
+        None => out,
+    };
+    PyTensor::from_tensor(out.relu())
 }
 
 #[pyfunction]
-fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyResult<PyTensor> {
+fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
     let x_inner = x.inner.clone();
     let w_inner = w.inner.clone();
     let b_inner = bias.map(|b| b.inner.clone());
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let out = x_inner.matmul(&w_inner);
-        let out = match &b_inner {
-            Some(b) => out.add(b),
-            None => out,
-        };
-        PyTensor::from_tensor(out.gelu())
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "fused_linear_gelu operation failed"
-    ))
+    let out = x_inner.matmul(&w_inner);
+    let out = match &b_inner {
+        Some(b) => out.add(b),
+        None => out,
+    };
+    PyTensor::from_tensor(out.gelu())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -185,18 +150,12 @@ fn fused_conv_bn_silu(
     bn_bias: &PyTensor,
     bn_running_mean: &PyTensor,
     bn_running_var: &PyTensor,
-    stride: &PyTensor,
-    padding: &PyTensor,
-    dilation: &PyTensor,
-    groups: &PyTensor,
-    eps: &PyTensor,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+    groups: usize,
+    eps: f64,
 ) -> PyResult<PyTensor> {
-    let stride_val = stride.inner.item() as usize;
-    let padding_val = padding.inner.item() as usize;
-    let dilation_val = dilation.inner.item() as usize;
-    let groups_val = groups.inner.item() as usize;
-    let eps_val = eps.inner.item() as f64;
-
     let has_bias = bias.is_some();
     let mut inputs: Vec<&Tensor> = vec![&x.inner, &w.inner];
     if let Some(b) = bias {
@@ -209,7 +168,7 @@ fn fused_conv_bn_silu(
 
     let outputs = Tensor::exec_aot(&inputs, |g, ins| {
         let mut offset = 2usize;
-        let conv_out = g.conv2d_with_params(&ins[0], &ins[1], stride_val, padding_val, dilation_val, groups_val);
+        let conv_out = g.conv2d_with_params(&ins[0], &ins[1], stride, padding, dilation, groups);
         let after_conv = if has_bias {
             let biased = g.add(&conv_out, &ins[offset]);
             offset += 1;
@@ -217,7 +176,7 @@ fn fused_conv_bn_silu(
         } else {
             conv_out
         };
-        let bn_out = g.batch_norm(&after_conv, &ins[offset], &ins[offset + 1], &ins[offset + 2], &ins[offset + 3], eps_val);
+        let bn_out = g.batch_norm(&after_conv, &ins[offset], &ins[offset + 1], &ins[offset + 2], &ins[offset + 3], eps);
         vec![g.silu(&bn_out)]
     })
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
@@ -228,15 +187,10 @@ fn fused_conv_bn_silu(
 }
 
 #[pyfunction]
-fn matmul(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
     let a_inner = a.inner.clone();
     let b_inner = b.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.matmul(&b_inner))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "matmul operation failed"
-    ))
+    PyTensor::from_tensor(a_inner.matmul(&b_inner))
 }
 
 #[pyfunction]
@@ -245,36 +199,30 @@ fn batched_mlp_forward(
     weights: Vec<PyTensor>,
     biases: Vec<PyTensor>,
     activations: Vec<String>,
-) -> PyResult<PyTensor> {
+) -> PyTensor {
     let x_inner = input.inner.clone();
     let weights_inner: Vec<_> = weights.iter().map(|p| p.inner.clone()).collect();
     let biases_inner: Vec<_> = biases.iter().map(|p| Some(p.inner.clone())).collect();
     let activations_clone = activations.clone();
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let mut x = x_inner;
-        for i in 0..weights_inner.len() {
-            let w = &weights_inner[i];
-            let b = biases_inner.get(i).and_then(|b| b.as_ref());
-            x = x.matmul(&w.transpose(0, 1));
-            if let Some(bias) = b {
-                x = x.add(bias);
-            }
-            if i < activations_clone.len() {
-                let act = &activations_clone[i];
-                match act.as_str() {
-                    "relu" => { x = x.relu(); }
-                    "sigmoid" => { x = x.sigmoid(); }
-                    "tanh" => { x = x.tanh(); }
-                    _ => {}
-                }
+    let mut x = x_inner;
+    for i in 0..weights_inner.len() {
+        let w = &weights_inner[i];
+        let b = biases_inner.get(i).and_then(|b| b.as_ref());
+        x = x.matmul(&w.transpose(0, 1));
+        if let Some(bias) = b {
+            x = x.add(bias);
+        }
+        if i < activations_clone.len() {
+            let act = &activations_clone[i];
+            match act.as_str() {
+                "relu" => { x = x.relu(); }
+                "sigmoid" => { x = x.sigmoid(); }
+                "tanh" => { x = x.tanh(); }
+                _ => {}
             }
         }
-        PyTensor::from_tensor(x)
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "batched_mlp_forward operation failed"
-    ))
+    }
+    PyTensor::from_tensor(x)
 }
 
 // Unary operations using macro
@@ -292,137 +240,89 @@ unary_op!(silu, silu);
 // Activation ops
 #[pyfunction]
 #[pyo3(signature = (a, negative_slope = 0.01))]
-fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyResult<PyTensor> {
+fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyTensor {
     let a_inner = a.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.leaky_relu(negative_slope))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "leaky_relu operation failed"
-    ))
+    PyTensor::from_tensor(a_inner.leaky_relu(negative_slope))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, alpha = 1.0))]
-fn elu(a: &PyTensor, alpha: f32) -> PyResult<PyTensor> {
+fn elu(a: &PyTensor, alpha: f32) -> PyTensor {
     let a_inner = a.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.elu(alpha))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "elu operation failed"
-    ))
+    PyTensor::from_tensor(a_inner.elu(alpha))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, beta = 1.0, threshold = 20.0))]
-fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyResult<PyTensor> {
+fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyTensor {
     let a_inner = a.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.softplus(beta, threshold))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "softplus operation failed"
-    ))
+    PyTensor::from_tensor(a_inner.softplus(beta, threshold))
 }
 
 #[pyfunction]
-fn hardswish(a: &PyTensor) -> PyResult<PyTensor> {
+fn hardswish(a: &PyTensor) -> PyTensor {
     let a_inner = a.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.hardswish())
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "hardswish operation failed"
-    ))
+    PyTensor::from_tensor(a_inner.hardswish())
 }
 
 #[pyfunction]
-fn softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
+fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
     let a_inner = a.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.softmax(dim))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "softmax operation failed"
-    ))
+    PyTensor::from_tensor(a_inner.softmax(dim))
 }
 
 #[pyfunction]
-fn log_softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
+fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
     let a_inner = a.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.log_softmax(dim))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "log_softmax operation failed"
-    ))
+    PyTensor::from_tensor(a_inner.log_softmax(dim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.sum(d, keepdim))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sum operation failed"))
+    PyTensor::from_tensor(a_inner.sum(d, keepdim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.mean(d, keepdim))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("mean operation failed"))
+    PyTensor::from_tensor(a_inner.mean(d, keepdim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.max(d, keepdim))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("max operation failed"))
+    PyTensor::from_tensor(a_inner.max(d, keepdim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
-fn maximum(a: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
+fn maximum(a: &PyTensor, other: &PyTensor) -> PyTensor {
     let a_inner = a.inner.clone();
     let b_inner = other.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.maximum(&b_inner))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("maximum operation failed"))
+    PyTensor::from_tensor(a_inner.maximum(&b_inner))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
-fn minimum(a: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
+fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
     let a_inner = a.inner.clone();
     let b_inner = other.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.minimum(&b_inner))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("minimum operation failed"))
+    PyTensor::from_tensor(a_inner.minimum(&b_inner))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
     let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.neg().max(d, keepdim).neg())
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("min operation failed"))
+    PyTensor::from_tensor(a_inner.neg().max(d, keepdim).neg())
 }
 
 // Argmax and argmin using macro
@@ -431,13 +331,10 @@ arg_op!(argmax, argmax);
 // argmin is argmax of negated input (no Tensor::argmin method)
 #[pyfunction]
 #[pyo3(signature = (a, dim = None))]
-fn argmin(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
+fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
     let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0) as usize;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.neg().argmax(Some(d)))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("argmin operation failed"))
+    PyTensor::from_tensor(a_inner.neg().argmax(Some(d)))
 }
 
 // Loss functions
@@ -447,21 +344,14 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
     let pred_inner = pred.inner.clone();
     let target_inner = target.inner.clone();
     let reduction_str = reduction.unwrap_or_else(|| "mean".to_string());
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let diff = &pred_inner - &target_inner;
-        let squared = diff.pow(2.0);
-        let output = match reduction_str.as_str() {
-            "none" => squared,
-            "mean" => reduce_mean_all(&squared),
-            "sum" => reduce_sum_all(&squared),
-            _ => reduce_mean_all(&squared),
-        };
-        output
-    }));
-    let output = result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "mse_loss computation failed"
-    ))?;
+    let diff = &pred_inner - &target_inner;
+    let squared = diff.pow(2.0);
+    let output = match reduction_str.as_str() {
+        "none" => squared,
+        "mean" => reduce_mean_all(&squared),
+        "sum" => reduce_sum_all(&squared),
+        _ => reduce_mean_all(&squared),
+    };
 
     let edges = autograd::make_edges(&pred.inner, &target.inner);
     let inputs = vec![pred.inner.clone(), target.inner.clone()];
@@ -476,22 +366,16 @@ fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<Stri
     let pred_inner = pred.inner.clone();
     let target_inner = target.inner.clone();
     let reduction_str = reduction.unwrap_or_else(|| "mean".to_string());
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let log_probs = pred_inner.log_softmax(-1);
-        let target_flat = target_inner.reshape(vec![-1, 1]);
-        let gathered = log_probs.gather(1, &target_flat);
-        let nll = gathered.neg().reshape(vec![pred_inner.shape()[0]]);
-        match reduction_str.as_str() {
-            "none" => nll,
-            "mean" => reduce_mean_all(&nll),
-            "sum" => reduce_sum_all(&nll),
-            _ => reduce_mean_all(&nll),
-        }
-    }));
-    let output = result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(
-        "cross_entropy_loss computation failed"
-    ))?;
+    let log_probs = pred_inner.log_softmax(-1);
+    let target_flat = target_inner.reshape(vec![-1, 1]);
+    let gathered = log_probs.gather(1, &target_flat);
+    let nll = gathered.neg().reshape(vec![pred_inner.shape()[0]]);
+    let output = match reduction_str.as_str() {
+        "none" => nll,
+        "mean" => reduce_mean_all(&nll),
+        "sum" => reduce_sum_all(&nll),
+        _ => reduce_mean_all(&nll),
+    };
 
     let edges = autograd::make_edges(&pred.inner, &target.inner);
     let inputs = vec![pred.inner.clone(), target.inner.clone()];
@@ -656,21 +540,15 @@ fn list_registered_ops() -> Vec<String> {
 }
 
 #[pyfunction]
-fn clamp(a: &PyTensor, min_val: f32, max_val: f32) -> PyResult<PyTensor> {
+fn clamp(a: &PyTensor, min_val: f32, max_val: f32) -> PyTensor {
     let a_inner = a.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.clamp(min_val, max_val))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("clamp operation failed"))
+    PyTensor::from_tensor(a_inner.clamp(min_val, max_val))
 }
 
 #[pyfunction]
-fn pow(a: &PyTensor, exponent: f32) -> PyResult<PyTensor> {
+fn pow(a: &PyTensor, exponent: f32) -> PyTensor {
     let a_inner = a.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(a_inner.pow(exponent))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("pow operation failed"))
+    PyTensor::from_tensor(a_inner.pow(exponent))
 }
 
 #[pyfunction]
@@ -725,21 +603,15 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
+fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
     let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(core_tensor::Tensor::cat(&tensors_inner, dim))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("cat operation failed"))
+    PyTensor::from_tensor(core_tensor::Tensor::cat(&tensors_inner, dim))
 }
 
 #[pyfunction]
-fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
+fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
     let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(core_tensor::Tensor::stack(&tensors_inner, dim))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("stack operation failed"))
+    PyTensor::from_tensor(core_tensor::Tensor::stack(&tensors_inner, dim))
 }
 
 #[pyfunction]
@@ -779,74 +651,53 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTen
 
 // Tensor manipulation ops
 #[pyfunction]
-fn where_(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyResult<PyTensor> {
+fn where_(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyTensor {
     let x_inner = x.inner.clone();
     let c_inner = condition.inner.clone();
     let y_inner = y.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(x_inner.where_tensor(&c_inner, &y_inner))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("where operation failed"))
+    PyTensor::from_tensor(x_inner.where_tensor(&c_inner, &y_inner))
 }
 
 #[pyfunction]
-fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyResult<PyTensor> {
+fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyTensor {
     let t_inner = tensor.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(t_inner.repeat(&repeats))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("repeat operation failed"))
+    PyTensor::from_tensor(t_inner.repeat(&repeats))
 }
 
 #[pyfunction]
-fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyResult<PyTensor> {
+fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyTensor {
     let t_inner = tensor.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(t_inner.expand(shape))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("expand operation failed"))
+    PyTensor::from_tensor(t_inner.expand(shape))
 }
 
 #[pyfunction]
 #[pyo3(signature = (tensor, dim, start, end, step = 1))]
-fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyResult<PyTensor> {
+fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTensor {
     let t_inner = tensor.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(t_inner.slice(dim, start, end, step))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("slice operation failed"))
+    PyTensor::from_tensor(t_inner.slice(dim, start, end, step))
 }
 
 #[pyfunction]
-fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
+fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> (PyTensor, PyTensor) {
     let t_inner = tensor.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let values = t_inner.max(dim as i32, false);
-        let indices = t_inner.argmax(Some(dim as usize));
-        (PyTensor::from_tensor(values), PyTensor::from_tensor(indices))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("topk operation failed"))
+    let values = t_inner.max(dim as i32, false);
+    let indices = t_inner.argmax(Some(dim as usize));
+    (PyTensor::from_tensor(values), PyTensor::from_tensor(indices))
 }
 
 #[pyfunction]
 #[pyo3(signature = (tensor, axis, indices))]
-fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyResult<PyTensor> {
+fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyTensor {
     let t_inner = tensor.inner.clone();
     let i_inner = indices.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(t_inner.gather(axis, &i_inner))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("gather operation failed"))
+    PyTensor::from_tensor(t_inner.gather(axis, &i_inner))
 }
 
 #[pyfunction]
-fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyResult<PyTensor> {
+fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
     let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     let eq = equation.to_string();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(core_tensor::einsum(&eq, &tensors_inner))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("einsum operation failed"))
+    PyTensor::from_tensor(core_tensor::einsum(&eq, &tensors_inner))
 }
 
 #[pyfunction]
@@ -904,46 +755,34 @@ fn flash_attention(
     v: &PyTensor,
     scale: Option<f32>,
     causal: Option<bool>,
-) -> PyResult<PyTensor> {
+) -> PyTensor {
     let q_inner = q.inner.clone();
     let k_inner = k.inner.clone();
     let v_inner = v.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(
-            crate::backend::cpu::flash_attn::flash_attention(
-                &q_inner, &k_inner, &v_inner, scale, causal.unwrap_or(false),
-            )
+    PyTensor::from_tensor(
+        crate::backend::cpu::flash_attn::flash_attention(
+            &q_inner, &k_inner, &v_inner, scale, causal.unwrap_or(false),
         )
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("flash_attention operation failed"))
+    )
 }
 
 #[pyfunction]
-fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyResult<PyTensor> {
+fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyTensor {
     let t_inner = tensor.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(t_inner.cumsum(dim, exclusive, reverse))
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("cumsum operation failed"))
+    PyTensor::from_tensor(t_inner.cumsum(dim, exclusive, reverse))
 }
 
 #[pyfunction]
-fn erf(tensor: &PyTensor) -> PyResult<PyTensor> {
+fn erf(tensor: &PyTensor) -> PyTensor {
     let t_inner = tensor.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        PyTensor::from_tensor(t_inner.erf())
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("erf operation failed"))
+    PyTensor::from_tensor(t_inner.erf())
 }
 
 #[allow(dead_code)]
 #[pyfunction]
-fn nonzero(tensor: &PyTensor) -> PyResult<Vec<Vec<i64>>> {
+fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
     let t_inner = tensor.inner.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        t_inner.nonzero()
-    }));
-    result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("nonzero operation failed"))
+    t_inner.nonzero()
 }
 
 #[pyfunction]

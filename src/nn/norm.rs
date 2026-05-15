@@ -11,6 +11,7 @@ use crate::{
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct LayerNorm {
     #[allow(dead_code)]
     pub normalized_shape: i64,
@@ -98,6 +99,7 @@ impl Module for LayerNorm {
     impl_training_state!(self, self.training);
 }
 
+#[derive(Clone)]
 pub struct BatchNorm1d {
     #[allow(dead_code)]
     pub num_features: i64,
@@ -333,6 +335,7 @@ impl Module for BatchNorm1d {
     impl_training_state!(self, self.training);
 }
 
+#[derive(Clone)]
 pub struct RMSNorm {
     pub weight: Tensor,
     pub eps: f32,
@@ -409,6 +412,7 @@ impl Module for RMSNorm {
     }
 }
 
+#[derive(Clone)]
 pub struct GroupNorm {
     pub weight: Tensor,
     pub bias: Tensor,
@@ -576,6 +580,21 @@ pub struct BatchNorm2d {
     pub momentum: f32,
     pub num_features: i64,
     training: TrainingState,
+}
+
+impl Clone for BatchNorm2d {
+    fn clone(&self) -> Self {
+        BatchNorm2d {
+            weight: self.weight.clone(),
+            bias: self.bias.clone(),
+            running_mean: parking_lot::RwLock::new(self.running_mean.read().clone()),
+            running_var: parking_lot::RwLock::new(self.running_var.read().clone()),
+            eps: self.eps,
+            momentum: self.momentum,
+            num_features: self.num_features,
+            training: self.training.clone(),
+        }
+    }
 }
 
 impl BatchNorm2d {

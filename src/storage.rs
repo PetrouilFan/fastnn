@@ -191,40 +191,26 @@ impl Storage {
         })
     }
 
-    pub fn from_vec<T: bytemuck::Pod>(data: Vec<T>, dtype: DType, device: Device) -> Self {
+    pub fn from_vec_owned<T: bytemuck::Pod>(mut data: Vec<T>, _dtype: DType, device: Device) -> Self {
         let nbytes = std::mem::size_of::<T>() * data.len();
         match device {
-            Device::Cpu => {
-                let mut storage = Storage::new_cpu(dtype, nbytes);
-                if let Storage::Cpu(cpu) = &mut storage {
-                    let ptr = Arc::make_mut(&mut cpu.data).as_mut_ptr() as *mut T;
-                    // SAFETY: The destination pointer is derived from a freshly allocated
-                    // and uniquely owned `Vec<u8>` via `Arc::make_mut`. The source pointer
-                    // comes from the input `data` vector. Both point to `data.len()` elements
-                    // of type `T` and are guaranteed non-overlapping.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-                    }
-                }
-                storage
-            }
-            Device::Wgpu(_device_id) => {
-                // For GPU, create CPU storage first
-                // The actual GPU buffer will be created on-demand when needed
-                let mut cpu_storage = Storage::new_cpu(dtype, nbytes);
-                if let Storage::Cpu(cpu) = &mut cpu_storage {
-                    let ptr = Arc::make_mut(&mut cpu.data).as_mut_ptr() as *mut T;
-                    // SAFETY: The destination pointer is derived from a freshly allocated
-                    // and uniquely owned `Vec<u8>` via `Arc::make_mut`. The source pointer
-                    // comes from the input `data` vector. Both point to `data.len()` elements
-                    // of type `T` and are guaranteed non-overlapping.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-                    }
-                }
-                cpu_storage
+            Device::Cpu | Device::Wgpu(_) => {
+                let ptr = data.as_mut_ptr() as *mut u8;
+                let len = nbytes;
+                let cap = data.capacity() * std::mem::size_of::<T>();
+                std::mem::forget(data);
+                let byte_vec = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+                Storage::Cpu(CpuStorage {
+                    data: Arc::new(byte_vec),
+                    nbytes,
+                    gpu_buffer_cache: Default::default(),
+                })
             }
         }
+    }
+
+    pub fn from_vec<T: bytemuck::Pod>(data: Vec<T>, dtype: DType, device: Device) -> Self {
+        Self::from_vec_owned(data, dtype, device)
     }
 
     pub fn as_ptr<T>(&self) -> *const T {

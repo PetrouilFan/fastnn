@@ -23,6 +23,26 @@ pub struct MultiHeadAttention {
     pub causal_mask_cache: RwLock<Option<(i64, Tensor)>>,
 }
 
+impl Clone for MultiHeadAttention {
+    fn clone(&self) -> Self {
+        MultiHeadAttention {
+            q_proj: self.q_proj.clone(),
+            k_proj: self.k_proj.clone(),
+            v_proj: self.v_proj.clone(),
+            out_proj: self.out_proj.clone(),
+            num_heads: self.num_heads,
+            head_dim: self.head_dim,
+            d_model: self.d_model,
+            dropout_p: self.dropout_p,
+            causal: self.causal,
+            training: self.training.clone(),
+            qkv_proj: self.qkv_proj.clone(),
+            scale: self.scale,
+            causal_mask_cache: RwLock::new(self.causal_mask_cache.read().clone()),
+        }
+    }
+}
+
 impl MultiHeadAttention {
     #[allow(dead_code)]
     pub fn new(d_model: i64, num_heads: i64, dropout_p: f32) -> Self {

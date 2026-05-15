@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 pub mod activation_quantization;
 pub mod auto_cast;
+pub mod dead_code_elimination;
 pub mod fusion;
 pub mod memory_planning;
 pub mod operator_fusion;

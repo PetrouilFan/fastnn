@@ -9,6 +9,7 @@ pub trait Activation {
 }
 
 /// No activation (fused Conv2d + BatchNorm2d only)
+#[derive(Clone)]
 pub struct NoAct;
 impl Activation for NoAct {
     const DISPATCH_NAME: &'static str = "fused_conv_bn";
@@ -17,6 +18,7 @@ impl Activation for NoAct {
 }
 
 /// ReLU activation (fused Conv2d + BatchNorm2d + ReLU)
+#[derive(Clone)]
 pub struct ReluAct;
 impl Activation for ReluAct {
     const DISPATCH_NAME: &'static str = "fused_conv_bn_relu";
@@ -25,6 +27,7 @@ impl Activation for ReluAct {
 }
 
 /// GELU activation (fused Conv2d + BatchNorm2d + GELU)
+#[derive(Clone)]
 pub struct GeluAct;
 impl Activation for GeluAct {
     const DISPATCH_NAME: &'static str = "fused_conv_bn_gelu";
@@ -33,6 +36,7 @@ impl Activation for GeluAct {
 }
 
 /// SiLU activation (fused Conv2d + BatchNorm2d + SiLU)
+#[derive(Clone)]
 pub struct SiluAct;
 impl Activation for SiluAct {
     const DISPATCH_NAME: &'static str = "fused_conv_bn_silu";
@@ -42,6 +46,7 @@ impl Activation for SiluAct {
 
 /// Generic fused Conv2d + BatchNorm2d + optional activation layer (inference only).
 /// Parameterized by `A: Activation` to support different activation functions.
+#[derive(Clone)]
 pub struct FusedConvBn<A: Activation = NoAct> {
     pub conv_weight: Tensor,
     pub conv_bias: Option<Tensor>,

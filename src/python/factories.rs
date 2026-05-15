@@ -183,13 +183,7 @@ fn tensor_from_bytes(data: Vec<u8>, shape: Vec<i64>, dtype: Option<String>) -> P
         )));
     }
     let _dtype = resolve_dtype(dtype);
-    let mut floats: Vec<f32> = Vec::with_capacity(n);
-    let mut i = 0;
-    while i + 4 <= data.len() {
-        let bytes: [u8; 4] = [data[i], data[i + 1], data[i + 2], data[i + 3]];
-        floats.push(f32::from_ne_bytes(bytes));
-        i += 4;
-    }
+    let floats: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
     Ok(PyTensor::from_tensor(Tensor::from_vec(floats, shape)))
 }
 
