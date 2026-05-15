@@ -71,8 +71,7 @@ impl Tensor {
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward =
-                std::sync::Arc::new(autograd::MaximumBackward::new(edges, inputs));
+            let backward = std::sync::Arc::new(autograd::MaximumBackward::new(edges, inputs));
             Self::attach_grad_fn(output, backward)
         } else {
             output
@@ -115,8 +114,7 @@ impl Tensor {
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward =
-                std::sync::Arc::new(autograd::CumSumBackward::new(edges, inputs));
+            let backward = std::sync::Arc::new(autograd::CumSumBackward::new(edges, inputs));
             Self::attach_grad_fn(output, backward)
         } else {
             output

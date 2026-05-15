@@ -919,8 +919,8 @@ impl Backend for CpuBackend {
                         output_slice,
                         secondary_output_slice: None,
                         params: vec![
-                            stride, padding, input_c, input_d, input_h, input_w, kernel_d, kernel_h,
-                            kernel_w,
+                            stride, padding, input_c, input_d, input_h, input_w, kernel_d,
+                            kernel_h, kernel_w,
                         ],
                         param_dims: None,
                         weight_meta: None,
@@ -962,7 +962,9 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![stride, padding, input_c, input_h, input_w, kernel_h, kernel_w],
+                        params: vec![
+                            stride, padding, input_c, input_h, input_w, kernel_h, kernel_w,
+                        ],
                         param_dims: None,
                         weight_meta: None,
                     });
