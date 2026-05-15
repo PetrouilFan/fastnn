@@ -706,6 +706,7 @@ pub struct ComputeGraph {
     pub nodes: Vec<IRNode>,
     pub inputs: Vec<NodeId>,
     pub outputs: Vec<NodeId>,
+    pub required_nodes: Vec<NodeId>,
     pub next_id: NodeId,
 }
 
@@ -716,6 +717,7 @@ impl ComputeGraph {
             nodes: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            required_nodes: Vec::new(),
             next_id: 1,
         }
     }
@@ -833,6 +835,12 @@ impl ComputeGraph {
         self.outputs = outputs;
     }
 
+    pub fn add_required_node(&mut self, node_id: NodeId) {
+        if !self.required_nodes.contains(&node_id) {
+            self.required_nodes.push(node_id);
+        }
+    }
+
     pub fn topological_sort(&self) -> Vec<NodeId> {
         let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
         let mut adjacency: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -903,6 +911,7 @@ impl ComputeGraph {
         }
         self.inputs.retain(|&i| i != id);
         self.outputs.retain(|&i| i != id);
+        self.required_nodes.retain(|&i| i != id);
     }
 
     /// Save the ComputeGraph to a .fnn binary file.

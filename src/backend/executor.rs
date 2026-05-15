@@ -15,9 +15,11 @@
 
 #![allow(dead_code)]
 
-use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
+use crate::autograd::build_backward_graph;
+use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan};
+use crate::compiler::passes::training::{TrainConfig, inject_optimizer};
 use crate::compiler::passes::{memory_planning, operator_fusion, quantization, shape_inference};
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv};
+use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::sync::atomic::Ordering;
 
 /// An ahead-of-time graph executor that compiles and dispatches
@@ -115,6 +117,12 @@ impl<B: Backend> GraphExecutor<B> {
 
     /// Execute a compiled plan with input data.
     ///
+    /// At runtime the `ShapeEnv` resolves any symbolic dimensions from input
+    /// byte sizes.  The `MemoryPlan` is tightened (slot sizes shrunk from
+    /// worst-case `SYMBOL_DIM_MAX` to actual sizes), then the `ExecutablePlan`
+    /// is rebuilt so every `BufferSlice` matches the tightened slots.  This
+    /// saves up to 90%+ arena memory for dynamic-shaped inputs.
+    ///
     /// `inputs` must correspond one-to-one with `graph.inputs` (in order).
     /// Returns output byte slices corresponding to `graph.outputs` (in order).
     pub fn execute(
@@ -128,42 +136,46 @@ impl<B: Backend> GraphExecutor<B> {
         let shape_env = ShapeEnv::from_graph_inputs(graph, inputs).map_err(|e| {
             BackendError::Dispatch(format!("shape env: {e}"))
         })?;
-        // Validate shape constraints using the resolved environment
         validate_shapes(graph, &shape_env).map_err(|e| {
             BackendError::Dispatch(format!("shape validation: {e}"))
         })?;
-        // Pre-dispatch slot overflow check: ensure every node's resolved output
-        // byte size fits within its allocated memory slot. This catches
-        // intermediate-tensor overruns before any kernel writes to the arena.
-        for (&node_id, slot) in &memory_plan.slots {
+
+        // Tighten memory plan using runtime-resolved shapes, then rebuild
+        // the ExecutablePlan instructions to use the tightened BufferSlices.
+        // This shrinks the arena from SYMBOL_DIM_MAX worst-case to actual
+        // sizes — saving up to 90%+ arena memory for dynamic shapes.
+        let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
+        let tightened_plan = self.backend.compile(graph, &tightened_memory_plan)
+            .map_err(|e| BackendError::Dispatch(format!("retighten compile: {e}")))?;
+
+        // Safety check: every node's resolved output must fit in its slot.
+        for (&node_id, slot) in &tightened_memory_plan.slots {
             if let Some(node) = graph.get_node(node_id) {
-                let _resolved = tensor_byte_size(&node.output_type.shape, node.output_type.dtype.byte_size());
-                // Use compile-time max estimate for Symbol dims (already the
-                // slot size), but check that resolved Known/Bounded dims fit.
                 let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
                     let numel: u64 = shape.iter().product();
-                    numel as usize * node.output_type.dtype.byte_size()
+                    let raw = numel as usize * node.output_type.dtype.byte_size();
+                    match &node.output_type.dtype {
+                        IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                            node.output_type.dtype.packed_byte_size(numel as usize)
+                        }
+                        _ => raw,
+                    }
                 } else {
-                    // Cannot resolve – skip runtime check (compile-time
-                    // slot sizing is the safety net).
                     continue;
                 };
                 if needed > slot.size {
                     return Err(BackendError::Dispatch(format!(
-                        "node {}: resolved output size {} exceeds slot size {} (shape {:?})",
+                        "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
                         node_id, needed, slot.size, node.output_type.shape
                     )));
                 }
             }
         }
-        // Allocate arena.  The plan was compiled with worst-case SYMBOL_DIM_MAX
-        // sizes; at runtime the ShapeEnv resolves symbolic dims to actual values.
-        // TODO: invoke memory_plan.tighten() here and rebuild the ExecutablePlan's
-        // instruction BufferSlices to match the tightened sizes (saves up to 90%
-        // arena memory for dynamic shapes).
-        let arena = self.backend.allocate_arena(plan.arena_size);
 
-        // Write input data into the arena at the slots for graph input nodes
+        // Allocate tightened arena
+        let arena = self.backend.allocate_arena(tightened_plan.arena_size);
+
+        // Write input data into the arena at tightened input slots
         for (i, &input_node_id) in graph.inputs.iter().enumerate() {
             let input_bytes = inputs.get(i).ok_or_else(|| {
                 BackendError::Dispatch(format!(
@@ -172,7 +184,7 @@ impl<B: Backend> GraphExecutor<B> {
                 ))
             })?;
 
-            let slot = memory_plan.slots.get(&input_node_id).ok_or_else(|| {
+            let slot = tightened_memory_plan.slots.get(&input_node_id).ok_or_else(|| {
                 BackendError::Dispatch(format!(
                     "no memory slot for input node {}",
                     input_node_id
@@ -183,44 +195,31 @@ impl<B: Backend> GraphExecutor<B> {
                 .write_arena(&arena, slot.offset, input_bytes);
         }
 
-        // Dispatch the plan
-        self.backend.dispatch(plan, &arena, &shape_env)?;
+        // Dispatch the tightened plan
+        self.backend.dispatch(&tightened_plan, &arena, &shape_env)?;
 
-        // Read output data from the arena — compute actual sizes using shape_env
+        // Read output data — compute actual sizes via shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
         for &output_node_id in &graph.outputs {
-            let slot = memory_plan.slots.get(&output_node_id).ok_or_else(|| {
+            let slot = tightened_memory_plan.slots.get(&output_node_id).ok_or_else(|| {
                 BackendError::Dispatch(format!(
                     "no memory slot for output node {}",
                     output_node_id
                 ))
             })?;
 
-            // Re-evaluate output size with shape_env to handle symbolic dims.
             let actual_size = if let Some(node) = graph.get_node(output_node_id) {
                 let resolved_shape = resolve_shape(&node.output_type.shape, &shape_env)
                     .map_err(|e| BackendError::Dispatch(format!(
                         "output node {}: {e}", output_node_id
                     )))?;
                 let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-                // For packed dtypes (U4/U8), use packed_byte_size which accounts
-                // for the header + SIMD margin. For standard dtypes, use numel * byte_size.
-                let computed = match &node.output_type.dtype {
+                match &node.output_type.dtype {
                     IrDType::U4 { .. } | IrDType::U8 { .. } => {
                         node.output_type.dtype.packed_byte_size(actual_numel)
                     }
                     _ => actual_numel * node.output_type.dtype.byte_size(),
-                };
-                if computed > slot.size {
-                    return Err(BackendError::Dispatch(format!(
-                        "output node {}: resolved size {} exceeds allocated slot size {} \
-                         (shape {:?}, env may have overflowed SYMBOL_DIM_MAX={})",
-                        output_node_id, computed, slot.size,
-                        node.output_type.shape,
-                        crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed),
-                    )));
                 }
-                computed
             } else {
                 slot.size
             };
@@ -240,6 +239,266 @@ impl<B: Backend> GraphExecutor<B> {
     ) -> Result<Vec<Vec<u8>>, BackendError> {
         let (plan, memory_plan, compiled_graph) = self.compile_with_plan(graph)?;
         self.execute(&compiled_graph, &plan, &memory_plan, inputs)
+    }
+
+    /// Compile a training model from a forward graph.
+    ///
+    /// `batch_inputs`: all non-parameter runtime inputs including data, labels, masks, targets.
+    ///   These are overwritten each step. Everything else persists in the arena.
+    ///
+    /// `params`: trainable parameter graph input nodes (must have entries in param_data)
+    /// `param_data`: initial f32 byte slices for each param (same order as params)
+    ///
+    /// `batch_shape_env`: optional concrete shapes for symbolic batch dims. When provided,
+    ///   the memory plan is tightened after compilation, shrinking slots from worst-case
+    ///   SYMBOL_DIM_MAX to actual sizes. Pass `None` to skip tightening (uses worst-case).
+    pub fn compile_train(
+        &self,
+        forward_graph: &ComputeGraph,
+        loss_node: NodeId,
+        params: &[NodeId],
+        param_data: &[&[u8]],
+        batch_inputs: &[NodeId],
+        batch_shape_env: Option<&ShapeEnv>,
+        config: &TrainConfig,
+    ) -> Result<CompiledTrainingModel<B>, BackendError>
+    where
+        B: Clone,
+    {
+        // 1. Clone forward graph
+        let mut combined_graph = forward_graph.clone();
+
+        // 2. Build backward graph (result already contains forward + backward nodes)
+        let (grad_graph, grad_map) = build_backward_graph(&combined_graph, loss_node)
+            .map_err(|e| BackendError::Compilation(format!("build_backward_graph: {e}")))?;
+        combined_graph = grad_graph;
+
+        // 3. Map each param to its gradient accumulator
+        let params_with_grads: Vec<(NodeId, NodeId)> = params
+            .iter()
+            .map(|p| {
+                let grad = *grad_map.get(p).ok_or_else(|| {
+                    BackendError::Compilation(format!(
+                        "param {} has no gradient in backward graph",
+                        p
+                    ))
+                })?;
+                Ok((*p, grad))
+            })
+            .collect::<Result<Vec<_>, BackendError>>()?;
+
+        // 4. Inject optimizer nodes
+        let injection =
+            inject_optimizer(&mut combined_graph, &params_with_grads, &config.optimizer)
+                .map_err(|e| BackendError::Compilation(format!("inject_optimizer: {e}")))?;
+
+        // 5. Set graph inputs and outputs
+        combined_graph.outputs = vec![loss_node];
+
+        // Mark persistent state nodes as required so the memory planner
+        // extends their lifetimes to end of execution (prevents slot reuse
+        // by post-optimizer nodes — especially important for m/v state).
+        for &param_id in params {
+            combined_graph.add_required_node(param_id);
+        }
+        for state_nodes in &injection.state_input_nodes {
+            for &state_id in state_nodes {
+                combined_graph.add_required_node(state_id);
+            }
+        }
+        for &updated_id in &injection.updated_param_nodes {
+            combined_graph.add_required_node(updated_id);
+        }
+
+        // Inputs = [batch_inputs..., params..., state_input_nodes...]
+        let mut all_inputs: Vec<NodeId> = Vec::new();
+        all_inputs.extend_from_slice(batch_inputs);
+        all_inputs.extend_from_slice(params);
+        for state in &injection.state_input_nodes {
+            all_inputs.extend_from_slice(state);
+        }
+        combined_graph.inputs = all_inputs;
+
+        // 6. Run the standard compiler pipeline
+        let (plan, memory_plan, final_graph) =
+            self.compile_with_plan_and_quantize(&combined_graph, config.quantize)?;
+
+        // 6b. Optionally tighten memory plan using concrete batch shapes.
+        //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
+        let (plan, memory_plan) = if let Some(shape_env) = batch_shape_env {
+            let tightened_mp = memory_plan.tighten(&final_graph, shape_env);
+            let tightened_plan = self.backend.compile(&final_graph, &tightened_mp)
+                .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
+            (tightened_plan, tightened_mp)
+        } else {
+            (plan, memory_plan)
+        };
+
+        // 7. Extract slot metadata from the (possibly tightened) memory plan
+        let mut input_slot_offsets = Vec::new();
+        for &input_id in batch_inputs {
+            let slot = memory_plan.slots.get(&input_id).ok_or_else(|| {
+                BackendError::Compilation(format!(
+                    "no memory slot for batch input {}",
+                    input_id
+                ))
+            })?;
+            input_slot_offsets.push((slot.offset, slot.size));
+        }
+
+        let loss_slot = memory_plan.slots.get(&loss_node).ok_or_else(|| {
+            BackendError::Compilation(format!("no memory slot for loss node {}", loss_node))
+        })?;
+        let loss_slot_offset = loss_slot.offset;
+
+        // 8. Store shape env for dispatch (batch_shape_env or empty)
+        let model_shape_env = batch_shape_env.cloned().unwrap_or_default();
+
+        // 9. Allocate arena and write initial values
+        let arena = self.backend.allocate_arena(plan.arena_size);
+
+        // Write param data
+        for (i, data) in param_data.iter().enumerate() {
+            let slot = memory_plan.slots.get(&params[i]).ok_or_else(|| {
+                BackendError::Compilation(format!("param {} slot not found", params[i]))
+            })?;
+            self.backend.write_arena(&arena, slot.offset, data);
+        }
+
+        // Write zero-initialized optimizer state (m, v for AdamW)
+        for state_nodes in &injection.state_input_nodes {
+            for &state_id in state_nodes {
+                let slot = memory_plan.slots.get(&state_id).ok_or_else(|| {
+                    BackendError::Compilation(format!(
+                        "state node {} slot not found",
+                        state_id
+                    ))
+                })?;
+                let zeros = vec![0u8; slot.size];
+                self.backend.write_arena(&arena, slot.offset, &zeros);
+            }
+        }
+
+        Ok(CompiledTrainingModel {
+            backend: self.backend.clone(),
+            plan,
+            memory_plan,
+            graph: final_graph,
+            arena,
+            input_slot_offsets,
+            loss_slot_offset,
+            shape_env: model_shape_env,
+        })
+    }
+}
+
+/// A compiled training model with a persistent memory arena.
+///
+/// Created by [`GraphExecutor::compile_train`]. The arena is allocated once
+/// and reused across steps. Parameters and optimizer state (m, v) persist
+/// via in-place kernel writes + required_nodes lifetime extension in the
+/// memory planner. Only batch input slots are overwritten each step.
+pub struct CompiledTrainingModel<B: Backend> {
+    pub backend: B,
+    pub plan: ExecutablePlan,
+    pub memory_plan: MemoryPlan,
+    pub graph: ComputeGraph,
+    pub arena: B::Buffer,
+    /// (offset, size) for each batch input — overwritten each step
+    pub input_slot_offsets: Vec<(usize, usize)>,
+    /// Arena offset for the loss scalar (4 bytes, f32)
+    pub loss_slot_offset: usize,
+    /// Shape env (empty for now — no tightening at compile time)
+    pub shape_env: ShapeEnv,
+}
+
+impl<B: Backend> CompiledTrainingModel<B> {
+    /// Execute one training step.
+    ///
+    /// `batch_data[i]` is written to the i-th batch input slot (same order as
+    /// `batch_inputs` in `compile_train`). Must have exactly the expected byte size.
+    ///
+    /// Returns the loss as `f32`.
+    pub fn train_step(&mut self, batch_data: &[&[u8]]) -> Result<f32, BackendError> {
+        // 1. Validate batch input count
+        if batch_data.len() != self.input_slot_offsets.len() {
+            return Err(BackendError::Dispatch(format!(
+                "train_step: expected {} batch inputs, got {}",
+                self.input_slot_offsets.len(),
+                batch_data.len()
+            )));
+        }
+
+        // 2. Write batch input data into reserved arena slots
+        for (i, data) in batch_data.iter().enumerate() {
+            let (off, size) = self.input_slot_offsets[i];
+            if data.len() != size {
+                return Err(BackendError::Dispatch(format!(
+                    "train_step: batch input {} expected {} bytes, got {}",
+                    i,
+                    size,
+                    data.len()
+                )));
+            }
+            self.backend.write_arena(&self.arena, off, data);
+        }
+
+        // 3. Dispatch the full train-step graph
+        self.backend
+            .dispatch(&self.plan, &self.arena, &self.shape_env)
+            .map_err(|e| BackendError::Dispatch(format!("train_step dispatch: {e}")))?;
+
+        // 4. Read loss immediately (before any post-dispatch writes)
+        let loss_raw = self.backend.read_arena(&self.arena, self.loss_slot_offset, 4);
+        let loss_arr: [u8; 4] = loss_raw
+            .get(..4)
+            .ok_or_else(|| {
+                BackendError::Dispatch("train_step: loss buffer too small".into())
+            })?
+            .try_into()
+            .map_err(|_| BackendError::Dispatch("train_step: invalid loss bytes".into()))?;
+        let loss = f32::from_le_bytes(loss_arr);
+
+        // 5. Increment Adam/AdamW step counters for bias correction
+        self.increment_optimizer_steps()?;
+
+        Ok(loss)
+    }
+
+    /// Increment `t` (params[4]) in all Adam/AdamW kernel instructions.
+    /// This advances the bias correction denominator for the next step.
+    fn increment_optimizer_steps(&mut self) -> Result<(), BackendError> {
+        for instr in &mut self.plan.instructions {
+            if let Instruction::CallKernel {
+                kernel_name,
+                params,
+                ..
+            } = instr
+            {
+                match kernel_name.as_str() {
+                    "adam_update_f32"
+                    | "adam_update_f16_state"
+                    | "adamw_update_f32"
+                    | "adamw_update_f16_state" => {
+                        if params.len() <= 4 {
+                            return Err(BackendError::Dispatch(format!(
+                                "{} expected >=5 params, got {}",
+                                kernel_name,
+                                params.len()
+                            )));
+                        }
+                        // params[4] = step counter t (u64 stored as usize)
+                        params[4] = params[4].checked_add(1).ok_or_else(|| {
+                            BackendError::Dispatch(
+                                "train_step: Adam step overflow (t > u64::MAX)".into(),
+                            )
+                        })?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
     }
 }
 

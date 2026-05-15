@@ -32,9 +32,10 @@ blas-src     = { version = "0.10", features = ["openblas"], optional = true }
 fnv          = "1.0"
 rustc-hash  = "2.0"
 ndarray      = { version = "0.16", features = ["blas"] }
+clap         = { version = "4", features = ["derive"], optional = true }
 
 [features]
-default = ["simd", "parallel", "simd_avx512"]
+default = ["simd", "parallel", "simd_avx512", "fusion-forward"]
 openblas = ["blas-src/openblas-src"]
 blas = []
 parallel = ["rayon"]
@@ -42,6 +43,20 @@ simd = []
 prefetch = []
 simd_avx512 = []
 neon = []
+
+# ── Fusion passes (compile-time modular) ─────────────────────────────
+fusion-forward = ["fusion-op-relu", "fusion-matmul-add-relu"]
+fusion-op-relu = []
+fusion-matmul-add-relu = []
+fusion-backward = []
+
+# ── CLI binary ────────────────────────────────────────────────────────
+cli = ["dep:clap"]
+
+[[bin]]
+name = "fastnn-runtime"
+path = "src/bin/runtime.rs"
+required-features = ["cli"]
 
 [profile.release]
 lto = true
