@@ -7,7 +7,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
     let order = graph.topological_sort();
 
     for &node_id in &order {
-        let node = graph.get_node(node_id).unwrap().clone();
+        let node = graph.get_node(node_id).unwrap();
         let inputs: Vec<&IRNode> = node
             .inputs
             .iter()

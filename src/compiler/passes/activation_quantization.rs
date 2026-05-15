@@ -33,7 +33,7 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
 
     for &node_id in &order {
         let node = match graph.get_node(node_id) {
-            Some(n) => n.clone(),
+            Some(n) => n,
             None => continue,
         };
 
@@ -41,35 +41,29 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
             continue;
         }
 
-        // Get the activation input (input[0]).
         let &act_id = match node.inputs.first() {
             Some(id) => id,
             None => continue,
         };
 
-        // Skip if the activation is already quantized (idempotent).
+        let matmul_shape = node.output_type.shape.clone();
+
         if let Some(act_node) = graph.get_node(act_id) {
             if act_node.opcode == Opcode::QuantizeActivations {
                 continue;
             }
         }
 
-        // The activation is a non-Input, non-Constant node we want to quantize.
-        // Skip Input nodes (they carry external data that may already be in
-        // the right format) and Constants (those are weights, handled by
-        // quantize_weights).
         if let Some(act_node) = graph.get_node(act_id) {
             if matches!(act_node.opcode, Opcode::Input | Opcode::Constant(_)) {
                 continue;
             }
         }
 
-        // Collect consumers of the MatMul's output (before we insert new nodes).
         let output_id = node_id;
         let consumers: Vec<NodeId> = graph.consumers(output_id);
         let is_graph_output = graph.outputs.contains(&output_id);
 
-        // Create QuantizeActivations node (f32 → i8).
         let act_shape = graph
             .get_node(act_id)
             .map(|n| n.output_type.shape.clone())
@@ -77,13 +71,10 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
         let quant_type = TensorType::new(act_shape, IrDType::I8);
         let quantize_id = graph.add_node(Opcode::QuantizeActivations, vec![act_id], quant_type);
 
-        // Rewire MatMul's first input to the QuantizeActivations output.
         if let Some(mm_node) = graph.get_node_mut(node_id) {
             mm_node.inputs[0] = quantize_id;
         }
 
-        // Create DequantizeActivations node (i8 → f32).
-        let matmul_shape = node.output_type.shape.clone();
         let dequant_type = TensorType::new(matmul_shape, IrDType::F32);
         let dequantize_id =
             graph.add_node(Opcode::DequantizeActivations, vec![output_id], dequant_type);

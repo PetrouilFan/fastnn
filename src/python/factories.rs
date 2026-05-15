@@ -172,6 +172,28 @@ fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyRe
 }
 
 #[pyfunction]
+#[pyo3(signature = (data, shape, dtype = None))]
+fn tensor_from_bytes(data: Vec<u8>, shape: Vec<i64>, dtype: Option<String>) -> PyResult<PyTensor> {
+    let n: usize = shape.iter().product::<i64>() as usize;
+    let expected_bytes = n * 4;
+    if data.len() != expected_bytes {
+        return Err(PyValueError::new_err(format!(
+            "tensor_from_bytes: expected {expected_bytes} bytes for shape {:?}, got {}",
+            shape, data.len()
+        )));
+    }
+    let _dtype = resolve_dtype(dtype);
+    let mut floats: Vec<f32> = Vec::with_capacity(n);
+    let mut i = 0;
+    while i + 4 <= data.len() {
+        let bytes: [u8; 4] = [data[i], data[i + 1], data[i + 2], data[i + 3]];
+        floats.push(f32::from_ne_bytes(bytes));
+        i += 4;
+    }
+    Ok(PyTensor::from_tensor(Tensor::from_vec(floats, shape)))
+}
+
+#[pyfunction]
 fn zeros_like(tensor: &PyTensor) -> PyTensor {
     PyTensor::from_tensor(Tensor::zeros(
         tensor.inner.shape(),

@@ -55,18 +55,20 @@ fn apply_residual_add_norm(_graph: &mut ComputeGraph) -> Result<bool, String> {
     Ok(false)
 }
 
+fn apply_pass(graph: &mut ComputeGraph, idx: usize) -> Result<bool, String> {
+    match idx {
+        0 => apply_matmul_add_relu(graph),
+        1 => apply_op_relu(graph),
+        2 => apply_residual_add_norm(graph),
+        3 => apply_backward_relu_matmul(graph),
+        4 => apply_backward_matmul_add_relu(graph),
+        _ => Ok(false),
+    }
+}
+
 pub fn fuse_operators(graph: &mut ComputeGraph) -> Result<(), String> {
-    // Pass ordering: more specific patterns first, general fallbacks last.
-    // MatMulAddRelu must precede OpRelu so that BiasAdd→Relu isn't consumed
-    // by the general OpRelu pass before MatMulAddRelu can fuse the full chain.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        changed |= apply_matmul_add_relu(graph)?;
-        changed |= apply_op_relu(graph)?;
-        changed |= apply_residual_add_norm(graph)?;
-        changed |= apply_backward_relu_matmul(graph)?;
-        changed |= apply_backward_matmul_add_relu(graph)?;
+    for i in 0..5 {
+        while apply_pass(graph, i)? {}
     }
     Ok(())
 }

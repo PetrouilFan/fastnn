@@ -1,3 +1,4 @@
+#![allow(clippy::needless_borrowed_reference)]
 //! Standalone runtime for executing compiled plans without the full compiler stack.
 //!
 //! # Usage
@@ -17,7 +18,8 @@
 //! it just loads the plan, maps the arena, and dispatches.
 
 use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
-use crate::ir::node::ShapeEnv;
+use crate::compiler::passes::memory_planning::AllocSlot;
+use crate::ir::node::{NodeId, ShapeEnv};
 
 /// A minimal runtime that loads and executes pre-compiled plans.
 ///
@@ -28,15 +30,28 @@ pub struct Runtime<B: Backend> {
     backend: B,
     plan: ExecutablePlan,
     memory_plan: MemoryPlan,
+    slots_sorted: Vec<(NodeId, AllocSlot)>,
 }
 
 impl<B: Backend> Runtime<B> {
+    fn build_sorted_slots(memory_plan: &MemoryPlan) -> Vec<(NodeId, AllocSlot)> {
+        let mut slots: Vec<_> = memory_plan
+            .slots
+            .iter()
+            .map(|(&nid, s)| (nid, s.clone()))
+            .collect();
+        slots.sort_by_key(|&(_, ref s)| s.offset);
+        slots
+    }
+
     /// Create a new runtime from an already-loaded plan and memory plan.
     pub fn new(backend: B, plan: ExecutablePlan, memory_plan: MemoryPlan) -> Self {
+        let slots_sorted = Self::build_sorted_slots(&memory_plan);
         Runtime {
             backend,
             plan,
             memory_plan,
+            slots_sorted,
         }
     }
 
@@ -56,10 +71,12 @@ impl<B: Backend> Runtime<B> {
         let memory_json = std::fs::read_to_string(memory_path)?;
         let memory_plan: MemoryPlan = serde_json::from_str(&memory_json)?;
 
+        let slots_sorted = Self::build_sorted_slots(&memory_plan);
         Ok(Runtime {
             backend,
             plan,
             memory_plan,
+            slots_sorted,
         })
     }
 
@@ -94,14 +111,9 @@ impl<B: Backend> Runtime<B> {
         let arena = self.backend.allocate_arena(self.plan.arena_size);
         let arena_ref = &arena;
 
-        // Collect slots sorted by offset — inputs are typically the first slots.
-        let mut sorted_slots: Vec<_> = self.memory_plan.slots.iter().collect();
-        sorted_slots.sort_by_key(|(_, s)| s.offset);
-
-        // Write inputs into the earliest slots (assumes inputs are the first
-        // nodes in topological order, which the memory planner schedules first).
+        // Write inputs into earliest slots (ordering cached at construction).
         for (i, input_bytes) in inputs.iter().enumerate() {
-            if let Some((_node_id, slot)) = sorted_slots.get(i) {
+            if let Some((_nid, slot)) = self.slots_sorted.get(i) {
                 self.backend
                     .write_arena(arena_ref, slot.offset, input_bytes);
             }
@@ -112,11 +124,13 @@ impl<B: Backend> Runtime<B> {
         let shape_env = ShapeEnv::new();
         self.backend.dispatch(&self.plan, arena_ref, &shape_env)?;
 
-        // Read output slot data (sorted by offset for deterministic order).
-        let mut outputs = Vec::with_capacity(sorted_slots.len());
-        for (_node_id, slot) in &sorted_slots {
-            let data = self.backend.read_arena(arena_ref, slot.offset, slot.size);
-            outputs.push(data);
+        // Read only graph output slots (not all intermediate tensors).
+        let mut outputs = Vec::with_capacity(self.memory_plan.outputs.len());
+        for &node_id in &self.memory_plan.outputs {
+            if let Some(slot) = self.memory_plan.slots.get(&node_id) {
+                let data = self.backend.read_arena(arena_ref, slot.offset, slot.size);
+                outputs.push(data);
+            }
         }
 
         Ok(outputs)

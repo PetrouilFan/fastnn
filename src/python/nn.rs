@@ -14,11 +14,11 @@ macro_rules! impl_nn_module {
                     .collect()
             }
 
-            fn named_parameters(&self) -> Vec<(String, PyTensor)> {
+            fn named_parameters(&self) -> Vec<(&str, PyTensor)> {
                 self.inner
-                    .named_parameters()
+                    .named_parameters_ref()
                     .into_iter()
-                    .map(|(n, t)| (n, PyTensor::from_tensor(t)))
+                    .map(|(n, t)| (n, PyTensor::from_tensor(t.clone())))
                     .collect()
             }
 
@@ -1079,17 +1079,13 @@ impl AotExecutor {
         &self,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
-        let mut input_bytes: Vec<Vec<u8>> = Vec::with_capacity(self.input_names.len());
-        for name in &self.input_names {
-            match inputs.get(name.as_str()) {
-                Some(t) => input_bytes.push(t.inner.as_bytes().to_vec()),
-                None => return Err(pyo3::exceptions::PyValueError::new_err(
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
                     format!("required input '{}' not found", name),
-                )),
-            }
-        }
-
-        let input_refs: Vec<&[u8]> = input_bytes.iter().map(|v| v.as_slice()).collect();
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
         let output_data = self.executor
             .execute(&self.graph, &self.plan, &self.memory_plan, &input_refs)

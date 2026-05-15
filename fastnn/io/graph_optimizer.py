@@ -597,14 +597,27 @@ def optimize_graph(header: dict, params: Optional[Dict[str, np.ndarray]] = None)
     if not nodes:
         return header
 
+    # Build adjacency maps once for all passes
+    output_to_consumer: Dict[str, List[int]] = {}
+    for i, node in enumerate(nodes):
+        for inp in node.get("inputs", []):
+            if inp not in output_to_consumer:
+                output_to_consumer[inp] = []
+            output_to_consumer[inp].append(i)
+
+    output_to_producer: Dict[str, int] = {}
+    for i, node in enumerate(nodes):
+        for out in node.get("outputs", []):
+            output_to_producer[out] = i
+
     # Pass 1: Dead node elimination
-    nodes = eliminate_dead_nodes(nodes, graph)
+    nodes = eliminate_dead_nodes(nodes, graph, output_to_consumer)
     
     # Pass 2: Conv+BN fusion  
-    nodes = fuse_conv_bn(nodes)
+    nodes = fuse_conv_bn(nodes, output_to_consumer, output_to_producer)
     
     # Pass 3: Constant folding
-    nodes = fold_constants(nodes, header, params=params)
+    nodes = fold_constants(nodes, header, output_to_consumer, output_to_producer, params=params)
     
     # Update header
     header = dict(header)
@@ -614,13 +627,17 @@ def optimize_graph(header: dict, params: Optional[Dict[str, np.ndarray]] = None)
     return header
 
 
-def eliminate_dead_nodes(nodes: List[dict], graph: dict) -> List[dict]:
+def eliminate_dead_nodes(
+    nodes: List[dict], graph: dict,
+    output_to_consumer: Optional[Dict[str, List[int]]] = None,
+) -> List[dict]:
     """Remove nodes whose outputs are never used as inputs to other nodes
     and are not model outputs.
 
     Args:
         nodes: List of node dicts with 'name', 'inputs', 'outputs'.
         graph: Graph dict with 'outputs' list.
+        output_to_consumer: Optional pre-built output-to-consumer map.
 
     Returns:
         Filtered node list.
@@ -634,10 +651,13 @@ def eliminate_dead_nodes(nodes: List[dict], graph: dict) -> List[dict]:
             model_outputs.add(out)
     
     # Build set of all consumed outputs (inputs to other nodes)
-    consumed_outputs: Set[str] = set()
-    for node in nodes:
-        for inp in node.get("inputs", []):
-            consumed_outputs.add(inp)
+    if output_to_consumer is not None:
+        consumed_outputs: Set[str] = set(output_to_consumer)
+    else:
+        consumed_outputs = set()
+        for node in nodes:
+            for inp in node.get("inputs", []):
+                consumed_outputs.add(inp)
     
     # Also add initializer names as consumed (they're always used)
     # (Initializers are tracked separately, not as node outputs)
@@ -667,7 +687,11 @@ def eliminate_dead_nodes(nodes: List[dict], graph: dict) -> List[dict]:
     return live_nodes
 
 
-def fuse_conv_bn(nodes: List[dict]) -> List[dict]:
+def fuse_conv_bn(
+    nodes: List[dict],
+    output_to_consumer: Optional[Dict[str, List[int]]] = None,
+    output_to_producer: Optional[Dict[str, int]] = None,
+) -> List[dict]:
     """Detect Conv -> BatchNormalization patterns and fuse them.
 
     Looks for pattern:
@@ -677,23 +701,25 @@ def fuse_conv_bn(nodes: List[dict]) -> List[dict]:
 
     Args:
         nodes: List of node dicts.
+        output_to_consumer: Optional pre-built output-to-consumer map.
+        output_to_producer: Optional pre-built output-to-producer map.
 
     Returns:
         Optimized node list with fused Conv+BN nodes.
     """
-    # Build a map from output name to consuming node indices
-    output_to_consumer: Dict[str, List[int]] = {}
-    for i, node in enumerate(nodes):
-        for inp in node.get("inputs", []):
-            if inp not in output_to_consumer:
-                output_to_consumer[inp] = []
-            output_to_consumer[inp].append(i)
-    
-    # Build map from output name to producing node index
-    output_to_producer: Dict[str, int] = {}
-    for i, node in enumerate(nodes):
-        for out in node.get("outputs", []):
-            output_to_producer[out] = i
+    # Build adjacency maps if not provided
+    if output_to_consumer is None:
+        output_to_consumer = {}
+        for i, node in enumerate(nodes):
+            for inp in node.get("inputs", []):
+                if inp not in output_to_consumer:
+                    output_to_consumer[inp] = []
+                output_to_consumer[inp].append(i)
+    if output_to_producer is None:
+        output_to_producer = {}
+        for i, node in enumerate(nodes):
+            for out in node.get("outputs", []):
+                output_to_producer[out] = i
     
     # Find Conv -> BatchNormalization patterns
     nodes_to_remove: Set[int] = set()
@@ -807,6 +833,8 @@ def fuse_conv_bn(nodes: List[dict]) -> List[dict]:
 def fold_constants(
     nodes: List[dict],
     header: dict,
+    output_to_consumer: Optional[Dict[str, List[int]]] = None,
+    output_to_producer: Optional[Dict[str, int]] = None,
     params: Optional[Dict[str, np.ndarray]] = None,
 ) -> List[dict]:
     """Fold constant subgraphs into constant nodes.
@@ -830,15 +858,19 @@ def fold_constants(
         Node list with constant subgraphs folded into Constant nodes.
     """
     # 1. Build index maps
-    output_to_producer: Dict[str, int] = {}
-    for i, node in enumerate(nodes):
-        for out in node.get("outputs", []):
-            output_to_producer[out] = i
+    if output_to_producer is None:
+        output_to_producer = {}
+        for i, node in enumerate(nodes):
+            for out in node.get("outputs", []):
+                output_to_producer[out] = i
 
-    consumed_outputs: Set[str] = set()
-    for node in nodes:
-        for inp in node.get("inputs", []):
-            consumed_outputs.add(inp)
+    if output_to_consumer is not None:
+        consumed_outputs: Set[str] = set(output_to_consumer)
+    else:
+        consumed_outputs = set()
+        for node in nodes:
+            for inp in node.get("inputs", []):
+                consumed_outputs.add(inp)
 
     model_outputs: Set[str] = set()
     for out in header.get("graph", {}).get("outputs", []):

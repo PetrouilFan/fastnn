@@ -13,7 +13,8 @@ use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
 use pyo3::PyAny;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // Custom exception hierarchy for fastnn
 pyo3::create_exception!(
@@ -65,21 +66,26 @@ pyo3::create_exception!(
     "CUDA/GPU computation error."
 );
 
-// Thread-local default device storage
-pub(crate) static DEFAULT_DEVICE: OnceLock<RwLock<Device>> = OnceLock::new();
+// Lock-free default device storage (AtomicU8 for variant, AtomicUsize for device_id)
+static DEFAULT_DEVICE_VARIANT: AtomicU8 = AtomicU8::new(0);
+static DEFAULT_DEVICE_ID: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn get_default_device() -> Device {
-    let guard = DEFAULT_DEVICE
-        .get_or_init(|| RwLock::new(Device::Cpu))
-        .read();
-    *guard
+    match DEFAULT_DEVICE_VARIANT.load(Ordering::Relaxed) {
+        0 => Device::Cpu,
+        1 => Device::Wgpu(DEFAULT_DEVICE_ID.load(Ordering::Relaxed)),
+        _ => Device::Cpu,
+    }
 }
 
 pub(crate) fn set_default_device_internal(device: Device) {
-    let mut guard = DEFAULT_DEVICE
-        .get_or_init(|| RwLock::new(Device::Cpu))
-        .write();
-    *guard = device;
+    match device {
+        Device::Cpu => DEFAULT_DEVICE_VARIANT.store(0, Ordering::Relaxed),
+        Device::Wgpu(id) => {
+            DEFAULT_DEVICE_VARIANT.store(1, Ordering::Relaxed);
+            DEFAULT_DEVICE_ID.store(id, Ordering::Relaxed);
+        }
+    }
 }
 
 include!("tensor.rs");
@@ -113,6 +119,7 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CudaError", py.get_type::<CudaError>())?;
 
     m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
+    m.add_function(wrap_pyfunction!(tensor_from_bytes, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_factory, py)?)?;
     m.add_function(wrap_pyfunction!(zeros, py)?)?;
     m.add_function(wrap_pyfunction!(empty, py)?)?;

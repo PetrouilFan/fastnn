@@ -56,24 +56,26 @@ class _BaseModule(Module):
     
     def _register_layer(self, layer: Any, name: Optional[str] = None) -> None:
         """Register a layer for parameter iteration, training mode, etc."""
-        has_params = hasattr(layer, "parameters")
-        has_zero_grad = hasattr(layer, "zero_grad")
-        has_train = hasattr(layer, "train_mode")
-        has_eval = hasattr(layer, "eval_mode")
-        has_gpu = hasattr(layer, "to_gpu")
-        has_named_params = name and hasattr(layer, "named_parameters")
+        mask = getattr(layer, '_fnn_cap_mask', 0)
+        if mask == 0:
+            mask = (1 << 0) if hasattr(layer, "parameters") else 0
+            mask |= (1 << 1) if hasattr(layer, "zero_grad") else 0
+            mask |= (1 << 2) if hasattr(layer, "train_mode") else 0
+            mask |= (1 << 3) if hasattr(layer, "eval_mode") else 0
+            mask |= (1 << 4) if hasattr(layer, "to_gpu") else 0
+            layer._fnn_cap_mask = mask
         
-        if has_params:
+        if mask & (1 << 0):
             self._param_layers.append(layer)
-        if has_zero_grad:
+        if mask & (1 << 1):
             self._zero_grad_layers.append(layer)
-        if has_train:
+        if mask & (1 << 2):
             self._train_layers.append(layer)
-        if has_eval:
+        if mask & (1 << 3):
             self._eval_layers.append(layer)
-        if has_gpu:
+        if mask & (1 << 4):
             self._gpu_layers.append(layer)
-        if has_named_params:
+        if name and (mask & (1 << 0)) and hasattr(layer, "named_parameters"):
             self._named_param_pairs.append((name, layer))
     
     def parameters(self) -> List[Any]:

@@ -164,16 +164,13 @@ impl Module for BatchNorm1d {
 
         let is_training = self.training.is_training();
 
-        // Read current running stats - clone tensors so guards are dropped before dispatch
-        let running_mean = self.running_mean.read().clone();
-        let running_var = self.running_var.read().clone();
-
         let grads_needed = x.requires_grad()
             || self.weight.as_ref().is_some_and(|w| w.requires_grad())
             || self.bias.as_ref().is_some_and(|b| b.requires_grad());
 
-        // Compute batch stats for backward (before running stats update modifies them)
-        let (batch_mean, batch_var) = if is_training {
+        // Compute batch statistics via fused AOT graph (mean + var in one pass)
+        // In eval mode, read running stats from the stored values
+        let (mean, var, batch_mean, batch_var) = if is_training {
             let x_shape = x.shape_ref();
             let batch_size = x_shape[0];
             let num_features = x_shape[1];
@@ -183,27 +180,60 @@ impl Module for BatchNorm1d {
                 1
             };
 
+            // Fused AOT graph: compute batch mean and variance in one compilation
             let x_reshaped = x.reshape(vec![batch_size, num_features, spatial_size]);
-            let b_mean = x_reshaped.mean(2, false).mean(0, false);
-            let centered = x_reshaped.sub(&b_mean.reshape(vec![1, num_features, 1]));
-            let b_var = centered.mul(&centered).mean(2, false).mean(0, false);
-            (b_mean, b_var)
+            let stats = Tensor::exec_aot(&[&x_reshaped], |g, ins| {
+                let b_mean = g.reduce_mean(&ins[0], 2, false);
+                let b_mean_2d = g.reduce_mean(&b_mean, 0, false);
+                // The centered needs a reshape for correct broadcasting
+                let centered = g.sub(
+                    &ins[0],
+                    &g.reshape(
+                        &b_mean_2d,
+                        &[
+                            DimExpr::Known(1),
+                            DimExpr::Known(num_features as u64),
+                            DimExpr::Known(1),
+                        ],
+                    ),
+                );
+                let sq = g.mul(&centered, &centered);
+                let b_var = g.reduce_mean(&sq, 2, false);
+                let b_var_1d = g.reduce_mean(&b_var, 0, false);
+                vec![b_mean_2d, b_var_1d]
+            })
+            .expect("BatchNorm stats computation failed");
+
+            let b_mean = stats[0].clone();
+            let b_var = stats[1].clone();
+
+            // Clone before releasing read lock if training (for running stats update)
+            let rm = self.running_mean.read();
+            let rv = self.running_var.read();
+            (rm.clone(), rv.clone(), b_mean, b_var)
         } else {
-            (running_mean.clone(), running_var.clone())
+            let rm = self.running_mean.read();
+            let rv = self.running_var.read();
+            (rm.clone(), rv.clone(), rm.clone(), rv.clone())
         };
 
-        let (mean, var) = if is_training {
+        let (mean_ref, var_ref) = if is_training {
             (&batch_mean, &batch_var)
         } else {
-            (&running_mean, &running_var)
+            (&mean, &var)
         };
 
-        let result = Tensor::exec_aot(&[x, weight_ref, bias_ref, mean, var], |g, ins| {
+        let result = Tensor::exec_aot(&[x, weight_ref, bias_ref, mean_ref, var_ref], |g, ins| {
             vec![g.batch_norm(&ins[0], &ins[1], &ins[2], &ins[3], &ins[4], self.eps)]
         })
         .expect("BatchNorm1d::forward: AOT failed");
 
+        #[allow(unused_mut)]
         let mut output = result.into_iter().next().unwrap();
+
+        // Remove redundant output.clone() — output is uniquely owned
+        #[allow(unused_mut)]
+        let mut output = output;
 
         // In training mode, update the running stats
         if is_training {

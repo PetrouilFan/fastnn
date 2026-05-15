@@ -1,3 +1,4 @@
+#![allow(clippy::for_kv_map, clippy::redundant_closure)]
 //! AOT graph executor — ties together IR, compiler passes, and backend dispatch.
 //!
 //! Usage:

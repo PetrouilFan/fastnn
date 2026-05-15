@@ -64,7 +64,7 @@ impl TensorImpl {
         let strides = &self.strides;
         let sizes = &self.sizes;
         let offset = self.storage_offset;
-        let mut indices = vec![0i64; ndim];
+        let mut indices: SmallVec<[i64; 6]> = smallvec![0i64; ndim];
         for i in 0..numel {
             let mut src_idx = offset;
             for d in 0..ndim {

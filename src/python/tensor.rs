@@ -57,13 +57,13 @@ impl PyTensor {
     }
 
     #[getter]
-    fn dtype(&self) -> String {
-        self.inner.dtype().as_str().to_string()
+    fn dtype(&self) -> &'static str {
+        self.inner.dtype().as_str()
     }
 
     #[getter]
-    fn device(&self) -> String {
-        self.inner.device().as_str().to_string()
+    fn device(&self) -> &'static str {
+        self.inner.device().as_str()
     }
 
     #[getter]
@@ -195,8 +195,8 @@ impl PyTensor {
     }
 
     #[getter]
-    fn grad_fn(&self) -> Option<String> {
-        self.inner.grad_fn().map(|_| "grad_fn".to_string())
+    fn grad_fn(&self) -> Option<&'static str> {
+        self.inner.grad_fn().map(|_| "grad_fn")
     }
 
     #[getter]
