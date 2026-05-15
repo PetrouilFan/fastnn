@@ -812,6 +812,10 @@ impl Backend for CpuBackend {
                 Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d => {
                     let scale_h: usize = node.attrs.get("scale_h").and_then(|s| s.parse().ok()).unwrap_or(2);
                     let scale_w: usize = node.attrs.get("scale_w").and_then(|s| s.parse().ok()).unwrap_or(2);
+                    // Pass input spatial dims so the kernel doesn't need to guess H,W
+                    // from flat buffer size (which is ambiguous for NCHW layouts).
+                    let h_in = input_shapes.first().and_then(|s| s.get(2).copied()).unwrap_or(1) as usize;
+                    let w_in = input_shapes.first().and_then(|s| s.get(3).copied()).unwrap_or(1) as usize;
                     let kernel_name = match node.opcode {
                         Opcode::UpsampleNearest2d => "upsample_nearest2d",
                         _ => "upsample_bilinear2d",
@@ -821,7 +825,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![scale_h, scale_w],
+                        params: vec![scale_h, scale_w, h_in, w_in],
                         param_dims: None,
                         weight_meta: None,
                     });
