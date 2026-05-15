@@ -27,23 +27,23 @@ def uniform_(tensor: Tensor, a: float = 0.0, b: float = 1.0) -> Tensor:
     """Fill tensor with values drawn from Uniform(a, b)."""
     with fastnn.no_grad():
         rng = np.random.default_rng()
-        data = rng.uniform(a, b, tensor.shape).astype(np.float32).flatten().tolist()
-        return fastnn.Tensor(data, tensor.shape)
+        data = rng.uniform(a, b, tensor.shape).astype(np.float32)
+        return fastnn.from_numpy(data)
 
 
 def normal_(tensor: Tensor, mean: float = 0.0, std: float = 1.0) -> Tensor:
     """Fill tensor with values drawn from Normal(mean, std)."""
     with fastnn.no_grad():
         rng = np.random.default_rng()
-        data = rng.normal(mean, std, tensor.shape).astype(np.float32).flatten().tolist()
-        return fastnn.Tensor(data, tensor.shape)
+        data = rng.normal(mean, std, tensor.shape).astype(np.float32)
+        return fastnn.from_numpy(data)
 
 
 def constant_(tensor: Tensor, val: float) -> Tensor:
     """Fill tensor with constant value."""
     with fastnn.no_grad():
-        data = np.full(tensor.shape, val, dtype=np.float32).flatten().tolist()
-        return fastnn.Tensor(data, tensor.shape)
+        data = np.full(tensor.shape, val, dtype=np.float32)
+        return fastnn.from_numpy(data)
 
 
 def ones_(tensor: Tensor) -> Tensor:
@@ -146,7 +146,7 @@ def orthogonal_(tensor: Tensor, gain: float = 1.0) -> Tensor:
         q, r = np.linalg.qr(rng.normal(0.0, 1.0, flat_shape))
         q *= np.sign(np.diag(r))
         q *= gain
-        return fastnn.Tensor(q.flatten().tolist(), shape)
+        return fastnn.from_numpy(q)
 
 
 def eye_(tensor: Tensor) -> Tensor:
@@ -178,4 +178,4 @@ def dirac_(tensor: Tensor) -> Tensor:
                 data[i, i, shape[2] // 2, shape[3] // 2] = 1.0
             elif len(shape) == 5:
                 data[i, i, shape[2] // 2, shape[3] // 2, shape[4] // 2] = 1.0
-        return fastnn.Tensor(data.flatten().tolist(), shape)
+        return fastnn.from_numpy(data)

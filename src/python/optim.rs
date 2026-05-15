@@ -28,8 +28,8 @@ struct PySGD {
 
 #[pymethods]
 impl PySGD {
-    fn step(&mut self) {
-        self.inner.step();
+    fn step(&mut self, py: Python<'_>) {
+        py.detach(|| self.inner.step());
     }
 
     fn zero_grad(&mut self) {
@@ -78,8 +78,8 @@ struct PyAdam {
 
 #[pymethods]
 impl PyAdam {
-    fn step(&mut self) {
-        self.inner.step();
+    fn step(&mut self, py: Python<'_>) {
+        py.detach(|| self.inner.step());
     }
 
     fn zero_grad(&mut self) {
@@ -156,8 +156,8 @@ struct PyAdamW {
 
 #[pymethods]
 impl PyAdamW {
-    fn step(&mut self) {
-        self.inner.step();
+    fn step(&mut self, py: Python<'_>) {
+        py.detach(|| self.inner.step());
     }
 
     fn zero_grad(&mut self) {
@@ -225,8 +225,8 @@ struct PyMuon {
 
 #[pymethods]
 impl PyMuon {
-    fn step(&mut self) {
-        self.inner.step();
+    fn step(&mut self, py: Python<'_>) {
+        py.detach(|| self.inner.step());
     }
 
     fn zero_grad(&mut self) {
@@ -285,8 +285,8 @@ struct PyLion {
 
 #[pymethods]
 impl PyLion {
-    fn step(&mut self) {
-        self.inner.step();
+    fn step(&mut self, py: Python<'_>) {
+        py.detach(|| self.inner.step());
     }
 
     fn zero_grad(&mut self) {
@@ -334,8 +334,8 @@ struct PyRMSprop {
 
 #[pymethods]
 impl PyRMSprop {
-    fn step(&mut self) {
-        self.inner.step();
+    fn step(&mut self, py: Python<'_>) {
+        py.detach(|| self.inner.step());
     }
 
     fn zero_grad(&mut self) {

@@ -31,18 +31,25 @@ impl Module for Dropout {
             let mut rng = rand::thread_rng();
             let mut mask_data = vec![0.0f32; numel];
 
-            let chunk_size = 4096;
-            for chunk_start in (0..numel).step_by(chunk_size) {
-                let chunk_end = std::cmp::min(chunk_start + chunk_size, numel);
-                let chunk_len = chunk_end - chunk_start;
+            if numel > 100_000 {
+                let chunk_size = 4096;
+                for chunk_start in (0..numel).step_by(chunk_size) {
+                    let chunk_end = std::cmp::min(chunk_start + chunk_size, numel);
+                    let chunk_len = chunk_end - chunk_start;
 
-                let mut rand_vals = vec![0.0f32; chunk_len];
-                rng.fill(&mut rand_vals[..]);
+                    let mut rand_vals = vec![0.0f32; chunk_len];
+                    rng.fill(&mut rand_vals[..]);
 
-                for i in 0..chunk_len {
-                    if rand_vals[i] < keep_prob as f32 {
-                        mask_data[chunk_start + i] = scale;
+                    for i in 0..chunk_len {
+                        if rand_vals[i] < keep_prob as f32 {
+                            mask_data[chunk_start + i] = scale;
+                        }
                     }
+                }
+            } else {
+                rng.fill(&mut mask_data[..]);
+                for val in mask_data.iter_mut() {
+                    *val = if *val < keep_prob as f32 { scale } else { 0.0 };
                 }
             }
 

@@ -108,12 +108,13 @@ impl Module for Conv2d {
             for b in 0..x_shape[0] {
                 for c in 0..x_shape[1] {
                     for h in 0..x_shape[2] {
-                        for w in 0..x_shape[3] {
-                            let src = ((b * x_shape[1] + c) * x_shape[2] + h) * x_shape[3] + w;
-                            let dst = ((b * x_shape[1] + c) * new_h + (h + pad_top)) * new_w
-                                + (w + pad_left);
-                            padded_data[dst as usize] = x_data[src as usize];
-                        }
+                        let src_off = ((b * x_shape[1] + c) * x_shape[2] + h) * x_shape[3];
+                        let dst_off =
+                            ((b * x_shape[1] + c) * new_h + (h + pad_top)) * new_w + pad_left;
+                        let src = &x_data[src_off as usize..(src_off + x_shape[3]) as usize];
+                        let dst =
+                            &mut padded_data[dst_off as usize..(dst_off + x_shape[3]) as usize];
+                        dst.copy_from_slice(src);
                     }
                 }
             }
@@ -124,7 +125,7 @@ impl Module for Conv2d {
         } else {
             (x.clone(), self.padding_scalar.clone())
         };
-        let output = {
+        let mut output = {
             let conv = Tensor::exec_aot(&[&input, &self.weight], |g, ins| {
                 vec![g.conv2d_with_params(
                     &ins[0],
@@ -140,33 +141,8 @@ impl Module for Conv2d {
             .next()
             .unwrap();
             if let Some(bias) = &self.bias {
-                // Manually expand bias to full spatial dims to avoid
-                // broadcasting issues in the element-wise add kernel.
-                let conv_shape = conv.shape();
-                let h_out = if conv_shape.len() > 2 {
-                    conv_shape[2] as usize
-                } else {
-                    1
-                };
-                let w_out = if conv_shape.len() > 3 {
-                    conv_shape[3] as usize
-                } else {
-                    1
-                };
-                let bias_vals = bias.as_f32_slice();
-                let out_c = self.out_channels as usize;
-                let mut expanded = Vec::with_capacity(out_c * h_out * w_out);
-                for c in 0..out_c {
-                    let bv = bias_vals[c.min(bias_vals.len().saturating_sub(1))];
-                    for _ in 0..h_out * w_out {
-                        expanded.push(bv);
-                    }
-                }
-                let expanded_t = Tensor::from_vec(
-                    expanded,
-                    vec![1, self.out_channels, h_out as i64, w_out as i64],
-                );
-                conv.add(&expanded_t)
+                let bias_shape = vec![1, self.out_channels, 1, 1];
+                conv.add(&bias.reshape(bias_shape))
             } else {
                 conv
             }
@@ -182,7 +158,6 @@ impl Module for Conv2d {
             let backward = Conv2dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(Arc::new(backward));
-            let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta =
                 Some(Arc::new(std::sync::Mutex::new(meta)));
             output

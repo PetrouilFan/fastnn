@@ -2,7 +2,7 @@
 
 use crate::ir::node::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A single allocation slot in the arena
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +21,8 @@ pub struct MemoryPlan {
     /// Secondary output slots for multi-output nodes (e.g. MaxPool argmax indices).
     /// Key is (node_id, output_index).
     pub secondary_slots: HashMap<(NodeId, usize), AllocSlot>,
+    /// Graph output node IDs, in order.  Populated by [`plan_memory_with_env`].
+    pub outputs: Vec<NodeId>,
 }
 
 impl MemoryPlan {
@@ -30,46 +32,28 @@ impl MemoryPlan {
     /// shrunk, and `total_size` is recomputed.  Offsets are not changed
     /// (the slot layout is preserved), so this is safe to call after the
     /// plan was compiled with max-estimate sizes.
-    pub fn tighten(&self, graph: &ComputeGraph, shape_env: &ShapeEnv) -> Self {
-        let mut new_slots = self.slots.clone();
-        let mut new_secondary_slots = self.secondary_slots.clone();
+    pub fn tighten(&self, graph: &ComputeGraph, shape_env: &ShapeEnv) -> MemoryPlan {
+        let mut mp = self.clone();
         let mut max_end = 0usize;
-        for (&node_id, slot) in &self.slots {
+        for (_, slot) in mp.slots.iter_mut() {
             let tight_size = graph
-                .get_node(node_id)
+                .get_node(slot.node_id)
                 .map(|n| n.output_type.byte_size_with_env(Some(shape_env)))
                 .unwrap_or(slot.size);
-            let clamped = tight_size.min(slot.size);
-            new_slots.insert(
-                node_id,
-                AllocSlot {
-                    size: clamped,
-                    ..*slot
-                },
-            );
-            max_end = max_end.max(slot.offset + clamped);
+            slot.size = tight_size.min(slot.size);
+            max_end = max_end.max(slot.offset + slot.size);
         }
-        for (&(node_id, _), slot) in &self.secondary_slots {
+        for (_, slot) in mp.secondary_slots.iter_mut() {
             let tight_size = graph
-                .get_node(node_id)
+                .get_node(slot.node_id)
                 .and_then(|n| n.secondary_output_type.as_ref())
                 .map(|t| t.byte_size_with_env(Some(shape_env)))
                 .unwrap_or(slot.size);
-            let clamped = tight_size.min(slot.size);
-            new_secondary_slots.insert(
-                (node_id, 1),
-                AllocSlot {
-                    size: clamped,
-                    ..*slot
-                },
-            );
-            max_end = max_end.max(slot.offset + clamped);
+            slot.size = tight_size.min(slot.size);
+            max_end = max_end.max(slot.offset + slot.size);
         }
-        MemoryPlan {
-            total_size: max_end,
-            slots: new_slots,
-            secondary_slots: new_secondary_slots,
-        }
+        mp.total_size = max_end;
+        mp
     }
 }
 
@@ -99,20 +83,19 @@ fn align_up(val: usize, alignment: usize) -> usize {
     (val + alignment - 1) & !(alignment - 1)
 }
 
-/// Size-segregated free list allocator.
-/// Maintains one free list per power-of-2 size class.
-/// Allocation: find the smallest bucket with a free block, take the first one.
+/// Size-segregated free list allocator backed by a `BTreeMap`.
+/// Buckets are keyed by power-of-2 size class for O(log n) best-fit search.
+/// Allocation: find the smallest bucket with a free block meeting the size.
 /// Deallocation: return the block to its size-class bucket.
 struct SegFreeList {
-    buckets: Vec<Vec<FreeBlock>>,
+    buckets: BTreeMap<usize, Vec<FreeBlock>>,
     large_blocks: Vec<FreeBlock>,
 }
 
 impl SegFreeList {
     fn new() -> Self {
-        let buckets = (0..64).map(|_| Vec::new()).collect();
         SegFreeList {
-            buckets,
+            buckets: BTreeMap::new(),
             large_blocks: Vec::new(),
         }
     }
@@ -134,18 +117,10 @@ impl SegFreeList {
             return;
         }
         let aligned = align_up(size, 8);
-        if let Some(bucket) = Self::bucket_for(aligned) {
-            self.buckets[bucket].push(FreeBlock {
-                offset,
-                size: aligned,
-            });
-            return;
-        }
-        self.large_blocks.push(FreeBlock {
+        self.buckets.entry(aligned).or_default().push(FreeBlock {
             offset,
             size: aligned,
         });
-        self.large_blocks.sort_by_key(|b| b.offset);
     }
 
     fn alloc(&mut self, size: usize) -> Option<usize> {
@@ -153,15 +128,17 @@ impl SegFreeList {
         if aligned == 0 {
             return None;
         }
-        let b = (usize::BITS - aligned.leading_zeros()) as usize - 1;
-        for b_idx in b..self.buckets.len() {
-            if let Some(pos) = self.buckets[b_idx]
-                .iter()
-                .position(|block| block.size >= aligned)
-            {
-                let block = self.buckets[b_idx].swap_remove(pos);
+
+        let target_key = self.buckets.range(aligned..).next().map(|(&k, _)| k);
+        if let Some(key) = target_key {
+            if let Some(blocks) = self.buckets.get_mut(&key) {
+                let block = blocks.swap_remove(0);
+                let empty = blocks.is_empty();
                 let off = block.offset;
                 let extra = block.size - aligned;
+                if empty {
+                    self.buckets.remove(&key);
+                }
                 if extra > 0 {
                     self.add(off + aligned, extra);
                 }
@@ -214,6 +191,7 @@ pub fn plan_memory_with_env(
             total_size: 0,
             slots: HashMap::new(),
             secondary_slots: HashMap::new(),
+            outputs: graph.outputs.clone(),
         });
     }
 
@@ -420,5 +398,6 @@ pub fn plan_memory_with_env(
         total_size: arena_top,
         slots,
         secondary_slots,
+        outputs: graph.outputs.clone(),
     })
 }

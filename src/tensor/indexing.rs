@@ -1,6 +1,10 @@
 use crate::autograd::{self, Edge};
 use crate::ir::node::DimExpr;
+use crate::storage::{DType, Device, Storage};
 use std::sync::Arc;
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use std::arch::x86_64::*;
 
 use super::{Tensor, TensorImpl};
 
@@ -73,6 +77,56 @@ impl Tensor {
     }
 
     pub fn gt_scalar(&self, threshold: f32) -> Tensor {
+        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    unreachable!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let threshold_v = _mm256_set1_ps(threshold);
+                            let one_v = _mm256_set1_ps(1.0);
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let av = _mm256_loadu_ps(a_ptr.add(i));
+                                let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_GT_OQ);
+                                _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *out_ptr.add(j) = if *a_ptr.add(j) > threshold { 1.0 } else { 0.0 };
+                            }
+                        }
+                    } else {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) = if *a_ptr.add(i) > threshold { 1.0 } else { 0.0 };
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for i in 0..numel {
+                        unsafe {
+                            *out_ptr.add(i) = if *a_ptr.add(i) > threshold { 1.0 } else { 0.0 };
+                        }
+                    }
+                }
+            }
+            return output;
+        }
+
         let scalar = Tensor::from_scalar(threshold);
         Tensor::exec_aot(&[self, &scalar], |g, ins| {
             vec![g.gt_scalar(&ins[0], &ins[1])]
@@ -132,6 +186,56 @@ impl Tensor {
     }
 
     pub fn lt_scalar(&self, threshold: f32) -> Tensor {
+        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    unreachable!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let threshold_v = _mm256_set1_ps(threshold);
+                            let one_v = _mm256_set1_ps(1.0);
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let av = _mm256_loadu_ps(a_ptr.add(i));
+                                let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_LT_OQ);
+                                _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *out_ptr.add(j) = if *a_ptr.add(j) < threshold { 1.0 } else { 0.0 };
+                            }
+                        }
+                    } else {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) = if *a_ptr.add(i) < threshold { 1.0 } else { 0.0 };
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for i in 0..numel {
+                        unsafe {
+                            *out_ptr.add(i) = if *a_ptr.add(i) < threshold { 1.0 } else { 0.0 };
+                        }
+                    }
+                }
+            }
+            return output;
+        }
+
         let scalar = Tensor::from_scalar(threshold);
         Tensor::exec_aot(&[self, &scalar], |g, ins| {
             vec![g.lt_scalar(&ins[0], &ins[1])]
@@ -143,6 +247,58 @@ impl Tensor {
     }
 
     pub fn eq_scalar(&self, threshold: f32) -> Tensor {
+        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    unreachable!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let threshold_v = _mm256_set1_ps(threshold);
+                            let one_v = _mm256_set1_ps(1.0);
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let av = _mm256_loadu_ps(a_ptr.add(i));
+                                let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_EQ_OQ);
+                                _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *out_ptr.add(j) =
+                                    if *a_ptr.add(j) == threshold { 1.0 } else { 0.0 };
+                            }
+                        }
+                    } else {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) =
+                                    if *a_ptr.add(i) == threshold { 1.0 } else { 0.0 };
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for i in 0..numel {
+                        unsafe {
+                            *out_ptr.add(i) = if *a_ptr.add(i) == threshold { 1.0 } else { 0.0 };
+                        }
+                    }
+                }
+            }
+            return output;
+        }
+
         let scalar = Tensor::from_scalar(threshold);
         Tensor::exec_aot(&[self, &scalar], |g, ins| {
             vec![g.eq_scalar(&ins[0], &ins[1])]
@@ -154,6 +310,62 @@ impl Tensor {
     }
 
     pub fn add_scalar(&self, scalar: f32) -> Tensor {
+        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    unreachable!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let scalar_v = _mm256_set1_ps(scalar);
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let av = _mm256_loadu_ps(a_ptr.add(i));
+                                _mm256_storeu_ps(out_ptr.add(i), _mm256_add_ps(av, scalar_v));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *out_ptr.add(j) = *a_ptr.add(j) + scalar;
+                            }
+                        }
+                    } else {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) = *a_ptr.add(i) + scalar;
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for i in 0..numel {
+                        unsafe {
+                            *out_ptr.add(i) = *a_ptr.add(i) + scalar;
+                        }
+                    }
+                }
+            }
+            if autograd::is_grad_enabled() && self.requires_grad() {
+                let s = Tensor::from_scalar(scalar);
+                let edges = autograd::make_edge(self);
+                let inputs = vec![self.clone(), s.clone()];
+                let backward = Arc::new(autograd::AddScalarBackward::new(edges, inputs));
+                return Self::attach_grad_fn(output, backward);
+            } else {
+                return output;
+            }
+        }
+
         let s = Tensor::from_scalar(scalar);
         let output = Tensor::exec_aot(&[self, &s], |g, ins| vec![g.add_scalar(&ins[0], &ins[1])])
             .expect("Tensor::add_scalar: AOT execution failed")
@@ -171,6 +383,62 @@ impl Tensor {
     }
 
     pub fn div_scalar(&self, scalar: f32) -> Tensor {
+        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
+            let numel = self.inner.numel() as usize;
+            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+            {
+                let inner = Arc::make_mut(&mut output.inner);
+                let storage = Arc::make_mut(&mut inner.storage);
+                let Storage::Cpu(cpu_storage) = storage else {
+                    unreachable!()
+                };
+                let out_data = Arc::make_mut(&mut cpu_storage.data);
+                let a_ptr = self.data_ptr_f32();
+                let out_ptr = out_data.as_mut_ptr() as *mut f32;
+
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                {
+                    if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        unsafe {
+                            let scalar_v = _mm256_set1_ps(scalar);
+                            let mut i = 0;
+                            while i + 8 <= numel {
+                                let av = _mm256_loadu_ps(a_ptr.add(i));
+                                _mm256_storeu_ps(out_ptr.add(i), _mm256_div_ps(av, scalar_v));
+                                i += 8;
+                            }
+                            for j in i..numel {
+                                *out_ptr.add(j) = *a_ptr.add(j) / scalar;
+                            }
+                        }
+                    } else {
+                        for i in 0..numel {
+                            unsafe {
+                                *out_ptr.add(i) = *a_ptr.add(i) / scalar;
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                {
+                    for i in 0..numel {
+                        unsafe {
+                            *out_ptr.add(i) = *a_ptr.add(i) / scalar;
+                        }
+                    }
+                }
+            }
+            if autograd::is_grad_enabled() && self.requires_grad() {
+                let s = Tensor::from_scalar(scalar);
+                let edges = autograd::make_edge(self);
+                let inputs = vec![self.clone(), s.clone()];
+                let backward = Arc::new(autograd::DivScalarBackward::new(edges, inputs));
+                return Self::attach_grad_fn(output, backward);
+            } else {
+                return output;
+            }
+        }
+
         let s = Tensor::from_scalar(scalar);
         let output = Tensor::exec_aot(&[self, &s], |g, ins| vec![g.div_scalar(&ins[0], &ins[1])])
             .expect("Tensor::div_scalar: AOT execution failed")
