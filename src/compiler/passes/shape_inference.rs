@@ -202,10 +202,6 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                         + pads.get(2).copied().unwrap_or(0);
                     let pad_w = pads.get(1).copied().unwrap_or(0)
                         + pads.get(3).copied().unwrap_or(0);
-                    eprintln!(
-                        "[shape_inference] Pool node={} name='{}' input_shape={:?} kernel={} stride={} pads={:?} pad_h={} pad_w={}",
-                        node_id, node.name, input_shape, kernel, stride, pads, pad_h, pad_w
-                    );
                     Some(
                         input_shape
                             .iter()
@@ -441,21 +437,14 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                                 };
                                 broadcast_shape.push(DimExpr::Known(data_dim.max(target_dim)));
                             }
-                            eprintln!("[shape_inference] Expand node={} data_shape={:?} target={:?} => broadcast={:?}",
-                                node_id, inputs[0].output_type.shape, target, broadcast_shape);
-                            eprintln!("  data_rank={} target_rank={} max_rank={}", data_rank, target_rank, max_rank);
                             Some(broadcast_shape)
                         } else {
                             // Fallback: use data shape
-                            eprintln!("[shape_inference] Expand node={} expand_shape={:?} target parse empty, fallback to data shape {:?}",
-                                node_id, node.attrs.get("expand_shape"), inputs[0].output_type.shape);
                             Some(inputs[0].output_type.shape.clone())
                         }
                     } else {
                         // No expand_shape attr: fallback to data shape.
                         // The expand kernel will read the target shape at runtime.
-                        eprintln!("[shape_inference] Expand node={} no expand_shape attr, fallback to data shape {:?}",
-                            node_id, inputs[0].output_type.shape);
                         Some(inputs[0].output_type.shape.clone())
                     };
                     inferred
@@ -471,11 +460,6 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             Opcode::Range => {
                 // Range(start, limit, step) — always produces a 1D F32 tensor.
                 // The length is dynamic (set by the builder as Symbol("N")).
-                eprintln!("[shape_inference] Range node={} name='{}' inputs={}",
-                    node_id, node.name, inputs.len());
-                for (i, inp) in inputs.iter().enumerate() {
-                    eprintln!("  input[{}]: shape={:?}", i, inp.output_type.shape);
-                }
                 inputs.first().map(|_| {
                     vec![DimExpr::Symbol("N".to_string())]
                 })
@@ -489,14 +473,19 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
         };
 
         if let Some(shape) = inferred {
-            if shape.is_empty() {
-                eprintln!(
-                    "[shape_inference] node={} op={:?} name='{}' -> RANK-0 (scalar) output",
-                    node_id, node.opcode, node.name
-                );
-            }
             if let Some(node_mut) = graph.get_node_mut(node_id) {
                 node_mut.output_type.shape = shape;
+            }
+        }
+    }
+
+    // Debug: print all nodes whose output type contains Symbol or Bounded dims
+    for &node_id in &order {
+        if let Some(node) = graph.get_node(node_id) {
+            let has_symbol = node.output_type.shape.iter().any(|d| matches!(d, DimExpr::Symbol(_) | DimExpr::Bounded { .. }));
+            if has_symbol {
+                eprintln!("[SHAPE_DEBUG] node {} ({:?}): shape={:?}",
+                    node.name, node.opcode, node.output_type.shape);
             }
         }
     }
