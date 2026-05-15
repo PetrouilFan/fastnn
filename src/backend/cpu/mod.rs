@@ -932,8 +932,13 @@ impl Backend for CpuBackend {
                     let beta2: f32 = node.attrs.get("beta2").and_then(|s| s.parse().ok()).unwrap_or(0.999);
                     let eps: f32 = node.attrs.get("eps").and_then(|s| s.parse().ok()).unwrap_or(1e-8);
                     let t: u64 = node.attrs.get("t").and_then(|s| s.parse().ok()).unwrap_or(1);
+                    // Detect F16 state tensors (m and v at inputs[2] and inputs[3]).
+                    let has_f16_state = node.inputs.len() >= 4 &&
+                        graph.get_node(node.inputs[2]).map(|n| n.output_type.dtype == IrDType::F16).unwrap_or(false) &&
+                        graph.get_node(node.inputs[3]).map(|n| n.output_type.dtype == IrDType::F16).unwrap_or(false);
+                    let kernel_name = if has_f16_state { "adam_update_f16_state" } else { "adam_update_f32" };
                     instructions.push(Instruction::CallKernel {
-                        kernel_name: "adam_update_f32".to_string(),
+                        kernel_name: kernel_name.to_string(),
                         input_slices,  // [weight, grad, m, v]
                         output_slice,
                         secondary_output_slice: None,
@@ -949,8 +954,12 @@ impl Backend for CpuBackend {
                     let eps: f32 = node.attrs.get("eps").and_then(|s| s.parse().ok()).unwrap_or(1e-8);
                     let t: u64 = node.attrs.get("t").and_then(|s| s.parse().ok()).unwrap_or(1);
                     let wd: f32 = node.attrs.get("weight_decay").and_then(|s| s.parse().ok()).unwrap_or(0.01);
+                    let has_f16_state = node.inputs.len() >= 4 &&
+                        graph.get_node(node.inputs[2]).map(|n| n.output_type.dtype == IrDType::F16).unwrap_or(false) &&
+                        graph.get_node(node.inputs[3]).map(|n| n.output_type.dtype == IrDType::F16).unwrap_or(false);
+                    let kernel_name = if has_f16_state { "adamw_update_f16_state" } else { "adamw_update_f32" };
                     instructions.push(Instruction::CallKernel {
-                        kernel_name: "adamw_update_f32".to_string(),
+                        kernel_name: kernel_name.to_string(),
                         input_slices,  // [weight, grad, m, v]
                         output_slice,
                         secondary_output_slice: None,
@@ -1046,12 +1055,40 @@ impl Backend for CpuBackend {
                     let numel = input_shapes.first()
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
+                    // Check if the input has per-channel scale metadata (from
+                    // quantized Constants or Quantize ops). These are passed as
+                    // additional params so the dequantize kernel can reconstruct
+                    // f32 values without relying on an inline header.
+                    let (scales, zero_points) = node.inputs.first()
+                        .and_then(|&input_id| graph.get_node(input_id))
+                        .map(|n| match &n.output_type.dtype {
+                            IrDType::U4 { scales, zero_points } => {
+                                (scales.clone(), zero_points.clone())
+                            }
+                            IrDType::U8 { scales, zero_points } => {
+                                (scales.clone(), zero_points.clone())
+                            }
+                            _ => (vec![], vec![]),
+                        })
+                        .unwrap_or_default();
+                    let has_metadata = !scales.is_empty() && !zero_points.is_empty();
+                    let format_flag: usize = if has_metadata { 1 } else { 0 }; // 0=header, 1=metadata
+                    // Flatten scales and zero_points into params (f32 bits as usize)
+                    let mut params = vec![numel, format_flag];
+                    let num_channels = scales.len();
+                    params.push(num_channels);
+                    for &s in &scales {
+                        params.push(s.to_bits() as usize);
+                    }
+                    for &zp in &zero_points {
+                        params.push(zp.to_bits() as usize);
+                    }
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "dequantize_kernel".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![numel],
+                        params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -1112,6 +1149,25 @@ impl Backend for CpuBackend {
                         param_dims: None,
                         weight_meta: None,
                     });
+                }
+                Opcode::GradientScale => {
+                    let scale: f32 = node.attrs.get("scale")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1.0);
+                    let numel = input_shapes.first()
+                        .map(|s| s.iter().product::<u64>() as usize)
+                        .unwrap_or(1);
+                    if input_slices.first().is_some() {
+                        instructions.push(Instruction::CallKernel {
+                            kernel_name: "gradient_scale".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![numel, scale.to_bits() as usize],
+                            param_dims: None,
+                            weight_meta: None,
+                        });
+                    }
                 }
                 Opcode::Expand | Opcode::Tile => {
                     // For Expand/Tile, fall back to MemCopy of first input.
@@ -3339,6 +3395,26 @@ impl Backend for CpuBackend {
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
                         }
+                        "gradient_scale" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let numel = *params.first().unwrap_or(&0);
+                                let scale = f32::from_bits(*params.get(1).unwrap_or(&0) as u32);
+                                // Read input into a local vec to avoid aliasing borrows
+                                let in_f32 = {
+                                    let d = arena.data_mut();
+                                    let d_ref: &[u8] = &*d;
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d_ref[input_slice.offset..input_slice.offset + input_slice.size]
+                                    ).to_vec()
+                                };
+                                let d = arena.data_mut();
+                                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]);
+                                let len = out_f32.len().min(in_f32.len()).min(numel);
+                                for i in 0..len {
+                                    out_f32[i] = in_f32[i] * scale;
+                                }
+                            }
+                        }
                         "adam_update_f32" => {
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
                                 let d = arena.data_mut();
@@ -3408,6 +3484,107 @@ impl Backend for CpuBackend {
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&m_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).copy_from_slice(&v_new);
+                        }
+                        // ── F16 state optimizer kernels ──────────────
+                        // m and v are stored as F16 (2 bytes/elem), w and grad are F32 (4 bytes/elem).
+                        // Read F16 state, convert to f32 internally, apply update, write back as F16.
+                        "adam_update_f16_state" => {
+                            let n = {
+                                // weight is f32 — number of elements from output byte size
+                                let w_bytes = out_end - out_start;
+                                w_bytes / 4
+                            };
+                            let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
+                                let d = arena.data_mut();
+                                let d_ref: &[u8] = &*d;
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                // m and v are F16 — read as half::f16 bytes, convert to f32
+                                let m_raw: Vec<u16> = d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]
+                                    .chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                                let v_raw: Vec<u16> = d_ref[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]
+                                    .chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                                let m_init: Vec<f32> = m_raw.iter().map(|&bits| half::f16::from_bits(bits).to_f32()).collect();
+                                let v_init: Vec<f32> = v_raw.iter().map(|&bits| half::f16::from_bits(bits).to_f32()).collect();
+                                let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
+                                let lr = f32::from_bits(params[0] as u32);
+                                let beta1 = f32::from_bits(params[1] as u32);
+                                let beta2 = f32::from_bits(params[2] as u32);
+                                let eps = f32::from_bits(params[3] as u32);
+                                let t = params[4] as f32;
+                                (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t)
+                            };
+                            let bias_corr1 = 1.0 - beta1.powi(t as i32);
+                            let bias_corr2 = 1.0 - beta2.powi(t as i32);
+                            let len = n.min(w_init.len()).min(m_init.len()).min(v_init.len());
+                            let mut w_new = w_init.clone();
+                            let mut m_new_f32 = vec![0.0f32; len];
+                            let mut v_new_f32 = vec![0.0f32; len];
+                            for i in 0..len {
+                                let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                let m_hat = m_new_f32[i] / bias_corr1;
+                                let v_hat = v_new_f32[i] / bias_corr2;
+                                w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+                            }
+                            let d = arena.data_mut();
+                            // Write updated weight as f32
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
+                            // Write updated m, v as F16
+                            let m_bytes: Vec<u8> = m_new_f32.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();
+                            let v_bytes: Vec<u8> = v_new_f32.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();
+                            let m_end = (input_slices[2].offset + m_bytes.len()).min(d.len());
+                            let v_end = (input_slices[3].offset + v_bytes.len()).min(d.len());
+                            d[input_slices[2].offset..m_end].copy_from_slice(&m_bytes[..m_end - input_slices[2].offset]);
+                            d[input_slices[3].offset..v_end].copy_from_slice(&v_bytes[..v_end - input_slices[3].offset]);
+                        }
+                        "adamw_update_f16_state" => {
+                            let n = {
+                                let w_bytes = out_end - out_start;
+                                w_bytes / 4
+                            };
+                            let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd) = {
+                                let d = arena.data_mut();
+                                let d_ref: &[u8] = &*d;
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                let m_raw: Vec<u16> = d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]
+                                    .chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                                let v_raw: Vec<u16> = d_ref[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]
+                                    .chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                                let m_init: Vec<f32> = m_raw.iter().map(|&bits| half::f16::from_bits(bits).to_f32()).collect();
+                                let v_init: Vec<f32> = v_raw.iter().map(|&bits| half::f16::from_bits(bits).to_f32()).collect();
+                                let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
+                                let lr = f32::from_bits(params[0] as u32);
+                                let beta1 = f32::from_bits(params[1] as u32);
+                                let beta2 = f32::from_bits(params[2] as u32);
+                                let eps = f32::from_bits(params[3] as u32);
+                                let t = params[4] as f32;
+                                let wd = f32::from_bits(params[5] as u32);
+                                (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd)
+                            };
+                            let bias_corr1 = 1.0 - beta1.powi(t as i32);
+                            let bias_corr2 = 1.0 - beta2.powi(t as i32);
+                            let len = n.min(w_init.len()).min(m_init.len()).min(v_init.len());
+                            let mut w_new = w_init.clone();
+                            let mut m_new_f32 = vec![0.0f32; len];
+                            let mut v_new_f32 = vec![0.0f32; len];
+                            for i in 0..len {
+                                w_new[i] -= lr * wd * w_init[i];
+                                let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                let m_hat = m_new_f32[i] / bias_corr1;
+                                let v_hat = v_new_f32[i] / bias_corr2;
+                                w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+                            }
+                            let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
+                            let m_bytes: Vec<u8> = m_new_f32.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();
+                            let v_bytes: Vec<u8> = v_new_f32.iter().flat_map(|&v| half::f16::from_f32(v).to_le_bytes()).collect();
+                            let m_end = (input_slices[2].offset + m_bytes.len()).min(d.len());
+                            let v_end = (input_slices[3].offset + v_bytes.len()).min(d.len());
+                            d[input_slices[2].offset..m_end].copy_from_slice(&m_bytes[..m_end - input_slices[2].offset]);
+                            d[input_slices[3].offset..v_end].copy_from_slice(&v_bytes[..v_end - input_slices[3].offset]);
                         }
                         "cast" => {
                             let in_byte_size = *params.first().unwrap_or(&4);
@@ -3540,47 +3717,83 @@ impl Backend for CpuBackend {
                         "dequantize_kernel" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let numel = *params.first().unwrap_or(&0);
-                                // Read input data into local vec first
+                                let format_flag = *params.get(1).unwrap_or(&0); // 0=header, 1=metadata
                                 let in_data = {
                                     let d = arena.data_mut();
                                     d[input_slice.offset..input_slice.offset + input_slice.size].to_vec()
                                 };
 
-                                // Parse header
-                                let num_channels = u32::from_le_bytes(
-                                    in_data[0..4].try_into().unwrap_or([0u8; 4])
-                                ) as usize;
-                                let num_elems_per_channel = u32::from_le_bytes(
-                                    in_data[4..8].try_into().unwrap_or([0u8; 4])
-                                ) as usize;
-                                let mut offset = 8usize;
-
-                                let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
-                                for _ in 0..num_channels {
-                                    if offset + 4 <= in_data.len() {
-                                        let s = f32::from_le_bytes(in_data[offset..offset+4].try_into().unwrap());
-                                        scales.push(s);
-                                        offset += 4;
+                                let (num_channels, num_elems_per_channel, scales, zero_points, data_offset, bit_width) =
+                                if format_flag == 1 {
+                                    // Metadata-based: scales/zero_points passed as params
+                                    let num_channels = *params.get(2).unwrap_or(&0);
+                                    let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
+                                    for j in 0..num_channels {
+                                        let bits = *params.get(3 + j).unwrap_or(&0);
+                                        scales.push(f32::from_bits(bits as u32));
                                     }
-                                }
-                                let zero_points: Vec<f32> = vec![0.0; num_channels];
-                                // Skip zero_points in input (symmetric, all zero)
-                                for _ in 0..num_channels {
-                                    if offset + 4 <= in_data.len() {
-                                        offset += 4;
+                                    let mut zero_points: Vec<f32> = Vec::with_capacity(num_channels);
+                                    for j in 0..num_channels {
+                                        let bits = *params.get(3 + num_channels + j).unwrap_or(&0);
+                                        zero_points.push(f32::from_bits(bits as u32));
                                     }
-                                }
-
-                                let packed_bytes_remaining = in_data.len().saturating_sub(offset);
-                                let packed_words = packed_bytes_remaining / 4;
-                                // Infer bit_width from packed byte ratio vs numel
-                                let bit_width = if packed_words > 0 && numel > 0 {
-                                    let ratio = (packed_words * 4) as f64 / numel as f64;
-                                    if ratio < 0.6 { 4 } else { 8 }
+                                    // The packed data starts at offset 0 (no header)
+                                    let data_offset = 0;
+                                    // Infer num_elems_per_channel from numel
+                                    let num_elems_per_channel = if num_channels > 0 {
+                                        numel / num_channels
+                                    } else {
+                                        numel
+                                    };
+                                    // Infer bit_width from packed byte ratio
+                                    let total_packed_bytes = in_data.len().saturating_sub(data_offset);
+                                    let packed_words = total_packed_bytes / 4;
+                                    let bit_width = if packed_words > 0 && numel > 0 {
+                                        let ratio = (packed_words * 4) as f64 / numel as f64;
+                                        if ratio < 0.6 { 4 } else { 8 }
+                                    } else {
+                                        8
+                                    };
+                                    (num_channels, num_elems_per_channel, scales, zero_points, data_offset, bit_width)
                                 } else {
-                                    8
+                                    // Header-based: parse [num_channels][num_elems][scales...][zps...][packed_data]
+                                    let num_channels = u32::from_le_bytes(
+                                        in_data[0..4].try_into().unwrap_or([0u8; 4])
+                                    ) as usize;
+                                    let num_elems_per_channel = u32::from_le_bytes(
+                                        in_data[4..8].try_into().unwrap_or([0u8; 4])
+                                    ) as usize;
+                                    let mut hdr_offset = 8usize;
+                                    let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
+                                    for _ in 0..num_channels {
+                                        if hdr_offset + 4 <= in_data.len() {
+                                            let s = f32::from_le_bytes(in_data[hdr_offset..hdr_offset+4].try_into().unwrap());
+                                            scales.push(s);
+                                            hdr_offset += 4;
+                                        }
+                                    }
+                                    // zero_points (currently all zero for symmetric quant)
+                                    for _ in 0..num_channels {
+                                        if hdr_offset + 4 <= in_data.len() {
+                                            hdr_offset += 4;
+                                        }
+                                    }
+                                    let zero_points: Vec<f32> = vec![0.0; num_channels];
+                                    let data_offset = hdr_offset;
+                                    let total_packed_bytes = in_data.len().saturating_sub(data_offset);
+                                    let packed_words = total_packed_bytes / 4;
+                                    let bit_width = if packed_words > 0 && numel > 0 {
+                                        let ratio = (packed_words * 4) as f64 / numel as f64;
+                                        if ratio < 0.6 { 4 } else { 8 }
+                                    } else {
+                                        8
+                                    };
+                                    (num_channels, num_elems_per_channel, scales, zero_points, data_offset, bit_width)
                                 };
+
                                 let items_per_word = 32 / bit_width;
+                                let total_packed_bytes = in_data.len().saturating_sub(data_offset);
+                                let packed_words = total_packed_bytes / 4;
 
                                 // Write output
                                 let out_f32 = {
@@ -3599,7 +3812,7 @@ impl Backend for CpuBackend {
                                     let word_idx = i / items_per_word;
                                     let shift = (i % items_per_word) * bit_width;
                                     if word_idx < packed_words {
-                                        let word_start = offset + word_idx * 4;
+                                        let word_start = data_offset + word_idx * 4;
                                         let word = if word_start + 4 <= in_data.len() {
                                             u32::from_le_bytes(in_data[word_start..word_start+4].try_into().unwrap())
                                         } else { 0 };

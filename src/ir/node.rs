@@ -114,6 +114,10 @@ pub enum Opcode {
     AdamUpdate,
     /// AdamW weight update: Adam with decoupled weight decay
     AdamWUpdate,
+    /// Scale gradient by a constant factor (for loss scaling / gradient unscaling).
+    /// Backward: dx = dy * scale (correctly scales the gradient).
+    /// Attribute `"scale"`: f32 scale factor.
+    GradientScale,
 }
 
 /// Default maximum extent assumed for a purely symbolic dimension (no Bounded bound).
