@@ -1820,8 +1820,13 @@ impl Backend for CpuBackend {
                                         sum += (input[i] - max_val).exp();
                                     }
                                     let log_sum = sum.ln();
-                                    for i in 0..out_f32.len().min(input.len()) {
-                                        out_f32[i] = (input[i] - max_val) - log_sum;
+                                    let len = out_f32.len().min(input.len());
+                                    #[cfg(not(feature = "parallel"))]
+                                    { for i in 0..len { out_f32[i] = (input[i] - max_val) - log_sum; } }
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| *o = (input[i] - max_val) - log_sum);
                                     }
                                 }
                             }
@@ -2391,9 +2396,19 @@ impl Backend for CpuBackend {
                                         bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                     };
                                     let c = weight.len();
-                                    for i in 0..out_f32.len().min(data.len()) {
+                                    let len = out_f32.len().min(data.len());
+                                    #[cfg(not(feature = "parallel"))]
+                                    { for i in 0..len {
                                         let ch = i % c;
                                         out_f32[i] = (data[i] - running_mean[ch]) / (running_var[ch] + eps).sqrt() * weight[ch] + bias[ch];
+                                    } }
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        out_f32[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
+                                            let ch = i % c;
+                                            *o = (data[i] - running_mean[ch]) / (running_var[ch] + eps).sqrt() * weight[ch] + bias[ch];
+                                        });
                                     }
                                 }
                             } else {
@@ -2411,7 +2426,8 @@ impl Backend for CpuBackend {
                                     // Layer norm over the last dimension
                                     let row_size = input.len() / out_f32.len().max(1);
                                     let num_rows = input.len().checked_div(row_size).unwrap_or(1);
-                                    for r in 0..num_rows {
+                                    #[cfg(not(feature = "parallel"))]
+                                    { for r in 0..num_rows {
                                         let start = r * row_size;
                                         let end = (start + row_size).min(input.len());
                                         let n = (end - start) as f32;
@@ -2421,6 +2437,24 @@ impl Backend for CpuBackend {
                                         for i in start..end {
                                             out_f32[i] = (input[i] - mean) * inv_std;
                                         }
+                                    } }
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        let row_size = row_size;
+                                        let out_addr = out_f32.as_mut_ptr() as usize;
+                                        (0..num_rows).into_par_iter().for_each(|r| {
+                                            let start = r * row_size;
+                                            let end = start + row_size;
+                                            let n = row_size as f32;
+                                            let mean: f32 = input[start..end].iter().sum::<f32>() / n;
+                                            let var: f32 = input[start..end].iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
+                                            let inv_std = 1.0 / (var + eps).sqrt();
+                                            let out_ptr = out_addr as *mut f32;
+                                            for i in start..end {
+                                                unsafe { *out_ptr.add(i) = (input[i] - mean) * inv_std; }
+                                            }
+                                        });
                                     }
                                 }
                             }
@@ -4096,16 +4130,14 @@ impl Backend for CpuBackend {
                             );
 
                             // Broadcast: for each output element, map back to input coords
-                            for out_linear in 0..out_numel {
-                                // Unravel output linear index -> output coords
+                            #[cfg(not(feature = "parallel"))]
+                            { for out_linear in 0..out_numel {
                                 let mut out_coord = vec![0usize; max_rank];
                                 let mut remaining = out_linear;
                                 for i in (0..max_rank).rev() {
                                     out_coord[i] = remaining % out_dims[i];
                                     remaining /= out_dims[i];
                                 }
-
-                                // Map output coords to input coords (broadcast)
                                 let mut in_linear: usize = 0;
                                 let mut in_stride = 1usize;
                                 for i in (0..max_rank).rev() {
@@ -4114,18 +4146,48 @@ impl Backend for CpuBackend {
                                     let in_coord = if in_dim == out_dim {
                                         out_coord[i]
                                     } else if in_dim == 1 {
-                                        0 // broadcast
+                                        0
                                     } else {
-                                        // Should not happen if shapes are valid
                                         0
                                     };
                                     in_linear += in_coord * in_stride;
                                     in_stride *= in_dim;
                                 }
-
                                 if in_linear < data_numel {
                                     out_f32[out_linear] = in_f32[in_linear];
                                 }
+                            } }
+                            #[cfg(feature = "parallel")]
+                            {
+                                use rayon::prelude::*;
+                                let max_rank = max_rank;
+                                let out_addr = out_f32.as_mut_ptr() as usize;
+                                (0..out_numel).into_par_iter().for_each(|out_linear| {
+                                    let mut out_coord = vec![0usize; max_rank];
+                                    let mut remaining = out_linear;
+                                    for i in (0..max_rank).rev() {
+                                        out_coord[i] = remaining % out_dims[i];
+                                        remaining /= out_dims[i];
+                                    }
+                                    let mut in_linear: usize = 0;
+                                    let mut in_stride = 1usize;
+                                    for i in (0..max_rank).rev() {
+                                        let in_dim = in_dims[i];
+                                        let out_dim = out_dims[i];
+                                        let in_coord = if in_dim == out_dim {
+                                            out_coord[i]
+                                        } else if in_dim == 1 {
+                                            0
+                                        } else {
+                                            0
+                                        };
+                                        in_linear += in_coord * in_stride;
+                                        in_stride *= in_dim;
+                                    }
+                                    if in_linear < data_numel {
+                                        unsafe { *(out_addr as *mut f32).add(out_linear) = in_f32[in_linear]; }
+                                    }
+                                });
                             }
                         }
                         "range_f32" => {
