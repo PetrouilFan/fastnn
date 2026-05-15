@@ -36,21 +36,23 @@ pub fn flash_attention(
     let v_data = v.as_f32_slice();
     let out_data = output.as_f32_slice_mut();
 
-    let head_elts_q = seq_len * dk;
-    let head_elts_kv = seq_len * dv;
+    let q_head_stride = (q.shape()[2] * q.shape()[3]) as usize;
+    let k_head_stride = (k.shape()[2] * k.shape()[3]) as usize;
+    let v_head_stride = (v.shape()[2] * v.shape()[3]) as usize;
+    let out_head_stride = seq_len * dv;
 
     for b in 0..batch {
         for h in 0..heads {
-            let q_off = (b * heads + h) * head_elts_q;
-            let k_off = (b * heads + h) * head_elts_q;
-            let v_off = (b * heads + h) * head_elts_kv;
-            let out_off = (b * heads + h) * head_elts_kv;
+            let q_off = (b * heads + h) * q_head_stride;
+            let k_off = (b * heads + h) * k_head_stride;
+            let v_off = (b * heads + h) * v_head_stride;
+            let out_off = (b * heads + h) * out_head_stride;
 
             flash_attention_single(
-                &q_data[q_off..q_off + head_elts_q],
-                &k_data[k_off..k_off + head_elts_q],
-                &v_data[v_off..v_off + head_elts_kv],
-                &mut out_data[out_off..out_off + head_elts_kv],
+                &q_data[q_off..q_off + q_head_stride],
+                &k_data[k_off..k_off + k_head_stride],
+                &v_data[v_off..v_off + v_head_stride],
+                &mut out_data[out_off..out_off + out_head_stride],
                 seq_len,
                 dk,
                 dv,

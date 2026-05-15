@@ -328,13 +328,22 @@ impl Tensor {
         } else {
             axis as usize
         };
-        Tensor::exec_aot(&[self, indices], |g, ins| {
+        let output = Tensor::exec_aot(&[self, indices], |g, ins| {
             vec![g.gather(&ins[0], &ins[1], norm_axis)]
         })
         .expect("Tensor::gather: AOT failed")
         .into_iter()
         .next()
-        .unwrap()
+        .unwrap();
+        if autograd::is_grad_enabled() && (self.requires_grad() || indices.requires_grad()) {
+            let edges = autograd::make_edges(self, indices);
+            let inputs = vec![self.clone(), indices.clone()];
+            let backward =
+                std::sync::Arc::new(autograd::GatherBackward::new(edges, inputs));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn nonzero(&self) -> Vec<Vec<i64>> {

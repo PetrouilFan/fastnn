@@ -841,13 +841,7 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
-                Opcode::Conv1d | Opcode::Conv3d | Opcode::ConvTranspose2d => {
-                    let kernel_name = match node.opcode {
-                        Opcode::Conv1d => "conv1d",
-                        Opcode::Conv3d => "conv3d",
-                        Opcode::ConvTranspose2d => "conv_transpose2d",
-                        _ => unreachable!(),
-                    };
+                Opcode::Conv1d => {
                     let stride: usize = node
                         .attrs
                         .get("stride")
@@ -858,12 +852,117 @@ impl Backend for CpuBackend {
                         .get("padding")
                         .and_then(|p| p.parse().ok())
                         .unwrap_or(0);
+                    let input_c = input_shapes
+                        .first()
+                        .and_then(|s| s.get(1).copied())
+                        .unwrap_or(1) as usize;
+                    let input_w = input_shapes
+                        .first()
+                        .and_then(|s| s.get(2).copied())
+                        .unwrap_or(0) as usize;
+                    let kernel_w = input_shapes
+                        .get(1)
+                        .and_then(|s| s.get(2).copied())
+                        .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
-                        kernel_name: kernel_name.to_string(),
+                        kernel_name: "conv1d".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![stride, padding],
+                        params: vec![stride, padding, input_c, input_w, kernel_w],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Conv3d => {
+                    let stride: usize = node
+                        .attrs
+                        .get("stride")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+                    let padding: usize = node
+                        .attrs
+                        .get("padding")
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(0);
+                    let input_c = input_shapes
+                        .first()
+                        .and_then(|s| s.get(1).copied())
+                        .unwrap_or(1) as usize;
+                    let input_d = input_shapes
+                        .first()
+                        .and_then(|s| s.get(2).copied())
+                        .unwrap_or(0) as usize;
+                    let input_h = input_shapes
+                        .first()
+                        .and_then(|s| s.get(3).copied())
+                        .unwrap_or(0) as usize;
+                    let input_w = input_shapes
+                        .first()
+                        .and_then(|s| s.get(4).copied())
+                        .unwrap_or(0) as usize;
+                    let kernel_d = input_shapes
+                        .get(1)
+                        .and_then(|s| s.get(2).copied())
+                        .unwrap_or(0) as usize;
+                    let kernel_h = input_shapes
+                        .get(1)
+                        .and_then(|s| s.get(3).copied())
+                        .unwrap_or(0) as usize;
+                    let kernel_w = input_shapes
+                        .get(1)
+                        .and_then(|s| s.get(4).copied())
+                        .unwrap_or(0) as usize;
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "conv3d".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![
+                            stride, padding, input_c, input_d, input_h, input_w, kernel_d, kernel_h,
+                            kernel_w,
+                        ],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::ConvTranspose2d => {
+                    let stride: usize = node
+                        .attrs
+                        .get("stride")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+                    let padding: usize = node
+                        .attrs
+                        .get("padding")
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(0);
+                    let input_c = input_shapes
+                        .first()
+                        .and_then(|s| s.get(1).copied())
+                        .unwrap_or(1) as usize;
+                    let input_h = input_shapes
+                        .first()
+                        .and_then(|s| s.get(2).copied())
+                        .unwrap_or(0) as usize;
+                    let input_w = input_shapes
+                        .first()
+                        .and_then(|s| s.get(3).copied())
+                        .unwrap_or(0) as usize;
+                    let kernel_h = input_shapes
+                        .get(1)
+                        .and_then(|s| s.get(2).copied())
+                        .unwrap_or(0) as usize;
+                    let kernel_w = input_shapes
+                        .get(1)
+                        .and_then(|s| s.get(3).copied())
+                        .unwrap_or(0) as usize;
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "conv_transpose2d".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![stride, padding, input_c, input_h, input_w, kernel_h, kernel_w],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -4056,60 +4155,18 @@ impl Backend for CpuBackend {
                                         .to_vec(),
                                     )
                                 };
-                                let &[stride, padding] = &params[..] else {
+                                let &[stride, padding, c, w, kw] = &params[..] else {
                                     return Err(BackendError::Dispatch(
-                                        "conv1d: expected params [stride, padding]".into(),
+                                        "conv1d: expected params [stride, padding, input_c, input_w, kernel_w]".into(),
                                     ));
                                 };
+                                let n = input.len() / (c * w).max(1);
+                                let f = weight.len() / (c * kw).max(1);
+                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let ni = input.len();
-                                let nw = weight.len();
-                                let no = out_f32.len();
-                                let dims = (|| -> Option<(usize, usize, usize, usize, usize)> {
-                                    for &n in &[1, 2, 4, 8, 16, 32, 64] {
-                                        if ni % n != 0 || no % n != 0 {
-                                            continue;
-                                        }
-                                        let c_w = ni / n;
-                                        let f_w_out = no / n;
-                                        for c in 1..=c_w.min(4096) {
-                                            if c_w % c != 0 {
-                                                continue;
-                                            }
-                                            let w = c_w / c;
-                                            if nw % c != 0 {
-                                                continue;
-                                            }
-                                            let f_kw = nw / c;
-                                            for f in 1..=f_w_out.min(f_kw) {
-                                                if f_w_out % f != 0 || f_kw % f != 0 {
-                                                    continue;
-                                                }
-                                                let w_out = f_w_out / f;
-                                                let kw = f_kw / f;
-                                                if kw > 11 {
-                                                    continue;
-                                                }
-                                                let w_out_calc =
-                                                    (w + 2 * padding).saturating_sub(kw) / stride
-                                                        + 1;
-                                                if w_out_calc == w_out && w_out > 0 {
-                                                    return Some((n, f, c, kw, w));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None
-                                })();
-                                let (n, f, c, kw, w) = dims.ok_or_else(|| {
-                                    BackendError::Dispatch(
-                                        "conv1d: could not infer dimensions".into(),
-                                    )
-                                })?;
-                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
                                 for nn in 0..n {
                                     for ff in 0..f {
                                         for ww in 0..w_out {
@@ -4151,69 +4208,20 @@ impl Backend for CpuBackend {
                                         .to_vec(),
                                     )
                                 };
-                                let &[stride, padding] = &params[..] else {
+                                let &[stride, padding, c, d, h, w, kd, kh, kw] = &params[..] else {
                                     return Err(BackendError::Dispatch(
-                                        "conv3d: expected params [stride, padding]".into(),
+                                        "conv3d: expected params [stride, padding, input_c, input_d, input_h, input_w, kernel_d, kernel_h, kernel_w]".into(),
                                     ));
                                 };
+                                let n = input.len() / (c * d * h * w).max(1);
+                                let f = weight.len() / (c * kd * kh * kw).max(1);
+                                let d_out = (d + 2 * padding).saturating_sub(kd) / stride + 1;
+                                let h_out = (h + 2 * padding).saturating_sub(kh) / stride + 1;
+                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let ni = input.len();
-                                let nw = weight.len();
-                                let no = out_f32.len();
-                                #[allow(clippy::type_complexity)]
-                                let dims = (|| -> Option<(usize,usize,usize,usize,usize,usize,usize,usize,usize)> {
-                                    for &n in &[1, 2, 4, 8, 16] {
-                                        if ni % n != 0 || no % n != 0 { continue; }
-                                        let c_dhw = ni / n;
-                                        let f_dout_hout_wout = no / n;
-                                        for c in 1..=c_dhw.min(4096) {
-                                            if c_dhw % c != 0 { continue; }
-                                            let dhw = c_dhw / c;
-                                            if nw % c != 0 { continue; }
-                                            let f_kd_kh_kw = nw / c;
-                                            for f in 1..=f_dout_hout_wout.min(f_kd_kh_kw) {
-                                                if f_dout_hout_wout % f != 0 || f_kd_kh_kw % f != 0 { continue; }
-                                                let dout_hout_wout = f_dout_hout_wout / f;
-                                                let kd_kh_kw = f_kd_kh_kw / f;
-                                                for &kd in &[1, 3, 5] {
-                                                    if kd > kd_kh_kw || kd_kh_kw % kd != 0 { continue; }
-                                                    let kh_kw = kd_kh_kw / kd;
-                                                    for &kh in &[1, 3, 5] {
-                                                        if kh > kh_kw || kh_kw % kh != 0 { continue; }
-                                                        let kw = kh_kw / kh;
-                                                        if kw > 5 { continue; }
-                                                        for d in 1..=dhw {
-                                                            if dhw % d != 0 { continue; }
-                                                            let hw = dhw / d;
-                                                            for h in 1..=hw {
-                                                                if hw % h != 0 { continue; }
-                                                                let w = hw / h;
-                                                                let d_out = (d + 2 * padding).saturating_sub(kd) / stride + 1;
-                                                                let h_out = (h + 2 * padding).saturating_sub(kh) / stride + 1;
-                                                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
-                                                                if d_out * h_out * w_out == dout_hout_wout && d_out > 0 && h_out > 0 && w_out > 0 {
-                                                                    return Some((n, f, c, kd, kh, kw, d, h, w));
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None
-                                })();
-                                let (n, f, c, kd, kh, kw, d, h, w) = dims.ok_or_else(|| {
-                                    BackendError::Dispatch(
-                                        "conv3d: could not infer dimensions".into(),
-                                    )
-                                })?;
-                                let d_out = (d + 2 * padding).saturating_sub(kd) / stride + 1;
-                                let h_out = (h + 2 * padding).saturating_sub(kh) / stride + 1;
-                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
                                 for nn in 0..n {
                                     for ff in 0..f {
                                         for dd in 0..d_out {
@@ -4293,59 +4301,20 @@ impl Backend for CpuBackend {
                                         .to_vec(),
                                     )
                                 };
-                                let &[stride, padding] = &params[..] else {
+                                let &[stride, padding, c, hin, win, kh, kw] = &params[..] else {
                                     return Err(BackendError::Dispatch(
-                                        "conv_transpose2d: expected params [stride, padding]"
+                                        "conv_transpose2d: expected params [stride, padding, input_c, input_h, input_w, kernel_h, kernel_w]"
                                             .into(),
                                     ));
                                 };
+                                let n = input.len() / (c * hin * win).max(1);
+                                let f = weight.len() / (c * kh * kw).max(1);
+                                let h_out = (hin - 1) * stride + kh - 2 * padding;
+                                let w_out = (win - 1) * stride + kw - 2 * padding;
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let ni = input.len();
-                                let nw = weight.len();
-                                let no = out_f32.len();
-                                let dims = (|| -> Option<(usize,usize,usize,usize,usize,usize,usize)> {
-                                    for &n in &[1, 2, 4, 8] {
-                                        if ni % n != 0 || no % n != 0 { continue; }
-                                        let c_hin_win = ni / n;
-                                        let f_hout_wout = no / n;
-                                        for c in 1..=c_hin_win.min(4096) {
-                                            if c_hin_win % c != 0 { continue; }
-                                            let hin_win = c_hin_win / c;
-                                            if nw % c != 0 { continue; }
-                                            let f_kh_kw = nw / c;
-                                            for f in 1..=f_hout_wout.min(f_kh_kw) {
-                                                if f_hout_wout % f != 0 || f_kh_kw % f != 0 { continue; }
-                                                let hout_wout = f_hout_wout / f;
-                                                let kh_kw = f_kh_kw / f;
-                                                for &kh in &[1, 3, 5, 7] {
-                                                    if kh > kh_kw || kh_kw % kh != 0 { continue; }
-                                                    let kw = kh_kw / kh;
-                                                    if kw > 7 { continue; }
-                                                    for hin in 1..=hin_win {
-                                                        if hin_win % hin != 0 { continue; }
-                                                        let win = hin_win / hin;
-                                                        let h_out = (hin - 1) * stride + kh - 2 * padding;
-                                                        let w_out = (win - 1) * stride + kw - 2 * padding;
-                                                        if h_out * w_out == hout_wout && h_out > 0 && w_out > 0 {
-                                                            return Some((n, f, c, kh, kw, hin, win));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None
-                                })();
-                                let (n, f, c, kh, kw, hin, win) = dims.ok_or_else(|| {
-                                    BackendError::Dispatch(
-                                        "conv_transpose2d: could not infer dimensions".into(),
-                                    )
-                                })?;
-                                let h_out = (hin - 1) * stride + kh - 2 * padding;
-                                let w_out = (win - 1) * stride + kw - 2 * padding;
                                 out_f32.fill(0.0f32);
                                 for nn in 0..n {
                                     for cc in 0..c {

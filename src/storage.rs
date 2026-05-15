@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-#[allow(dead_code)]
-static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -290,8 +288,14 @@ impl Storage {
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        if let Some(stats) = ALLOC_STATS.get() {
-            stats.add_freed(self.nbytes());
+        let is_last = match self {
+            Storage::Cpu(cpu) => Arc::strong_count(&cpu.data) == 1,
+            Storage::Wgpu(gpu) => Arc::strong_count(&gpu.buffer) == 1,
+        };
+        if is_last {
+            if let Some(stats) = ALLOC_STATS.get() {
+                stats.add_freed(self.nbytes());
+            }
         }
     }
 }
