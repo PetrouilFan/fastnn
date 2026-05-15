@@ -48,6 +48,12 @@ pub fn clear_grad(tensor: &Tensor) {
 /// Helper struct for managing training/eval mode with atomic bool.
 pub struct TrainingState(std::sync::atomic::AtomicBool);
 
+impl Clone for TrainingState {
+    fn clone(&self) -> Self {
+        TrainingState(std::sync::atomic::AtomicBool::new(self.0.load(std::sync::atomic::Ordering::Relaxed)))
+    }
+}
+
 impl TrainingState {
     pub fn new() -> Self {
         Self(std::sync::atomic::AtomicBool::new(true))

@@ -33,6 +33,22 @@ pub struct TransformerBlock {
     training: AtomicBool,
 }
 
+impl Clone for TransformerBlock {
+    fn clone(&self) -> Self {
+        TransformerBlock {
+            self_attn: self.self_attn.clone(),
+            norm1: self.norm1.clone(),
+            norm2: self.norm2.clone(),
+            ff1: self.ff1.clone(),
+            ff2: self.ff2.clone(),
+            dropout: self.dropout.clone(),
+            d_model: self.d_model,
+            ff_dim: self.ff_dim,
+            training: AtomicBool::new(self.training.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 impl TransformerBlock {
     pub fn new(d_model: i64, num_heads: i64, ff_dim: i64, dropout_p: f32) -> Self {
         Self::new_with_config(d_model, num_heads, ff_dim, dropout_p, true)
@@ -192,6 +208,28 @@ pub struct TransformerEncoder {
     training: AtomicBool,
     // Precomputed position tensor for max_seq_len, sliced for actual seq_len
     pos_cache: OnceLock<Option<Tensor>>,
+}
+
+impl Clone for TransformerEncoder {
+    fn clone(&self) -> Self {
+        let pos_cache_val = self.pos_cache.get().cloned();
+        let new_pos_cache = OnceLock::new();
+        if let Some(val) = pos_cache_val {
+            let _ = new_pos_cache.set(val);
+        }
+        TransformerEncoder {
+            embedding: self.embedding.clone(),
+            pos_embedding: self.pos_embedding.clone(),
+            layers: self.layers.clone(),
+            norm: self.norm.clone(),
+            classifier: self.classifier.clone(),
+            d_model: self.d_model,
+            max_seq_len: self.max_seq_len,
+            num_classes: self.num_classes,
+            training: AtomicBool::new(self.training.load(Ordering::Relaxed)),
+            pos_cache: new_pos_cache,
+        }
+    }
 }
 
 impl TransformerEncoder {

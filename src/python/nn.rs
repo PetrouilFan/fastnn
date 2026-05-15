@@ -878,36 +878,158 @@ impl_nn_module!(AdaptiveAvgPool2d {
     }
 });
 
+// ---------------------------------------------------------------------------
+// Native module extraction helpers
+// ---------------------------------------------------------------------------
+
+/// Try to extract a native `Arc<dyn Module>` from a Python object that wraps
+/// a Rust-backed module via its `inner` field.
+macro_rules! try_extract_inner {
+    ($b:expr, $py_type:ty, $native_type:ty) => {
+        if let Ok(layer) = $b.extract::<pyo3::PyRef<'_, $py_type>>() {
+            let cloned: $native_type = layer.inner.clone();
+            return Some(Arc::new(cloned) as Arc<dyn Module>);
+        }
+    };
+}
+
+/// Try to extract a native `Arc<dyn Module>` from a parameterless Python
+/// activation class.
+macro_rules! try_extract_activation {
+    ($b:expr, $py_type:ty, $native_type:ty) => {
+        if $b.extract::<pyo3::PyRef<'_, $py_type>>().is_ok() {
+            return Some(Arc::new(<$native_type>::new()) as Arc<dyn Module>);
+        }
+    };
+}
+
+/// Attempt to obtain a native `Arc<dyn Module>` for a Python-bound layer.
+/// Returns `None` when the layer is a Python-only module that cannot be
+/// converted.
+fn try_extract_native_layer(b: &Bound<'_, PyAny>) -> Option<Arc<dyn Module>> {
+    // ---- modules backed by an inner field (cloneable Rust Module) ----
+    try_extract_inner!(b, Linear, core_nn::linear::Linear);
+    try_extract_inner!(b, Conv2d, core_nn::conv::Conv2d);
+    try_extract_inner!(b, Conv1d, core_nn::conv::Conv1d);
+    try_extract_inner!(b, Conv3d, core_nn::conv::Conv3d);
+    try_extract_inner!(b, ConvTranspose2d, core_nn::conv::ConvTranspose2d);
+    try_extract_inner!(b, MaxPool2d, core_nn::pooling::MaxPool2d);
+    try_extract_inner!(b, MaxPool1d, core_nn::pooling::MaxPool1d);
+    try_extract_inner!(b, AvgPool2d, core_nn::pooling::AvgPool2d);
+    try_extract_inner!(b, AvgPool1d, core_nn::pooling::AvgPool1d);
+    try_extract_inner!(b, ResidualBlock, residual::ResidualBlock);
+    try_extract_inner!(b, LayerNorm, core_nn::norm::LayerNorm);
+    try_extract_inner!(b, BatchNorm1d, core_nn::norm::BatchNorm1d);
+    try_extract_inner!(b, BatchNorm2d, core_nn::norm::BatchNorm2d);
+    try_extract_inner!(b, RMSNorm, core_nn::norm::RMSNorm);
+    try_extract_inner!(b, GroupNorm, core_nn::norm::GroupNorm);
+    try_extract_inner!(b, Dropout, core_nn::dropout::Dropout);
+    try_extract_inner!(b, Dropout2d, core_nn::dropout::Dropout2d);
+    try_extract_inner!(b, Upsample, core_nn::upsample::Upsample);
+    try_extract_inner!(b, Embedding, core_nn::embedding::Embedding);
+    try_extract_inner!(b, PReLU, core_nn::activations::PReLU);
+    try_extract_inner!(b, Softmax, core_nn::activations::Softmax);
+    try_extract_inner!(b, AdaptiveAvgPool2d, core_nn::activations::AdaptiveAvgPool2d);
+    try_extract_inner!(b, FusedConvBn, core_nn::fused::FusedConvBn<core_nn::fused::NoAct>);
+    try_extract_inner!(b, FusedConvBnRelu, core_nn::fused::FusedConvBn<core_nn::fused::ReluAct>);
+    try_extract_inner!(b, FusedConvBnGelu, core_nn::fused::FusedConvBn<core_nn::fused::GeluAct>);
+    try_extract_inner!(b, PyTransformerEncoder, core_nn::transformer::TransformerEncoder);
+
+    // ---- parameterless activations (no inner) ----
+    try_extract_activation!(b, ReLU, core_nn::activations::ReLU);
+    try_extract_activation!(b, Gelu, core_nn::activations::Gelu);
+    try_extract_activation!(b, Sigmoid, core_nn::activations::Sigmoid);
+    try_extract_activation!(b, Tanh, core_nn::activations::Tanh);
+    try_extract_activation!(b, SiLU, core_nn::activations::SiLU);
+    try_extract_activation!(b, Hardswish, core_nn::activations::Hardswish);
+    try_extract_activation!(b, Mish, core_nn::activations::Mish);
+
+    // ---- parameterised activations (extract fields directly) ----
+    if let Ok(layer) = b.extract::<pyo3::PyRef<'_, LeakyReLU>>() {
+        return Some(
+            Arc::new(core_nn::activations::LeakyReLU::new(layer.negative_slope)) as Arc<dyn Module>,
+        );
+    }
+    if let Ok(layer) = b.extract::<pyo3::PyRef<'_, Softplus>>() {
+        return Some(
+            Arc::new(core_nn::activations::Softplus::new(layer.beta, layer.threshold))
+                as Arc<dyn Module>,
+        );
+    }
+    if let Ok(layer) = b.extract::<pyo3::PyRef<'_, Elu>>() {
+        return Some(
+            Arc::new(core_nn::activations::Elu::new(layer.alpha)) as Arc<dyn Module>,
+        );
+    }
+
+    None // Python-only module – will fall back to Python dispatch
+}
+
+/// Build native layer list for a `Sequential`.  Returns `None` when any layer
+/// is a Python-only module (triggers the Python fallback path).
+fn build_native_layers(py: Python<'_>, layers: &[Py<PyAny>]) -> Option<Vec<Arc<dyn Module>>> {
+    let mut native = Vec::with_capacity(layers.len());
+    for layer in layers {
+        native.push(try_extract_native_layer(&layer.bind(py))?);
+    }
+    Some(native)
+}
+
+// ---------------------------------------------------------------------------
+// Sequential container
+// ---------------------------------------------------------------------------
+
 #[pyclass(name = "Sequential_")]
 struct Sequential {
     layers: Vec<Py<PyAny>>,
+    native_layers: Vec<Arc<dyn Module>>,
 }
 
 #[pymethods]
 impl Sequential {
     #[new]
-    fn new(layers: Vec<Py<PyAny>>) -> Self {
-        Sequential { layers }
+    fn new(py: Python<'_>, layers: Vec<Py<PyAny>>) -> Self {
+        let native_layers = build_native_layers(py, &layers).unwrap_or_default();
+        Sequential { layers, native_layers }
     }
 
     fn __call__(&self, py: Python<'_>, x: PyTensor) -> PyResult<PyTensor> {
-        let mut result = x;
-        for layer in &self.layers {
-            // Call the layer using __call__ (which internally calls forward)
-            let new_result = layer.call1(py, (result,))?;
-            result = new_result.extract::<PyTensor>(py)?;
+        if self.native_layers.len() == self.layers.len() {
+            // Fast native path – zero Python C API calls per layer
+            let mut result = x.inner;
+            for layer in &self.native_layers {
+                result = layer.forward(&result);
+            }
+            Ok(PyTensor::from_tensor(result))
+        } else {
+            // Python fallback for mixed / Python-only layers
+            let mut result = x;
+            for layer in &self.layers {
+                let new_result = layer.call1(py, (result,))?;
+                result = new_result.extract::<PyTensor>(py)?;
+            }
+            Ok(result)
         }
-        Ok(result)
     }
 
     fn parameters(&self, py: Python<'_>) -> PyResult<Vec<PyTensor>> {
-        let mut params = Vec::new();
-        for layer in &self.layers {
-            let params_method: Py<PyAny> = layer.getattr(py, "parameters")?;
-            let layer_params: Vec<PyTensor> = params_method.call0(py)?.extract(py)?;
-            params.extend(layer_params);
+        if self.native_layers.len() == self.layers.len() {
+            let mut params = vec![];
+            for layer in &self.native_layers {
+                for t in layer.parameters() {
+                    params.push(PyTensor::from_tensor(t));
+                }
+            }
+            Ok(params)
+        } else {
+            let mut params = vec![];
+            for layer in &self.layers {
+                let params_method: Py<PyAny> = layer.getattr(py, "parameters")?;
+                let layer_params: Vec<PyTensor> = params_method.call0(py)?.extract(py)?;
+                params.extend(layer_params);
+            }
+            Ok(params)
         }
-        Ok(params)
     }
 }
 

@@ -5,6 +5,7 @@ use crate::{
 };
 use rand::Rng;
 
+#[derive(Clone)]
 pub struct Dropout {
     pub p: f64,
     training: TrainingState,
@@ -85,6 +86,7 @@ impl Module for Dropout {
     impl_training_state!(self, self.training);
 }
 
+#[derive(Clone)]
 pub struct Dropout2d {
     pub p: f64,
     training: TrainingState,

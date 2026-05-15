@@ -86,6 +86,7 @@ impl_stateless_activation!(Hardswish, "hardswish");
 
 impl_stateless_activation!(Mish, "mish");
 
+#[derive(Clone)]
 pub struct LeakyReLU {
     negative_slope: f64,
 }
@@ -104,6 +105,7 @@ impl Module for LeakyReLU {
     impl_stateless_activation_methods!();
 }
 
+#[derive(Clone)]
 pub struct PReLU {
     pub weight: Tensor,
 }
@@ -150,6 +152,7 @@ impl Module for PReLU {
     }
 }
 
+#[derive(Clone)]
 pub struct Softmax {
     dim: i64,
 }
@@ -190,6 +193,7 @@ impl Module for Softmax {
     }
 }
 
+#[derive(Clone)]
 pub struct Softplus {
     beta: f64,
     threshold: f64,
@@ -209,6 +213,7 @@ impl Module for Softplus {
     impl_stateless_activation_methods!();
 }
 
+#[derive(Clone)]
 pub struct Elu {
     pub alpha: f64,
 }
@@ -227,6 +232,7 @@ impl Module for Elu {
     impl_stateless_activation_methods!();
 }
 
+#[derive(Clone)]
 pub struct AdaptiveAvgPool2d {
     pub output_h: usize,
     pub output_w: usize,

@@ -137,6 +137,7 @@ impl Tensor {
             device,
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
+            requires_grad: false,
         })
     }
 
@@ -170,42 +171,37 @@ impl Tensor {
     pub fn ones(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         match device {
             Device::Cpu => {
-                let mut t = Self::zeros(shape, dtype, device);
-                let numel = t.inner.numel() as usize;
-                let inner = Arc::make_mut(&mut t.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
+                let sizes: SmallVec<[i64; 8]> = shape.into();
+                let numel: i64 = sizes.iter().product();
+                let nbytes = (numel * dtype.size() as i64) as usize;
+                let numel = numel as usize;
+
+                let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
+                let inner = Arc::make_mut(&mut storage);
+                let Storage::Cpu(cpu_storage) = inner else {
                     panic!("Expected CPU storage for ones()");
                 };
                 let data = Arc::make_mut(&mut cpu_storage.data);
                 match dtype {
                     DType::F32 => {
-                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
-                        // (numel * sizeof(f32)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f32, numel)
                         };
                         slice.fill(1.0);
                     }
                     DType::F64 => {
-                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
-                        // (numel * sizeof(f64)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, numel)
                         };
                         slice.fill(1.0);
                     }
                     DType::I32 => {
-                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
-                        // (numel * sizeof(i32)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i32, numel)
                         };
                         slice.fill(1);
                     }
                     DType::BF16 => {
-                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
-                        // (numel * sizeof(bf16)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(
                                 data.as_mut_ptr() as *mut half::bf16,
@@ -215,8 +211,6 @@ impl Tensor {
                         slice.fill(half::bf16::from_f32(1.0));
                     }
                     DType::F16 => {
-                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
-                        // (numel * sizeof(f16)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(
                                 data.as_mut_ptr() as *mut half::f16,
@@ -226,16 +220,12 @@ impl Tensor {
                         slice.fill(half::f16::from_f32(1.0));
                     }
                     DType::I64 => {
-                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
-                        // (numel * sizeof(i64)). The pointer is valid and properly aligned.
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i64, numel)
                         };
                         slice.fill(1);
                     }
                     DType::Bool => {
-                        // SAFETY: `data` is a uniquely owned `Vec<u8>` of sufficient size
-                        // (numel * sizeof(u8)). The pointer is valid and properly aligned.
                         let slice =
                             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr(), numel) };
                         slice.fill(1);
@@ -244,7 +234,18 @@ impl Tensor {
                         panic!("ones(): packed U4/U8 tensors are not supported. Use the IR quantization pass to create packed weights.")
                     }
                 }
-                t
+                let strides = compute_strides(&sizes);
+                Tensor::new(TensorImpl {
+                    storage,
+                    sizes,
+                    strides,
+                    storage_offset: 0,
+                    dtype,
+                    device,
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: None,
+            requires_grad: false,
+                })
             }
             Device::Wgpu(device_id) => {
                 let cpu_ones = Self::ones(shape.clone(), dtype, Device::Cpu);
@@ -254,88 +255,100 @@ impl Tensor {
     }
 
     pub fn full(shape: Vec<i64>, value: f32, dtype: DType, device: Device) -> Self {
-        let mut t = Self::zeros(shape, dtype, device);
+        if value == 0.0 {
+            return Self::zeros(shape, dtype, device);
+        }
 
         match device {
             Device::Cpu => {
-                let numel = t.inner.numel() as usize;
-                let inner = Arc::make_mut(&mut t.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
+                let sizes: SmallVec<[i64; 8]> = shape.into();
+                let numel: i64 = sizes.iter().product();
+                let nbytes = (numel * dtype.size() as i64) as usize;
+                let numel = numel as usize;
+
+                let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
+                let inner = Arc::make_mut(&mut storage);
+                let Storage::Cpu(cpu_storage) = inner else {
                     panic!("Expected CPU storage for full()");
                 };
-                let ptr = Arc::make_mut(&mut cpu_storage.data).as_mut_ptr();
-
+                let data = Arc::make_mut(&mut cpu_storage.data);
                 match dtype {
                     DType::F32 => {
-                        let f32_ptr = ptr as *mut f32;
-                        for i in 0..numel {
-                            // SAFETY: `f32_ptr` points to a uniquely owned buffer of sufficient
-                            // size (numel * sizeof(f32)), and `i` is within bounds.
-                            unsafe {
-                                *f32_ptr.add(i) = value;
-                            }
-                        }
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f32, numel)
+                        };
+                        slice.fill(value);
                     }
                     DType::F64 => {
-                        let f64_ptr = ptr as *mut f64;
-                        for i in 0..numel {
-                            // SAFETY: `f64_ptr` points to a uniquely owned buffer of sufficient
-                            // size (numel * sizeof(f64)), and `i` is within bounds.
-                            unsafe {
-                                *f64_ptr.add(i) = value as f64;
-                            }
-                        }
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, numel)
+                        };
+                        slice.fill(value as f64);
                     }
                     DType::I32 => {
-                        let i32_ptr = ptr as *mut i32;
-                        for i in 0..numel {
-                            // SAFETY: `i32_ptr` points to a uniquely owned buffer of sufficient
-                            // size (numel * sizeof(i32)), and `i` is within bounds.
-                            unsafe {
-                                *i32_ptr.add(i) = value as i32;
-                            }
-                        }
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i32, numel)
+                        };
+                        slice.fill(value as i32);
                     }
                     DType::BF16 => {
-                        let bf16_ptr = ptr as *mut half::bf16;
-                        for i in 0..numel {
-                            // SAFETY: `bf16_ptr` points to a uniquely owned buffer of sufficient
-                            // size (numel * sizeof(bf16)), and `i` is within bounds.
-                            unsafe {
-                                *bf16_ptr.add(i) = half::bf16::from_f32(value);
-                            }
-                        }
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                data.as_mut_ptr() as *mut half::bf16,
+                                numel,
+                            )
+                        };
+                        slice.fill(half::bf16::from_f32(value));
                     }
                     DType::F16 => {
-                        let f16_ptr = ptr as *mut half::f16;
-                        for i in 0..numel {
-                            // SAFETY: `f16_ptr` points to a uniquely owned buffer of sufficient
-                            // size (numel * sizeof(f16)), and `i` is within bounds.
-                            unsafe {
-                                *f16_ptr.add(i) = half::f16::from_f32(value);
-                            }
-                        }
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                data.as_mut_ptr() as *mut half::f16,
+                                numel,
+                            )
+                        };
+                        slice.fill(half::f16::from_f32(value));
                     }
                     _ => {}
                 }
+                let strides = compute_strides(&sizes);
+                Tensor::new(TensorImpl {
+                    storage,
+                    sizes,
+                    strides,
+                    storage_offset: 0,
+                    dtype,
+                    device,
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: None,
+            requires_grad: false,
+                })
             }
             Device::Wgpu(device_id) => {
+                let sizes: SmallVec<[i64; 8]> = shape.into();
+                let numel: i64 = sizes.iter().product();
                 let ctx = get_wgpu_context(device_id);
-                let numel = t.inner.numel() as usize;
-                let data = vec![value; numel];
+                let data = vec![value; numel as usize];
                 let buffer = ctx.create_gpu_buffer_from_data(&data, "full");
-
-                let inner = Arc::make_mut(&mut t.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                *storage = Storage::Wgpu(GpuStorage {
+                let storage = Arc::new(Storage::Wgpu(GpuStorage {
                     buffer: buffer.buffer,
-                    nbytes: numel * 4,
+                    nbytes: numel as usize * 4,
                     device_id,
                     staging: RwLock::new(None),
-                });
+                }));
+                let strides = compute_strides(&sizes);
+                Tensor::new(TensorImpl {
+                    storage,
+                    sizes,
+                    strides,
+                    storage_offset: 0,
+                    dtype,
+                    device,
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: None,
+            requires_grad: false,
+                })
             }
         }
-        t
     }
 }

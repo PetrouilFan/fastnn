@@ -1863,17 +1863,12 @@ pub unsafe fn simd_dot_product(a: &[f32], b: &[f32], len: usize) -> f32 {
             }
 
             let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-            let mut acc_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-            _mm256_storeu_ps(acc_arr.as_mut_ptr() as *mut f32, acc);
-            sum += acc_arr.assume_init_ref().iter().sum::<f32>();
+            sum += hsum256_ps(acc);
 
             while i + 8 <= len {
                 let a_vec = _mm256_loadu_ps(a.as_ptr().add(i));
                 let b_vec = _mm256_loadu_ps(b.as_ptr().add(i));
-                let prod = _mm256_mul_ps(a_vec, b_vec);
-                let mut prod_arr = std::mem::MaybeUninit::<[f32; 8]>::uninit();
-                _mm256_storeu_ps(prod_arr.as_mut_ptr() as *mut f32, prod);
-                sum += prod_arr.assume_init_ref().iter().sum::<f32>();
+                sum += hsum256_ps(_mm256_mul_ps(a_vec, b_vec));
                 i += 8;
             }
         }
@@ -2080,6 +2075,138 @@ pub unsafe fn conv2d_im2col(
                 }
             }
         });
+    }
+}
+
+// ============================================================
+// Conv2d f32 tiled microkernel (cache-blocked SIMD-friendly)
+// ============================================================
+
+/// Tiled f32 conv2d with OC×2×2 register blocking.
+///
+/// Tiles over output channels (OC_TILE=4) and output positions (2×2)
+/// to keep filter weights and partial sums in registers. The inner
+/// (cc, kh, kw) loop broadcasts the input value and does 4 FMAs,
+/// which the compiler auto-vectorizes.
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d_f32_tiled(
+    input: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    output: &mut [f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    f: usize,
+    kh: usize,
+    kw: usize,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+    groups: usize,
+) {
+    let c_per_group = c / groups.max(1);
+    let f_per_group = f / groups.max(1);
+    let h_out = (h + 2 * padding)
+        .saturating_sub(dilation * (kh.saturating_sub(1)) + 1)
+        / stride
+        + 1;
+    let w_out = (w + 2 * padding)
+        .saturating_sub(dilation * (kw.saturating_sub(1)) + 1)
+        / stride
+        + 1;
+
+    const OC_TILE: usize = 4;
+
+    for nn in 0..n {
+        for g in 0..groups {
+            let ff_base = g * f_per_group;
+            let input_group_off = g * c_per_group * (h * w);
+
+            for ff_tile in (0..f_per_group).step_by(OC_TILE) {
+                let ff_abs = ff_base + ff_tile;
+                let oc_end = (ff_tile + OC_TILE).min(f_per_group);
+                let oc_tile = oc_end - ff_tile;
+
+                let weight_off = ff_abs * c_per_group * kh * kw;
+
+                for hh in (0..h_out).step_by(2) {
+                    for ww in (0..w_out).step_by(2) {
+                        let mut acc = [[0.0f32; 4]; 4];
+
+                        for cc in 0..c_per_group {
+                            let input_ch_off = nn * (c * h * w) + input_group_off + cc * (h * w);
+                            let weight_ch_off = weight_off + cc * kh * kw;
+
+                            for kkh in 0..kh {
+                                for kkw in 0..kw {
+                                    let weight_val_base = weight_ch_off + kkh * kw + kkw;
+
+                                    for pos_h in 0..2 {
+                                        let oh = hh + pos_h;
+                                        if oh >= h_out {
+                                            continue;
+                                        }
+                                        for pos_w in 0..2 {
+                                            let ow = ww + pos_w;
+                                            if ow >= w_out {
+                                                continue;
+                                            }
+
+                                            let h_in = oh * stride + kkh * dilation;
+                                            let w_in = ow * stride + kkw * dilation;
+                                            if h_in < padding || w_in < padding {
+                                                continue;
+                                            }
+                                            let h_in_s = h_in - padding;
+                                            let w_in_s = w_in - padding;
+                                            if h_in_s >= h || w_in_s >= w {
+                                                continue;
+                                            }
+
+                                            let input_val =
+                                                input[input_ch_off + h_in_s * w + w_in_s];
+                                            let pos = pos_h * 2 + pos_w;
+
+                                            for oc in 0..oc_tile {
+                                                acc[pos][oc] += input_val
+                                                    * weight[weight_val_base
+                                                        + oc * c_per_group * kh * kw];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        for pos_h in 0..2 {
+                            let oh = hh + pos_h;
+                            if oh >= h_out {
+                                continue;
+                            }
+                            for pos_w in 0..2 {
+                                let ow = ww + pos_w;
+                                if ow >= w_out {
+                                    continue;
+                                }
+                                let pos = pos_h * 2 + pos_w;
+                                let out_base =
+                                    nn * (f * h_out * w_out) + (oh * w_out + ow);
+                                for oc in 0..oc_tile {
+                                    let mut val = acc[pos][oc];
+                                    if !bias.is_empty() {
+                                        let b = (ff_abs + oc) % bias.len();
+                                        val += bias[b];
+                                    }
+                                    output[out_base + (ff_abs + oc) * (h_out * w_out)] = val;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

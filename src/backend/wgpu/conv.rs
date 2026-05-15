@@ -113,9 +113,9 @@ pub(super) fn dispatch_conv_gpu(
             ],
         });
 
-        let wgc_x = (h_out * w_out).max(1);
-        let wgc_y = oc.max(1);
-        let wgc_z = n.max(1);
+        let wgc_x = ((h_out + 7) / 8).max(1);
+        let wgc_y = ((w_out + 7) / 8).max(1);
+        let wgc_z = (oc * n).max(1);
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -225,18 +225,16 @@ struct ConvParams {
 }
 @group(0) @binding(3) var<uniform> params: ConvParams;
 
-@compute @workgroup_size(1, 1, 1)
+@compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let spatial_idx = gid.x;
-    let oc = gid.y;
-    let n = gid.z;
-
-    if (spatial_idx >= params.H_out * params.W_out || oc >= params.OC || n >= params.N) {
+    let h_out = gid.x;
+    let w_out = gid.y;
+    let of = gid.z;
+    if (h_out >= params.H_out || w_out >= params.W_out) {
         return;
     }
-
-    let h_out = spatial_idx / params.W_out;
-    let w_out = spatial_idx % params.W_out;
+    let oc = of % params.OC;
+    let n = of / params.OC;
 
     let C_per_group = params.C / params.groups;
     let oc_per_group = params.OC / params.groups;

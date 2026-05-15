@@ -1,6 +1,15 @@
 use super::FusionPass;
 use crate::ir::node::{ComputeGraph, NodeId, Opcode};
 
+fn activation_fused_name(opcode: Opcode) -> Option<&'static str> {
+    match opcode {
+        Opcode::Relu => Some("OpRelu"),
+        Opcode::Gelu => Some("OpGelu"),
+        Opcode::Silu => Some("OpSilu"),
+        _ => None,
+    }
+}
+
 pub struct OpRelu;
 
 impl FusionPass for OpRelu {
@@ -23,7 +32,7 @@ impl FusionPass for OpRelu {
                 None => continue,
             };
             match op_node.opcode {
-                Opcode::Relu | Opcode::Input | Opcode::Constant(_) => continue,
+                Opcode::Relu | Opcode::Gelu | Opcode::Silu | Opcode::Input | Opcode::Constant(_) => continue,
                 _ => {}
             }
             if op_node.attrs.contains_key("fused_op") {
@@ -35,37 +44,41 @@ impl FusionPass for OpRelu {
                 continue;
             }
 
-            let relu_id = op_consumers[0];
-            if to_remove.contains(&relu_id) {
+            let act_id = op_consumers[0];
+            if to_remove.contains(&act_id) {
                 continue;
             }
 
-            let relu = match graph.get_node(relu_id) {
-                Some(n) if n.opcode == Opcode::Relu => n.clone(),
+            let act = match graph.get_node(act_id) {
+                Some(n) => n.clone(),
                 _ => continue,
+            };
+            let fused_name = match activation_fused_name(act.opcode) {
+                Some(name) => name,
+                None => continue,
             };
 
             if let Some(op_mut) = graph.get_node_mut(op_id) {
                 op_mut
                     .attrs
-                    .insert("fused_op".to_string(), "OpRelu".to_string());
-                op_mut.output_type = relu.output_type.clone();
+                    .insert("fused_op".to_string(), fused_name.to_string());
+                op_mut.output_type = act.output_type.clone();
             }
 
-            to_remove.push(relu_id);
+            to_remove.push(act_id);
 
-            let relu_consumers: Vec<NodeId> = graph.consumers(relu_id);
-            for consumer_id in relu_consumers {
+            let act_consumers: Vec<NodeId> = graph.consumers(act_id);
+            for consumer_id in act_consumers {
                 if let Some(consumer) = graph.get_node_mut(consumer_id) {
                     for input in consumer.inputs.iter_mut() {
-                        if *input == relu_id {
+                        if *input == act_id {
                             *input = op_id;
                         }
                     }
                 }
             }
 
-            if let Some(output) = graph.outputs.iter_mut().find(|o| **o == relu_id) {
+            if let Some(output) = graph.outputs.iter_mut().find(|o| **o == act_id) {
                 *output = op_id;
             }
 

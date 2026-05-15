@@ -32,6 +32,7 @@ pub struct TensorImpl {
     pub device: Device,
     pub version_counter: Arc<AtomicU64>,
     pub autograd_meta: Option<Arc<std::sync::Mutex<AutogradMeta>>>,
+    pub requires_grad: bool,
 }
 
 impl TensorImpl {
@@ -64,6 +65,7 @@ impl TensorImpl {
             device,
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
+            requires_grad: false,
         }
     }
 
@@ -88,6 +90,7 @@ impl TensorImpl {
             device,
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
+            requires_grad: false,
         }
     }
 
@@ -121,6 +124,7 @@ impl TensorImpl {
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
             autograd_meta: self.autograd_meta.clone(),
+            requires_grad: self.requires_grad,
         }
     }
 
@@ -135,18 +139,25 @@ impl TensorImpl {
             device,
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: self.autograd_meta.clone(),
+            requires_grad: self.requires_grad,
         }
     }
 
     pub fn requires_grad(&self) -> bool {
-        self.autograd_meta
-            .as_ref()
-            .and_then(|m| m.lock().ok())
-            .map(|m| m.requires_grad)
-            .unwrap_or(false)
+        self.requires_grad
+    }
+
+    /// Set autograd_meta and sync the cached requires_grad bool in one call.
+    /// Prefer this over writing to `autograd_meta` directly to keep the
+    /// cached `requires_grad` field consistent.
+    pub fn set_autograd_meta(&mut self, meta: AutogradMeta) {
+        let rg = meta.requires_grad;
+        self.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+        self.requires_grad = rg;
     }
 
     pub fn set_requires_grad(&mut self, requires_grad: bool) {
+        self.requires_grad = requires_grad;
         if self.autograd_meta.is_none() {
             self.autograd_meta = Some(Arc::new(std::sync::Mutex::new(AutogradMeta::new(
                 requires_grad,
@@ -159,6 +170,7 @@ impl TensorImpl {
     }
 
     pub fn requires_grad_(mut self, requires_grad: bool) -> Tensor {
+        self.requires_grad = requires_grad;
         if let Some(meta) = &mut self.autograd_meta {
             if let Ok(mut lock) = meta.lock() {
                 lock.requires_grad = requires_grad;
@@ -202,6 +214,7 @@ impl TensorImpl {
     pub fn detach(&self) -> Tensor {
         let mut new = self.clone();
         new.autograd_meta = None;
+        new.requires_grad = false;
         new.into()
     }
 
@@ -355,6 +368,7 @@ impl Clone for TensorImpl {
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
             autograd_meta: self.autograd_meta.clone(),
+            requires_grad: self.requires_grad,
         }
     }
 }
@@ -399,8 +413,9 @@ impl Tensor {
     ) -> Tensor {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
-        Arc::make_mut(&mut output.inner).autograd_meta =
-            Some(Arc::new(std::sync::Mutex::new(meta)));
+        let inner = Arc::make_mut(&mut output.inner);
+        inner.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+        inner.requires_grad = true;
         output
     }
 
@@ -1201,8 +1216,7 @@ impl Tensor {
                     numel,
                     dt.size()
                 );
-                let mut data = vec![0u8; num_bytes];
-                data.copy_from_slice(&bytes);
+                let data = bytes.to_vec();
                 let storage = Storage::Cpu(crate::storage::CpuStorage {
                     data: Arc::new(data),
                     nbytes: num_bytes,

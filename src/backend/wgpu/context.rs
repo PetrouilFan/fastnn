@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use crate::dtypes::PackedWord;
 use crate::error::{FastnnError, FastnnResult};
 use crate::storage::DType;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 /// Global wgpu context — lazily initialized.
 static WGPU_CONTEXT: OnceLock<Arc<Mutex<WgpuContext>>> = OnceLock::new();
@@ -182,6 +182,56 @@ impl WgpuContext {
         drop(data);
         staging.unmap();
         result
+    }
+
+    /// Read multiple buffers in a single sync point.
+    /// Avoids per-dispatch `device.poll(Maintain::Wait)` overhead.
+    pub fn read_buffers(&mut self, buffers: &[(&wgpu::Buffer, usize)]) -> Vec<Vec<u8>> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("batched_readback"),
+            });
+
+        let mut staging_buffers = Vec::with_capacity(buffers.len());
+        let mut results = Vec::with_capacity(buffers.len());
+
+        for &(buffer, size) in buffers {
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("staging"),
+                size: size as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size as u64);
+            staging_buffers.push(staging);
+            results.push(Vec::new());
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Single sync point for all copies
+        self.device.poll(wgpu::Maintain::Wait);
+
+        for (i, staging) in staging_buffers.iter().enumerate() {
+            let size = buffers[i].1;
+            let buffer_slice = staging.slice(..size as u64);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+            self.device.poll(wgpu::Maintain::Wait);
+            if let Ok(data) = receiver.recv() {
+                if data.is_ok() {
+                    let mapped = buffer_slice.get_mapped_range();
+                    results[i] = mapped.to_vec();
+                    drop(mapped);
+                    staging.unmap();
+                }
+            }
+        }
+
+        results
     }
 }
 
@@ -855,7 +905,7 @@ where
 {
     ensure_wgpu_context();
     let ctx = WGPU_CONTEXT.get().unwrap();
-    let mut guard = ctx.lock().unwrap();
+    let mut guard = ctx.lock();
     f(&mut guard)
 }
 

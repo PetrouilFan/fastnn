@@ -151,7 +151,7 @@ impl StoragePool {
                 let key = nbytes;
 
                 if let Some(mut storages) = self.buffers.get_mut(&key) {
-                    if storages.len() < 4 {
+                    if storages.len() < 64 {
                         storages.push(storage);
                     }
                 } else {

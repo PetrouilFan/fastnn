@@ -4,6 +4,7 @@ use crate::{
     nn::{clear_grad, Module, TrainingState},
 };
 
+#[derive(Clone)]
 pub struct Embedding {
     pub weight: Tensor,
     #[allow(dead_code)]

@@ -19,12 +19,48 @@ fn apply_op_relu(_graph: &mut ComputeGraph) -> Result<bool, String> {
     Ok(false)
 }
 
+#[cfg(feature = "fusion-op-gelu")]
+fn apply_op_gelu(graph: &mut ComputeGraph) -> Result<bool, String> {
+    op_relu::OpRelu::fuse(graph)
+}
+#[cfg(not(feature = "fusion-op-gelu"))]
+fn apply_op_gelu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(feature = "fusion-op-silu")]
+fn apply_op_silu(graph: &mut ComputeGraph) -> Result<bool, String> {
+    op_relu::OpRelu::fuse(graph)
+}
+#[cfg(not(feature = "fusion-op-silu"))]
+fn apply_op_silu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+    Ok(false)
+}
+
 #[cfg(feature = "fusion-matmul-add-relu")]
 fn apply_matmul_add_relu(graph: &mut ComputeGraph) -> Result<bool, String> {
     matmul_add_relu::MatMulAddRelu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-matmul-add-relu"))]
 fn apply_matmul_add_relu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(feature = "fusion-matmul-add-gelu")]
+fn apply_matmul_add_gelu(graph: &mut ComputeGraph) -> Result<bool, String> {
+    matmul_add_relu::MatMulAddRelu::fuse(graph)
+}
+#[cfg(not(feature = "fusion-matmul-add-gelu"))]
+fn apply_matmul_add_gelu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(feature = "fusion-matmul-add-silu")]
+fn apply_matmul_add_silu(graph: &mut ComputeGraph) -> Result<bool, String> {
+    matmul_add_relu::MatMulAddRelu::fuse(graph)
+}
+#[cfg(not(feature = "fusion-matmul-add-silu"))]
+fn apply_matmul_add_silu(_graph: &mut ComputeGraph) -> Result<bool, String> {
     Ok(false)
 }
 
@@ -58,16 +94,20 @@ fn apply_residual_add_norm(_graph: &mut ComputeGraph) -> Result<bool, String> {
 fn apply_pass(graph: &mut ComputeGraph, idx: usize) -> Result<bool, String> {
     match idx {
         0 => apply_matmul_add_relu(graph),
-        1 => apply_op_relu(graph),
-        2 => apply_residual_add_norm(graph),
-        3 => apply_backward_relu_matmul(graph),
-        4 => apply_backward_matmul_add_relu(graph),
+        1 => apply_matmul_add_gelu(graph),
+        2 => apply_matmul_add_silu(graph),
+        3 => apply_op_relu(graph),
+        4 => apply_op_gelu(graph),
+        5 => apply_op_silu(graph),
+        6 => apply_residual_add_norm(graph),
+        7 => apply_backward_relu_matmul(graph),
+        8 => apply_backward_matmul_add_relu(graph),
         _ => Ok(false),
     }
 }
 
 pub fn fuse_operators(graph: &mut ComputeGraph) -> Result<(), String> {
-    for i in 0..5 {
+    for i in 0..9 {
         while apply_pass(graph, i)? {}
     }
     Ok(())

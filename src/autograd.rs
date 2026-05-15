@@ -406,14 +406,13 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
     use crate::backend::cpu::CpuBackend;
 
     // Input data order must match the order inputs were registered (all_input_tensors)
-    let input_data: Vec<Vec<u8>> = all_input_tensors
+    let input_refs: Vec<&[u8]> = all_input_tensors
         .iter()
-        .map(|t| t.as_bytes().to_vec())
+        .map(|t| t.as_bytes())
         .collect();
-    let input_refs: Vec<&[u8]> = input_data.iter().map(|d| d.as_slice()).collect();
     let grad_refs: Vec<&GraphTensor> = grad_tensors.iter().collect();
 
-    let results = match builder.compile_and_execute(&grad_refs, CpuBackend, &input_refs) {
+    let mut results = match builder.compile_and_execute(&grad_refs, CpuBackend, &input_refs) {
         Ok(r) => r,
         Err(_) => return,
     };
@@ -435,7 +434,7 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
             continue;
         }
 
-        let result_bytes = &results[i];
+        let result_bytes = std::mem::take(&mut results[i]);
         let numel = tensor.shape().iter().product::<i64>() as usize;
         let dtype_size = tensor.dtype().size();
         let expected_bytes = numel * dtype_size;
@@ -445,20 +444,15 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
         }
 
         // Build a fresh CPU Storage from the result bytes
-        let storage = Storage::from_vec(result_bytes.clone(), tensor.dtype(), Device::Cpu);
-        let shape: SmallVec<[i64; 8]> = tensor.shape().iter().copied().collect();
+        let storage = Storage::from_vec(result_bytes, tensor.dtype(), Device::Cpu);
+        let shape: SmallVec<[i64; 8]> = tensor.shape().to_vec().into();
         let new_grad = Tensor::new(TensorImpl::new(Arc::new(storage), shape, tensor.dtype()));
 
-        // Accumulate: if a gradient already exists, add the new one to it
+        // Accumulate: if a gradient already exists, add the new one to it in-place
         let final_grad = if let Some(existing_grad) = tensor.grad() {
-            // Use raw AOT addition (no autograd, gradients are not differentiable)
-            Tensor::exec_aot(&[&existing_grad, &new_grad], |g, ins| {
-                vec![g.add(&ins[0], &ins[1])]
-            })
-            .expect("backward: gradient accumulation failed")
-            .into_iter()
-            .next()
-            .unwrap()
+            let mut grad = existing_grad;
+            grad.add_(&new_grad);
+            grad
         } else {
             new_grad
         };
@@ -1026,6 +1020,32 @@ pub fn build_backward_graph(
                             }
                             grad_input
                         }
+                        Some("OpGelu") | Some("MatMulAddGelu") => {
+                            let mut attrs = HashMap::new();
+                            attrs.insert("op".to_string(), "gelu_backward".to_string());
+                            let grad_input = grad_graph.add_node(
+                                Opcode::Mul,
+                                vec![grad_id, node_id],
+                                node.output_type.clone(),
+                            );
+                            if let Some(n) = grad_graph.get_node_mut(grad_input) {
+                                n.attrs = attrs;
+                            }
+                            grad_input
+                        }
+                        Some("OpSilu") | Some("MatMulAddSilu") => {
+                            let mut attrs = HashMap::new();
+                            attrs.insert("op".to_string(), "silu_backward".to_string());
+                            let grad_input = grad_graph.add_node(
+                                Opcode::Mul,
+                                vec![grad_id, node_id],
+                                node.output_type.clone(),
+                            );
+                            if let Some(n) = grad_graph.get_node_mut(grad_input) {
+                                n.attrs = attrs;
+                            }
+                            grad_input
+                        }
                         _ => grad_id,
                     };
 
@@ -1057,18 +1077,23 @@ pub fn build_backward_graph(
                     );
                     accumulate_grad(&mut grad_graph, &mut grads, b_id, db);
 
-                    // For fused MatMulAddRelu: bias lives at input[2]
-                    if let Some("MatMulAddRelu") = node.attrs.get("fused_op").map(|s| s.as_str()) {
-                        if let Some(&bias_id) = node.inputs.get(2) {
-                            let dbias = grad_graph.add_node(
-                                Opcode::ReduceSum,
-                                vec![effective_grad],
-                                forward_graph
-                                    .get_node(bias_id)
-                                    .map(|n| n.output_type.clone())
-                                    .unwrap(),
-                            );
-                            accumulate_grad(&mut grad_graph, &mut grads, bias_id, dbias);
+                    // For fused MatMulAdd{Relu,Gelu,Silu}: bias lives at input[2]
+                    if let Some(fused) = node.attrs.get("fused_op").map(|s| s.as_str()) {
+                        if fused == "MatMulAddRelu"
+                            || fused == "MatMulAddGelu"
+                            || fused == "MatMulAddSilu"
+                        {
+                            if let Some(&bias_id) = node.inputs.get(2) {
+                                let dbias = grad_graph.add_node(
+                                    Opcode::ReduceSum,
+                                    vec![effective_grad],
+                                    forward_graph
+                                        .get_node(bias_id)
+                                        .map(|n| n.output_type.clone())
+                                        .unwrap(),
+                                );
+                                accumulate_grad(&mut grad_graph, &mut grads, bias_id, dbias);
+                            }
                         }
                     }
                 }

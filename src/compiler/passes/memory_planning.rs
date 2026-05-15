@@ -36,6 +36,12 @@ impl MemoryPlan {
     /// shrunk, and `total_size` is recomputed.  Offsets are not changed
     /// (the slot layout is preserved), so this is safe to call after the
     /// plan was compiled with max-estimate sizes.
+    ///
+    /// Also computes `tightened_params` — the runtime-resolved kernel
+    /// parameters (e.g. [M, K, N] for matmul) for every node whose kernel
+    /// depends on shape information.  These are stored so that
+    /// [`tighten_slices`](crate::backend::executor::tighten_slices) can
+    /// update [`Instruction::CallKernel`] params without a full recompile.
     pub fn tighten(&self, graph: &ComputeGraph, shape_env: &ShapeEnv) -> MemoryPlan {
         let mut mp = self.clone();
         let mut max_end = 0usize;
@@ -57,6 +63,106 @@ impl MemoryPlan {
             max_end = max_end.max(slot.offset + slot.size);
         }
         mp.total_size = max_end;
+
+        // ── Compute tightened kernel params ──────────────────────────
+        // Iterate over every node in topological order and re-derive
+        // shape-dependent kernel parameters using the concrete ShapeEnv.
+        let order = graph.topological_sort();
+        for &node_id in &order {
+            let node = match graph.get_node(node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            let resolved_input_shapes: Vec<Vec<u64>> = node
+                .inputs
+                .iter()
+                .filter_map(|&id| graph.get_node(id))
+                .map(|n| {
+                    n.output_type
+                        .shape
+                        .iter()
+                        .map(|d| d.evaluate_with_env(shape_env).unwrap_or(0))
+                        .collect()
+                })
+                .collect();
+
+            let tightened = match node.opcode {
+                Opcode::MatMul => {
+                    if resolved_input_shapes.len() < 2 {
+                        continue;
+                    }
+                    let m = resolved_input_shapes[0]
+                        .get(resolved_input_shapes[0].len().saturating_sub(2))
+                        .copied()
+                        .unwrap_or(1) as usize;
+                    let k = resolved_input_shapes[0].last().copied().unwrap_or(1) as usize;
+                    let n = resolved_input_shapes[1].last().copied().unwrap_or(1) as usize;
+                    vec![m, k, n]
+                }
+                Opcode::Transpose => {
+                    let m = resolved_input_shapes
+                        .first()
+                        .and_then(|s| s.first())
+                        .copied()
+                        .unwrap_or(1) as usize;
+                    let n = resolved_input_shapes
+                        .first()
+                        .and_then(|s| s.get(1))
+                        .copied()
+                        .unwrap_or(1) as usize;
+                    vec![m, n]
+                }
+                Opcode::Softmax => {
+                    let axis: i64 = node
+                        .attrs
+                        .get("axis")
+                        .and_then(|a| a.parse().ok())
+                        .unwrap_or(0);
+                    let rank = resolved_input_shapes.first().map(|s| s.len()).unwrap_or(1);
+                    let normalized_axis = if axis < 0 {
+                        (rank as i64 + axis) as usize
+                    } else {
+                        axis as usize
+                    };
+                    let axis_dim = resolved_input_shapes
+                        .first()
+                        .and_then(|s| s.get(normalized_axis).copied())
+                        .unwrap_or(1) as usize;
+                    let stride = resolved_input_shapes
+                        .first()
+                        .map(|s| {
+                            s[normalized_axis + 1..]
+                                .iter()
+                                .copied()
+                                .map(|x| x as usize)
+                                .product::<usize>()
+                                .max(1)
+                        })
+                        .unwrap_or(1);
+                    vec![axis_dim, stride]
+                }
+                Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => {
+                    let axis: usize = node
+                        .attrs
+                        .get("axis")
+                        .and_then(|a| a.parse().ok())
+                        .unwrap_or(0);
+                    let group_size = resolved_input_shapes
+                        .first()
+                        .and_then(|s| s.get(axis).copied())
+                        .unwrap_or(1) as usize;
+                    let is_mean = if matches!(node.opcode, Opcode::ReduceMean) {
+                        1
+                    } else {
+                        0
+                    };
+                    vec![group_size, is_mean]
+                }
+                _ => continue,
+            };
+            mp.tightened_params.insert(node_id, tightened);
+        }
+
         mp
     }
 }
@@ -215,12 +321,6 @@ pub fn plan_memory_with_env(
 
         // Primary output
         let size = tensor_byte_size(&node.output_type, shape_env);
-        if size == 0 {
-            eprintln!(
-                "[memory_planning] SKIPPING node={} op={:?} name='{}' size=0 type={:?}",
-                node_id, node.opcode, node.name, node.output_type
-            );
-        }
         if size > 0 {
             // Input nodes have their data written by the executor before any
             // instruction runs, so their lifetime starts at position 0 — not

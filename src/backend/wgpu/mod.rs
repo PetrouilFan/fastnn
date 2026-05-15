@@ -32,8 +32,8 @@
 
 #![allow(dead_code)]
 
-mod argmax;
 pub mod context;
+mod argmax;
 mod conv;
 mod elementwise;
 mod embed;
@@ -41,14 +41,14 @@ mod matmul;
 mod norm;
 mod pipeline;
 mod pool;
-mod quantized;
 mod reduce;
 mod softmax;
 mod transpose;
+mod quantized;
 
 use crate::backend::cpu::CpuBackend;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction, MemoryPlan};
-use crate::ir::node::{ComputeGraph, DimExpr, ShapeEnv};
+use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 use bytemuck;
 use std::cell::UnsafeCell;
 
@@ -126,6 +126,8 @@ impl Backend for WgpuBackend {
                     params,
                     param_dims,
                     weight_meta,
+                    node_id,
+                    ..
                 } => {
                     let out_start = output_slice.offset;
                     let _out_end = output_slice.offset + output_slice.size;
@@ -134,6 +136,7 @@ impl Backend for WgpuBackend {
                     if let Err(_err) = try_gpu_dispatch(
                         arena,
                         kernel_name,
+                        node_id.as_ref(),
                         input_slices,
                         *output_slice,
                         params,
@@ -147,11 +150,14 @@ impl Backend for WgpuBackend {
                         let mut tmp = vec![0u8; plan.arena_size];
                         for s in input_slices {
                             let end = (s.offset + s.size).min(arena.data_mut().len());
-                            tmp[s.offset..end].copy_from_slice(&arena.data_mut()[s.offset..end]);
+                            tmp[s.offset..end]
+                                .copy_from_slice(&arena.data_mut()[s.offset..end]);
                         }
                         // Output slot may overlap with input; copy it too.
-                        let o_end = (out_start + output_slice.size).min(arena.data_mut().len());
-                        tmp[out_start..o_end].copy_from_slice(&arena.data_mut()[out_start..o_end]);
+                        let o_end =
+                            (out_start + output_slice.size).min(arena.data_mut().len());
+                        tmp[out_start..o_end]
+                            .copy_from_slice(&arena.data_mut()[out_start..o_end]);
 
                         let cpu_buf = crate::backend::cpu::CpuBuffer::new(tmp);
                         let cpu = CpuBackend;
@@ -164,7 +170,8 @@ impl Backend for WgpuBackend {
                         // Copy output back to real arena.
                         let cpu_data = cpu_buf.data_mut();
                         let wgpu_data = arena.data_mut();
-                        wgpu_data[out_start..o_end].copy_from_slice(&cpu_data[out_start..o_end]);
+                        wgpu_data[out_start..o_end]
+                            .copy_from_slice(&cpu_data[out_start..o_end]);
                     }
                 }
                 Instruction::MemCopy { dst, src } => {
@@ -214,6 +221,7 @@ impl Backend for WgpuBackend {
 fn try_gpu_dispatch(
     arena: &WgpuBuffer,
     kernel_name: &str,
+    node_id: Option<&NodeId>,
     input_slices: &[BufferSlice],
     output_slice: BufferSlice,
     params: &[usize],
@@ -257,15 +265,9 @@ fn try_gpu_dispatch(
     // Dispatch based on kernel category.
     if let Some(opcode) = elementwise::elementwise_opcode(kernel_name) {
         let extra0 = if kernel_name == "leaky_relu_f32" {
-            params
-                .first()
-                .copied()
-                .unwrap_or(f32::to_bits(0.01) as usize)
+            params.first().copied().unwrap_or(f32::to_bits(0.01) as usize)
         } else if kernel_name == "clamp_f32" {
-            params
-                .first()
-                .copied()
-                .unwrap_or(f32::to_bits(0.0) as usize)
+            params.first().copied().unwrap_or(f32::to_bits(0.0) as usize)
         } else {
             0
         };
@@ -309,13 +311,9 @@ fn try_gpu_dispatch(
             out_f32[..len].copy_from_slice(&result[..len]);
             Ok(())
         }
-        "matmul" | "matmul_relu" | "fused_matmul_add_relu" => matmul::dispatch_matmul_gpu(
-            arena,
-            input_slices,
-            output_slice,
-            &resolved_params,
-            shape_env,
-        ),
+        "matmul" | "matmul_relu" | "matmul_gelu" | "matmul_silu" | "fused_matmul_add_relu" | "fused_matmul_add_gelu" | "fused_matmul_add_silu" => {
+            matmul::dispatch_matmul_gpu(arena, input_slices, output_slice, &resolved_params, shape_env)
+        }
         "transpose_f32" => {
             let m = resolved_params.first().copied().unwrap_or(1);
             let n = resolved_params.get(1).copied().unwrap_or(1);
@@ -326,74 +324,66 @@ fn try_gpu_dispatch(
             out_f32[..len].copy_from_slice(&result[..len]);
             Ok(())
         }
-        "conv2d" => conv::dispatch_conv_gpu(
-            arena,
-            input_slices,
-            output_slice,
-            &resolved_params,
-            shape_env,
-        ),
-        "norm_f32" | "rms_norm" => norm::dispatch_norm_gpu(
-            arena,
-            kernel_name,
-            input_slices,
-            output_slice,
-            &resolved_params,
-        ),
-        "pool_f32" => pool::dispatch_pool_gpu(arena, input_slices, output_slice, &resolved_params),
+        "conv2d" => {
+            conv::dispatch_conv_gpu(arena, input_slices, output_slice, &resolved_params, shape_env)
+        }
+        "norm_f32" | "rms_norm" => {
+            norm::dispatch_norm_gpu(arena, kernel_name, input_slices, output_slice, &resolved_params)
+        }
+        "pool_f32" => {
+            pool::dispatch_pool_gpu(arena, input_slices, output_slice, &resolved_params)
+        }
         "embedding" => {
             embed::dispatch_embed_gpu(arena, input_slices, output_slice, &resolved_params)
         }
-        "argmax" => argmax::dispatch_argmax_gpu(arena, input_slices, output_slice),
+        "argmax" => {
+            argmax::dispatch_argmax_gpu(arena, input_slices, output_slice)
+        }
         "matmul_u4" | "matmul_u8" => {
             let bit_width = if kernel_name == "matmul_u4" { 4 } else { 8 };
-            let scales = weight_meta
-                .as_ref()
+            let scales = weight_meta.as_ref()
                 .map(|m| m.scales.clone())
                 .unwrap_or_default();
-            let zero_points = weight_meta
-                .as_ref()
+            let zero_points = weight_meta.as_ref()
                 .map(|m| m.zero_points.clone())
                 .unwrap_or_default();
             quantized::dispatch_quantized_matmul_gpu(
-                arena,
-                input_slices,
-                output_slice,
-                &resolved_params,
-                bit_width,
-                &scales,
-                &zero_points,
+                arena, input_slices, output_slice, &resolved_params, bit_width, &scales, &zero_points,
             )
         }
         "conv2d_u4" | "conv2d_u8" => {
             let bit_width = if kernel_name == "conv2d_u4" { 4 } else { 8 };
-            let scales = weight_meta
-                .as_ref()
+            let scales = weight_meta.as_ref()
                 .map(|m| m.scales.clone())
                 .unwrap_or_default();
-            let zero_points = weight_meta
-                .as_ref()
+            let zero_points = weight_meta.as_ref()
                 .map(|m| m.zero_points.clone())
                 .unwrap_or_default();
             quantized::dispatch_quantized_conv_gpu(
-                arena,
-                input_slices,
-                output_slice,
-                &resolved_params,
-                bit_width,
-                &scales,
-                &zero_points,
+                arena, input_slices, output_slice, &resolved_params, bit_width, &scales, &zero_points,
             )
         }
         "upsample_nearest2d" | "upsample_bilinear2d" => {
             Err(BackendError::UnsupportedOp(kernel_name.to_string()))
         }
-        "adaptive_avg_pool2d" => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
-        "repeat" => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
-        "cumsum" => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
-        "erf_f32" => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
-        "flip" => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
-        "where_f32" => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
+        "adaptive_avg_pool2d" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "repeat" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "cumsum" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "erf_f32" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "flip" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
+        "where_f32" => {
+            Err(BackendError::UnsupportedOp(kernel_name.to_string()))
+        }
         _ => Err(BackendError::UnsupportedOp(kernel_name.to_string())),
     }
 }
