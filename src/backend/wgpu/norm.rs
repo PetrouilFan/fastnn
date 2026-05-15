@@ -1,5 +1,5 @@
-use crate::backend::BackendError;
 use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::BackendError;
 
 const NORM_WORKGROUP_SIZE: u32 = 256;
 
@@ -31,8 +31,14 @@ pub(super) fn dispatch_norm_gpu(
 
     let num_rows = input_data.len() / hidden_dim;
     let eps_bits = match kernel_name {
-        "rms_norm" => resolved_params.first().copied().unwrap_or(f32::to_bits(1e-5) as usize),
-        _ => resolved_params.first().copied().unwrap_or(f32::to_bits(1e-5) as usize),
+        "rms_norm" => resolved_params
+            .first()
+            .copied()
+            .unwrap_or(f32::to_bits(1e-5) as usize),
+        _ => resolved_params
+            .first()
+            .copied()
+            .unwrap_or(f32::to_bits(1e-5) as usize),
     };
 
     let is_batch_norm = if kernel_name == "norm_f32" {
@@ -53,8 +59,7 @@ pub(super) fn dispatch_norm_gpu(
     with_wgpu_context(|ctx| -> Result<(), BackendError> {
         let shader = build_norm_shader();
         let pipeline_key = format!("wgpu_backend_{}", kernel_name);
-        ensure_norm_pipeline(ctx, &pipeline_key, &shader)
-            .map_err(BackendError::Dispatch)?;
+        ensure_norm_pipeline(ctx, &pipeline_key, &shader).map_err(BackendError::Dispatch)?;
 
         let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "norm_input");
         let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "norm_weight");
@@ -89,11 +94,26 @@ pub(super) fn dispatch_norm_gpu(
             label: Some("norm_bg"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_input.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_weight.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_bias.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: buf_out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: buf_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf_input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf_weight.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf_bias.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: buf_params.as_entire_binding(),
+                },
             ],
         });
 

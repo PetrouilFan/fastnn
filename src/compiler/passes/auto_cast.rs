@@ -116,9 +116,13 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Stri
         let accepts_quantized = matches!(
             node.opcode,
             Opcode::MatMul
-                | Opcode::Conv1d | Opcode::Conv2d | Opcode::Conv3d
-                | Opcode::Quantize | Opcode::Dequantize
-                | Opcode::DequantizeActivations | Opcode::QuantizeActivations
+                | Opcode::Conv1d
+                | Opcode::Conv2d
+                | Opcode::Conv3d
+                | Opcode::Quantize
+                | Opcode::Dequantize
+                | Opcode::DequantizeActivations
+                | Opcode::QuantizeActivations
         );
 
         for (i, &input_id) in node.inputs.iter().enumerate() {
@@ -175,7 +179,12 @@ mod tests {
     use crate::ir::node::{DimExpr, TensorValue};
 
     /// Helper to create a weight Data constant with the given dimensions.
-    fn make_weight_constant(graph: &mut ComputeGraph, rows: usize, cols: usize, value: f32) -> NodeId {
+    fn make_weight_constant(
+        graph: &mut ComputeGraph,
+        rows: usize,
+        cols: usize,
+        value: f32,
+    ) -> NodeId {
         let numel = rows * cols;
         let data: Vec<u8> = std::iter::repeat(value)
             .take(numel)
@@ -200,12 +209,14 @@ mod tests {
     fn test_auto_cast_quantizes_weights() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = make_weight_constant(&mut graph, 4, 4, 1.0);
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id, weight_id]);
@@ -233,13 +244,15 @@ mod tests {
         let mut graph = ComputeGraph::new();
         // Activation input: [1, 4]
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         // MatMul weight: [4, 4] (for [1,4] × [4,4] → [1,4])
         let mm_weight_id = make_weight_constant(&mut graph, 4, 4, 1.0);
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, mm_weight_id],
+            Opcode::MatMul,
+            vec![input_id, mm_weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         // The MatMul output is then added to a bias [1, 4].
@@ -250,12 +263,14 @@ mod tests {
         // Relu is not a MatMul/Conv so it gets Dequantize inserted.
         let shared_weight_id = make_weight_constant(&mut graph, 4, 4, 0.5);
         let mm2_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, shared_weight_id],
+            Opcode::MatMul,
+            vec![input_id, shared_weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         // Use shared_weight in a non-MatMul op (Relu) to trigger Dequantize insertion
         let relu_id = graph.add_node(
-            Opcode::Relu, vec![shared_weight_id],
+            Opcode::Relu,
+            vec![shared_weight_id],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
 
@@ -306,24 +321,28 @@ mod tests {
     fn test_auto_cast_with_activation_quant() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = make_weight_constant(&mut graph, 4, 4, 1.0);
         // First MatMul produces an intermediate activation
         let mm1_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         // Relu transforms it (this is the activation we want to quantize)
         let relu_id = graph.add_node(
-            Opcode::Relu, vec![mm1_id],
+            Opcode::Relu,
+            vec![mm1_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         // Second MatMul consumes the ReLU output (this MatMul's activation gets quantized)
         let weight2_id = make_weight_constant(&mut graph, 4, 4, 0.5);
         let mm2_id = graph.add_node(
-            Opcode::MatMul, vec![relu_id, weight2_id],
+            Opcode::MatMul,
+            vec![relu_id, weight2_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
 
@@ -355,12 +374,14 @@ mod tests {
     fn test_auto_cast_u8_weights() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = make_weight_constant(&mut graph, 4, 4, 1.0);
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id, weight_id]);
@@ -386,12 +407,14 @@ mod tests {
     fn test_auto_cast_noop_when_no_options() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = make_weight_constant(&mut graph, 4, 4, 1.0);
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id, weight_id]);
@@ -408,7 +431,8 @@ mod tests {
             assert_eq!(
                 node.output_type.dtype,
                 IrDType::F32,
-                "node {} should remain F32", node.id
+                "node {} should remain F32",
+                node.id
             );
         }
     }
@@ -418,8 +442,17 @@ mod tests {
     fn test_auto_cast_conv2d_weights() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
-            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(3), DimExpr::Known(8), DimExpr::Known(8)], IrDType::F32),
+            Opcode::Input,
+            vec![],
+            TensorType::new(
+                vec![
+                    DimExpr::Known(1),
+                    DimExpr::Known(3),
+                    DimExpr::Known(8),
+                    DimExpr::Known(8),
+                ],
+                IrDType::F32,
+            ),
         );
 
         // Conv2d weight: [out_channels, in_channels, kh, kw] = [4, 3, 3, 3]
@@ -447,8 +480,17 @@ mod tests {
         );
 
         let conv_id = graph.add_node_with_attrs(
-            Opcode::Conv2d, vec![input_id, weight_id],
-            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4), DimExpr::Known(6), DimExpr::Known(6)], IrDType::F32),
+            Opcode::Conv2d,
+            vec![input_id, weight_id],
+            TensorType::new(
+                vec![
+                    DimExpr::Known(1),
+                    DimExpr::Known(4),
+                    DimExpr::Known(6),
+                    DimExpr::Known(6),
+                ],
+                IrDType::F32,
+            ),
             {
                 let mut m = std::collections::HashMap::new();
                 m.insert("stride".to_string(), "1".to_string());

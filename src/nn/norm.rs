@@ -198,10 +198,9 @@ impl Module for BatchNorm1d {
             (&running_mean, &running_var)
         };
 
-        let result = Tensor::exec_aot(
-            &[x, weight_ref, bias_ref, mean, var],
-            |g, ins| vec![g.batch_norm(&ins[0], &ins[1], &ins[2], &ins[3], &ins[4], self.eps)],
-        )
+        let result = Tensor::exec_aot(&[x, weight_ref, bias_ref, mean, var], |g, ins| {
+            vec![g.batch_norm(&ins[0], &ins[1], &ins[2], &ins[3], &ins[4], self.eps)]
+        })
         .expect("BatchNorm1d::forward: AOT failed");
 
         let mut output = result.into_iter().next().unwrap();
@@ -434,12 +433,15 @@ impl Module for GroupNorm {
             let b = &ins[2];
 
             // Reshape: [N, C, H, W] -> [N, G, C/G, H*W]
-            let reshaped = g.reshape(x, &[
-                DimExpr::Known(batch as u64),
-                DimExpr::Known(self.num_groups as u64),
-                DimExpr::Known(group_size as u64),
-                DimExpr::Known(spatial as u64),
-            ]);
+            let reshaped = g.reshape(
+                x,
+                &[
+                    DimExpr::Known(batch as u64),
+                    DimExpr::Known(self.num_groups as u64),
+                    DimExpr::Known(group_size as u64),
+                    DimExpr::Known(spatial as u64),
+                ],
+            );
 
             // Scalar constants reused below
             let scalar_tt = TensorType::new(vec![], IrDType::F32);
@@ -467,11 +469,13 @@ impl Module for GroupNorm {
             let x_norm = g.div(&centered, &std);
 
             // Reshape back to original
-            let out_shape: Vec<DimExpr> = x_shape.iter().map(|&d| DimExpr::Known(d as u64)).collect();
+            let out_shape: Vec<DimExpr> =
+                x_shape.iter().map(|&d| DimExpr::Known(d as u64)).collect();
             let x_norm = g.reshape(&x_norm, &out_shape);
 
             // Weight * norm + bias with broadcast shape [1, C, 1, ...]
-            let mut weight_shape: Vec<DimExpr> = vec![DimExpr::Known(1), DimExpr::Known(channels as u64)];
+            let mut weight_shape: Vec<DimExpr> =
+                vec![DimExpr::Known(1), DimExpr::Known(channels as u64)];
             for _ in 2..x_shape.len() {
                 weight_shape.push(DimExpr::Known(1));
             }
@@ -479,7 +483,11 @@ impl Module for GroupNorm {
             let b_r = g.reshape(b, &weight_shape);
             let scaled = g.mul(&x_norm, &w_r);
             vec![g.add(&scaled, &b_r)]
-        }).expect("GroupNorm::forward: AOT execution failed").into_iter().next().unwrap();
+        })
+        .expect("GroupNorm::forward: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap();
 
         if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
             let edges = {
@@ -608,10 +616,9 @@ impl Module for BatchNorm2d {
             (&running_mean, &running_var)
         };
 
-        let result = Tensor::exec_aot(
-            &[x, &self.weight, &self.bias, mean, var],
-            |g, ins| vec![g.batch_norm(&ins[0], &ins[1], &ins[2], &ins[3], &ins[4], self.eps as f64)],
-        )
+        let result = Tensor::exec_aot(&[x, &self.weight, &self.bias, mean, var], |g, ins| {
+            vec![g.batch_norm(&ins[0], &ins[1], &ins[2], &ins[3], &ins[4], self.eps as f64)]
+        })
         .expect("BatchNorm2d::forward: AOT failed");
 
         let mut output = result.into_iter().next().unwrap();

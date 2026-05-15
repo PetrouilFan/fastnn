@@ -46,7 +46,11 @@ impl TensorImpl {
             nbytes <= storage_nbytes,
             "TensorImpl::new: shape {:?} requires {} bytes for {} elements of {:?}, \
              but storage only has {} bytes. This is a shape-inference or data-pipeline bug.",
-            sizes, nbytes, numel, dtype, storage_nbytes
+            sizes,
+            nbytes,
+            numel,
+            dtype,
+            storage_nbytes
         );
 
         let strides = compute_strides(&sizes);
@@ -1053,8 +1057,14 @@ pub fn dtype_to_ir(dt: DType) -> IrDType {
         // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
         // not in the Tensor-level DType.  Use default values here; the actual
         // scales are filled in by the quantization compiler pass.
-        DType::U4 => IrDType::U4 { scales: vec![1.0], zero_points: vec![0.0] },
-        DType::U8 => IrDType::U8 { scales: vec![1.0], zero_points: vec![0.0] },
+        DType::U4 => IrDType::U4 {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
+        DType::U8 => IrDType::U8 {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
     }
 }
 
@@ -1095,7 +1105,10 @@ impl Tensor {
     /// and must return the output [`GraphTensor`]s for the operation.
     pub fn exec_aot<F>(inputs: &[&Tensor], build_graph: F) -> Result<Vec<Tensor>, BackendError>
     where
-        F: FnOnce(&GraphBuilder, &[crate::ir::builder::GraphTensor]) -> Vec<crate::ir::builder::GraphTensor>,
+        F: FnOnce(
+            &GraphBuilder,
+            &[crate::ir::builder::GraphTensor],
+        ) -> Vec<crate::ir::builder::GraphTensor>,
     {
         let g = GraphBuilder::new();
         let graph_inputs: Vec<_> = inputs
@@ -1149,11 +1162,17 @@ impl Tensor {
                 // A mismatch here indicates a shape-inference or memory-planning
                 // bug in the compiler pipeline.
                 assert_eq!(
-                    num_bytes, expected_bytes,
+                    num_bytes,
+                    expected_bytes,
                     "AOT bridge: output byte size mismatch for shape {:?}, dtype {:?}: \
                      got {} bytes but expected {} ({} elements × {} bytes/elem). \
                      This is likely a shape-inference bug in the compiler pass.",
-                    shape, dt, num_bytes, expected_bytes, numel, dt.size()
+                    shape,
+                    dt,
+                    num_bytes,
+                    expected_bytes,
+                    numel,
+                    dt.size()
                 );
                 let mut data = vec![0u8; num_bytes];
                 data.copy_from_slice(&bytes);

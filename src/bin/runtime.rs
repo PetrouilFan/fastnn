@@ -11,7 +11,11 @@ use fastnn::onnx::converter::{OnnxConverter, OnnxNode};
 use fastnn::Tensor;
 
 #[derive(Parser)]
-#[command(name = "fastnn-runtime", version, about = "FastNN standalone runtime for compiled inference plans")]
+#[command(
+    name = "fastnn-runtime",
+    version,
+    about = "FastNN standalone runtime for compiled inference plans"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -96,18 +100,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Info { plan, memory } => cmd_info(&plan, &memory),
-        Commands::Run { plan, memory, inputs, output, iterations } => {
-            cmd_run(&plan, &memory, &inputs, &output, iterations)
-        }
-        Commands::Bench { plan, memory, iterations, warmup, random_inputs, input_sizes } => {
-            cmd_bench(&plan, &memory, iterations, warmup, random_inputs, input_sizes.as_deref())
-        }
-        Commands::Quantize { plan, memory, bits, output_plan, output_memory } => {
-            cmd_quantize(&plan, &memory, bits, output_plan.as_deref(), output_memory.as_deref())
-        }
-        Commands::Compile { onnx, output_plan, output_memory, quantize } => {
-            cmd_compile(&onnx, &output_plan, &output_memory, quantize)
-        }
+        Commands::Run {
+            plan,
+            memory,
+            inputs,
+            output,
+            iterations,
+        } => cmd_run(&plan, &memory, &inputs, &output, iterations),
+        Commands::Bench {
+            plan,
+            memory,
+            iterations,
+            warmup,
+            random_inputs,
+            input_sizes,
+        } => cmd_bench(
+            &plan,
+            &memory,
+            iterations,
+            warmup,
+            random_inputs,
+            input_sizes.as_deref(),
+        ),
+        Commands::Quantize {
+            plan,
+            memory,
+            bits,
+            output_plan,
+            output_memory,
+        } => cmd_quantize(
+            &plan,
+            &memory,
+            bits,
+            output_plan.as_deref(),
+            output_memory.as_deref(),
+        ),
+        Commands::Compile {
+            onnx,
+            output_plan,
+            output_memory,
+            quantize,
+        } => cmd_compile(&onnx, &output_plan, &output_memory, quantize),
     }
 }
 
@@ -117,45 +150,84 @@ fn cmd_info(plan_path: &str, memory_path: &str) -> Result<(), Box<dyn std::error
     let memory_plan: MemoryPlan = serde_json::from_str(&memory_json)?;
 
     println!("ExecutablePlan:");
-    println!("  arena_size: {} bytes ({:.2} MB)", plan.arena_size, plan.arena_size as f64 / 1_048_576.0);
+    println!(
+        "  arena_size: {} bytes ({:.2} MB)",
+        plan.arena_size,
+        plan.arena_size as f64 / 1_048_576.0
+    );
     println!("  instructions: {}", plan.instructions.len());
     for (i, inst) in plan.instructions.iter().enumerate() {
         match inst {
-            Instruction::CallKernel { kernel_name, input_slices, output_slice, params, .. } => {
-                let input_str: Vec<String> = input_slices.iter()
+            Instruction::CallKernel {
+                kernel_name,
+                input_slices,
+                output_slice,
+                params,
+                ..
+            } => {
+                let input_str: Vec<String> = input_slices
+                    .iter()
                     .map(|s| format!("{}+{}", s.offset, s.size))
                     .collect();
-                println!("    [{}] {}: inputs=[{}] out={}+{} params={:?}",
-                    i, kernel_name, input_str.join(","),
-                    output_slice.offset, output_slice.size, params);
+                println!(
+                    "    [{}] {}: inputs=[{}] out={}+{} params={:?}",
+                    i,
+                    kernel_name,
+                    input_str.join(","),
+                    output_slice.offset,
+                    output_slice.size,
+                    params
+                );
             }
             Instruction::MemCopy { dst, src } => {
-                println!("    [{}] MemCopy: {}..{} -> {}..{}", i, src.offset, src.offset + src.size, dst.offset, dst.offset + dst.size);
+                println!(
+                    "    [{}] MemCopy: {}..{} -> {}..{}",
+                    i,
+                    src.offset,
+                    src.offset + src.size,
+                    dst.offset,
+                    dst.offset + dst.size
+                );
             }
             Instruction::Fill { dst, value } => {
-                println!("    [{}] Fill: offset={} size={} value={}", i, dst.offset, dst.size, value);
+                println!(
+                    "    [{}] Fill: offset={} size={} value={}",
+                    i, dst.offset, dst.size, value
+                );
             }
             Instruction::WriteConst { dst, .. } => {
-                println!("    [{}] WriteConst: offset={} size={}", i, dst.offset, dst.size);
+                println!(
+                    "    [{}] WriteConst: offset={} size={}",
+                    i, dst.offset, dst.size
+                );
             }
         }
     }
 
     println!("\nMemoryPlan:");
-    println!("  total_size: {} bytes ({:.2} MB)", memory_plan.total_size, memory_plan.total_size as f64 / 1_048_576.0);
+    println!(
+        "  total_size: {} bytes ({:.2} MB)",
+        memory_plan.total_size,
+        memory_plan.total_size as f64 / 1_048_576.0
+    );
     println!("  slots: {}", memory_plan.slots.len());
     let mut slots: Vec<_> = memory_plan.slots.iter().collect();
     slots.sort_by_key(|(_, s)| s.offset);
     for (node_id, slot) in &slots {
-        println!("    node {}: offset={} size={}", node_id, slot.offset, slot.size);
+        println!(
+            "    node {}: offset={} size={}",
+            node_id, slot.offset, slot.size
+        );
     }
 
     Ok(())
 }
 
 fn cmd_run(
-    plan_path: &str, memory_path: &str,
-    input_paths: &[String], output_paths: &[String],
+    plan_path: &str,
+    memory_path: &str,
+    input_paths: &[String],
+    output_paths: &[String],
     iterations: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::<CpuBackend>::load(CpuBackend, plan_path, memory_path)?;
@@ -172,30 +244,42 @@ fn cmd_run(
         let outputs = runtime.run(&input_refs)?;
         if iterations == 1 {
             for (i, data) in outputs.iter().enumerate() {
-                let path = output_paths.get(i).cloned().unwrap_or_else(|| format!("output_{}.bin", i));
+                let path = output_paths
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("output_{}.bin", i));
                 std::fs::write(&path, data)?;
                 eprintln!("Wrote {} bytes to {}", data.len(), path);
             }
         }
         if iterations > 1 {
             let total_bytes: usize = outputs.iter().map(|o| o.len()).sum();
-            eprintln!("Iteration {}: {} outputs, {} total bytes", iter + 1, outputs.len(), total_bytes);
+            eprintln!(
+                "Iteration {}: {} outputs, {} total bytes",
+                iter + 1,
+                outputs.len(),
+                total_bytes
+            );
         }
     }
     Ok(())
 }
 
 fn cmd_bench(
-    plan_path: &str, memory_path: &str,
-    iterations: usize, warmup: usize,
-    random_inputs: bool, input_sizes: Option<&str>,
+    plan_path: &str,
+    memory_path: &str,
+    iterations: usize,
+    warmup: usize,
+    random_inputs: bool,
+    input_sizes: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::<CpuBackend>::load(CpuBackend, plan_path, memory_path)?;
 
     // Generate or read inputs
     let inputs: Vec<Vec<u8>> = if random_inputs {
         if let Some(sizes_str) = input_sizes {
-            sizes_str.split(',')
+            sizes_str
+                .split(',')
                 .map(|s| s.trim().parse::<usize>().map(|n| vec![0u8; n]))
                 .collect::<Result<Vec<_>, _>>()?
         } else {
@@ -225,9 +309,17 @@ fn cmd_bench(
 
     let avg_us = elapsed.as_micros() as f64 / iterations as f64;
     let avg_ms = avg_us / 1000.0;
-    let throughput = if avg_us > 0.0 { 1_000_000.0 / avg_us } else { 0.0 };
+    let throughput = if avg_us > 0.0 {
+        1_000_000.0 / avg_us
+    } else {
+        0.0
+    };
 
-    println!("Results: {} iterations in {:.3}s", iterations, elapsed.as_secs_f64());
+    println!(
+        "Results: {} iterations in {:.3}s",
+        iterations,
+        elapsed.as_secs_f64()
+    );
     println!("  Avg latency: {:.2} us ({:.2} ms)", avg_us, avg_ms);
     println!("  Throughput: {:.2} inferences/sec", throughput);
 
@@ -235,14 +327,21 @@ fn cmd_bench(
 }
 
 fn cmd_quantize(
-    plan_path: &str, memory_path: &str,
-    bits: u8, output_plan: Option<&str>, output_memory: Option<&str>,
+    plan_path: &str,
+    memory_path: &str,
+    bits: u8,
+    output_plan: Option<&str>,
+    output_memory: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let plan = ExecutablePlan::load(plan_path)?;
     let memory_json = std::fs::read_to_string(memory_path)?;
     let memory_plan: MemoryPlan = serde_json::from_str(&memory_json)?;
 
-    println!("Loaded plan: {} instructions, arena={} bytes", plan.instructions.len(), plan.arena_size);
+    println!(
+        "Loaded plan: {} instructions, arena={} bytes",
+        plan.instructions.len(),
+        plan.arena_size
+    );
     println!("Target bit width: {} bits", bits);
 
     // Scan instructions for existing quantization state
@@ -264,30 +363,39 @@ fn cmd_quantize(
         println!("  Plan is already partially quantized.");
     } else {
         println!("  F32 compute kernels: {}", f32_ops);
-        println!(
-            "  In-place quantization requires re-compilation from the original graph."
-        );
+        println!("  In-place quantization requires re-compilation from the original graph.");
     }
 
     // Determine output paths (default: append .q<N> suffix)
     let base_plan = plan_path
-        .strip_suffix(".fnnc").unwrap_or(plan_path)
-        .strip_suffix(".q4").unwrap_or(plan_path)
-        .strip_suffix(".q8").unwrap_or(plan_path);
-    let out_plan = output_plan.map(|s| s.to_string())
+        .strip_suffix(".fnnc")
+        .unwrap_or(plan_path)
+        .strip_suffix(".q4")
+        .unwrap_or(plan_path)
+        .strip_suffix(".q8")
+        .unwrap_or(plan_path);
+    let out_plan = output_plan
+        .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}.q{}.fnnc", base_plan, bits));
 
     let base_memory = memory_path
-        .strip_suffix(".memory.json").unwrap_or(memory_path)
-        .strip_suffix(".q4").unwrap_or(memory_path)
-        .strip_suffix(".q8").unwrap_or(memory_path);
-    let out_memory = output_memory.map(|s| s.to_string())
+        .strip_suffix(".memory.json")
+        .unwrap_or(memory_path)
+        .strip_suffix(".q4")
+        .unwrap_or(memory_path)
+        .strip_suffix(".q8")
+        .unwrap_or(memory_path);
+    let out_memory = output_memory
+        .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}.q{}.memory.json", base_memory, bits));
 
     if quantized_ops == 0 && f32_ops > 0 {
         println!();
         println!("  To quantize, use the compiler pipeline:");
-        println!("    fastnn-runtime compile model.onnx --quantize {} -o {}", bits, out_plan);
+        println!(
+            "    fastnn-runtime compile model.onnx --quantize {} -o {}",
+            bits, out_plan
+        );
         println!();
     }
 
@@ -302,7 +410,9 @@ fn cmd_quantize(
 }
 
 fn cmd_compile(
-    onnx_path: &str, output_plan: &str, output_memory: &str,
+    onnx_path: &str,
+    output_plan: &str,
+    output_memory: &str,
     quantize: Option<u8>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let onnx_json = std::fs::read_to_string(onnx_path)?;
@@ -311,15 +421,20 @@ fn cmd_compile(
     let nodes_arr = onnx_data["nodes"].as_array().ok_or("missing nodes array")?;
     let mut onnx_nodes: Vec<OnnxNode> = Vec::new();
     for node_val in nodes_arr {
-        let op_type = node_val["op_type"].as_str().ok_or("node missing op_type")?.to_string();
+        let op_type = node_val["op_type"]
+            .as_str()
+            .ok_or("node missing op_type")?
+            .to_string();
         let name = node_val["name"].as_str().unwrap_or("").to_string();
         let inputs_str = node_val["inputs"].as_str().unwrap_or("");
-        let inputs: Vec<String> = inputs_str.split(',')
+        let inputs: Vec<String> = inputs_str
+            .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
         let outputs_str = node_val["outputs"].as_str().unwrap_or("");
-        let outputs: Vec<String> = outputs_str.split(',')
+        let outputs: Vec<String> = outputs_str
+            .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
@@ -333,10 +448,18 @@ fn cmd_compile(
                 }
             }
         }
-        onnx_nodes.push(OnnxNode { name, op_type, inputs, outputs, attrs });
+        onnx_nodes.push(OnnxNode {
+            name,
+            op_type,
+            inputs,
+            outputs,
+            attrs,
+        });
     }
 
-    let params_obj = onnx_data["params"].as_object().ok_or("missing params object")?;
+    let params_obj = onnx_data["params"]
+        .as_object()
+        .ok_or("missing params object")?;
     let mut params: HashMap<String, Tensor> = HashMap::new();
     for (name, param_val) in params_obj {
         let data: Vec<f32> = serde_json::from_value(param_val["data"].clone())?;
@@ -348,7 +471,9 @@ fn cmd_compile(
     let output_names: Vec<String> = serde_json::from_value(onnx_data["output_names"].clone())?;
 
     let converter = OnnxConverter::new(&onnx_nodes, &params, &input_names, &output_names);
-    let graph = converter.to_compute_graph().map_err(|e| format!("ONNX conversion: {e}"))?;
+    let graph = converter
+        .to_compute_graph()
+        .map_err(|e| format!("ONNX conversion: {e}"))?;
 
     println!("ONNX model loaded: {} nodes", graph.node_count());
 

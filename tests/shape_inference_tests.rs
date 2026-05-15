@@ -4,12 +4,7 @@ use fastnn::ir::node::{DimExpr, IrDType};
 
 #[test]
 fn test_matmul_shape_inference() {
-    let cases = vec![
-        (4, 8, 16),
-        (1, 64, 32),
-        (128, 256, 64),
-        (3, 12, 12),
-    ];
+    let cases = vec![(4, 8, 16), (1, 64, 32), (128, 256, 64), (3, 12, 12)];
 
     for (m, k, n) in cases {
         let g = GraphBuilder::new();
@@ -25,7 +20,12 @@ fn test_matmul_shape_inference() {
             mm_node.output_type.shape,
             vec![DimExpr::Known(m as u64), DimExpr::Known(n as u64)],
             "MatMul [{}x{}] @ [{}x{}] should produce [{}x{}]",
-            m, k, k, n, m, n
+            m,
+            k,
+            k,
+            n,
+            m,
+            n
         );
     }
 }
@@ -231,7 +231,9 @@ fn test_conv2d_with_padding() {
 
 #[test]
 fn test_unary_shape_inference() {
-    let op_builders: Vec<fn(&GraphBuilder, &fastnn::ir::builder::GraphTensor) -> fastnn::ir::builder::GraphTensor> = vec![
+    let op_builders: Vec<
+        fn(&GraphBuilder, &fastnn::ir::builder::GraphTensor) -> fastnn::ir::builder::GraphTensor,
+    > = vec![
         |g, x| g.relu(x),
         |g, x| g.gelu(x),
         |g, x| g.silu(x),
@@ -284,7 +286,10 @@ fn test_matmul_inner_dim_mismatch_error() {
 
     let mut graph = g.to_graph();
     let result = shape_inference::infer_shapes(&mut graph);
-    assert!(result.is_err(), "MatMul with mismatched inner dims should fail");
+    assert!(
+        result.is_err(),
+        "MatMul with mismatched inner dims should fail"
+    );
 }
 
 #[test]
@@ -379,6 +384,11 @@ fn test_transpose_with_perm() {
     let t_node = graph.get_node(transposed.node_id()).unwrap();
     assert_eq!(
         t_node.output_type.shape,
-        vec![DimExpr::Known(2), DimExpr::Known(4), DimExpr::Known(3), DimExpr::Known(5)]
+        vec![
+            DimExpr::Known(2),
+            DimExpr::Known(4),
+            DimExpr::Known(3),
+            DimExpr::Known(5)
+        ]
     );
 }

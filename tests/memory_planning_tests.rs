@@ -7,19 +7,23 @@ use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
 fn test_memory_plan_basic_reuse() {
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     let relu_a_id = graph.add_node(
-        Opcode::Relu, vec![input_id],
+        Opcode::Relu,
+        vec![input_id],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     let relu_b_id = graph.add_node(
-        Opcode::Relu, vec![relu_a_id],
+        Opcode::Relu,
+        vec![relu_a_id],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     let output_id = graph.add_node(
-        Opcode::Add, vec![relu_a_id, relu_b_id],
+        Opcode::Add,
+        vec![relu_a_id, relu_b_id],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
 
@@ -58,15 +62,18 @@ fn test_memory_plan_basic_reuse() {
 fn test_memory_plan_required_nodes_lifetime() {
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     let relu_id = graph.add_node(
-        Opcode::Relu, vec![input_id],
+        Opcode::Relu,
+        vec![input_id],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     let output_id = graph.add_node(
-        Opcode::Add, vec![input_id, relu_id],
+        Opcode::Add,
+        vec![input_id, relu_id],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
 
@@ -88,23 +95,28 @@ fn test_memory_plan_required_nodes_lifetime() {
 fn test_memory_plan_arena_size_peak_usage() {
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
     );
     let w1_id = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
     );
     let mm_id = graph.add_node(
-        Opcode::MatMul, vec![input_id, w1_id],
+        Opcode::MatMul,
+        vec![input_id, w1_id],
         TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
     );
     let relu_id = graph.add_node(
-        Opcode::Relu, vec![mm_id],
+        Opcode::Relu,
+        vec![mm_id],
         TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
     );
     let output_id = graph.add_node(
-        Opcode::Relu, vec![relu_id],
+        Opcode::Relu,
+        vec![relu_id],
         TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
     );
 
@@ -115,7 +127,9 @@ fn test_memory_plan_arena_size_peak_usage() {
     let plan = memory_planning::plan_memory(&graph).unwrap();
 
     // Peak memory should be less than worst case (sum of all sizes)
-    let sum_sizes: usize = graph.nodes.iter()
+    let sum_sizes: usize = graph
+        .nodes
+        .iter()
         .filter_map(|n| plan.slots.get(&n.id))
         .map(|s| s.size)
         .sum();
@@ -131,11 +145,13 @@ fn test_memory_plan_arena_size_peak_usage() {
 fn test_memory_plan_output_lifetime_extended() {
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     let relu_id = graph.add_node(
-        Opcode::Relu, vec![input_id],
+        Opcode::Relu,
+        vec![input_id],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     graph.set_inputs(vec![input_id]);
@@ -163,7 +179,8 @@ fn test_memory_plan_empty_graph() {
 fn test_memory_plan_zero_sized_tensor() {
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Known(0)], IrDType::F32),
     );
     graph.set_inputs(vec![input_id]);
@@ -181,7 +198,8 @@ fn test_memory_plan_tighten() {
 
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Symbol("N".to_string())], IrDType::F32),
     );
     graph.set_inputs(vec![input_id]);
@@ -214,7 +232,8 @@ fn test_memory_plan_tighten() {
 fn test_memory_plan_single_node() {
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     graph.set_inputs(vec![input_id]);

@@ -70,15 +70,12 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
         let is_graph_output = graph.outputs.contains(&output_id);
 
         // Create QuantizeActivations node (f32 → i8).
-        let act_shape = graph.get_node(act_id)
+        let act_shape = graph
+            .get_node(act_id)
             .map(|n| n.output_type.shape.clone())
             .unwrap_or_default();
         let quant_type = TensorType::new(act_shape, IrDType::I8);
-        let quantize_id = graph.add_node(
-            Opcode::QuantizeActivations,
-            vec![act_id],
-            quant_type,
-        );
+        let quantize_id = graph.add_node(Opcode::QuantizeActivations, vec![act_id], quant_type);
 
         // Rewire MatMul's first input to the QuantizeActivations output.
         if let Some(mm_node) = graph.get_node_mut(node_id) {
@@ -88,11 +85,8 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
         // Create DequantizeActivations node (i8 → f32).
         let matmul_shape = node.output_type.shape.clone();
         let dequant_type = TensorType::new(matmul_shape, IrDType::F32);
-        let dequantize_id = graph.add_node(
-            Opcode::DequantizeActivations,
-            vec![output_id],
-            dequant_type,
-        );
+        let dequantize_id =
+            graph.add_node(Opcode::DequantizeActivations, vec![output_id], dequant_type);
 
         // Rewire consumers of the MatMul output to consume DequantizeActivations.
         for &consumer_id in &consumers {
@@ -126,11 +120,11 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Backend;
-    use crate::ir::node::DimExpr;
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
+    use crate::backend::Backend;
     use crate::compiler::passes::{memory_planning, shape_inference};
+    use crate::ir::node::DimExpr;
 
     /// Test that activation quantization round-trips with reasonable accuracy.
     #[test]
@@ -138,15 +132,18 @@ mod tests {
         // Build a simple graph: Input → MatMul → Relu → Output
         let mut graph = ComputeGraph::new();
         let input_a_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_a_id, weight_id],
+            Opcode::MatMul,
+            vec![input_a_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
 
@@ -155,19 +152,25 @@ mod tests {
 
         // Run standard compile without activation quantization
         let executor = GraphExecutor::new(CpuBackend);
-        let (plan_no_q, mem_no_q, _) = executor.compile_with_plan_and_quantize(&graph, None).unwrap();
+        let (plan_no_q, mem_no_q, _) = executor
+            .compile_with_plan_and_quantize(&graph, None)
+            .unwrap();
 
         let input_a = vec![1.0f32, 2.0, 3.0, 4.0];
         let input_w = vec![
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let input_bytes_a: Vec<u8> = bytemuck::cast_slice(&input_a).to_vec();
         let input_bytes_w: Vec<u8> = bytemuck::cast_slice(&input_w).to_vec();
 
-        let result_no_q = executor.execute(&graph, &plan_no_q, &mem_no_q, &[&input_bytes_a, &input_bytes_w]).unwrap();
+        let result_no_q = executor
+            .execute(
+                &graph,
+                &plan_no_q,
+                &mem_no_q,
+                &[&input_bytes_a, &input_bytes_w],
+            )
+            .unwrap();
         let result_no_q_f32: Vec<f32> = bytemuck::cast_slice(&result_no_q[0]).to_vec();
 
         // Run with activation quantization (manual pipeline without fusion)
@@ -181,7 +184,9 @@ mod tests {
         // DequantizeActivations if the pass rewired it, or still MatMul if it's a graph output)
         let plan_q = CpuBackend.compile(&graph_q, &mem_q).unwrap();
 
-        let result_q = executor.execute(&graph_q, &plan_q, &mem_q, &[&input_bytes_a, &input_bytes_w]).unwrap();
+        let result_q = executor
+            .execute(&graph_q, &plan_q, &mem_q, &[&input_bytes_a, &input_bytes_w])
+            .unwrap();
         let result_q_f32: Vec<f32> = bytemuck::cast_slice(&result_q[0]).to_vec();
 
         // Results should be close (INT8 quantization introduces small error)
@@ -192,7 +197,10 @@ mod tests {
             assert!(
                 err <= tol,
                 "activation quant mismatch: expected {}, got {} (err={}, tol={})",
-                expected, actual, err, tol
+                expected,
+                actual,
+                err,
+                tol
             );
         }
     }
@@ -202,15 +210,18 @@ mod tests {
     fn test_activation_quantization_idempotent() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id, weight_id]);
@@ -231,15 +242,18 @@ mod tests {
     fn test_activation_quantization_skips_input_activations() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id, weight_id]);
@@ -272,11 +286,13 @@ mod tests {
             const_tt,
         );
         let weight_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![const_id, weight_id],
+            Opcode::MatMul,
+            vec![const_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![weight_id]);
@@ -299,25 +315,30 @@ mod tests {
     fn test_activation_quantization_inserts_qdq_for_intermediate() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         // First MatMul produces an intermediate activation
         let mm1_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         // Second MatMul consumes the first MatMul's output (intermediate activation)
         let weight2_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         let mm2_id = graph.add_node(
-            Opcode::MatMul, vec![mm1_id, weight2_id],
+            Opcode::MatMul,
+            vec![mm1_id, weight2_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id, weight_id, weight2_id]);
@@ -343,25 +364,30 @@ mod tests {
     fn test_activation_quantization_downstream_dequantize() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         // Intermediate relu so the MatMul's activation is not an Input (which is skipped)
         let relu_act_id = graph.add_node(
-            Opcode::Relu, vec![input_id],
+            Opcode::Relu,
+            vec![input_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![relu_act_id, weight_id],
+            Opcode::MatMul,
+            vec![relu_act_id, weight_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         // A Relu consumes the MatMul output (non-MatMul consumer)
         let relu_id = graph.add_node(
-            Opcode::Relu, vec![mm_id],
+            Opcode::Relu,
+            vec![mm_id],
             TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id, weight_id]);
@@ -386,11 +412,13 @@ mod tests {
     fn test_activation_quantization_no_matmul() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         let relu_id = graph.add_node(
-            Opcode::Relu, vec![input_id],
+            Opcode::Relu,
+            vec![input_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id]);

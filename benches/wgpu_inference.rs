@@ -17,7 +17,11 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
 
 /// Run the WGPU quantized inference benchmark, returning the mean time in ms,
 /// or None if WGPU is unavailable or fails.
-fn bench_wgpu_quantized(graph: &fastnn::ir::node::ComputeGraph, input_bytes: &[u8], iters: usize) -> Option<f64> {
+fn bench_wgpu_quantized(
+    graph: &fastnn::ir::node::ComputeGraph,
+    input_bytes: &[u8],
+    iters: usize,
+) -> Option<f64> {
     let gpu_executor = GraphExecutor::new(WgpuBackend);
     let (gpu_plan, gpu_mem, gpu_graph) = gpu_executor
         .compile_with_plan_and_quantize(graph, Some(4))
@@ -51,10 +55,7 @@ fn main() {
         .map(|i| (i as f32 * 0.001).cos() * 0.1)
         .collect();
     let w_bytes = f32_bytes(&w_data);
-    let w_tt = TensorType::new(
-        vec![DimExpr::Known(256), DimExpr::Known(512)],
-        IrDType::F32,
-    );
+    let w_tt = TensorType::new(vec![DimExpr::Known(256), DimExpr::Known(512)], IrDType::F32);
     let w = g.constant(&w_bytes, w_tt);
 
     let mm = g.matmul(&x, &w);
@@ -121,27 +122,23 @@ fn main() {
             );
             println!();
             println!("=== Comparison ===");
-            println!(
-                "  {:<30} {:>12} {:>10}",
-                "Backend", "Mean Time", "Speedup"
-            );
+            println!("  {:<30} {:>12} {:>10}", "Backend", "Mean Time", "Speedup");
             println!(
                 "  {:<30} {:>10.4} ms  {:>6.2}x",
                 "CPU (U4 quantized)", cpu_ms, 1.0
             );
             println!(
                 "  {:<30} {:>10.4} ms  {:>6.2}x",
-                "WGPU (GPU)", ms, cpu_ms / ms
+                "WGPU (GPU)",
+                ms,
+                cpu_ms / ms
             );
         }
         None => {
             println!("  WGPU not available or benchmark failed (GPU device limits)");
             println!();
             println!("=== Comparison ===");
-            println!(
-                "  {:<30} {:>12} {:>10}",
-                "Backend", "Mean Time", "Speedup"
-            );
+            println!("  {:<30} {:>12} {:>10}", "Backend", "Mean Time", "Speedup");
             println!(
                 "  {:<30} {:>10.4} ms  {:>6.2}x",
                 "CPU (U4 quantized)", cpu_ms, 1.0

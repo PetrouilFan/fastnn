@@ -35,31 +35,28 @@ pub unsafe fn im2col_kernel(
             let x_usize = x_ptr as usize;
             let col_usize = col_data.as_mut_ptr() as usize;
 
-            (0..batch_size).into_par_iter().for_each(|n| {
-                unsafe {
-                    let x_p = x_usize as *const f32;
-                    let col_p = (col_usize as *mut f32).add(n * col_rows_per_batch * col_cols);
+            (0..batch_size).into_par_iter().for_each(|n| unsafe {
+                let x_p = x_usize as *const f32;
+                let col_p = (col_usize as *mut f32).add(n * col_rows_per_batch * col_cols);
 
-                    for oh in 0..out_height {
-                        for ow in 0..out_width {
-                            let col_row = oh * out_width + ow;
+                for oh in 0..out_height {
+                    for ow in 0..out_width {
+                        let col_row = oh * out_width + ow;
 
-                            for ic in 0..in_channels {
-                                for kh in 0..kernel_height {
-                                    for kw in 0..kernel_width {
-                                        let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
-                                        let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
+                        for ic in 0..in_channels {
+                            for kh in 0..kernel_height {
+                                for kw in 0..kernel_width {
+                                    let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
+                                    let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
 
-                                        let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
+                                    let col_col = ((ic * kernel_height) + kh) * kernel_width + kw;
 
-                                        if ih < in_height && iw < in_width {
-                                            let x_idx = ((n * in_channels + ic) * in_height + ih)
-                                                * in_width
-                                                + iw;
+                                    if ih < in_height && iw < in_width {
+                                        let x_idx = ((n * in_channels + ic) * in_height + ih)
+                                            * in_width
+                                            + iw;
 
-                                            *col_p.add(col_row * col_cols + col_col) =
-                                                *x_p.add(x_idx);
-                                        }
+                                        *col_p.add(col_row * col_cols + col_col) = *x_p.add(x_idx);
                                     }
                                 }
                             }

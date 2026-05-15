@@ -101,27 +101,71 @@ fn align_up(val: usize, alignment: usize) -> usize {
 }
 
 fn add_to_free_list(free_list: &mut Vec<FreeBlock>, offset: usize, size: usize) {
-    let pos = free_list.binary_search_by(|b| b.offset.cmp(&offset)).unwrap_or_else(|e| e);
+    if size == 0 {
+        return;
+    }
 
+    let pos = match free_list.binary_search_by(|b| b.offset.cmp(&offset)) {
+        Ok(exact_pos) => {
+            // Offset already exists as a free block — this should never
+            // happen in a correct allocator and indicates a double-free.
+            // Merge by extending the existing block if the new size is larger.
+            if free_list[exact_pos].size < size {
+                free_list[exact_pos].size = size;
+            }
+            // Try merging with next block (may now overlap due to extension).
+            if exact_pos + 1 < free_list.len()
+                && free_list[exact_pos].offset + free_list[exact_pos].size
+                    >= free_list[exact_pos + 1].offset
+            {
+                let next_end = free_list[exact_pos + 1].offset + free_list[exact_pos + 1].size;
+                let merged_end = std::cmp::max(
+                    free_list[exact_pos].offset + free_list[exact_pos].size,
+                    next_end,
+                );
+                free_list[exact_pos].size = merged_end - free_list[exact_pos].offset;
+                free_list.remove(exact_pos + 1);
+            }
+            return;
+        }
+        Err(pos) => pos,
+    };
+
+    // Merge with previous block if adjacent or overlapping
     if pos > 0 {
         let prev = &free_list[pos - 1];
-        if prev.offset + prev.size == offset {
-            free_list[pos - 1].size += size;
-            if pos < free_list.len() && offset + size == free_list[pos].offset {
-                free_list[pos - 1].size += free_list[pos].size;
+        let prev_end = prev.offset + prev.size;
+        if prev_end >= offset {
+            // Extend previous block to cover the new range
+            let new_end = std::cmp::max(prev_end, offset + size);
+            free_list[pos - 1].size = new_end - free_list[pos - 1].offset;
+            // Check if the extended previous block now overlaps with the next block
+            if pos < free_list.len()
+                && free_list[pos - 1].offset + free_list[pos - 1].size >= free_list[pos].offset
+            {
+                let next_end = free_list[pos].offset + free_list[pos].size;
+                let merged_end = std::cmp::max(
+                    free_list[pos - 1].offset + free_list[pos - 1].size,
+                    next_end,
+                );
+                free_list[pos - 1].size = merged_end - free_list[pos - 1].offset;
                 free_list.remove(pos);
             }
             return;
         }
     }
 
-    if pos < free_list.len() && offset + size == free_list[pos].offset {
-        free_list[pos].offset = offset;
-        free_list[pos].size += size;
+    // Merge with next block if adjacent or overlapping
+    if pos < free_list.len() && offset + size >= free_list[pos].offset {
+        let new_end = std::cmp::max(offset + size, free_list[pos].offset + free_list[pos].size);
+        free_list[pos].offset = std::cmp::min(free_list[pos].offset, offset);
+        free_list[pos].size = new_end - free_list[pos].offset;
         return;
     }
 
-    free_list.insert(pos, FreeBlock { offset, size });
+    if size > 0 {
+        free_list.insert(pos, FreeBlock { offset, size });
+    }
 }
 
 /// Find the smallest free block that fits the requested size (best-fit).
@@ -171,8 +215,8 @@ pub fn plan_memory_with_env(
 
     let order = graph.topological_sort();
 
-    let position: HashMap<NodeId, usize> = order.iter().enumerate()
-        .map(|(i, &id)| (id, i)).collect();
+    let position: HashMap<NodeId, usize> =
+        order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
 
     let mut alloc_infos: Vec<AllocInfo> = Vec::new();
 
@@ -224,7 +268,8 @@ pub fn plan_memory_with_env(
                 if graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id) {
                     order.len() - 1
                 } else {
-                    consumers.iter()
+                    consumers
+                        .iter()
                         .filter_map(|cid| position.get(cid))
                         .copied()
                         .max()
@@ -253,7 +298,8 @@ pub fn plan_memory_with_env(
                         first_use
                     }
                 } else {
-                    let consumer_last = consumers.iter()
+                    let consumer_last = consumers
+                        .iter()
                         .filter_map(|cid| position.get(cid))
                         .copied()
                         .max()
@@ -285,7 +331,9 @@ pub fn plan_memory_with_env(
     // is always allocated to the main slot, even when the secondary output
     // (e.g. MaxPool i64 indices) is larger than the primary (f32 data).
     alloc_infos.sort_by(|a, b| {
-        a.live_range.0.cmp(&b.live_range.0)
+        a.live_range
+            .0
+            .cmp(&b.live_range.0)
             .then_with(|| a.is_secondary.cmp(&b.is_secondary))
             .then_with(|| b.size.cmp(&a.size))
     });
@@ -300,7 +348,8 @@ pub fn plan_memory_with_env(
         let mut i = 0;
         while i < active.len() {
             if active[i].0 < info.live_range.0 {
-                let (_expired_end, expired_id, _expired_size, was_secondary) = active.swap_remove(i);
+                let (_expired_end, expired_id, _expired_size, was_secondary) =
+                    active.swap_remove(i);
                 // IMPORTANT: only free the slot that corresponds to this
                 // specific active entry.  When a node has both a primary and
                 // a secondary output (e.g. MaxPool), two separate entries
@@ -374,7 +423,12 @@ pub fn plan_memory_with_env(
             slots.insert(info.node_id, slot);
         }
 
-        active.push((info.live_range.1, info.node_id, info.size, info.is_secondary));
+        active.push((
+            info.live_range.1,
+            info.node_id,
+            info.size,
+            info.is_secondary,
+        ));
     }
 
     Ok(MemoryPlan {

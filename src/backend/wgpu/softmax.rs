@@ -1,5 +1,5 @@
-use crate::backend::BackendError;
 use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::BackendError;
 
 pub(super) fn dispatch_softmax_gpu(
     input: &[f32],
@@ -39,9 +39,18 @@ pub(super) fn dispatch_softmax_gpu(
             label: Some("sf_bg"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_in.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf_in.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf_params.as_entire_binding(),
+                },
             ],
         });
 

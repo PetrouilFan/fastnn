@@ -1,6 +1,6 @@
-use crate::backend::{BackendError, BufferSlice};
 use crate::backend::wgpu::context::with_wgpu_context;
 use crate::backend::wgpu::pipeline::ensure_compute_pipeline;
+use crate::backend::{BackendError, BufferSlice};
 
 pub(super) fn dispatch_argmax_gpu(
     arena: &super::WgpuBuffer,
@@ -26,8 +26,7 @@ pub(super) fn dispatch_argmax_gpu(
 
     let result = with_wgpu_context(|ctx| -> Result<Vec<u64>, BackendError> {
         let shader = build_argmax_shader();
-        ensure_compute_pipeline(ctx, "argmax", &shader)
-            .map_err(BackendError::Dispatch)?;
+        ensure_compute_pipeline(ctx, "argmax", &shader).map_err(BackendError::Dispatch)?;
 
         let buf_in = ctx.create_buffer(bytemuck::cast_slice(&input), "am_input");
         let output_size = (numel as u64) * 8;
@@ -40,8 +39,14 @@ pub(super) fn dispatch_argmax_gpu(
 
         #[repr(C)]
         #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        struct AmParams { numel: u32, _pad: u32 }
-        let params = AmParams { numel: numel as u32, _pad: 0 };
+        struct AmParams {
+            numel: u32,
+            _pad: u32,
+        }
+        let params = AmParams {
+            numel: numel as u32,
+            _pad: 0,
+        };
         let buf_params = ctx.create_uniform_buffer(&params, "am_params");
 
         let pipeline_key = "wgpu_backend_argmax";
@@ -50,16 +55,27 @@ pub(super) fn dispatch_argmax_gpu(
             label: Some("am_bg"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_in.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf_in.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf_params.as_entire_binding(),
+                },
             ],
         });
 
         let wgc = 1u32;
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("am_encoder"),
-        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("am_encoder"),
+            });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("am_pass"),

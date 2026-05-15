@@ -182,21 +182,25 @@ impl DimExpr {
                 sym: sym.clone(),
                 max: max * v,
             },
-            (DimExpr::Known(v), DimExpr::Symbol(s))
-            | (DimExpr::Symbol(s), DimExpr::Known(v)) => DimExpr::Bounded {
-                sym: s.clone(),
-                max: *v,
-            },
-            (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: sym_b, max: mb }) => {
+            (DimExpr::Known(v), DimExpr::Symbol(s)) | (DimExpr::Symbol(s), DimExpr::Known(v)) => {
+                DimExpr::Bounded {
+                    sym: s.clone(),
+                    max: *v,
+                }
+            }
+            (
+                DimExpr::Bounded { sym, max },
+                DimExpr::Bounded {
+                    sym: sym_b,
+                    max: mb,
+                },
+            ) => {
                 let sym = if sym == sym_b {
                     format!("{}^2", sym)
                 } else {
                     canonical_commutative("*", sym, sym_b)
                 };
-                DimExpr::Bounded {
-                    sym,
-                    max: max * mb,
-                }
+                DimExpr::Bounded { sym, max: max * mb }
             }
             // Same symbol squared → canonical "N^2" instead of stringy "(N*N)"
             (DimExpr::Symbol(s), DimExpr::Symbol(t)) if s == t => {
@@ -216,10 +220,7 @@ impl DimExpr {
                 } else {
                     canonical_commutative("*", s, sym)
                 };
-                DimExpr::Bounded {
-                    sym,
-                    max: *max,
-                }
+                DimExpr::Bounded { sym, max: *max }
             }
         }
     }
@@ -234,21 +235,25 @@ impl DimExpr {
                 sym: sym.clone(),
                 max: max + v,
             },
-            (DimExpr::Known(v), DimExpr::Symbol(s))
-            | (DimExpr::Symbol(s), DimExpr::Known(v)) => DimExpr::Bounded {
-                sym: s.clone(),
-                max: *v,
-            },
-            (DimExpr::Bounded { sym, max }, DimExpr::Bounded { sym: sym_b, max: mb }) => {
+            (DimExpr::Known(v), DimExpr::Symbol(s)) | (DimExpr::Symbol(s), DimExpr::Known(v)) => {
+                DimExpr::Bounded {
+                    sym: s.clone(),
+                    max: *v,
+                }
+            }
+            (
+                DimExpr::Bounded { sym, max },
+                DimExpr::Bounded {
+                    sym: sym_b,
+                    max: mb,
+                },
+            ) => {
                 let sym = if sym == sym_b {
                     format!("2*{}", sym)
                 } else {
                     canonical_commutative("+", sym, sym_b)
                 };
-                DimExpr::Bounded {
-                    sym,
-                    max: max + mb,
-                }
+                DimExpr::Bounded { sym, max: max + mb }
             }
             // Same symbol + itself → canonical "2*N" instead of stringy "(N+N)"
             (DimExpr::Symbol(s), DimExpr::Symbol(t)) if s == t => {
@@ -262,12 +267,14 @@ impl DimExpr {
                 DimExpr::Symbol(canonical_commutative("+", s, t))
             }
             (DimExpr::Symbol(s), DimExpr::Bounded { sym, max })
-            | (DimExpr::Bounded { sym, max }, DimExpr::Symbol(s)) => {
-                DimExpr::Bounded {
-                    sym: if s == sym { format!("2*{}", s) } else { canonical_commutative("+", s, sym) },
-                    max: *max,
-                }
-            }
+            | (DimExpr::Bounded { sym, max }, DimExpr::Symbol(s)) => DimExpr::Bounded {
+                sym: if s == sym {
+                    format!("2*{}", s)
+                } else {
+                    canonical_commutative("+", s, sym)
+                },
+                max: *max,
+            },
         }
     }
 }
@@ -293,9 +300,7 @@ impl DimExpr {
     /// fallback since the result is rarely affine in a useful way.
     pub fn floordiv(&self, divisor: &DimExpr) -> DimExpr {
         match (self, divisor) {
-            (DimExpr::Known(va), DimExpr::Known(vb)) if *vb > 0 => {
-                DimExpr::Known(va / vb)
-            }
+            (DimExpr::Known(va), DimExpr::Known(vb)) if *vb > 0 => DimExpr::Known(va / vb),
             (DimExpr::Symbol(s), DimExpr::Known(v)) if *v > 0 => {
                 let max = SYMBOL_DIM_MAX.load(Ordering::Relaxed);
                 DimExpr::Bounded {
@@ -303,12 +308,10 @@ impl DimExpr {
                     max: max / v,
                 }
             }
-            (DimExpr::Bounded { sym, max }, DimExpr::Known(v)) if *v > 0 => {
-                DimExpr::Bounded {
-                    sym: format!("{}/{}", sym, v),
-                    max: max / v,
-                }
-            }
+            (DimExpr::Bounded { sym, max }, DimExpr::Known(v)) if *v > 0 => DimExpr::Bounded {
+                sym: format!("{}/{}", sym, v),
+                max: max / v,
+            },
             _ => DimExpr::Known(1),
         }
     }
@@ -499,9 +502,9 @@ impl DimExpr {
                 }
                 None => Ok(*max),
             },
-            DimExpr::Symbol(s) => env.resolve(s).ok_or_else(|| {
-                format!("DimExpr::Symbol '{}' is not bound in the ShapeEnv", s)
-            }),
+            DimExpr::Symbol(s) => env
+                .resolve(s)
+                .ok_or_else(|| format!("DimExpr::Symbol '{}' is not bound in the ShapeEnv", s)),
         }
     }
 }
@@ -518,10 +521,16 @@ pub enum IrDType {
     I8,
     /// Packed 4-bit (U4x8): 8 values per u32 word.
     /// `scales` and `zero_points` are per-output-channel vectors.
-    U4 { scales: Vec<f32>, zero_points: Vec<f32> },
+    U4 {
+        scales: Vec<f32>,
+        zero_points: Vec<f32>,
+    },
     /// Packed 8-bit (U8x4): 4 values per u32 word.
     /// `scales` and `zero_points` are per-output-channel vectors.
-    U8 { scales: Vec<f32>, zero_points: Vec<f32> },
+    U8 {
+        scales: Vec<f32>,
+        zero_points: Vec<f32>,
+    },
 }
 
 impl IrDType {
@@ -668,9 +677,7 @@ impl TensorType {
         // overestimate.  The packed data stored in TensorValue::Data already
         // includes the SIMD margin, so the slot must be large enough to hold it.
         match &self.dtype {
-            IrDType::U4 { .. } | IrDType::U8 { .. } => {
-                self.dtype.packed_byte_size(numel)
-            }
+            IrDType::U4 { .. } | IrDType::U8 { .. } => self.dtype.packed_byte_size(numel),
             _ => numel * self.dtype.byte_size(),
         }
     }
@@ -699,12 +706,19 @@ pub struct IRNode {
 
 impl IRNode {
     pub fn num_outputs(&self) -> usize {
-        if self.secondary_output_type.is_some() { 2 } else { 1 }
+        if self.secondary_output_type.is_some() {
+            2
+        } else {
+            1
+        }
     }
     pub fn output_type_for_index(&self, idx: usize) -> &TensorType {
         match idx {
             0 => &self.output_type,
-            1 => self.secondary_output_type.as_ref().expect("secondary output requested but not set"),
+            1 => self
+                .secondary_output_type
+                .as_ref()
+                .expect("secondary output requested but not set"),
             _ => panic!("output index {} out of range (max 1)", idx),
         }
     }

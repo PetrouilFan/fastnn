@@ -41,15 +41,15 @@ impl MaxPool2d {
 impl Module for MaxPool2d {
     fn forward(&self, x: &Tensor) -> Tensor {
         let result = Tensor::exec_aot(&[x], |g, ins| {
-                let (values, _indices) = g.max_pool2d(
-                    &ins[0],
-                    self.kernel_size as usize,
-                    self.stride as usize,
-                    self.padding as usize,
-                );
-                vec![values]
-            })
-            .expect("MaxPool2d::forward: AOT execution failed");
+            let (values, _indices) = g.max_pool2d(
+                &ins[0],
+                self.kernel_size as usize,
+                self.stride as usize,
+                self.padding as usize,
+            );
+            vec![values]
+        })
+        .expect("MaxPool2d::forward: AOT execution failed");
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() {
@@ -119,8 +119,14 @@ impl Module for AvgPool1d {
         // Add a dummy H dimension: [N, C, W] -> [N, C, 1, W]
         let x_4d = x.reshape(vec![x_shape[0], x_shape[1], 1, x_shape[2]]);
         let result = Tensor::exec_aot(&[&x_4d], |g, ins| {
-                vec![g.avg_pool2d(&ins[0], self.kernel_size as usize, self.stride as usize, self.padding as usize)]
-            }).expect("AvgPool1d::forward: AOT failed");
+            vec![g.avg_pool2d(
+                &ins[0],
+                self.kernel_size as usize,
+                self.stride as usize,
+                self.padding as usize,
+            )]
+        })
+        .expect("AvgPool1d::forward: AOT failed");
         let out_4d = result.into_iter().next().unwrap();
         let out_shape = out_4d.shape_ref();
         // Remove dummy H: [N, C, 1, W] -> [N, C, W]
@@ -179,18 +185,18 @@ impl Module for MaxPool1d {
         let x_shape = x.shape_ref();
         let x_4d = x.reshape(vec![x_shape[0], x_shape[1], 1, x_shape[2]]);
         let out_4d = Tensor::exec_aot(&[&x_4d], |g, ins| {
-                let (values, _indices) = g.max_pool2d(
-                    &ins[0],
-                    self.kernel_size as usize,
-                    self.stride as usize,
-                    self.padding as usize,
-                );
-                vec![values]
-            })
-            .expect("MaxPool1d::forward: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap();
+            let (values, _indices) = g.max_pool2d(
+                &ins[0],
+                self.kernel_size as usize,
+                self.stride as usize,
+                self.padding as usize,
+            );
+            vec![values]
+        })
+        .expect("MaxPool1d::forward: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap();
         let out_shape = out_4d.shape_ref();
         out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]])
     }
@@ -240,8 +246,14 @@ impl AvgPool2d {
 impl Module for AvgPool2d {
     fn forward(&self, x: &Tensor) -> Tensor {
         let result = Tensor::exec_aot(&[x], |g, ins| {
-                vec![g.avg_pool2d(&ins[0], self.kernel_size as usize, self.stride as usize, self.padding as usize)]
-            }).expect("AvgPool2d::forward: AOT failed");
+            vec![g.avg_pool2d(
+                &ins[0],
+                self.kernel_size as usize,
+                self.stride as usize,
+                self.padding as usize,
+            )]
+        })
+        .expect("AvgPool2d::forward: AOT failed");
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() {

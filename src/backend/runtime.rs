@@ -33,7 +33,11 @@ pub struct Runtime<B: Backend> {
 impl<B: Backend> Runtime<B> {
     /// Create a new runtime from an already-loaded plan and memory plan.
     pub fn new(backend: B, plan: ExecutablePlan, memory_plan: MemoryPlan) -> Self {
-        Runtime { backend, plan, memory_plan }
+        Runtime {
+            backend,
+            plan,
+            memory_plan,
+        }
     }
 
     /// Load a plan and memory plan from files saved by the compiler pipeline.
@@ -52,14 +56,22 @@ impl<B: Backend> Runtime<B> {
         let memory_json = std::fs::read_to_string(memory_path)?;
         let memory_plan: MemoryPlan = serde_json::from_str(&memory_json)?;
 
-        Ok(Runtime { backend, plan, memory_plan })
+        Ok(Runtime {
+            backend,
+            plan,
+            memory_plan,
+        })
     }
 
     /// Save the plan and memory plan to files for later use by the runtime.
     ///
     /// Creates a `.fnnc` file (bincode for the plan) and a `.json` file
     /// (for the memory plan).
-    pub fn save(&self, plan_path: &str, memory_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(
+        &self,
+        plan_path: &str,
+        memory_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let plan_bytes = bincode::serialize(&self.plan)?;
         std::fs::write(plan_path, plan_bytes)?;
 
@@ -90,7 +102,8 @@ impl<B: Backend> Runtime<B> {
         // nodes in topological order, which the memory planner schedules first).
         for (i, input_bytes) in inputs.iter().enumerate() {
             if let Some((_node_id, slot)) = sorted_slots.get(i) {
-                self.backend.write_arena(arena_ref, slot.offset, input_bytes);
+                self.backend
+                    .write_arena(arena_ref, slot.offset, input_bytes);
             }
         }
 

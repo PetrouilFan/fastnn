@@ -27,10 +27,10 @@ fn read_f32(data: &[u8]) -> Vec<f32> {
 /// Returns (graph, loss_node_id, params, batch_inputs, param_data).
 fn build_mlp() -> (
     fastnn::ir::node::ComputeGraph,
-    usize,              // loss_node_id
-    Vec<usize>,         // param ids
-    Vec<Vec<u8>>,       // param data
-    Vec<usize>,         // batch input ids
+    usize,        // loss_node_id
+    Vec<usize>,   // param ids
+    Vec<Vec<u8>>, // param data
+    Vec<usize>,   // batch input ids
 ) {
     let g = GraphBuilder::new();
 
@@ -44,8 +44,8 @@ fn build_mlp() -> (
     let logits = g.add(&mm, &b);
 
     // Loss: reduce_mean over all dims to get scalar
-    let loss_tmp = g.reduce_mean(&logits, 0, false);     // [1,2] → [2]
-    let loss = g.reduce_mean(&loss_tmp, 0, false);        // [2] → scalar
+    let loss_tmp = g.reduce_mean(&logits, 0, false); // [1,2] → [2]
+    let loss = g.reduce_mean(&loss_tmp, 0, false); // [2] → scalar
 
     let graph = g.to_graph();
     let x_id = x.node_id();
@@ -54,8 +54,8 @@ fn build_mlp() -> (
     let loss_id = loss.node_id();
 
     // Parameter initial values
-    let W_data = f32_bytes(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);  // 8 f32s = 32 bytes
-    let b_data = f32_bytes(&[0.0, 0.0]);  // 2 f32s = 8 bytes
+    let W_data = f32_bytes(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]); // 8 f32s = 32 bytes
+    let b_data = f32_bytes(&[0.0, 0.0]); // 2 f32s = 8 bytes
 
     (
         graph,
@@ -81,10 +81,10 @@ fn build_mlp_single_output() -> (
     let W = g.parameter(&[4, 1], IrDType::F32);
     let b = g.parameter(&[1], IrDType::F32);
 
-    let mm = g.matmul(&x, &W);      // [1,1]
-    let logits = g.add(&mm, &b);    // [1,1]
-    let loss = g.reduce_mean(&logits, 0, false);  // [1]
-    let loss = g.reduce_mean(&loss, 0, false);     // scalar
+    let mm = g.matmul(&x, &W); // [1,1]
+    let logits = g.add(&mm, &b); // [1,1]
+    let loss = g.reduce_mean(&logits, 0, false); // [1]
+    let loss = g.reduce_mean(&loss, 0, false); // scalar
 
     let graph = g.to_graph();
     let x_id = x.node_id();
@@ -92,8 +92,8 @@ fn build_mlp_single_output() -> (
     let b_id = b.node_id();
     let loss_id = loss.node_id();
 
-    let W_data = f32_bytes(&[0.5, -0.3, 0.2, 0.1]);  // 4 f32s
-    let b_data = f32_bytes(&[0.0]);                    // 1 f32
+    let W_data = f32_bytes(&[0.5, -0.3, 0.2, 0.1]); // 4 f32s
+    let b_data = f32_bytes(&[0.0]); // 1 f32
 
     (
         graph,
@@ -134,7 +134,9 @@ fn test_sgd_mlp_converges() {
     // Run 20 training steps
     let mut losses = Vec::new();
     for _ in 0..20 {
-        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        let loss = model
+            .train_step(&[&x_data])
+            .expect("train_step should succeed");
         losses.push(loss);
     }
 
@@ -147,8 +149,14 @@ fn test_sgd_mlp_converges() {
     );
 
     // Verify loss is positive and finite
-    assert!(losses[0].is_finite() && losses[0] > 0.0, "SGD: initial loss should be positive finite");
-    assert!(losses[losses.len() - 1].is_finite(), "SGD: final loss should be finite");
+    assert!(
+        losses[0].is_finite() && losses[0] > 0.0,
+        "SGD: initial loss should be positive finite"
+    );
+    assert!(
+        losses[losses.len() - 1].is_finite(),
+        "SGD: final loss should be finite"
+    );
 }
 
 #[test]
@@ -165,7 +173,10 @@ fn test_sgd_wrong_batch_count_errors() {
             &batch_inputs,
             None,
             &TrainConfig {
-                optimizer: OptimizerConfig::SGD { lr: 0.01, weight_decay: 0.0 },
+                optimizer: OptimizerConfig::SGD {
+                    lr: 0.01,
+                    weight_decay: 0.0,
+                },
                 quantize: None,
             },
         )
@@ -196,7 +207,10 @@ fn test_sgd_wrong_input_size_errors() {
             &batch_inputs,
             None,
             &TrainConfig {
-                optimizer: OptimizerConfig::SGD { lr: 0.01, weight_decay: 0.0 },
+                optimizer: OptimizerConfig::SGD {
+                    lr: 0.01,
+                    weight_decay: 0.0,
+                },
                 quantize: None,
             },
         )
@@ -241,7 +255,9 @@ fn test_adamw_mlp_converges() {
     // Run 20 training steps
     let mut losses = Vec::new();
     for _ in 0..20 {
-        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        let loss = model
+            .train_step(&[&x_data])
+            .expect("train_step should succeed");
         losses.push(loss);
     }
 
@@ -283,7 +299,12 @@ fn test_adamw_step_counter_increments() {
     // Capture the step counter value from AdamWUpdate instruction params[4]
     let get_step = |model: &CompiledTrainingModel<CpuBackend>| -> u64 {
         for instr in &model.plan.instructions {
-            if let fastnn::backend::Instruction::CallKernel { kernel_name, params, .. } = instr {
+            if let fastnn::backend::Instruction::CallKernel {
+                kernel_name,
+                params,
+                ..
+            } = instr
+            {
                 if kernel_name.starts_with("adam") {
                     return params[4] as u64;
                 }
@@ -340,7 +361,9 @@ fn test_adamw_mv_persist_across_steps() {
     // Run 30 steps, track loss
     let mut losses = Vec::new();
     for _ in 0..30 {
-        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        let loss = model
+            .train_step(&[&x_data])
+            .expect("train_step should succeed");
         losses.push(loss);
     }
 
@@ -397,7 +420,9 @@ fn test_muon_mlp_converges() {
 
     let mut losses = Vec::new();
     for _ in 0..20 {
-        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        let loss = model
+            .train_step(&[&x_data])
+            .expect("train_step should succeed");
         losses.push(loss);
     }
 
@@ -439,7 +464,9 @@ fn test_lion_mlp_converges() {
 
     let mut losses = Vec::new();
     for _ in 0..20 {
-        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        let loss = model
+            .train_step(&[&x_data])
+            .expect("train_step should succeed");
         losses.push(loss);
     }
 
@@ -481,7 +508,9 @@ fn test_rmsprop_mlp_converges() {
 
     let mut losses = Vec::new();
     for _ in 0..20 {
-        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        let loss = model
+            .train_step(&[&x_data])
+            .expect("train_step should succeed");
         losses.push(loss);
     }
 
@@ -523,7 +552,10 @@ fn test_training_single_batch() {
             &[x.node_id()],
             None,
             &TrainConfig {
-                optimizer: OptimizerConfig::SGD { lr: 0.1, weight_decay: 0.0 },
+                optimizer: OptimizerConfig::SGD {
+                    lr: 0.1,
+                    weight_decay: 0.0,
+                },
                 quantize: None,
             },
         )
@@ -534,7 +566,8 @@ fn test_training_single_batch() {
     assert!(
         loss2 < loss1,
         "Loss should decrease (step1={:.6}, step2={:.6})",
-        loss1, loss2
+        loss1,
+        loss2
     );
 }
 
@@ -562,7 +595,10 @@ fn test_shape_tightening_reduces_arena() {
 
     let executor = GraphExecutor::new(CpuBackend);
     let config = TrainConfig {
-        optimizer: OptimizerConfig::SGD { lr: 0.01, weight_decay: 0.0 },
+        optimizer: OptimizerConfig::SGD {
+            lr: 0.01,
+            weight_decay: 0.0,
+        },
         quantize: None,
     };
 
@@ -627,6 +663,7 @@ fn test_shape_tightening_reduces_arena() {
     assert!(
         loss2 < loss1,
         "Loss should decrease with tightened model (step1={:.6}, step2={:.6})",
-        loss1, loss2
+        loss1,
+        loss2
     );
 }

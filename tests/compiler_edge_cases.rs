@@ -31,10 +31,16 @@ fn test_disconnected_graph() {
     graph.set_outputs(vec![relu_a.node_id(), sigmoid_b.node_id()]);
 
     let result = shape_inference::infer_shapes(&mut graph);
-    assert!(result.is_ok(), "disconnected graph should infer shapes successfully");
+    assert!(
+        result.is_ok(),
+        "disconnected graph should infer shapes successfully"
+    );
 
     let plan = memory_planning::plan_memory(&graph).unwrap();
-    assert!(plan.slots.len() >= 4, "disconnected graph should have slots for all nodes");
+    assert!(
+        plan.slots.len() >= 4,
+        "disconnected graph should have slots for all nodes"
+    );
 }
 
 #[test]
@@ -50,7 +56,10 @@ fn test_diamond_shape() {
     graph.set_outputs(vec![c.node_id()]);
 
     let result = shape_inference::infer_shapes(&mut graph);
-    assert!(result.is_ok(), "diamond graph should infer shapes successfully");
+    assert!(
+        result.is_ok(),
+        "diamond graph should infer shapes successfully"
+    );
 
     let c_node = graph.get_node(c.node_id()).unwrap();
     assert_eq!(
@@ -71,7 +80,10 @@ fn test_no_output_graph() {
     // No outputs set
 
     let result = shape_inference::infer_shapes(&mut graph);
-    assert!(result.is_ok(), "graph with no outputs should still infer shapes");
+    assert!(
+        result.is_ok(),
+        "graph with no outputs should still infer shapes"
+    );
 }
 
 #[test]
@@ -79,11 +91,13 @@ fn test_cyclic_graph_detection() {
     let mut graph = ComputeGraph::new();
     // Create two nodes that form a cycle: n1 -> n2 -> n1
     let n1 = graph.add_node(
-        Opcode::Input, vec![],
+        Opcode::Input,
+        vec![],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     let n2 = graph.add_node(
-        Opcode::Relu, vec![n1],
+        Opcode::Relu,
+        vec![n1],
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     // Create the cycle by making n1 depend on n2
@@ -94,7 +108,10 @@ fn test_cyclic_graph_detection() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         shape_inference::infer_shapes(&mut graph)
     }));
-    assert!(result.is_err(), "cyclic graph should panic during topological sort");
+    assert!(
+        result.is_err(),
+        "cyclic graph should panic during topological sort"
+    );
 }
 
 #[test]
@@ -111,7 +128,10 @@ fn test_chain_graph() {
     graph.set_outputs(vec![e.node_id()]);
 
     let result = shape_inference::infer_shapes(&mut graph);
-    assert!(result.is_ok(), "chain graph should infer shapes successfully");
+    assert!(
+        result.is_ok(),
+        "chain graph should infer shapes successfully"
+    );
 
     for node_id in [b.node_id(), c.node_id(), d.node_id(), e.node_id()] {
         let node = graph.get_node(node_id).unwrap();
@@ -137,7 +157,10 @@ fn test_fan_out_graph() {
     graph.set_outputs(vec![relu.node_id(), sigmoid.node_id(), tanh.node_id()]);
 
     let result = shape_inference::infer_shapes(&mut graph);
-    assert!(result.is_ok(), "fan-out graph should infer shapes successfully");
+    assert!(
+        result.is_ok(),
+        "fan-out graph should infer shapes successfully"
+    );
 
     for node_id in [relu.node_id(), sigmoid.node_id(), tanh.node_id()] {
         let node = graph.get_node(node_id).unwrap();

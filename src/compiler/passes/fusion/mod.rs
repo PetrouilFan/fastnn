@@ -1,9 +1,9 @@
 use crate::ir::node::ComputeGraph;
 
-pub mod op_relu;
-pub mod matmul_add_relu;
-pub mod residual_add_norm;
 pub mod backward;
+pub mod matmul_add_relu;
+pub mod op_relu;
+pub mod residual_add_norm;
 
 pub trait FusionPass {
     fn name() -> &'static str;

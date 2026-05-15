@@ -167,11 +167,15 @@ fn matmul_tile(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32) -
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx512f") {
-            unsafe { matmul_tile_avx512(a, b, &mut s, m, k, n, scale); }
+            unsafe {
+                matmul_tile_avx512(a, b, &mut s, m, k, n, scale);
+            }
             return s;
         }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            unsafe { matmul_tile_avx2(a, b, &mut s, m, k, n, scale); }
+            unsafe {
+                matmul_tile_avx2(a, b, &mut s, m, k, n, scale);
+            }
             return s;
         }
     }
@@ -191,7 +195,13 @@ fn matmul_tile(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32) -
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn matmul_tile_avx2(
-    a: &[f32], b: &[f32], s: &mut [f32], m: usize, k: usize, n: usize, scale: f32,
+    a: &[f32],
+    b: &[f32],
+    s: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    scale: f32,
 ) {
     for i in 0..m {
         for j in 0..n {
@@ -201,14 +211,34 @@ unsafe fn matmul_tile_avx2(
             let mut kk = 0;
 
             while kk + 32 <= k {
-                acc = _mm256_fmadd_ps(_mm256_loadu_ps(a_row.as_ptr().add(kk)), _mm256_loadu_ps(b_row.as_ptr().add(kk)), acc);
-                acc = _mm256_fmadd_ps(_mm256_loadu_ps(a_row.as_ptr().add(kk + 8)), _mm256_loadu_ps(b_row.as_ptr().add(kk + 8)), acc);
-                acc = _mm256_fmadd_ps(_mm256_loadu_ps(a_row.as_ptr().add(kk + 16)), _mm256_loadu_ps(b_row.as_ptr().add(kk + 16)), acc);
-                acc = _mm256_fmadd_ps(_mm256_loadu_ps(a_row.as_ptr().add(kk + 24)), _mm256_loadu_ps(b_row.as_ptr().add(kk + 24)), acc);
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(a_row.as_ptr().add(kk)),
+                    _mm256_loadu_ps(b_row.as_ptr().add(kk)),
+                    acc,
+                );
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(a_row.as_ptr().add(kk + 8)),
+                    _mm256_loadu_ps(b_row.as_ptr().add(kk + 8)),
+                    acc,
+                );
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(a_row.as_ptr().add(kk + 16)),
+                    _mm256_loadu_ps(b_row.as_ptr().add(kk + 16)),
+                    acc,
+                );
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(a_row.as_ptr().add(kk + 24)),
+                    _mm256_loadu_ps(b_row.as_ptr().add(kk + 24)),
+                    acc,
+                );
                 kk += 32;
             }
             while kk + 8 <= k {
-                acc = _mm256_fmadd_ps(_mm256_loadu_ps(a_row.as_ptr().add(kk)), _mm256_loadu_ps(b_row.as_ptr().add(kk)), acc);
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(a_row.as_ptr().add(kk)),
+                    _mm256_loadu_ps(b_row.as_ptr().add(kk)),
+                    acc,
+                );
                 kk += 8;
             }
 
@@ -237,7 +267,13 @@ unsafe fn hsum256_ps(v: __m256) -> f32 {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn matmul_tile_avx512(
-    a: &[f32], b: &[f32], s: &mut [f32], m: usize, k: usize, n: usize, scale: f32,
+    a: &[f32],
+    b: &[f32],
+    s: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    scale: f32,
 ) {
     for i in 0..m {
         for j in 0..n {
@@ -247,14 +283,34 @@ unsafe fn matmul_tile_avx512(
             let mut kk = 0;
 
             while kk + 64 <= k {
-                acc = _mm512_fmadd_ps(_mm512_loadu_ps(a_row.as_ptr().add(kk)), _mm512_loadu_ps(b_row.as_ptr().add(kk)), acc);
-                acc = _mm512_fmadd_ps(_mm512_loadu_ps(a_row.as_ptr().add(kk + 16)), _mm512_loadu_ps(b_row.as_ptr().add(kk + 16)), acc);
-                acc = _mm512_fmadd_ps(_mm512_loadu_ps(a_row.as_ptr().add(kk + 32)), _mm512_loadu_ps(b_row.as_ptr().add(kk + 32)), acc);
-                acc = _mm512_fmadd_ps(_mm512_loadu_ps(a_row.as_ptr().add(kk + 48)), _mm512_loadu_ps(b_row.as_ptr().add(kk + 48)), acc);
+                acc = _mm512_fmadd_ps(
+                    _mm512_loadu_ps(a_row.as_ptr().add(kk)),
+                    _mm512_loadu_ps(b_row.as_ptr().add(kk)),
+                    acc,
+                );
+                acc = _mm512_fmadd_ps(
+                    _mm512_loadu_ps(a_row.as_ptr().add(kk + 16)),
+                    _mm512_loadu_ps(b_row.as_ptr().add(kk + 16)),
+                    acc,
+                );
+                acc = _mm512_fmadd_ps(
+                    _mm512_loadu_ps(a_row.as_ptr().add(kk + 32)),
+                    _mm512_loadu_ps(b_row.as_ptr().add(kk + 32)),
+                    acc,
+                );
+                acc = _mm512_fmadd_ps(
+                    _mm512_loadu_ps(a_row.as_ptr().add(kk + 48)),
+                    _mm512_loadu_ps(b_row.as_ptr().add(kk + 48)),
+                    acc,
+                );
                 kk += 64;
             }
             while kk + 16 <= k {
-                acc = _mm512_fmadd_ps(_mm512_loadu_ps(a_row.as_ptr().add(kk)), _mm512_loadu_ps(b_row.as_ptr().add(kk)), acc);
+                acc = _mm512_fmadd_ps(
+                    _mm512_loadu_ps(a_row.as_ptr().add(kk)),
+                    _mm512_loadu_ps(b_row.as_ptr().add(kk)),
+                    acc,
+                );
                 kk += 16;
             }
 
@@ -289,10 +345,10 @@ mod tests {
         // S[0,1] = (1*7 + 2*8) * scale = (7+16) * 0.7071 = 16.26
         // S[1,0] = (3*5 + 4*6) * scale = (15+24) * 0.7071 = 27.58
         // S[1,1] = (3*7 + 4*8) * scale = (21+32) * 0.7071 = 37.48
-        let s00 = (1.0*5.0 + 2.0*6.0) * scale;
-        let s01 = (1.0*7.0 + 2.0*8.0) * scale;
-        let s10 = (3.0*5.0 + 4.0*6.0) * scale;
-        let s11 = (3.0*7.0 + 4.0*8.0) * scale;
+        let s00 = (1.0 * 5.0 + 2.0 * 6.0) * scale;
+        let s01 = (1.0 * 7.0 + 2.0 * 8.0) * scale;
+        let s10 = (3.0 * 5.0 + 4.0 * 6.0) * scale;
+        let s11 = (3.0 * 7.0 + 4.0 * 8.0) * scale;
 
         // Manual softmax(row)
         // Row 0: exp(S[0,0]-max0), exp(S[0,1]-max0) where max0 = max(12.02, 16.26) = 16.26
@@ -333,10 +389,30 @@ mod tests {
         let tiled_data = tiled.as_f32_slice();
 
         let eps = 1e-3;
-        assert!((tiled_data[0] - manual_o00).abs() < eps, "O[0,0]: tiled={}, manual={}", tiled_data[0], manual_o00);
-        assert!((tiled_data[1] - manual_o01).abs() < eps, "O[0,1]: tiled={}, manual={}", tiled_data[1], manual_o01);
-        assert!((tiled_data[2] - manual_o10).abs() < eps, "O[1,0]: tiled={}, manual={}", tiled_data[2], manual_o10);
-        assert!((tiled_data[3] - manual_o11).abs() < eps, "O[1,1]: tiled={}, manual={}", tiled_data[3], manual_o11);
+        assert!(
+            (tiled_data[0] - manual_o00).abs() < eps,
+            "O[0,0]: tiled={}, manual={}",
+            tiled_data[0],
+            manual_o00
+        );
+        assert!(
+            (tiled_data[1] - manual_o01).abs() < eps,
+            "O[0,1]: tiled={}, manual={}",
+            tiled_data[1],
+            manual_o01
+        );
+        assert!(
+            (tiled_data[2] - manual_o10).abs() < eps,
+            "O[1,0]: tiled={}, manual={}",
+            tiled_data[2],
+            manual_o10
+        );
+        assert!(
+            (tiled_data[3] - manual_o11).abs() < eps,
+            "O[1,1]: tiled={}, manual={}",
+            tiled_data[3],
+            manual_o11
+        );
     }
 
     #[test]
@@ -356,13 +432,20 @@ mod tests {
         let causal_data = tiled_causal.as_f32_slice();
 
         // All values should be finite
-        for v in data { assert!(v.is_finite()); }
-        for v in causal_data { assert!(v.is_finite()); }
+        for v in data {
+            assert!(v.is_finite());
+        }
+        for v in causal_data {
+            assert!(v.is_finite());
+        }
 
         // Causal result should differ from non-causal (except row 0, which has same mask)
         let mut differs = false;
-        for i in 1.. (data.len().min(causal_data.len())) {
-            if (data[i] - causal_data[i]).abs() > 1e-4 { differs = true; break; }
+        for i in 1..(data.len().min(causal_data.len())) {
+            if (data[i] - causal_data[i]).abs() > 1e-4 {
+                differs = true;
+                break;
+            }
         }
         assert!(differs, "Causal and non-causal should differ");
     }
@@ -376,15 +459,21 @@ mod tests {
         let dv = 32;
 
         let q = Tensor::from_vec(
-            (0..batch * heads * seq_len * dk).map(|i| (i as f32) * 0.01).collect(),
+            (0..batch * heads * seq_len * dk)
+                .map(|i| (i as f32) * 0.01)
+                .collect(),
             vec![batch, heads, seq_len, dk],
         );
         let k = Tensor::from_vec(
-            (0..batch * heads * seq_len * dk).map(|i| (i as f32) * 0.01 + 0.3).collect(),
+            (0..batch * heads * seq_len * dk)
+                .map(|i| (i as f32) * 0.01 + 0.3)
+                .collect(),
             vec![batch, heads, seq_len, dk],
         );
         let v = Tensor::from_vec(
-            (0..batch * heads * seq_len * dv).map(|i| (i as f32) * 0.01 + 0.6).collect(),
+            (0..batch * heads * seq_len * dv)
+                .map(|i| (i as f32) * 0.01 + 0.6)
+                .collect(),
             vec![batch, heads, seq_len, dv],
         );
 
