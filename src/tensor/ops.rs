@@ -21,8 +21,132 @@ where
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::{
-    _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_storeu_ps, _mm256_sub_ps,
+    _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
+    _mm256_sub_ps,
 };
+
+/// Macro to generate in-place binary ops (add_, sub_, mul_, div_)
+/// from a common template. Eliminates ~500 lines of copy-paste.
+macro_rules! impl_inplace_binary_op {
+    ($fn_name:ident, $immutable_fn:ident, $simd_intrin:ident, $assign_op:tt, $binop:tt) => {
+        pub fn $fn_name(&mut self, other: &Tensor) -> &mut Self {
+            if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+                let result = (self as &Tensor).$immutable_fn(other);
+                *self = result;
+                return self;
+            }
+            let dtype = self.inner.dtype;
+            let numel = self.inner.numel() as usize;
+            let other_numel = other.inner.numel() as usize;
+            if other_numel != numel || !other.is_contiguous() {
+                let result = (self as &Tensor).$immutable_fn(other);
+                *self = result;
+                return self;
+            }
+            let self_ptr = self.data_ptr_f32_mut();
+            let other_ptr = other.data_ptr_f32();
+            match dtype {
+                DType::F32 => {
+                    #[cfg(feature = "parallel")]
+                    {
+                        if numel > 64 * 1024 {
+                            use rayon::prelude::*;
+                            const CHUNK: usize = 4096;
+                            let num_chunks = numel.div_ceil(CHUNK);
+                            let self_usize = self_ptr as usize;
+                            let other_usize = other_ptr as usize;
+                            (0..num_chunks).into_par_iter().for_each(|chunk| {
+                                let start = chunk * CHUNK;
+                                let end = (start + CHUNK).min(numel);
+                                let s_p = self_usize as *mut f32;
+                                let o_p = other_usize as *const f32;
+                                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                {
+                                    if is_x86_feature_detected!("avx2") {
+                                        unsafe {
+                                            let mut i = start;
+                                            while i + 8 <= end {
+                                                let sv = _mm256_loadu_ps(s_p.add(i));
+                                                let ov = _mm256_loadu_ps(o_p.add(i));
+                                                let r = $simd_intrin(sv, ov);
+                                                _mm256_storeu_ps(s_p.add(i), r);
+                                                i += 8;
+                                            }
+                                            for j in i..end {
+                                                *s_p.add(j) $assign_op *o_p.add(j);
+                                            }
+                                            return;
+                                        }
+                                    }
+                                }
+                                for j in start..end {
+                                    unsafe { *s_p.add(j) $assign_op *o_p.add(j); }
+                                }
+                            });
+                            return self;
+                        }
+                    }
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        if is_x86_feature_detected!("avx2") && numel >= 8 {
+                            unsafe {
+                                let mut i = 0;
+                                while i + 8 <= numel {
+                                    let sv = _mm256_loadu_ps(self_ptr.add(i));
+                                    let ov = _mm256_loadu_ps(other_ptr.add(i));
+                                    let r = $simd_intrin(sv, ov);
+                                    _mm256_storeu_ps(self_ptr.add(i), r);
+                                    i += 8;
+                                }
+                                for j in i..numel {
+                                    *self_ptr.add(j) $assign_op *other_ptr.add(j);
+                                }
+                                return self;
+                            }
+                        }
+                    }
+                    for i in 0..numel {
+                        unsafe { *self_ptr.add(i) $assign_op *other_ptr.add(i); }
+                    }
+                }
+                DType::F64 => {
+                    let sp = self_ptr as *mut f64;
+                    let op = other_ptr as *const f64;
+                    for i in 0..numel { unsafe { *sp.add(i) $assign_op *op.add(i); } }
+                }
+                DType::I32 => {
+                    let sp = self_ptr as *mut i32;
+                    let op = other_ptr as *const i32;
+                    for i in 0..numel { unsafe { *sp.add(i) $assign_op *op.add(i); } }
+                }
+                DType::BF16 => {
+                    let sp = self.data_ptr_mut() as *mut half::bf16;
+                    let op = other.data_ptr() as *const half::bf16;
+                    for i in 0..numel {
+                        unsafe {
+                            let sv = f32::from(*sp.add(i));
+                            let ov = f32::from(*op.add(i));
+                            *sp.add(i) = half::bf16::from_f32(sv $binop ov);
+                        }
+                    }
+                }
+                DType::F16 => {
+                    let sp = self.data_ptr_mut() as *mut half::f16;
+                    let op = other.data_ptr() as *const half::f16;
+                    for i in 0..numel {
+                        unsafe {
+                            let sv = f32::from(*sp.add(i));
+                            let ov = f32::from(*op.add(i));
+                            *sp.add(i) = half::f16::from_f32(sv $binop ov);
+                        }
+                    }
+                }
+                _ => unimplemented!(concat!(stringify!($fn_name), " for dtype {:?}"), dtype),
+            }
+            self
+        }
+    };
+}
 
 impl Tensor {
     pub fn add(&self, other: &Tensor) -> Tensor {
@@ -43,7 +167,7 @@ impl Tensor {
             && self.inner.sizes == other.inner.sizes
         {
             let numel = self.inner.numel() as usize;
-            let mut output = Tensor::zeros(self.shape(), DType::F32, Device::Cpu);
+            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
             {
                 let inner = Arc::make_mut(&mut output.inner);
                 let storage = Arc::make_mut(&mut inner.storage);
@@ -118,294 +242,11 @@ impl Tensor {
         }
     }
 
-    /// In-place addition for gradient accumulation
-    /// This is used internally by the autograd engine to accumulate gradients
-    pub fn add_(&mut self, other: &Tensor) -> &mut Self {
-        // For GPU tensors or non-contiguous tensors, use dispatch-based addition
-        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
-            let result = (self as &Tensor).add(other);
-            *self = result;
-            return self;
-        }
+    // In-place addition for gradient accumulation
+    impl_inplace_binary_op!(add_, add, _mm256_add_ps, +=, +);
 
-        // CPU path: direct memory manipulation (requires contiguous self)
-        let dtype = self.inner.dtype;
-        let numel = self.inner.numel() as usize;
-        let other_numel = other.inner.numel() as usize;
-
-        // If other is broadcast (e.g., expanded scalar), use general path
-        if other_numel != numel || !other.is_contiguous() {
-            let result = (self as &Tensor).add(other);
-            *self = result;
-            return self;
-        }
-
-        let self_ptr = self.data_ptr_f32_mut();
-        let other_ptr = other.data_ptr_f32();
-
-        match dtype {
-            DType::F32 => {
-                // SIMD + parallel path for F32 gradient accumulation (hot path)
-                // Using sequential chunks with SIMD to avoid data races from parallel in-place modification
-                #[cfg(feature = "parallel")]
-                {
-                    if numel > 64 * 1024 {
-                        const CHUNK: usize = 4096;
-                        let num_chunks = numel.div_ceil(CHUNK);
-                        // Process each chunk sequentially to avoid race conditions
-                        for chunk in 0..num_chunks {
-                            let start = chunk * CHUNK;
-                            let end = (start + CHUNK).min(numel);
-
-                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                            {
-                                if is_x86_feature_detected!("avx2") {
-                                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                                    unsafe {
-                                        let mut i = start;
-                                        while i + 8 <= end {
-                                            let sv = _mm256_loadu_ps(self_ptr.add(i));
-                                            let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                            let r = _mm256_add_ps(sv, ov);
-                                            _mm256_storeu_ps(self_ptr.add(i), r);
-                                            i += 8;
-                                        }
-                                        for j in i..end {
-                                            *self_ptr.add(j) += *other_ptr.add(j);
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                            // Scalar fallback for this chunk
-                            for i in start..end {
-                                // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                                unsafe {
-                                    *self_ptr.add(i) += *other_ptr.add(i);
-                                }
-                            }
-                        }
-                        return self;
-                    }
-                }
-                // Small tensor or non-parallel: SIMD inline or scalar
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                        unsafe {
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let sv = _mm256_loadu_ps(self_ptr.add(i));
-                                let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                let r = _mm256_add_ps(sv, ov);
-                                _mm256_storeu_ps(self_ptr.add(i), r);
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *self_ptr.add(j) += *other_ptr.add(j);
-                            }
-                            return self;
-                        }
-                    }
-                }
-                // Scalar fallback
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) += *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::F64 => {
-                let self_ptr = self_ptr as *mut f64;
-                let other_ptr = other_ptr as *const f64;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) += *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::I32 => {
-                let self_ptr = self_ptr as *mut i32;
-                let other_ptr = other_ptr as *const i32;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) += *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::BF16 => {
-                let self_ptr = self.data_ptr_mut() as *mut half::bf16;
-                let other_ptr = other.data_ptr() as *const half::bf16;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        let self_val = f32::from(*self_ptr.add(i));
-                        let other_val = f32::from(*other_ptr.add(i));
-                        *self_ptr.add(i) = half::bf16::from_f32(self_val + other_val);
-                    }
-                }
-            }
-            DType::F16 => {
-                let self_ptr = self.data_ptr_mut() as *mut half::f16;
-                let other_ptr = other.data_ptr() as *const half::f16;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        let self_val = f32::from(*self_ptr.add(i));
-                        let other_val = f32::from(*other_ptr.add(i));
-                        *self_ptr.add(i) = half::f16::from_f32(self_val + other_val);
-                    }
-                }
-            }
-            _ => unimplemented!("add_ for dtype {:?}", dtype),
-        }
-        self
-    }
-
-    /// In-place multiplication
-    pub fn mul_(&mut self, other: &Tensor) -> &mut Self {
-        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
-            let result = (self as &Tensor).mul(other);
-            *self = result;
-            return self;
-        }
-
-        let numel = self.inner.numel() as usize;
-        let other_numel = other.inner.numel() as usize;
-        if other_numel != numel || !other.is_contiguous() {
-            let result = (self as &Tensor).mul(other);
-            *self = result;
-            return self;
-        }
-
-        let dtype = self.inner.dtype;
-        let numel = self.inner.numel() as usize;
-
-        let self_ptr = self.data_ptr_f32_mut();
-        let other_ptr = other.data_ptr_f32();
-
-        match dtype {
-            DType::F32 => {
-                #[cfg(feature = "parallel")]
-                {
-                    if numel > 64 * 1024 {
-                        use rayon::prelude::*;
-                        const CHUNK: usize = 4096;
-                        let num_chunks = numel.div_ceil(CHUNK);
-                        let self_usize = self_ptr as usize;
-                        let other_usize = other_ptr as usize;
-                        (0..num_chunks).into_par_iter().for_each(|chunk| {
-                            let start = chunk * CHUNK;
-                            let end = (start + CHUNK).min(numel);
-                            let s_p = self_usize as *mut f32;
-                            let o_p = other_usize as *const f32;
-                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                            {
-                                if is_x86_feature_detected!("avx2") {
-                                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                                    unsafe {
-                                        let mut i = start;
-                                        while i + 8 <= end {
-                                            let sv = _mm256_loadu_ps(s_p.add(i));
-                                            let ov = _mm256_loadu_ps(o_p.add(i));
-                                            _mm256_storeu_ps(s_p.add(i), _mm256_mul_ps(sv, ov));
-                                            i += 8;
-                                        }
-                                        for j in i..end {
-                                            *s_p.add(j) *= *o_p.add(j);
-                                        }
-                                        return;
-                                    }
-                                }
-                            }
-                            for j in start..end {
-                                // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
-                                unsafe {
-                                    *s_p.add(j) *= *o_p.add(j);
-                                }
-                            }
-                        });
-                        return self;
-                    }
-                }
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                        unsafe {
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let sv = _mm256_loadu_ps(self_ptr.add(i));
-                                let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                _mm256_storeu_ps(self_ptr.add(i), _mm256_mul_ps(sv, ov));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *self_ptr.add(j) *= *other_ptr.add(j);
-                            }
-                            return self;
-                        }
-                    }
-                }
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) *= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::F64 => {
-                let self_ptr = self_ptr as *mut f64;
-                let other_ptr = other_ptr as *const f64;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) *= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::I32 => {
-                let self_ptr = self_ptr as *mut i32;
-                let other_ptr = other_ptr as *const i32;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) *= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::BF16 => {
-                let self_ptr = self.data_ptr_mut() as *mut half::bf16;
-                let other_ptr = other.data_ptr() as *const half::bf16;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        let self_val = f32::from(*self_ptr.add(i));
-                        let other_val = f32::from(*other_ptr.add(i));
-                        *self_ptr.add(i) = half::bf16::from_f32(self_val * other_val);
-                    }
-                }
-            }
-            DType::F16 => {
-                let self_ptr = self.data_ptr_mut() as *mut half::f16;
-                let other_ptr = other.data_ptr() as *const half::f16;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        let self_val = f32::from(*self_ptr.add(i));
-                        let other_val = f32::from(*other_ptr.add(i));
-                        *self_ptr.add(i) = half::f16::from_f32(self_val * other_val);
-                    }
-                }
-            }
-            _ => unimplemented!("mul_ for dtype {:?}", dtype),
-        }
-        self
-    }
+    // In-place multiplication
+    impl_inplace_binary_op!(mul_, mul, _mm256_mul_ps, *=, *);
 
     /// In-place scalar multiplication: self *= scalar
     /// Avoids allocating a scalar tensor for optimizer hot paths.
@@ -419,6 +260,26 @@ impl Tensor {
 
         let numel = self.inner.numel() as usize;
         let self_ptr = self.data_ptr_f32_mut();
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let scalar_vec = _mm256_set1_ps(scalar);
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let sv = _mm256_loadu_ps(self_ptr.add(i));
+                        _mm256_storeu_ps(self_ptr.add(i), _mm256_mul_ps(sv, scalar_vec));
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *self_ptr.add(j) *= scalar;
+                    }
+                }
+                return self;
+            }
+        }
+
         for i in 0..numel {
             // SAFETY: The pointer offset stays within the bounds of the allocated storage.
             unsafe {
@@ -447,6 +308,26 @@ impl Tensor {
 
         let numel = self.inner.numel() as usize;
         let self_ptr = self.data_ptr_f32_mut();
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && numel >= 8 {
+                unsafe {
+                    let scalar_vec = _mm256_set1_ps(scalar);
+                    let mut i = 0;
+                    while i + 8 <= numel {
+                        let sv = _mm256_loadu_ps(self_ptr.add(i));
+                        _mm256_storeu_ps(self_ptr.add(i), _mm256_add_ps(sv, scalar_vec));
+                        i += 8;
+                    }
+                    for j in i..numel {
+                        *self_ptr.add(j) += scalar;
+                    }
+                }
+                return self;
+            }
+        }
+
         for i in 0..numel {
             // SAFETY: The pointer offset stays within the bounds of the allocated storage.
             unsafe {
@@ -456,299 +337,11 @@ impl Tensor {
         self
     }
 
-    /// In-place subtraction: self -= other
-    pub fn sub_(&mut self, other: &Tensor) -> &mut Self {
-        // For GPU tensors or non-contiguous tensors, use dispatch-based subtraction
-        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
-            let result = (self as &Tensor).sub(other);
-            *self = result;
-            return self;
-        }
+    // In-place subtraction: self -= other
+    impl_inplace_binary_op!(sub_, sub, _mm256_sub_ps, -=, -);
 
-        // CPU path: direct memory manipulation (requires contiguous self)
-        let dtype = self.inner.dtype;
-        let numel = self.inner.numel() as usize;
-        let other_numel = other.inner.numel() as usize;
-
-        // If other is broadcast (e.g., expanded scalar), use general path
-        if other_numel != numel || !other.is_contiguous() {
-            let result = (self as &Tensor).sub(other);
-            *self = result;
-            return self;
-        }
-
-        let self_ptr = self.data_ptr_f32_mut();
-        let other_ptr = other.data_ptr_f32();
-
-        match dtype {
-            DType::F32 => {
-                // SIMD + parallel path for F32
-                // Using sequential chunks with SIMD to avoid data races from parallel in-place modification
-                #[cfg(feature = "parallel")]
-                {
-                    if numel > 64 * 1024 {
-                        const CHUNK: usize = 4096;
-                        let num_chunks = numel.div_ceil(CHUNK);
-                        for chunk in 0..num_chunks {
-                            let start = chunk * CHUNK;
-                            let end = (start + CHUNK).min(numel);
-
-                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                            {
-                                if is_x86_feature_detected!("avx2") {
-                                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                                    unsafe {
-                                        let mut i = start;
-                                        while i + 8 <= end {
-                                            let sv = _mm256_loadu_ps(self_ptr.add(i));
-                                            let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                            _mm256_storeu_ps(
-                                                self_ptr.add(i),
-                                                _mm256_sub_ps(sv, ov),
-                                            );
-                                            i += 8;
-                                        }
-                                        for j in i..end {
-                                            *self_ptr.add(j) -= *other_ptr.add(j);
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                            // Scalar fallback for this chunk
-                            for i in start..end {
-                                // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                                unsafe {
-                                    *self_ptr.add(i) -= *other_ptr.add(i);
-                                }
-                            }
-                        }
-                        return self;
-                    }
-                }
-                // Small tensor or non-parallel: SIMD inline or scalar
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                        unsafe {
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let sv = _mm256_loadu_ps(self_ptr.add(i));
-                                let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                _mm256_storeu_ps(self_ptr.add(i), _mm256_sub_ps(sv, ov));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *self_ptr.add(j) -= *other_ptr.add(j);
-                            }
-                            return self;
-                        }
-                    }
-                }
-                // Scalar fallback
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) -= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::F64 => {
-                let self_ptr = self_ptr as *mut f64;
-                let other_ptr = other_ptr as *const f64;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) -= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::I32 => {
-                let self_ptr = self_ptr as *mut i32;
-                let other_ptr = other_ptr as *const i32;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) -= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::BF16 => {
-                let self_ptr = self.data_ptr_mut() as *mut half::bf16;
-                let other_ptr = other.data_ptr() as *const half::bf16;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        let self_val = f32::from(*self_ptr.add(i));
-                        let other_val = f32::from(*other_ptr.add(i));
-                        *self_ptr.add(i) = half::bf16::from_f32(self_val - other_val);
-                    }
-                }
-            }
-            DType::F16 => {
-                let self_ptr = self.data_ptr_mut() as *mut half::f16;
-                let other_ptr = other.data_ptr() as *const half::f16;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        let self_val = f32::from(*self_ptr.add(i));
-                        let other_val = f32::from(*other_ptr.add(i));
-                        *self_ptr.add(i) = half::f16::from_f32(self_val - other_val);
-                    }
-                }
-            }
-            _ => unimplemented!("sub_ for dtype {:?}", dtype),
-        }
-        self
-    }
-
-    /// In-place division: self /= other
-    pub fn div_(&mut self, other: &Tensor) -> &mut Self {
-        // For GPU tensors or non-contiguous tensors, use dispatch-based division
-        if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
-            let result = (self as &Tensor).div(other);
-            *self = result;
-            return self;
-        }
-
-        // CPU path: direct memory manipulation (requires contiguous self)
-        let dtype = self.inner.dtype;
-        let numel = self.inner.numel() as usize;
-        let other_numel = other.inner.numel() as usize;
-
-        // If other is broadcast (e.g., expanded scalar), use general path
-        if other_numel != numel || !other.is_contiguous() {
-            let result = (self as &Tensor).div(other);
-            *self = result;
-            return self;
-        }
-
-        let self_ptr = self.data_ptr_f32_mut();
-        let other_ptr = other.data_ptr_f32();
-
-        match dtype {
-            DType::F32 => {
-                // SIMD + parallel path for F32
-                // Using sequential chunks with SIMD to avoid data races from parallel in-place modification
-                #[cfg(feature = "parallel")]
-                {
-                    if numel > 64 * 1024 {
-                        const CHUNK: usize = 4096;
-                        let num_chunks = numel.div_ceil(CHUNK);
-                        for chunk in 0..num_chunks {
-                            let start = chunk * CHUNK;
-                            let end = (start + CHUNK).min(numel);
-
-                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                            {
-                                if is_x86_feature_detected!("avx2") {
-                                    // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                                    unsafe {
-                                        let mut i = start;
-                                        while i + 8 <= end {
-                                            let sv = _mm256_loadu_ps(self_ptr.add(i));
-                                            let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                            _mm256_storeu_ps(
-                                                self_ptr.add(i),
-                                                _mm256_div_ps(sv, ov),
-                                            );
-                                            i += 8;
-                                        }
-                                        for j in i..end {
-                                            *self_ptr.add(j) /= *other_ptr.add(j);
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                            // Scalar fallback for this chunk
-                            for i in start..end {
-                                // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                                unsafe {
-                                    *self_ptr.add(i) /= *other_ptr.add(i);
-                                }
-                            }
-                        }
-                        return self;
-                    }
-                }
-                // Small tensor or non-parallel: SIMD inline or scalar
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        // SAFETY: The pointers are valid and properly aligned for AVX2 access. Loop bounds guarantee all accesses stay within allocated storage.
-                        unsafe {
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let sv = _mm256_loadu_ps(self_ptr.add(i));
-                                let ov = _mm256_loadu_ps(other_ptr.add(i));
-                                _mm256_storeu_ps(self_ptr.add(i), _mm256_div_ps(sv, ov));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *self_ptr.add(j) /= *other_ptr.add(j);
-                            }
-                            return self;
-                        }
-                    }
-                }
-                // Scalar fallback
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) /= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::F64 => {
-                let self_ptr = self_ptr as *mut f64;
-                let other_ptr = other_ptr as *const f64;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) /= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::I32 => {
-                let self_ptr = self_ptr as *mut i32;
-                let other_ptr = other_ptr as *const i32;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        *self_ptr.add(i) /= *other_ptr.add(i);
-                    }
-                }
-            }
-            DType::BF16 => {
-                let self_ptr = self.data_ptr_mut() as *mut half::bf16;
-                let other_ptr = other.data_ptr() as *const half::bf16;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        let self_val = f32::from(*self_ptr.add(i));
-                        let other_val = f32::from(*other_ptr.add(i));
-                        *self_ptr.add(i) = half::bf16::from_f32(self_val / other_val);
-                    }
-                }
-            }
-            DType::F16 => {
-                let self_ptr = self.data_ptr_mut() as *mut half::f16;
-                let other_ptr = other.data_ptr() as *const half::f16;
-                for i in 0..numel {
-                    // SAFETY: The pointer offset stays within the bounds of the allocated storage.
-                    unsafe {
-                        let self_val = f32::from(*self_ptr.add(i));
-                        let other_val = f32::from(*other_ptr.add(i));
-                        *self_ptr.add(i) = half::f16::from_f32(self_val / other_val);
-                    }
-                }
-            }
-            _ => unimplemented!("div_ for dtype {:?}", dtype),
-        }
-        self
-    }
+    // In-place division: self /= other
+    impl_inplace_binary_op!(div_, div, _mm256_div_ps, /=, /);
 
     /// In-place addcmul: self += tensor1 * tensor2
     /// Fused operation to reduce allocations in backward passes
@@ -1194,13 +787,25 @@ impl Tensor {
     }
 
     pub fn fused_linear_gelu(&self, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
-        let out = self.matmul(weight);
-        let out = if let Some(b) = bias {
-            Tensor::add(&out, b)
+        let inputs: Vec<&Tensor> = if let Some(b) = bias.as_ref() {
+            vec![self, weight, b]
         } else {
-            out
+            vec![self, weight]
         };
-        out.gelu()
+        let input_refs = inputs.to_vec();
+        Tensor::exec_aot(&input_refs, |g, ins| {
+            let mm = g.matmul(&ins[0], &ins[1]);
+            let biased = if ins.len() >= 3 {
+                g.bias_add(&mm, &ins[2])
+            } else {
+                mm
+            };
+            vec![g.gelu(&biased)]
+        })
+        .expect("fused_linear_gelu: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     pub fn try_clamp(&self, min_val: f32, max_val: f32) -> Result<Tensor, BackendError> {
@@ -1273,11 +878,6 @@ impl Tensor {
 
     pub fn as_i64_slice(&self) -> Vec<i64> {
         let src = self.to_cpu();
-        let src = if !src.is_contiguous() {
-            src.contiguous()
-        } else {
-            src
-        };
         let data = src.as_f32_slice();
         data.iter().map(|&v| v as i64).collect()
     }
@@ -1287,8 +887,7 @@ impl Tensor {
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward =
-                std::sync::Arc::new(autograd::ErfBackward::new(edges, inputs));
+            let backward = std::sync::Arc::new(autograd::ErfBackward::new(edges, inputs));
             Ok(Self::attach_grad_fn(result, backward))
         } else {
             Ok(result)
