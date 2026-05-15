@@ -94,94 +94,98 @@ struct FreeBlock {
     size: usize,
 }
 
-/// Add a free block to the free list, merging adjacent blocks
 /// Align a value up to the next multiple of `alignment` (must be power of 2).
 fn align_up(val: usize, alignment: usize) -> usize {
     (val + alignment - 1) & !(alignment - 1)
 }
 
-fn add_to_free_list(free_list: &mut Vec<FreeBlock>, offset: usize, size: usize) {
-    if size == 0 {
-        return;
-    }
-
-    let pos = match free_list.binary_search_by(|b| b.offset.cmp(&offset)) {
-        Ok(exact_pos) => {
-            // Offset already exists as a free block — this should never
-            // happen in a correct allocator and indicates a double-free.
-            // Merge by extending the existing block if the new size is larger.
-            if free_list[exact_pos].size < size {
-                free_list[exact_pos].size = size;
-            }
-            // Try merging with next block (may now overlap due to extension).
-            if exact_pos + 1 < free_list.len()
-                && free_list[exact_pos].offset + free_list[exact_pos].size
-                    >= free_list[exact_pos + 1].offset
-            {
-                let next_end = free_list[exact_pos + 1].offset + free_list[exact_pos + 1].size;
-                let merged_end = std::cmp::max(
-                    free_list[exact_pos].offset + free_list[exact_pos].size,
-                    next_end,
-                );
-                free_list[exact_pos].size = merged_end - free_list[exact_pos].offset;
-                free_list.remove(exact_pos + 1);
-            }
-            return;
-        }
-        Err(pos) => pos,
-    };
-
-    // Merge with previous block if adjacent or overlapping
-    if pos > 0 {
-        let prev = &free_list[pos - 1];
-        let prev_end = prev.offset + prev.size;
-        if prev_end >= offset {
-            // Extend previous block to cover the new range
-            let new_end = std::cmp::max(prev_end, offset + size);
-            free_list[pos - 1].size = new_end - free_list[pos - 1].offset;
-            // Check if the extended previous block now overlaps with the next block
-            if pos < free_list.len()
-                && free_list[pos - 1].offset + free_list[pos - 1].size >= free_list[pos].offset
-            {
-                let next_end = free_list[pos].offset + free_list[pos].size;
-                let merged_end = std::cmp::max(
-                    free_list[pos - 1].offset + free_list[pos - 1].size,
-                    next_end,
-                );
-                free_list[pos - 1].size = merged_end - free_list[pos - 1].offset;
-                free_list.remove(pos);
-            }
-            return;
-        }
-    }
-
-    // Merge with next block if adjacent or overlapping
-    if pos < free_list.len() && offset + size >= free_list[pos].offset {
-        let new_end = std::cmp::max(offset + size, free_list[pos].offset + free_list[pos].size);
-        free_list[pos].offset = std::cmp::min(free_list[pos].offset, offset);
-        free_list[pos].size = new_end - free_list[pos].offset;
-        return;
-    }
-
-    if size > 0 {
-        free_list.insert(pos, FreeBlock { offset, size });
-    }
+/// Size-segregated free list allocator.
+/// Maintains one free list per power-of-2 size class.
+/// Allocation: find the smallest bucket with a free block, take the first one.
+/// Deallocation: return the block to its size-class bucket.
+struct SegFreeList {
+    buckets: Vec<Vec<FreeBlock>>,
+    large_blocks: Vec<FreeBlock>,
 }
 
-/// Find the smallest free block that fits the requested size (best-fit).
-/// Returns the (index, offset) of the matching block without modifying the list.
-fn find_best_fit(free_list: &[FreeBlock], size: usize) -> Option<(usize, usize)> {
-    let mut best_idx = None;
-    let mut best_size = usize::MAX;
-
-    for (i, block) in free_list.iter().enumerate() {
-        if block.size >= size && block.size < best_size {
-            best_idx = Some(i);
-            best_size = block.size;
+impl SegFreeList {
+    fn new() -> Self {
+        let buckets = (0..64).map(|_| Vec::new()).collect();
+        SegFreeList {
+            buckets,
+            large_blocks: Vec::new(),
         }
     }
 
-    best_idx.map(|idx| (idx, free_list[idx].offset))
+    fn bucket_for(size: usize) -> Option<usize> {
+        if size == 0 {
+            return None;
+        }
+        let b = (usize::BITS - size.leading_zeros()) as usize - 1;
+        if b < 64 {
+            Some(b)
+        } else {
+            None
+        }
+    }
+
+    fn add(&mut self, offset: usize, size: usize) {
+        if size == 0 {
+            return;
+        }
+        let aligned = align_up(size, 8);
+        if let Some(bucket) = Self::bucket_for(aligned) {
+            self.buckets[bucket].push(FreeBlock {
+                offset,
+                size: aligned,
+            });
+            return;
+        }
+        self.large_blocks.push(FreeBlock {
+            offset,
+            size: aligned,
+        });
+        self.large_blocks.sort_by_key(|b| b.offset);
+    }
+
+    fn alloc(&mut self, size: usize) -> Option<usize> {
+        let aligned = align_up(size, 8);
+        if aligned == 0 {
+            return None;
+        }
+        let b = (usize::BITS - aligned.leading_zeros()) as usize - 1;
+        for b_idx in b..self.buckets.len() {
+            if let Some(pos) = self.buckets[b_idx]
+                .iter()
+                .position(|block| block.size >= aligned)
+            {
+                let block = self.buckets[b_idx].swap_remove(pos);
+                let off = block.offset;
+                let extra = block.size - aligned;
+                if extra > 0 {
+                    self.add(off + aligned, extra);
+                }
+                return Some(off);
+            }
+        }
+
+        if let Some((idx, _)) = self
+            .large_blocks
+            .iter()
+            .enumerate()
+            .find(|(_, b)| b.size >= aligned)
+        {
+            let block = self.large_blocks.remove(idx);
+            let off = block.offset;
+            let extra = block.size - aligned;
+            if extra > 0 {
+                self.add(off + aligned, extra);
+            }
+            return Some(off);
+        }
+
+        None
+    }
 }
 
 /// Compute the byte size of a tensor's storage, optionally using a ShapeEnv
@@ -341,7 +345,7 @@ pub fn plan_memory_with_env(
     let mut slots: HashMap<NodeId, AllocSlot> = HashMap::new();
     let mut secondary_slots: HashMap<(NodeId, usize), AllocSlot> = HashMap::new();
     let mut active: Vec<(usize, NodeId, usize, bool)> = Vec::new();
-    let mut free_list: Vec<FreeBlock> = Vec::new();
+    let mut free_list = SegFreeList::new();
     let mut arena_top: usize = 0;
 
     for info in &alloc_infos {
@@ -360,10 +364,10 @@ pub fn plan_memory_with_env(
                 // live ranges.
                 if was_secondary {
                     if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
-                        add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
+                        free_list.add(slot.offset, align_up(slot.size, 8));
                     }
                 } else if let Some(slot) = slots.get(&expired_id) {
-                    add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
+                    free_list.add(slot.offset, align_up(slot.size, 8));
                 }
             } else {
                 i += 1;
@@ -374,27 +378,8 @@ pub fn plan_memory_with_env(
         // aligned offsets (satisfies both f32 4-byte and i64 8-byte alignment).
         let size_aligned = align_up(info.size, 8);
 
-        let offset = match find_best_fit(&free_list, size_aligned) {
-            Some((idx, block_off)) => {
-                let block_end = block_off + free_list[idx].size;
-                // Remove the original block from the free list.
-                free_list.remove(idx);
-                // Allocation starts at the block offset (already 8-aligned
-                // because all free-list entries were created from aligned
-                // allocations).
-                let alloc_start = block_off;
-                let alloc_end = alloc_start + size_aligned;
-                // Return leftover space before the allocation (should be 0
-                // since block_off is always aligned).
-                if alloc_start > block_off {
-                    add_to_free_list(&mut free_list, block_off, alloc_start - block_off);
-                }
-                // Return leftover space after the allocation.
-                if alloc_end < block_end {
-                    add_to_free_list(&mut free_list, alloc_end, block_end - alloc_end);
-                }
-                alloc_start
-            }
+        let offset = match free_list.alloc(size_aligned) {
+            Some(off) => off,
             None => {
                 let off = align_up(arena_top, 8);
                 arena_top = off + size_aligned;

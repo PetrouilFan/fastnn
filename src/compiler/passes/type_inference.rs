@@ -25,7 +25,7 @@ use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 /// Returns the dtype that `opcode` expects for its `input_index`-th input
 /// (0-based).  Returns `None` when the opcode treats all inputs uniformly
 /// (e.g. Add, Mul) or when the expected dtype equals the output dtype.
-fn expected_input_dtype(opcode: &Opcode, input_index: usize) -> Option<IrDType> {
+fn expected_input_dtype(opcode: &Opcode, _input_index: usize) -> Option<IrDType> {
     match opcode {
         // Quantized MatMul: activation (input 0) can be F32 or I8,
         // weight (input 1) can be F32, U4, or U8.
@@ -48,13 +48,7 @@ fn expected_input_dtype(opcode: &Opcode, input_index: usize) -> Option<IrDType> 
         | Opcode::AdamWUpdate
         | Opcode::MuonUpdate
         | Opcode::LionUpdate
-        | Opcode::RmspropUpdate => {
-            if input_index == 0 {
-                Some(IrDType::F32) // weight
-            } else {
-                Some(IrDType::F32) // gradient
-            }
-        }
+        | Opcode::RmspropUpdate => Some(IrDType::F32),
 
         // Everything else: no constraint (F32 is the default).
         _ => None,
