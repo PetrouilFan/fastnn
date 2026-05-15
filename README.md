@@ -17,15 +17,15 @@
 The v2.1.0 release replaces the old DAG/layer dispatch with a **fully compiled execution path**:
 
 ```
-ComputeGraph → Shape Inference → Operator Fusion → Quantization (opt.) → Memory Planning → Backend Compile → Execute
+ComputeGraph → Shape Inference → Operator Fusion (forward + backward) → Quantization (opt.) → Memory Planning → Backend Compile → Execute
 ```
 
 - **`ComputeGraph`** — First-class IR representation with 30+ opcodes (MatMul, Conv2d, Softmax, etc.), symbolic dimension support (`DimExpr::Symbol`, `Bounded`, `Known`), and per-node tensor types carrying dtype + shape.
 - **`GraphBuilder`** — Ergonomic Rust API for building graphs: `input()`, `constant()`, `matmul()`, `conv2d_with_params()`, `relu()`, `softmax()`, etc.
 - **`GraphExecutor`** — Compiles a `ComputeGraph` through the full pipeline and dispatches execution on a `CpuBackend` (or `WgpuBackend` for supported ops).
 - **Shape inference** — Resolves symbolic dimensions at compile time; falls back to bounded estimates with runtime tightening via `ShapeEnv`.
-- **Operator fusion** — Merges `MatMul + Add`, `MatMul + Add + ReLU`, `Conv2d + Add`, `Conv2d + Add + ReLU` into single fused kernels.
-- **Memory planning** — Greedy first-fit allocator with live-range analysis; reuses arena slots for non-overlapping tensors.
+- **Operator fusion** — Modular `FusionPass` trait with independent forward fusions (OpRelu, MatMulAddRelu) and backward fusions (BackwardReluMatMul, BackwardMatMulAddRelu), each feature-gated via Cargo.toml. Backward fusion eliminates 3 intermediate allocations per fused backward chain by combining dRelu+Transpose+MatMul into single fused kernels.
+- **Memory planning** — Greedy first-fit allocator with live-range analysis; reuses arena slots for non-overlapping tensors. Runtime `tighten()` shrinks worst-case symbolic arena (85 GB) to actual input sizes (40 KB).
 
 ### Native Weight Quantization (U4x8 / U8x4)
 
@@ -82,6 +82,36 @@ Key properties:
 - **`DAGModel(quantize=)`** and **`build_dag_model(quantize=)`** pass quantization through to the AOT pipeline.
 - **`GraphBuilder.compile_with_quantize()`** and **`compile_and_execute_with_quantize()`** exposed in Rust.
 - Existing `DAGExecutor` / packed layer APIs remain available for backward compatibility.
+- **Error handling** — All Python ops now return `PyResult<PyTensor>` with `catch_unwind`, preventing Python process crashes on AOT compilation/execution failures. Previously, a failed `.expect()` in a tensor op would abort the Python process.
+
+### Backward Fusion
+
+The v2.1.0 release introduces **backward graph fusion** that eliminates intermediate allocations in the backward pass:
+
+- **BackwardReluMatMul** — Detects `Mul(dRelu) + Transpose(b) + MatMul(da) + Transpose(a) + MatMul(db)` chains in backward graphs and replaces them with two fused backward MatMul nodes (one for da, one for db).
+- **BackwardMatMulAddRelu** — Identifies the `ReduceSum(dbias)` step in the MatMulAddRelu backward chain and marks it for fused execution.
+- **Effect** — 3 intermediate allocations eliminated per fused backward chain (dRelu tensor, b^T tensor, a^T tensor).
+
+### Error Handling
+
+- **`try_*` API** — Every tensor operation now has a `try_*` variant returning `Result<Tensor, BackendError>`:
+  `try_add`, `try_sub`, `try_mul`, `try_div`, `try_matmul`, `try_neg`, `try_relu`, `try_exp`, `try_ln`, `try_sigmoid`, `try_tanh`, `try_silu`, `try_gelu`, `try_leaky_relu`, `try_softplus`, `try_hardswish`, `try_mish`, `try_elu`, `try_softmax`, `try_sqrt`, `try_clamp`, `try_pow`, `try_abs`, `try_log_softmax`, `try_erf`.
+- Panicking variants (`.add()`, `.sub()`, etc.) now delegate to their `try_*` counterparts.
+- Python bridge uses `catch_unwind` on all ops — AOT failures produce a Python `RuntimeError` instead of aborting the process.
+
+### CLI Binary
+
+A standalone **`fastnn-runtime`** binary for deploying pre-compiled plans without the compiler stack:
+
+```
+cargo build --bin fastnn-runtime --features cli
+fastnn-runtime info plan.fnnc memory.json
+fastnn-runtime run plan.fnnc memory.json input0.bin input1.bin output.bin
+fastnn-runtime bench plan.fnnc memory.json input0.bin input1.bin
+```
+
+- Feature-gated behind `cli` (opt-in, not in default features).
+- Subcommands: `info` (inspect plan), `run` (execute), `bench` (latency/throughput).
 
 ---
 
@@ -278,6 +308,11 @@ let results = executor.execute(&graph, &plan, &mem, &[&input_bytes])?;
 | `neon`        | ARM NEON SIMD kernels for packed GEMV (aarch64)   | on      |
 | `parallel`    | Rayon multi-threaded parallelism                  | on      |
 | `simd-avx512` | AVX-512 kernels (requires AVX-512 CPU)            | on      |
+| `fusion-forward` | Enable forward operator fusion passes          | on      |
+| `fusion-op-relu` | Op+Relu fusion pass                            | on      |
+| `fusion-matmul-add-relu` | MatMul+BiasAdd+Relu fusion pass       | on      |
+| `fusion-backward` | Enable backward operator fusion passes         | off     |
+| `cli`         | Standalone runtime binary (`fastnn-runtime`)       | off     |
 | `openblas`    | Link against OpenBLAS for large matmul            | off     |
 | `blas`        | BLAS-accelerated matmul (requires system cblas)   | off     |
 
@@ -308,7 +343,8 @@ uv run pytest tests/ -v
 - [x] v1.2 — Fused kernels (Conv+BN+Activation, LayerNorm+GELU), ONNX import, YOLO support
 - [x] v1.3 — Packed precision expansion, quantized ONNX, fused packed layers, batch GEMM, ARM NEON, WGPU packed conv
 - [x] **v2.0** — AOT compiler pipeline, IR-based execution, native U4/U8 quantization, operator fusion, memory planning
-- [ ] v2.1 — Training through the IR pipeline, WGPU packed shaders, ONNX quantized op exporters (QLinearMatMul, QLinearConv)
+- [x] **v2.1** — Modular fusion passes (forward + backward), shape specialization (runtime `tighten()`), CLI binary, error handling (`try_*` API + `PyResult` bridge), backward fusion pattern matching
+- [ ] v2.2 — Training through the IR pipeline, WGPU packed shaders, ONNX quantized op exporters (QLinearMatMul, QLinearConv)
 - [ ] FlashAttention SIMD optimization (AVX2/AVX512 block kernels)
 - [ ] Raspberry Pi benchmark suite (ARM NEON validation)
 - [ ] Multi-GPU training via wgpu

@@ -1,56 +1,76 @@
 # Changelog
 
-## v2.1.0 — Multi-Threaded Dispatch, Serialization, ONNX Export & Runtime
+## v2.1.0 — Modular Fusion, Shape Specialization, CLI Runtime & Error Handling
 
-This release adds multi-threaded CPU dispatch (40+ kernels parallelized via rayon),
-plan/graph serialization (save/load compiled models), ONNX export, and a standalone
-runtime for deploying pre-compiled models without the compiler stack.
+This release completes the v2.x compiler pipeline with modular fusion passes (forward + backward),
+runtime shape specialization, a standalone CLI binary, and comprehensive error handling
+throughout the Rust and Python APIs.
 
-### Multi-Threaded Dispatch (Phase 4b)
+### Modular Fusion Pass System
 
-- **40+ CPU kernels parallelized** using `rayon::par_iter_mut()` and `par_chunks_mut()`
-  under the `parallel` feature flag (enabled by default)
-- **MatMul, fused MatMul+ReLU, all elementwise ops, reduce, transpose, activations,
-  and optimizers** now use all available CPU cores
-- **BLAS threshold tuned** — crossover raised from 32 to 16384 when parallelism is
-  enabled (parallel scalar handles medium matrices competitively)
-- **Softmax and layer norm** parallelized per-row using safe raw-pointer dispatch
-- **rayon made optional** — tied to the `parallel` feature for minimal builds
+- **`FusionPass` trait** — Each forward/backward pattern is an independent module implementing
+  `FusionPass`, composed at compile time via Cargo feature gates.
+- **Forward fusion refactored** — OpRelu and MatMulAddRelu passes extracted into dedicated
+  modules (`fusion/op_relu.rs`, `fusion/matmul_add_relu.rs`).
+- **Backward fusion passes** — `BackwardReluMatMul` and `BackwardMatMulAddRelu` with actual
+  pattern matching (was stubs returning `Ok(false)`):
+  - Detects `Mul(dRelu) + Transpose(b) + MatMul(da) + Transpose(a) + MatMul(db)` chains
+  - Replaces with two fused backward MatMul nodes, eliminating 3 intermediate allocations
+- **Cargo.toml feature flags**: `fusion-forward` (default), `fusion-op-relu`, `fusion-matmul-add-relu`,
+  `fusion-backward` — each pass independently compilable in/out.
+- **Pass ordering fix**: MatMulAddRelu fusion must run before OpRelu in the fixpoint loop — 
+  otherwise OpRelu greedily fuses BiasAdd→Relu and prevents the more specific MatMulAddRelu.
 
-### Backward Gradient Formula Fixes
+### Backward Gradient Correctness Fix
 
-- **ReduceSum/ReduceMean** — now scale by the incoming gradient (`grad_id`) instead
-  of ignoring it; `ReduceMean` n-factor correctly computed as `input_numel / output_numel`
-- **MulScalar backward** — proper `da = dy * b, db = dy * a` (was pass-through)
-- **GradientScale backward** — output type uses the actual input shape (not empty scalar)
+- **Critical bug fix**: `build_backward_graph` now checks `node.attrs["fused_op"]` on MatMul/BiasAdd
+  nodes. Chains `Mul(grad, fwd_output)` (dRelu) before weight/dbias backward when `fused_op` is
+  `"OpRelu"` or `"MatMulAddRelu"`. Without this fix, fused forward graphs silently computed
+  wrong gradients.
 
-### Memory Planner Fixes
+### Shape Specialization
 
-- **Input node lifetime** starts at position 0 (not the node's topological position),
-  preventing Constants/intermediates from reusing Input slots prematurely
-- **find_best_fit refactored** — returns `(index, offset)` tuple; free-list mutation
-  moved to caller for proper alignment tracking
+- **Runtime `tighten()` integration**: `GraphExecutor::execute()` now calls
+  `memory_plan.tighten(graph, &shape_env)` then `self.backend.compile(graph, &tightened_memory_plan)`,
+  shrinking arena from worst-case SYMBOL_DIM_MAX (16 GB+) to actual input sizes (40 KB for
+  dynamic test shapes).
+- All 122 library tests pass in 0.01s (was 100s+ before tighten integration).
 
-### Optimizer Kernel Fix
+### Error Handling
 
-- **All 5 optimizer kernels** — fixed to read weight values from `input_slices[0]`
-  (the weight's slot) instead of `out_start..out_end` (the output slot), which
-  contained stale/uninitialized data from arena reuse
+- **`try_*` API for tensor ops**: Every operation now has a `try_*` variant returning
+  `Result<Tensor, BackendError>`: `try_add`, `try_sub`, `try_mul`, `try_div`, `try_matmul`,
+  `try_neg`, `try_relu`, `try_exp`, `try_ln`, `try_sigmoid`, `try_tanh`, `try_silu`, `try_gelu`,
+  `try_leaky_relu`, `try_softplus`, `try_hardswish`, `try_mish`, `try_elu`, `try_softmax`,
+  `try_sqrt`, `try_clamp`, `try_pow`, `try_abs`, `try_log_softmax`, `try_erf`.
+- Panicking variants (`add()`, `sub()`, etc.) delegate to `try_*` via `.expect()`.
+- **Python bridge error handling**: All `#[pyfunction]` ops return `PyResult<PyTensor>` (was
+  `PyTensor`), using `std::panic::catch_unwind` to convert panics to `PyRuntimeError`.
+  Previously, a failed `.expect()` in a tensor op would abort the Python process.
 
-### Serialization & Export
+### CLI Binary
 
-- **ExecutablePlan save/load** — binary format via bincode (`save()`, `load()`)
-- **ComputeGraph save/load** — `.fnn` binary format via bincode (`save_fnn()`, `load_fnn()`)
-- **ONNX export** — walk ComputeGraph → ONNX JSON (`export_to_onnx_json()`,
-  `export_to_onnx_file()`), maps 30+ IR opcodes, exports weights
-- **Standalone runtime** — `Runtime<B: Backend>` loads pre-compiled plans and
-  executes without the compiler stack (`load()`, `save()`, `run()`)
+- **`fastnn-runtime`**: Standalone binary for deploying pre-compiled plans without the
+  compiler stack. Subcommands: `info` (inspect .fnnc + .memory.json), `run` (execute with
+  file I/O), `bench` (warmup + timed iterations, reports avg latency/throughput).
+- Feature-gated behind `cli` (opt-in, not in default features) — avoids pulling `clap`
+  dependency for library-only users.
 
-### Build System
+### Additional Changes
 
-- Updated `pyproject.toml` version to 2.1.0
-- Removed `pip>=26.0.1` from runtime dependencies
-- Moved `torch>=2.11.0` to optional extras
+- **`Tensor::add` refactored**: Split into `try_add() -> Result<Tensor, BackendError>`
+  (public) and `add() -> Tensor` (calls `try_add().expect(...)`).
+- **Build system**: `[[bin]]` for `fastnn-runtime` with `required-features = ["cli"]`.
+- **All 140 tests pass**: 122 library + 10 quantized_pipeline + 8 optim_test.
+- **Zero new clippy warnings**.
+
+### New Files
+
+- `src/compiler/passes/fusion/mod.rs` — FusionPass trait + cf-gated apply helpers
+- `src/compiler/passes/fusion/op_relu.rs` — OpRelu forward fusion pass
+- `src/compiler/passes/fusion/matmul_add_relu.rs` — MatMulAddRelu forward fusion pass
+- `src/compiler/passes/fusion/backward.rs` — BackwardReluMatMul + BackwardMatMulAddRelu passes
+- `src/bin/runtime.rs` — CLI runtime binary with info/run/bench subcommands
 
 ## v2.0.0 — AOT Compiler Pipeline & Native Quantization
 
@@ -105,7 +125,7 @@ This is a major release that replaces the legacy DAG/layer dispatch architecture
 
 ---
 
-## v2.1.0 — ONNX Expansion, GPU Quantized Dispatch & Multi-Output IR
+### Additional v2.1.0 Changes (ONNX Expansion, GPU Quantized Dispatch & Multi-Output IR)
 
 ### Added
 

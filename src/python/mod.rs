@@ -88,6 +88,7 @@ include!("ops.rs");
 include!("nn.rs");
 include!("optim.rs");
 include!("io.rs");
+include!("trainer.rs");
 #[pymodule]
 pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Set OpenBLAS and OMP to single-threaded mode by default for optimal
@@ -223,8 +224,11 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AotExecutor>()?;
 
     m.add_class::<PyTensor>()?;
+    m.add_class::<PyCompiledTrainingModel>()?;
 
     m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
+
+    m.add_function(wrap_pyfunction!(compile_train_model, py)?)?;
     m.add_function(wrap_pyfunction!(cat, py)?)?;
     m.add_function(wrap_pyfunction!(stack, py)?)?;
     m.add_function(wrap_pyfunction!(where_, py)?)?;
