@@ -909,14 +909,11 @@ fn flash_attention(
     let k_inner = k.inner.clone();
     let v_inner = v.inner.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let scale_val = scale.unwrap_or((q_inner.shape()[3] as f32).sqrt().recip());
-        let scale_t = Tensor::from_scalar(scale_val);
-        let ndim = k_inner.ndim();
-        let k_t = k_inner.transpose(ndim - 2, ndim - 1);
-        let scores = q_inner.matmul(&k_t) * scale_t;
-        let attn = scores.softmax(-1);
-        let result = attn.matmul(&v_inner);
-        PyTensor::from_tensor(result)
+        PyTensor::from_tensor(
+            crate::backend::cpu::flash_attn::flash_attention(
+                &q_inner, &k_inner, &v_inner, scale, causal.unwrap_or(false),
+            )
+        )
     }));
     result.map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("flash_attention operation failed"))
 }

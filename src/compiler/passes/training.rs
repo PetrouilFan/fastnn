@@ -1,11 +1,12 @@
-#![allow(dead_code)]
-
 use crate::ir::node::*;
 use std::collections::HashMap;
 
 pub enum OptimizerConfig {
     SGD { lr: f32, weight_decay: f32 },
     AdamW { lr: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32 },
+    Muon { lr: f32, beta1: f32, weight_decay: f32 },
+    Lion { lr: f32, beta1: f32, beta2: f32 },
+    RMSprop { lr: f32, beta: f32, eps: f32 },
 }
 
 pub struct TrainConfig {
@@ -160,6 +161,162 @@ pub fn inject_optimizer(
 
                 updated_param_nodes.push(adamw_id);
                 state_input_nodes.push(vec![m_id, v_id]);
+            }
+            OptimizerConfig::Muon { lr, beta1, weight_decay } => {
+                let m_id = graph.add_node(
+                    Opcode::Input,
+                    vec![],
+                    TensorType {
+                        shape: param_type.shape.clone(),
+                        dtype: param_type.dtype.clone(),
+                    },
+                );
+                if let Some(node) = graph.get_node_mut(m_id) {
+                    node.name = format!("optimizer/m_{}", param_name);
+                }
+
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*lr)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*beta1)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*weight_decay)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+
+                let mut attrs = HashMap::new();
+                attrs.insert("lr".to_string(), lr.to_string());
+                attrs.insert("beta1".to_string(), beta1.to_string());
+                attrs.insert("weight_decay".to_string(), weight_decay.to_string());
+                let muon_id = graph.add_node_with_attrs(
+                    Opcode::MuonUpdate,
+                    vec![param_id, grad_id, m_id],
+                    param_type,
+                    attrs,
+                );
+
+                updated_param_nodes.push(muon_id);
+                state_input_nodes.push(vec![m_id]);
+            }
+            OptimizerConfig::Lion { lr, beta1, beta2 } => {
+                let m_id = graph.add_node(
+                    Opcode::Input,
+                    vec![],
+                    TensorType {
+                        shape: param_type.shape.clone(),
+                        dtype: param_type.dtype.clone(),
+                    },
+                );
+                if let Some(node) = graph.get_node_mut(m_id) {
+                    node.name = format!("optimizer/m_{}", param_name);
+                }
+
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*lr)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*beta1)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*beta2)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+
+                let mut attrs = HashMap::new();
+                attrs.insert("lr".to_string(), lr.to_string());
+                attrs.insert("beta1".to_string(), beta1.to_string());
+                attrs.insert("beta2".to_string(), beta2.to_string());
+                let lion_id = graph.add_node_with_attrs(
+                    Opcode::LionUpdate,
+                    vec![param_id, grad_id, m_id],
+                    param_type,
+                    attrs,
+                );
+
+                updated_param_nodes.push(lion_id);
+                state_input_nodes.push(vec![m_id]);
+            }
+            OptimizerConfig::RMSprop { lr, beta, eps } => {
+                let v_id = graph.add_node(
+                    Opcode::Input,
+                    vec![],
+                    TensorType {
+                        shape: param_type.shape.clone(),
+                        dtype: param_type.dtype.clone(),
+                    },
+                );
+                if let Some(node) = graph.get_node_mut(v_id) {
+                    node.name = format!("optimizer/v_{}", param_name);
+                }
+
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*lr)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*beta)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+                graph.add_node(
+                    Opcode::Constant(TensorValue::Float(*eps)),
+                    vec![],
+                    TensorType {
+                        shape: vec![DimExpr::Known(1)],
+                        dtype: IrDType::F32,
+                    },
+                );
+
+                let mut attrs = HashMap::new();
+                attrs.insert("lr".to_string(), lr.to_string());
+                attrs.insert("beta".to_string(), beta.to_string());
+                attrs.insert("eps".to_string(), eps.to_string());
+                let rmsprop_id = graph.add_node_with_attrs(
+                    Opcode::RmspropUpdate,
+                    vec![param_id, grad_id, v_id],
+                    param_type,
+                    attrs,
+                );
+
+                updated_param_nodes.push(rmsprop_id);
+                state_input_nodes.push(vec![v_id]);
             }
         }
     }

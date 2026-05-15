@@ -128,7 +128,7 @@ impl<B: Backend> GraphExecutor<B> {
     pub fn execute(
         &self,
         graph: &ComputeGraph,
-        plan: &ExecutablePlan,
+        _plan: &ExecutablePlan,
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
@@ -173,6 +173,7 @@ impl<B: Backend> GraphExecutor<B> {
         }
 
         // Allocate tightened arena
+        eprintln!("[FNN_DBG_EXEC] Arena size={}", tightened_plan.arena_size);
         let arena = self.backend.allocate_arena(tightened_plan.arena_size);
 
         // Write input data into the arena at tightened input slots
@@ -198,9 +199,66 @@ impl<B: Backend> GraphExecutor<B> {
         // Dispatch the tightened plan
         self.backend.dispatch(&tightened_plan, &arena, &shape_env)?;
 
+        // Dump ALL slots sorted by offset
+        {
+            let mut all: Vec<_> = tightened_memory_plan.slots.iter()
+                .map(|(&nid, s)| (s.offset, s.size, nid, false, graph.get_node(nid).map(|n| format!("{:?}", n.opcode)).unwrap_or_default()))
+                .collect();
+            for (&(nid, _), s) in &tightened_memory_plan.secondary_slots {
+                all.push((s.offset, s.size, nid, true, graph.get_node(nid).map(|n| format!("{:?}", n.opcode)).unwrap_or_default()));
+            }
+            all.sort_by_key(|(off, _, _, _, _)| *off);
+            // Only show slots near MaxPool regions
+            let maxpool_off: Vec<usize> = tightened_memory_plan.slots.iter()
+                .filter(|(&nid, _)| graph.get_node(nid).map(|n| matches!(n.opcode, Opcode::MaxPool)).unwrap_or(false))
+                .map(|(_, s)| s.offset)
+                .collect();
+            for &(off, sz, nid, is_sec, ref op) in &all {
+                let near = maxpool_off.iter().any(|&mp_off| {
+                    let dist = if off >= mp_off { off - mp_off } else { mp_off - off };
+                    dist < 2000000  // within 2MB
+                });
+                if near || matches!(op.as_str(), "MaxPool" | "Concat" | "BiasAdd" | "Mul" if op == "Mul" && sz > 100000) {
+                    eprintln!("[FNN_DBG_SLOT] nid={} {:10} {}off={} sz={}",
+                        nid, op, if is_sec { "SEC " } else { "    " }, off, sz);
+                }
+            }
+        }
+        let mut all_slots: Vec<(usize, usize, NodeId, bool)> = Vec::new();
+        for (&nid, slot) in &tightened_memory_plan.slots {
+            all_slots.push((slot.offset, slot.size, nid, false));
+        }
+        for (&(nid, _), slot) in &tightened_memory_plan.secondary_slots {
+            all_slots.push((slot.offset, slot.size, nid, true));
+        }
+        all_slots.sort_by_key(|(off, _, _, _)| *off);
+        
+        // Find if any slot overlaps with MaxPool primary slots
+        let maxpool_primary: Vec<(usize, usize, NodeId)> = tightened_memory_plan.slots.iter()
+            .filter(|(&nid, _)| graph.get_node(nid).map(|n| matches!(n.opcode, Opcode::MaxPool)).unwrap_or(false))
+            .map(|(&nid, slot)| (slot.offset, slot.size, nid))
+            .collect();
+        
+        for &(mp_off, mp_sz, mp_nid) in &maxpool_primary {
+            let mp_end = mp_off + mp_sz;
+            for &(slot_off, slot_sz, slot_nid, is_sec) in &all_slots {
+                let slot_end = slot_off + slot_sz;
+                // Check if this slot overlaps with the MaxPool primary (excluding the MaxPool's own secondary)
+                if slot_nid == mp_nid { continue; }
+                let overlap = slot_off < mp_end && mp_off < slot_end;
+                if overlap {
+                    let op = graph.get_node(slot_nid).map(|n| format!("{:?}", n.opcode)).unwrap_or_default();
+                    let mp_op = graph.get_node(mp_nid).map(|n| format!("{:?}", n.opcode)).unwrap_or_default();
+                    eprintln!("[FNN_DBG_OVERLAP] MaxPool {} nid={} [{}, {}) overlaps with {} nid={}{} [{}, {})",
+                        mp_op, mp_nid, mp_off, mp_end,
+                        op, slot_nid, if is_sec { " SECONDARY" } else { "" }, slot_off, slot_end);
+                }
+            }
+        }
+
         // Read output data — compute actual sizes via shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
-        for &output_node_id in &graph.outputs {
+        for (out_idx, &output_node_id) in graph.outputs.iter().enumerate() {
             let slot = tightened_memory_plan.slots.get(&output_node_id).ok_or_else(|| {
                 BackendError::Dispatch(format!(
                     "no memory slot for output node {}",
@@ -208,23 +266,34 @@ impl<B: Backend> GraphExecutor<B> {
                 ))
             })?;
 
-            let actual_size = if let Some(node) = graph.get_node(output_node_id) {
+            let (actual_size, resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
                 let resolved_shape = resolve_shape(&node.output_type.shape, &shape_env)
                     .map_err(|e| BackendError::Dispatch(format!(
                         "output node {}: {e}", output_node_id
                     )))?;
                 let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-                match &node.output_type.dtype {
+                let computed = match &node.output_type.dtype {
                     IrDType::U4 { .. } | IrDType::U8 { .. } => {
                         node.output_type.dtype.packed_byte_size(actual_numel)
                     }
                     _ => actual_numel * node.output_type.dtype.byte_size(),
-                }
+                };
+                (computed, resolved_shape)
             } else {
-                slot.size
+                (slot.size, vec![])
             };
 
             let data = self.backend.read_arena(&arena, slot.offset, actual_size);
+            // Debug: log first f32 value for MaxPool outputs
+            if actual_size >= 4 {
+                let first_bytes: [u8; 4] = data[..4].try_into().unwrap_or([0; 4]);
+                let first = f32::from_le_bytes(first_bytes);
+                let opcode_str = graph.get_node(output_node_id)
+                    .map(|n| format!("{:?}", n.opcode))
+                    .unwrap_or_else(|| "?".to_string());
+                eprintln!("[FNN_DBG_EXEC] out[{}] nid={} op={:?} off={} sz={} shape={:?} first_f32={}",
+                    out_idx, output_node_id, opcode_str, slot.offset, actual_size, resolved_shape, first);
+            }
             outputs.push(data);
         }
 

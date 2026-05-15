@@ -26,7 +26,8 @@ FastNN provides:
 - [Models](models.md) - Pre-built model architectures
 - [IO & Serialization](io.md) - Saving and loading models
 - [API Reference](api-reference.md) - Complete API documentation
-- [Architecture](architecture.md) - v2.0 AOT compiler pipeline overview
+- [Python API](python-api.md) - Compiled training, FlashAttention, and WGPU Python API (v2.2)
+- [Architecture](architecture.md) - AOT compiler pipeline overview
 - [Development Architecture](development.md) - Internal module layout and contribution workflow
 - [Performance Roadmap](performance-roadmap.md) - GPU, fusion, optimizer, and packed precision roadmap
 

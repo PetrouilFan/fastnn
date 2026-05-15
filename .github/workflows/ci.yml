@@ -96,6 +96,36 @@ jobs:
         fi
         exit $EXIT_CODE
 
+  aarch64:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Install aarch64 target and cross-compiler
+      run: |
+        rustup target add aarch64-unknown-linux-gnu
+        sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+    - name: Build for aarch64 (no NEON)
+      run: cargo build --target aarch64-unknown-linux-gnu
+    - name: Build for aarch64 (with NEON)
+      run: cargo build --target aarch64-unknown-linux-gnu --features neon
+    - name: Build for aarch64 (all features)
+      run: cargo build --target aarch64-unknown-linux-gnu --features "neon,simd,parallel,fusion-forward,fusion-backward,fusion-residual-add-norm"
+
+  raspberry-pi:
+    runs-on: [self-hosted, linux, arm64]
+    if: github.repository_owner == 'PetrouilFan' && false
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build and test on Raspberry Pi
+      run: |
+        cargo test --features "neon,simd,parallel" -- --test-threads=2
+    - name: Run benchmarks
+      run: |
+        cargo bench --features neon
+
   coverage:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest

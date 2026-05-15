@@ -39,6 +39,7 @@ The fusion pass scans the `ComputeGraph` for adjacent ops that can be merged:
 | `Conv2d → Add` | `FusedConv2dAdd` |
 | `FusedMatMulAdd → ReLU` | `FusedMatMulAddRelu` |
 | `FusedConv2dAdd → ReLU` | `FusedConv2dAddRelu` |
+| `Residual → Add → LayerNorm` | `FusedResidualAddNorm` (v2.2) |
 
 Fusion eliminates intermediate tensor materialization and reduces kernel launch overhead.
 
@@ -55,7 +56,7 @@ A greedy first-fit arena allocator with live-range analysis assigns each tensor 
 Each `IRNode` is mapped to a concrete backend implementation:
 
 - **CpuBackend** — handles all opcodes including quantized `matmul_u4`, `matmul_u8`, `conv2d_u4`, `conv2d_u8`
-- **WgpuBackend** — handles `f32` ops but returns `UnsupportedOp` for quantized opcodes, causing fallback to CPU
+- **WgpuBackend** — handles `f32` ops and U4/U8 quantized ops via WGSL compute shaders (since v2.2)
 
 Both backends receive an `ExecutablePlan` with pre-planned arena offsets, eliminating runtime allocation.
 

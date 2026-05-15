@@ -11,6 +11,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::Ordering;
 
 pub mod blas;
+pub mod flash_attn;
 pub mod im2col;
 pub mod microkernels;
 pub mod reductions_fast;
@@ -525,33 +526,31 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
-                Opcode::MaxPool => {
+                Opcode::MaxPool | Opcode::AvgPool => {
                     let kernel_size: usize = node.attrs.get("kernel_size").and_then(|k| k.parse().ok()).unwrap_or(2);
                     let stride: usize = node.attrs.get("stride").and_then(|s| s.parse().ok()).unwrap_or(2);
                     let padding: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
-                    let secondary_output_slice = memory_plan.secondary_slots.get(&(node_id, 1)).map(|slot| {
-                        BufferSlice::new(slot.offset, slot.size)
-                    });
+                    let is_max = if matches!(node.opcode, Opcode::MaxPool) { 1 } else { 0 };
+                    let secondary_output_slice = if is_max == 1 {
+                        memory_plan.secondary_slots.get(&(node_id, 1)).map(|slot| {
+                            BufferSlice::new(slot.offset, slot.size)
+                        })
+                    } else {
+                        None
+                    };
+                    // Pass explicit input dims so pool_f32 doesn't need to
+                    // infer N,C,H,W from flat element counts (ambiguous).
+                    let input_n = input_shapes.first().and_then(|s| s.get(0).copied()).unwrap_or(1) as usize;
+                    let input_c = input_shapes.first().and_then(|s| s.get(1).copied()).unwrap_or(1) as usize;
+                    let input_h = input_shapes.first().and_then(|s| s.get(2).copied()).unwrap_or(0) as usize;
+                    let input_w = input_shapes.first().and_then(|s| s.get(3).copied()).unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "pool_f32".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice,
-                        params: vec![kernel_size, stride, padding, 1],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
-                }
-                Opcode::AvgPool => {
-                    let kernel_size: usize = node.attrs.get("kernel_size").and_then(|k| k.parse().ok()).unwrap_or(2);
-                    let stride: usize = node.attrs.get("stride").and_then(|s| s.parse().ok()).unwrap_or(2);
-                    let padding: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
-                    instructions.push(Instruction::CallKernel {
-                        kernel_name: "pool_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![kernel_size, stride, padding, 0],
+                        // params: [kernel_size, stride, padding, is_max, N, C, H, W]
+                        params: vec![kernel_size, stride, padding, is_max, input_n, input_c, input_h, input_w],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -990,6 +989,48 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                Opcode::MuonUpdate => {
+                    let lr: f32 = node.attrs.get("lr").and_then(|s| s.parse().ok()).unwrap_or(0.01);
+                    let beta1: f32 = node.attrs.get("beta1").and_then(|s| s.parse().ok()).unwrap_or(0.9);
+                    let weight_decay: f32 = node.attrs.get("weight_decay").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "muon_update_f32".to_string(),
+                        input_slices,  // [weight, grad, m]
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![lr.to_bits() as usize, beta1.to_bits() as usize, weight_decay.to_bits() as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::LionUpdate => {
+                    let lr: f32 = node.attrs.get("lr").and_then(|s| s.parse().ok()).unwrap_or(0.001);
+                    let beta1: f32 = node.attrs.get("beta1").and_then(|s| s.parse().ok()).unwrap_or(0.9);
+                    let beta2: f32 = node.attrs.get("beta2").and_then(|s| s.parse().ok()).unwrap_or(0.999);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "lion_update_f32".to_string(),
+                        input_slices,  // [weight, grad, m]
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![lr.to_bits() as usize, beta1.to_bits() as usize, beta2.to_bits() as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::RmspropUpdate => {
+                    let lr: f32 = node.attrs.get("lr").and_then(|s| s.parse().ok()).unwrap_or(0.001);
+                    let beta: f32 = node.attrs.get("beta").and_then(|s| s.parse().ok()).unwrap_or(0.99);
+                    let eps: f32 = node.attrs.get("eps").and_then(|s| s.parse().ok()).unwrap_or(1e-8);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "rmsprop_update_f32".to_string(),
+                        input_slices,  // [weight, grad, v]
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![lr.to_bits() as usize, beta.to_bits() as usize, eps.to_bits() as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
                 Opcode::Shape => {
                     // Write the shape of the input tensor as I64 values.
                     // Resolve input shape at compile time (known dims directly,
@@ -1172,6 +1213,20 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                Opcode::FusedResidualAddNorm => {
+                    let eps: f32 = node.attrs.get("eps").and_then(|s| s.parse().ok()).unwrap_or(1e-5);
+                    let norm_type = node.attrs.get("norm_type").map(|s| s.as_str()).unwrap_or("layer_norm");
+                    let kernel_name = format!("fused_residual_add_{}", norm_type);
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name,
+                        input_slices,  // [residual, main_output, weight, optional_bias]
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![eps.to_bits() as usize],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
                 Opcode::GradientScale => {
                     let scale: f32 = node.attrs.get("scale")
                         .and_then(|s| s.parse().ok())
@@ -1286,7 +1341,30 @@ impl Backend for CpuBackend {
         arena: &CpuBuffer,
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
-        for instr in &plan.instructions {
+        // ── Debug: collect MaxPool primary output ranges ──────────────
+        let maxpool_ranges: Vec<(usize, usize)> = {
+            let mut v = Vec::new();
+            for instr in &plan.instructions {
+                if let Instruction::CallKernel {
+                    kernel_name,
+                    params,
+                    output_slice,
+                    ..
+                } = instr
+                {
+                    if kernel_name == "pool_f32" && params.len() >= 4 && params[3] == 1 {
+                        v.push((output_slice.offset, output_slice.size));
+                    }
+                }
+            }
+            v
+        };
+        // Track: after each MaxPool kernel, snapshot its first f32 value;
+        // after every other instruction, check if any snapshot changed.
+        let mut maxpool_snapshot: Vec<Option<f32>> = vec![None; maxpool_ranges.len()];
+        let mut maxpool_seen: Vec<bool> = vec![false; maxpool_ranges.len()];
+
+        for (instr_idx, instr) in plan.instructions.iter().enumerate() {
             match instr {
                 Instruction::CallKernel {
                     kernel_name,
@@ -2000,7 +2078,7 @@ impl Backend for CpuBackend {
                                     (a_f32, b_f32, bias_f32)
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("fused_matmul_add_relu: expected params [M,K,N]".into())); };
+                                let &[_m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("fused_matmul_add_relu: expected params [M,K,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(
@@ -2008,7 +2086,7 @@ impl Backend for CpuBackend {
                                     )
                                 };
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..m {
+                                { for i in 0.._m {
                                     for j in 0..n {
                                         let mut sum = 0.0f32;
                                         for kk in 0.._k {
@@ -2042,13 +2120,13 @@ impl Backend for CpuBackend {
                                      bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec())
                                 };
                                 let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_relu: expected params [M,K,N]".into())); };
+                                let &[_m, _k, n] = &matmul_params[..] else { return Err(BackendError::Dispatch("matmul_relu: expected params [M,K,N]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 #[cfg(not(feature = "parallel"))]
-                                { for i in 0..m {
+                                { for i in 0.._m {
                                     for j in 0..n {
                                         let mut sum = 0.0f32;
                                         for kk in 0.._k {
@@ -2175,9 +2253,9 @@ impl Backend for CpuBackend {
                                         &mut d[out_start..out_end]
                                     )
                                 };
-                                let num_groups = out_f32.len();
+                                let _num_groups = out_f32.len();
                                 #[cfg(not(feature = "parallel"))]
-                                { for g in 0..num_groups {
+                                { for g in 0.._num_groups {
                                     let mut sum = 0.0f32;
                                     let start = g * effective_group_size;
                                     let end = (start + effective_group_size).min(input.len());
@@ -2731,53 +2809,14 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
                                 };
-                                let &[kernel, stride_val, padding_val, is_max] = &params[..] else { return Err(BackendError::Dispatch("pool_f32: expected params [kernel, stride, padding, is_max]".into())); };
+                                // params: [kernel, stride, padding, is_max, N, C, H, W]
+                                let &[kernel, stride_val, padding_val, is_max, n, c, h, w] = &params[..] else {
+                                    return Err(BackendError::Dispatch("pool_f32: expected params [kernel, stride, padding, is_max, N, C, H, W]".into()));
+                                };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Infer N, C, H, W from sizes
-                                let total_input = input.len();
-                                let total_output = out_f32.len();
-                                let dims = (|| -> Option<(usize,usize,usize,usize)> {
-                                    // Collect all valid (n,c,h,w) factorizations and pick the
-                                    // best one. The first-found heuristic (return Some(...) on first
-                                    // match) is ambiguous — for [1,128,20,20] it would return
-                                    // (1,1,1,51200), treating the 2D image as a flat row.
-                                    //
-                                    // Scoring: (1) minimum |h-w| (balanced spatial dims — typical
-                                    // for images), (2) maximum c (more channels is typical for deep
-                                    // NNs), (3) maximum n (larger batch).
-                                    let mut best: Option<(usize,usize,usize,usize)> = None;
-                                    let mut best_score: (usize, usize, usize) = (usize::MAX, 0, 0);
-                                    for &n in &[1, 2, 4, 8, 16, 32, 64] {
-                                        if total_input % n != 0 || total_output % n != 0 { continue; }
-                                        let c_hw = total_input / n;
-                                        let c_hout_wout = total_output / n;
-                                        for c in 1..=c_hw.min(4096) {
-                                            if c_hw % c != 0 || c_hout_wout % c != 0 { continue; }
-                                            let hw = c_hw / c;
-                                            let hout_wout = c_hout_wout / c;
-                                            if hout_wout == 0 { continue; }
-                                            for h in 1..=hw {
-                                                if hw % h != 0 { continue; }
-                                                let w = hw / h;
-                                                let h_out = (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
-                                                let w_out = (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
-                                                if h_out * w_out == hout_wout && h_out > 0 && w_out > 0 {
-                                                    let imbalance = if h > w { h - w } else { w - h };
-                                                    let score = (imbalance, c, n);
-                                                    if best.is_none() || score < best_score {
-                                                        best_score = score;
-                                                        best = Some((n, c, h, w));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    best
-                                })();
-                                let (n, c, h, w) = dims.ok_or_else(|| BackendError::Dispatch("pool_f32: could not infer dimensions".into()))?;
                                 let h_out = (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                 let w_out = (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                 let mut indices_out: Option<&mut [i64]> = if is_max == 1 {
@@ -2827,6 +2866,11 @@ impl Backend for CpuBackend {
                                                 let out_idx = nn * (c * h_out * w_out) + cc * (h_out * w_out) + hh * w_out + ww;
                                                 if out_idx < out_f32.len() {
                                                     out_f32[out_idx] = val;
+                                                }
+                                                // Debug: log first MaxPool write value
+                                                if nn == 0 && cc == 0 && hh == 0 && ww == 0 {
+                                                    eprintln!("[FNN_DBG_POOL] MaxPool out_start={} wrote={}",
+                                                        out_start, val);
                                                 }
                                                 // Write argmax index if this is max pooling
                                                 if let Some(ref mut idx_out) = indices_out {
@@ -2885,7 +2929,7 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice::<_, f32>(&d[input_slice.offset..input_slice.offset + input_slice.size]).to_vec()
                                 };
-                                let &[dim, start, end, stride] = &params[..] else { return Err(BackendError::Dispatch("slice_f32: expected params [dim, start, end, stride]".into())); };
+                                let &[_dim, start, end, stride] = &params[..] else { return Err(BackendError::Dispatch("slice_f32: expected params [dim, start, end, stride]".into())); };
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -3228,6 +3272,125 @@ impl Backend for CpuBackend {
                                     for i in start..end {
                                         let w = if i - start < weight.len() { weight[i - start] } else { 1.0 };
                                         out_f32[i] = input[i] / rms * w;
+                                    }
+                                }
+                            }
+                        }
+                        "fused_residual_add_layer_norm" => {
+                            let weight = if input_slices.len() >= 3 {
+                                let w_slice = &input_slices[2];
+                                let d = arena.data_mut();
+                                bytemuck::cast_slice::<_, f32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec()
+                            } else { vec![] };
+                            let bias = if input_slices.len() >= 4 {
+                                let b_slice = &input_slices[3];
+                                let d = arena.data_mut();
+                                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]).to_vec()
+                            } else { vec![] };
+                            if let [residual_slice, main_slice] = &input_slices[..2] {
+                                let (residual, main) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[residual_slice.offset..residual_slice.offset + residual_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[main_slice.offset..main_slice.offset + main_slice.size]).to_vec(),
+                                    )
+                                };
+                                let eps = f32::from_bits(params.first().copied().unwrap_or(0) as u32);
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let len = out_f32.len().min(main.len()).min(residual.len());
+                                let row_size = len;
+                                for i in 0..len {
+                                    out_f32[i] = main[i] + residual[i % residual.len()];
+                                }
+                                let num_rows = if row_size > 0 { len / row_size } else { 1 };
+                                let out_addr = out_f32.as_mut_ptr() as usize;
+                                #[cfg(not(feature = "parallel"))]
+                                { for r in 0..num_rows {
+                                    let start = r * row_size;
+                                    let end = (start + row_size).min(len);
+                                    let n = (end - start) as f32;
+                                    let out_ptr = out_addr as *mut f32;
+                                    let mut sum = 0.0f32;
+                                    for i in start..end { unsafe { sum += *out_ptr.add(i); } }
+                                    let mean = sum / n;
+                                    let mut var_sum = 0.0f32;
+                                    for i in start..end { unsafe { let x = *out_ptr.add(i); var_sum += (x - mean).powi(2); } }
+                                    let var = var_sum / n;
+                                    let inv_std = 1.0 / (var + eps).sqrt();
+                                    for i in start..end {
+                                        unsafe {
+                                            let idx = i - start;
+                                            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+                                            let b = if idx < bias.len() { bias[idx] } else { 0.0 };
+                                            *out_ptr.add(i) = (*out_ptr.add(i) - mean) * inv_std * w + b;
+                                        }
+                                    }
+                                } }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    (0..num_rows).into_par_iter().for_each(|r| {
+                                        let start = r * row_size;
+                                        let end = start + row_size;
+                                        let n = row_size as f32;
+                                        let out_ptr = out_addr as *mut f32;
+                                        let mut sum = 0.0f32;
+                                        for i in start..end { unsafe { sum += *out_ptr.add(i); } }
+                                        let mean = sum / n;
+                                        let mut var_sum = 0.0f32;
+                                        for i in start..end { unsafe { let x = *out_ptr.add(i); var_sum += (x - mean).powi(2); } }
+                                        let var = var_sum / n;
+                                        let inv_std = 1.0 / (var + eps).sqrt();
+                                        for i in start..end {
+                                            unsafe {
+                                                let idx = i - start;
+                                                let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+                                                let b = if idx < bias.len() { bias[idx] } else { 0.0 };
+                                                *out_ptr.add(i) = (*out_ptr.add(i) - mean) * inv_std * w + b;
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        "fused_residual_add_rms_norm" => {
+                            let weight = if input_slices.len() >= 3 {
+                                let w_slice = &input_slices[2];
+                                let d = arena.data_mut();
+                                bytemuck::cast_slice::<_, f32>(&d[w_slice.offset..w_slice.offset + w_slice.size]).to_vec()
+                            } else { vec![] };
+                            if let [residual_slice, main_slice] = &input_slices[..2] {
+                                let (residual, main) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(&d[residual_slice.offset..residual_slice.offset + residual_slice.size]).to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(&d[main_slice.offset..main_slice.offset + main_slice.size]).to_vec(),
+                                    )
+                                };
+                                let eps = f32::from_bits(params.first().copied().unwrap_or(0) as u32);
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let len = out_f32.len().min(main.len()).min(residual.len());
+                                for i in 0..len {
+                                    out_f32[i] = main[i] + residual[i % residual.len()];
+                                }
+                                let row_size = len;
+                                let num_rows = if row_size > 0 { len / row_size } else { 1 };
+                                for r in 0..num_rows {
+                                    let start = r * row_size;
+                                    let end = (start + row_size).min(len);
+                                    let mut sq_sum = 0.0f32;
+                                    for i in start..end { sq_sum += out_f32[i] * out_f32[i]; }
+                                    let rms = (sq_sum / (end - start) as f32 + eps).sqrt();
+                                    for i in start..end {
+                                        let idx = i - start;
+                                        let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+                                        out_f32[i] = out_f32[i] / rms * w;
                                     }
                                 }
                             }
@@ -3917,12 +4080,12 @@ impl Backend for CpuBackend {
                             };
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
                             let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                            let len = w_init.len();
+                            let _len = w_init.len();
                             let mut w_new = w_init.clone();
                             let mut m_new = m_init.clone();
                             let mut v_new = v_init.clone();
                             #[cfg(not(feature = "parallel"))]
-                            { for i in 0..len {
+                            { for i in 0.._len {
                                 let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
                                 m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                 v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
@@ -3970,12 +4133,12 @@ impl Backend for CpuBackend {
                             };
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
                             let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                            let len = w_init.len();
+                            let _len = w_init.len();
                             let mut w_new = w_init.clone();
                             let mut m_new = m_init.clone();
                             let mut v_new = v_init.clone();
                             #[cfg(not(feature = "parallel"))]
-                            { for i in 0..len {
+                            { for i in 0.._len {
                                 w_new[i] -= lr * wd * w_init[i];
                                 let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
                                 m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
@@ -4006,6 +4169,116 @@ impl Backend for CpuBackend {
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&m_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).copy_from_slice(&v_new);
+                        }
+                        "muon_update_f32" => {
+                            let (w_init, grad, m_init, lr, beta1, wd) = {
+                                let d = arena.data_mut();
+                                let d_ref: &[u8] = &*d;
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).to_vec();
+                                let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
+                                let m_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).to_vec();
+                                let lr = f32::from_bits(params[0] as u32);
+                                let beta1 = f32::from_bits(params[1] as u32);
+                                let wd = f32::from_bits(params[2] as u32);
+                                (w_init, grad, m_init, lr, beta1, wd)
+                            };
+                            let mut w_new = w_init.clone();
+                            let mut m_new = m_init.clone();
+                            #[cfg(not(feature = "parallel"))]
+                            { for i in 0..w_init.len() {
+                                let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                w_new[i] = w_init[i] - lr * (m_new[i] + wd * w_init[i]);
+                            } }
+                            #[cfg(feature = "parallel")]
+                            {
+                                use rayon::prelude::*;
+                                (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
+                                    .enumerate()
+                                    .for_each(|(i, (w, m))| {
+                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                        *m = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                        *w = w_init[i] - lr * (*m + wd * w_init[i]);
+                                    });
+                            }
+                            let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&m_new);
+                        }
+                        "lion_update_f32" => {
+                            let (w_init, m_init, grad, lr, beta1, beta2) = {
+                                let d = arena.data_mut();
+                                let d_ref: &[u8] = &*d;
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).to_vec();
+                                let m_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).to_vec();
+                                let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
+                                let lr = f32::from_bits(params[0] as u32);
+                                let beta1 = f32::from_bits(params[1] as u32);
+                                let beta2 = f32::from_bits(params[2] as u32);
+                                (w_init, m_init, grad, lr, beta1, beta2)
+                            };
+                            let mut w_new = w_init.clone();
+                            let mut m_new = m_init.clone();
+                            #[cfg(not(feature = "parallel"))]
+                            { for i in 0..w_init.len() {
+                                let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                m_new[i] = beta2 * m_init[i] + (1.0 - beta2) * g;
+                                let update = beta1 * m_new[i] + (1.0 - beta1) * g;
+                                w_new[i] -= lr * update.signum();
+                            } }
+                            #[cfg(feature = "parallel")]
+                            {
+                                use rayon::prelude::*;
+                                (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
+                                    .enumerate()
+                                    .for_each(|(i, (w, m))| {
+                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                        *m = beta2 * m_init[i] + (1.0 - beta2) * g;
+                                        let update = beta1 * *m + (1.0 - beta1) * g;
+                                        *w -= lr * update.signum();
+                                    });
+                            }
+                            let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&m_new);
+                        }
+                        "rmsprop_update_f32" => {
+                            let (w_init, v_init, grad, lr, beta, eps) = {
+                                let d = arena.data_mut();
+                                let d_ref: &[u8] = &*d;
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).to_vec();
+                                let v_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).to_vec();
+                                let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
+                                let lr = f32::from_bits(params[0] as u32);
+                                let beta = f32::from_bits(params[1] as u32);
+                                let eps = f32::from_bits(params[2] as u32);
+                                (w_init, v_init, grad, lr, beta, eps)
+                            };
+                            let mut w_new = w_init.clone();
+                            let mut v_new = v_init.clone();
+                            #[cfg(not(feature = "parallel"))]
+                            { for i in 0..w_init.len() {
+                                let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                v_new[i] = beta * v_init[i] + (1.0 - beta) * g * g;
+                                w_new[i] -= lr * g / (v_new[i].sqrt() + eps);
+                            } }
+                            #[cfg(feature = "parallel")]
+                            {
+                                use rayon::prelude::*;
+                                (w_new.par_iter_mut().zip(v_new.par_iter_mut()))
+                                    .enumerate()
+                                    .for_each(|(i, (w, v))| {
+                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                        *v = beta * v_init[i] + (1.0 - beta) * g * g;
+                                        *w -= lr * g / (v.sqrt() + eps);
+                                    });
+                            }
+                            let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]).copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).copy_from_slice(&v_new);
                         }
                         // ── F16 state optimizer kernels ──────────────
                         // m and v are stored as F16 (2 bytes/elem), w and grad are F32 (4 bytes/elem).
@@ -4618,6 +4891,111 @@ impl Backend for CpuBackend {
                     let arena_data = arena.data_mut();
                     let end = (dst.offset + data.len()).min(arena_data.len());
                     arena_data[dst.offset..end].copy_from_slice(&data[..end - dst.offset]);
+                }
+            }
+
+            // ── Debug: per-instruction MaxPool canary check ──────────
+            // After the current instruction has executed, check whether
+            // any MaxPool primary slot has been overwritten.
+            {
+                let d = arena.data_mut();
+                // Determine if this instruction IS a MaxPool kernel, and
+                // if so, which index in maxpool_ranges it corresponds to.
+                let is_mp_and_idx: Option<usize> = match instr {
+                    Instruction::CallKernel {
+                        kernel_name,
+                        params,
+                        output_slice,
+                        ..
+                    } if kernel_name == "pool_f32" && params.len() >= 4 && params[3] == 1 => {
+                        maxpool_ranges
+                            .iter()
+                            .position(|&(off, _)| off == output_slice.offset)
+                    }
+                    _ => None,
+                };
+
+                if let Some(mp_idx) = is_mp_and_idx {
+                    // This instruction just wrote MaxPool data → snapshot
+                    let (mp_off, mp_sz) = maxpool_ranges[mp_idx];
+                    if mp_sz >= 4 && mp_off + 4 <= d.len() {
+                        let bytes: [u8; 4] =
+                            d[mp_off..mp_off + 4].try_into().unwrap_or([0; 4]);
+                        maxpool_snapshot[mp_idx] = Some(f32::from_le_bytes(bytes));
+                        maxpool_seen[mp_idx] = true;
+                        // Also log the kernel's output_slice for reference
+                        if let Instruction::CallKernel {
+                            kernel_name,
+                            output_slice,
+                            ..
+                        } = instr
+                        {
+                            eprintln!(
+                                "[FNN_DBG_CANARY] MaxPool nid={}: off={} sz={} first_f32={} (AFTER kernel={} out=[{},{})",
+                                mp_idx, mp_off, mp_sz,
+                                maxpool_snapshot[mp_idx].unwrap(),
+                                kernel_name,
+                                output_slice.offset,
+                                output_slice.offset + output_slice.size,
+                            );
+                        }
+                    }
+                } else {
+                    // Not a MaxPool kernel — check if any MaxPool was corrupted
+                    for (mp_idx, &(mp_off, mp_sz)) in maxpool_ranges.iter().enumerate() {
+                        if !maxpool_seen[mp_idx] {
+                            continue; // MaxPool hasn't executed yet
+                        }
+                        if let Some(expected) = maxpool_snapshot[mp_idx] {
+                            if mp_sz >= 4 && mp_off + 4 <= d.len() {
+                                let bytes: [u8; 4] =
+                                    d[mp_off..mp_off + 4].try_into().unwrap_or([0; 4]);
+                                let actual = f32::from_le_bytes(bytes);
+                                if actual.to_bits() != expected.to_bits() {
+                                    let desc = match instr {
+                                        Instruction::CallKernel {
+                                            kernel_name,
+                                            output_slice,
+                                            ..
+                                        } => format!(
+                                            "kernel={} out=[{},{})",
+                                            kernel_name,
+                                            output_slice.offset,
+                                            output_slice.offset + output_slice.size
+                                        ),
+                                        Instruction::MemCopy { dst, src } => {
+                                            format!(
+                                                "MemCopy dst=[{},{}) src=[{},{})",
+                                                dst.offset,
+                                                dst.offset + dst.size,
+                                                src.offset,
+                                                src.offset + src.size
+                                            )
+                                        }
+                                        Instruction::Fill { dst, value } => {
+                                            format!(
+                                                "Fill dst=[{},{}) value={}",
+                                                dst.offset,
+                                                dst.offset + dst.size,
+                                                value
+                                            )
+                                        }
+                                        Instruction::WriteConst { dst, .. } => {
+                                            format!(
+                                                "WriteConst dst=[{},{})",
+                                                dst.offset,
+                                                dst.offset + dst.size
+                                            )
+                                        }
+                                    };
+                                    eprintln!(
+                                        "[FNN_DBG_CORRUPT] MaxPool mp_off={} expected={} actual={} AFTER instr_idx={} {}",
+                                        mp_off, expected, actual, instr_idx, desc
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -225,4 +225,182 @@ mod tests {
         let node_count_2 = graph.node_count();
         assert_eq!(node_count_1, node_count_2, "pass is not idempotent");
     }
+
+    /// Test that Input activations feeding MatMul are skipped (not quantized).
+    #[test]
+    fn test_activation_quantization_skips_input_activations() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        let weight_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
+        );
+        let mm_id = graph.add_node(
+            Opcode::MatMul, vec![input_id, weight_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id, weight_id]);
+        graph.set_outputs(vec![mm_id]);
+
+        shape_inference::infer_shapes(&mut graph).unwrap();
+        quantize_activations(&mut graph).unwrap();
+
+        // The MatMul's activation input (input_id) should NOT have been replaced
+        // since input nodes are skipped
+        let mm_node = graph.get_node(mm_id).unwrap();
+        assert_eq!(
+            mm_node.inputs[0], input_id,
+            "Input activation should not be replaced by QuantizeActivations"
+        );
+    }
+
+    /// Test that Constant activations feeding MatMul are skipped.
+    #[test]
+    fn test_activation_quantization_skips_constant_activations() {
+        let mut graph = ComputeGraph::new();
+        let const_data: Vec<u8> = vec![1u8; 16]; // 4 f32 values
+        let const_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32);
+        let const_id = graph.add_node(
+            Opcode::Constant(crate::ir::node::TensorValue::Data {
+                bytes: const_data,
+                tensor_type: const_tt.clone(),
+            }),
+            vec![],
+            const_tt,
+        );
+        let weight_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
+        );
+        let mm_id = graph.add_node(
+            Opcode::MatMul, vec![const_id, weight_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![weight_id]);
+        graph.set_outputs(vec![mm_id]);
+
+        shape_inference::infer_shapes(&mut graph).unwrap();
+        quantize_activations(&mut graph).unwrap();
+
+        // The MatMul's activation input (const_id) should NOT be replaced
+        let mm_node = graph.get_node(mm_id).unwrap();
+        assert_eq!(
+            mm_node.inputs[0], const_id,
+            "Constant activation should not be replaced by QuantizeActivations"
+        );
+    }
+
+    /// Test that the pass inserts QuantizeActivations/DequantizeActivations
+    /// around MatMul for non-Input, non-Constant activations.
+    #[test]
+    fn test_activation_quantization_inserts_qdq_for_intermediate() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        let weight_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
+        );
+        // First MatMul produces an intermediate activation
+        let mm1_id = graph.add_node(
+            Opcode::MatMul, vec![input_id, weight_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        // Second MatMul consumes the first MatMul's output (intermediate activation)
+        let weight2_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
+        );
+        let mm2_id = graph.add_node(
+            Opcode::MatMul, vec![mm1_id, weight2_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id, weight_id, weight2_id]);
+        graph.set_outputs(vec![mm2_id]);
+
+        shape_inference::infer_shapes(&mut graph).unwrap();
+        quantize_activations(&mut graph).unwrap();
+
+        // The second MatMul's activation input should now be QuantizeActivations
+        let mm2_node = graph.get_node(mm2_id).unwrap();
+        let act_input_id = mm2_node.inputs[0];
+        let act_node = graph.get_node(act_input_id).unwrap();
+        assert_eq!(
+            act_node.opcode,
+            Opcode::QuantizeActivations,
+            "intermediate activation should be quantized"
+        );
+    }
+
+    /// Test that DequantizeActivations is inserted after MatMul when
+    /// there are downstream non-MatMul consumers.
+    #[test]
+    fn test_activation_quantization_downstream_dequantize() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        let weight_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
+        );
+        // Intermediate relu so the MatMul's activation is not an Input (which is skipped)
+        let relu_act_id = graph.add_node(
+            Opcode::Relu, vec![input_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        let mm_id = graph.add_node(
+            Opcode::MatMul, vec![relu_act_id, weight_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        // A Relu consumes the MatMul output (non-MatMul consumer)
+        let relu_id = graph.add_node(
+            Opcode::Relu, vec![mm_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id, weight_id]);
+        graph.set_outputs(vec![mm_id, relu_id]);
+
+        shape_inference::infer_shapes(&mut graph).unwrap();
+        quantize_activations(&mut graph).unwrap();
+
+        // The Relu node should consume DequantizeActivations, not the MatMul directly
+        let relu_node = graph.get_node(relu_id).unwrap();
+        let dq_id = relu_node.inputs[0];
+        let dq_node = graph.get_node(dq_id).unwrap();
+        assert_eq!(
+            dq_node.opcode,
+            Opcode::DequantizeActivations,
+            "downstream non-MatMul consumer should get DequantizeActivations"
+        );
+    }
+
+    /// Test that the pass does nothing on graphs without MatMul.
+    #[test]
+    fn test_activation_quantization_no_matmul() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+        );
+        let relu_id = graph.add_node(
+            Opcode::Relu, vec![input_id],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id]);
+        graph.set_outputs(vec![relu_id]);
+
+        shape_inference::infer_shapes(&mut graph).unwrap();
+        // With no MatMul, the pass should be a no-op (0 new nodes)
+        let node_count_before = graph.node_count();
+        quantize_activations(&mut graph).unwrap();
+        let node_count_after = graph.node_count();
+        assert_eq!(node_count_before, node_count_after);
+    }
 }
