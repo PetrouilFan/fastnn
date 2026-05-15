@@ -23,6 +23,10 @@ pub struct MemoryPlan {
     pub secondary_slots: HashMap<(NodeId, usize), AllocSlot>,
     /// Graph output node IDs, in order.  Populated by [`plan_memory_with_env`].
     pub outputs: Vec<NodeId>,
+    /// Runtime-resolved kernel parameter values (e.g. [M, K, N] for matmul)
+    /// computed by [`tighten`] using the runtime [`ShapeEnv`].  Populated only
+    /// after a call to [`tighten`]; empty at plan-creation time.
+    pub tightened_params: HashMap<NodeId, Vec<usize>>,
 }
 
 impl MemoryPlan {
@@ -192,6 +196,7 @@ pub fn plan_memory_with_env(
             slots: HashMap::new(),
             secondary_slots: HashMap::new(),
             outputs: graph.outputs.clone(),
+            tightened_params: HashMap::new(),
         });
     }
 
@@ -399,5 +404,6 @@ pub fn plan_memory_with_env(
         slots,
         secondary_slots,
         outputs: graph.outputs.clone(),
+        tightened_params: HashMap::new(),
     })
 }
