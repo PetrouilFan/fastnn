@@ -243,12 +243,7 @@ impl<B: Backend> GraphExecutor<B> {
                 .collect();
             for &(off, sz, nid, is_sec, ref op) in &all {
                 let near = maxpool_off.iter().any(|&mp_off| {
-                    let dist = if off >= mp_off {
-                        off - mp_off
-                    } else {
-                        mp_off - off
-                    };
-                    dist < 2000000 // within 2MB
+                    off.abs_diff(mp_off) < 2000000 // within 2MB
                 });
                 if near
                     || matches!(op.as_str(), "MaxPool" | "Concat" | "BiasAdd" | "Mul" if op == "Mul" && sz > 100000)
@@ -388,6 +383,7 @@ impl<B: Backend> GraphExecutor<B> {
     /// `batch_shape_env`: optional concrete shapes for symbolic batch dims. When provided,
     ///   the memory plan is tightened after compilation, shrinking slots from worst-case
     ///   SYMBOL_DIM_MAX to actual sizes. Pass `None` to skip tightening (uses worst-case).
+    #[allow(clippy::too_many_arguments)]
     pub fn compile_train(
         &self,
         forward_graph: &ComputeGraph,
@@ -923,7 +919,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                         // as in_numel / product(concrete_dims).  Validate that
                         // the division is exact.
                         let known_product: u64 = concrete.iter().product();
-                        if known_product == 0 || in_numel % known_product != 0 {
+                        if known_product == 0 || !in_numel.is_multiple_of(known_product) {
                             return Err(format!(
                                 "Reshape node {}: element count {} not divisible by known dims product {} (shape={:?})",
                                 node_id, in_numel, known_product, tokens

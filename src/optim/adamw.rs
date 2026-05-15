@@ -98,7 +98,7 @@ impl Optimizer for AdamW {
             *m = m_update;
 
             // v = beta2 * v + (1 - beta2) * grad^2
-            let grad_sq = grad.pow(2.0);
+            let grad_sq = grad.mul(&grad);
             let v_update = v.mul_scalar(beta2).add(&grad_sq.mul_scalar(beta2_c));
             *v = v_update;
 

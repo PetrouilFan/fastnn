@@ -19,21 +19,12 @@
 use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Options for the auto-cast pass.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AutoCastOptions {
     /// Target bit width for weight quantization (4 or 8). `None` = skip weight quantization.
     pub weight_bit_width: Option<u8>,
     /// Whether to enable INT8 activation quantization.
     pub enable_activation_quant: bool,
-}
-
-impl Default for AutoCastOptions {
-    fn default() -> Self {
-        AutoCastOptions {
-            weight_bit_width: None,
-            enable_activation_quant: false,
-        }
-    }
 }
 
 /// Apply auto-cast transformations to the graph.

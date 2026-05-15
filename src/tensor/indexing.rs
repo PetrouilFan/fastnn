@@ -246,7 +246,7 @@ impl Tensor {
                     edges.push(Edge(node, i));
                 }
             }
-            let inputs = tensors.iter().map(|t| t.clone()).collect();
+            let inputs = tensors.to_vec();
             let backward = Arc::new(autograd::CatBackward::new(edges, inputs));
             Self::attach_grad_fn(output, backward)
         } else {

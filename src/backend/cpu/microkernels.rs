@@ -1297,6 +1297,49 @@ pub fn gemm_packed_batched<T: PackedWord>(
 }
 
 // ============================================================
+// Flat-buffer GEMM (avoids Vec<Vec> allocation storm)
+// ============================================================
+
+#[inline(always)]
+pub fn gemm_cpu_flat<T: PackedWord>(
+    weights: &PackedTensor<T>,
+    batch_inputs: &[f32],
+    outputs: &mut [f32],
+    num_pixels: usize,
+    col_w: usize,
+    oc: usize,
+) {
+    let shape = weights.shape();
+    let m = shape[0];
+    let k = shape[1];
+    let k_packed = k.div_ceil(T::ITEMS);
+
+    with_scratch(k, |unpack_buf| {
+        for row in 0..m {
+            let scale = weights.scale_for_row(row);
+            let zero = weights.zero_for_row(row);
+            let row_offset = row * k_packed;
+            for p in 0..k_packed {
+                let word = weights.as_packed()[row_offset + p];
+                let unpacked = word.unpack_to_f32();
+                let base = p * T::ITEMS;
+                for j in 0..T::ITEMS {
+                    let idx = base + j;
+                    if idx < k {
+                        unpack_buf[idx] = unpacked.as_ref()[j];
+                    }
+                }
+            }
+            for bi in 0..num_pixels {
+                let input = &batch_inputs[bi * col_w..(bi + 1) * col_w];
+                let acc = fma_f32_slice(unpack_buf, input);
+                outputs[bi * oc + row] = acc * scale + zero;
+            }
+        }
+    });
+}
+
+// ============================================================
 // Batch GEMM — K-tiled for cache reuse across batch rows
 // ============================================================
 

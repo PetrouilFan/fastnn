@@ -63,6 +63,7 @@ pub fn flash_attention(
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flash_attention_single(
     q: &[f32],
     k: &[f32],
@@ -75,8 +76,8 @@ fn flash_attention_single(
     causal: bool,
 ) {
     let mut s_buf = vec![0.0f32; TILE_SIZE * TILE_SIZE];
-    let mut m = vec![f32::NEG_INFINITY; TILE_SIZE];
-    let mut l = vec![0.0f32; TILE_SIZE];
+    let mut m = [f32::NEG_INFINITY; TILE_SIZE];
+    let mut l = [0.0f32; TILE_SIZE];
     let mut o_tile = vec![0.0f32; TILE_SIZE * dv];
 
     for q_start in (0..seq_len).step_by(TILE_SIZE) {

@@ -1,4 +1,11 @@
 #![allow(dead_code)]
+#![allow(clippy::shadow_unrelated)]
+#![allow(clippy::let_and_return)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::manual_checked_ops)]
+#![allow(clippy::redundant_locals)]
+#![allow(clippy::get_first)]
+#![allow(clippy::if_same_then_else)]
 
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
@@ -1618,7 +1625,7 @@ impl Backend for CpuBackend {
                         .first()
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
-                    if input_slices.first().is_some() {
+                    if !input_slices.is_empty() {
                         instructions.push(Instruction::CallKernel {
                             kernel_name: "gradient_scale".to_string(),
                             input_slices,

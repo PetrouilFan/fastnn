@@ -122,7 +122,7 @@ fn detect_qlinear_patterns(
         let q_output_id = match consumers.iter().find(|&&cid| {
             graph
                 .get_node(cid)
-                .map_or(false, |c| matches!(c.opcode, Opcode::Quantize))
+                .is_some_and(|c| matches!(c.opcode, Opcode::Quantize))
         }) {
             Some(&id) => id,
             None => continue,
