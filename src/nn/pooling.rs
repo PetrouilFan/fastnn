@@ -221,13 +221,6 @@ pub struct AvgPool2d {
     stride: i64,
     #[allow(dead_code)]
     padding: i64,
-    // Pre-allocated scalar tensors
-    #[allow(dead_code)]
-    kernel_size_scalar: Tensor,
-    #[allow(dead_code)]
-    stride_scalar: Tensor,
-    #[allow(dead_code)]
-    padding_scalar: Tensor,
 }
 
 impl AvgPool2d {
@@ -236,9 +229,6 @@ impl AvgPool2d {
             kernel_size,
             stride,
             padding,
-            kernel_size_scalar: Tensor::from_scalar(kernel_size as f32),
-            stride_scalar: Tensor::from_scalar(stride as f32),
-            padding_scalar: Tensor::from_scalar(padding as f32),
         }
     }
 }

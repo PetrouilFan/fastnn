@@ -381,19 +381,31 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
                 .cloned()
                 .unwrap_or_else(|| "1e-5".to_string());
             let intermediate = format!("t_fused_add_{}", node_id);
+
+            // Add: only the first 2 inputs (x and residual)
             onnx_nodes.push(OnnxExportNode {
                 op_type: "Add".to_string(),
                 name: format!("node_{}_add", node_id),
-                inputs: input_names.join(","),
+                inputs: input_names[..2.min(input_names.len())].join(","),
                 outputs: intermediate.clone(),
                 attrs: HashMap::new(),
             });
+
+            // Norm: intermediate plus optional weight (at index 2)
+            let norm_input = if input_names.len() >= 3 {
+                let mut parts = vec![intermediate];
+                parts.push(input_names[2].clone());
+                parts.join(",")
+            } else {
+                intermediate
+            };
+
             let mut attrs = HashMap::new();
             attrs.insert("epsilon".to_string(), eps);
             onnx_nodes.push(OnnxExportNode {
                 op_type: norm_op.to_string(),
                 name: format!("node_{}", node_id),
-                inputs: intermediate,
+                inputs: norm_input,
                 outputs: output_name.clone(),
                 attrs,
             });

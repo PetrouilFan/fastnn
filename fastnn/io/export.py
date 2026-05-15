@@ -1,5 +1,15 @@
-import torch
-from torch.nn import Sequential, ModuleList, ModuleDict, ParameterList, ParameterDict
+try:
+    import torch
+    from torch.nn import Sequential, ModuleList, ModuleDict, ParameterList, ParameterDict
+    _torch_available = True
+except ImportError:
+    torch = None
+    Sequential = None
+    ModuleList = None
+    ModuleDict = None
+    ParameterList = None
+    ParameterDict = None
+    _torch_available = False
 import json
 import logging
 import struct
@@ -10,9 +20,12 @@ from fastnn.io import write_tensor, read_tensor, MODEL_MAGIC, MODEL_VERSION, rea
 
 logger = logging.getLogger(__name__)
 
-try:
-    from torchvision.models.resnet import BasicBlock
-except ImportError:
+if _torch_available:
+    try:
+        from torchvision.models.resnet import BasicBlock
+    except ImportError:
+        BasicBlock = None
+else:
     BasicBlock = None
 
 # Import fastnn for tensor creation
