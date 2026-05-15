@@ -2825,6 +2825,10 @@ mod tests {
 
     #[test]
     fn test_dynamic_multi_symbol() {
+        // Lower SYMBOL_DIM_MAX to avoid OOM (2 symbolic dims blow up).
+        let prev = crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+        crate::ir::node::SYMBOL_DIM_MAX.store(128, std::sync::atomic::Ordering::Relaxed);
+
         let g = GraphBuilder::new();
         // Input A: [B, T, 64] — two symbolic dims
         // Bias: [B, 1, 128] — shares B, lets us infer B from its data
@@ -2865,6 +2869,9 @@ mod tests {
             "multi-symbol output should be 2*3*128=768 elements, got {}",
             out_f32.len()
         );
+
+        // Restore SYMBOL_DIM_MAX
+        crate::ir::node::SYMBOL_DIM_MAX.store(prev, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]
