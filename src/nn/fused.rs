@@ -57,16 +57,6 @@ pub struct FusedConvBn<A: Activation = NoAct> {
     pub in_channels: i64,
     pub out_channels: i64,
     pub kernel_size: i64,
-    #[allow(dead_code)]
-    eps_scalar: Tensor,
-    #[allow(dead_code)]
-    stride_scalar: Tensor,
-    #[allow(dead_code)]
-    padding_scalar: Tensor,
-    #[allow(dead_code)]
-    dilation_scalar: Tensor,
-    #[allow(dead_code)]
-    groups_scalar: Tensor,
     _act: std::marker::PhantomData<A>,
 }
 
@@ -130,11 +120,6 @@ impl<A: Activation> FusedConvBn<A> {
             in_channels,
             out_channels,
             kernel_size,
-            eps_scalar: Tensor::from_scalar(eps as f32),
-            stride_scalar: Tensor::from_scalar(stride as f32),
-            padding_scalar: Tensor::from_scalar(padding as f32),
-            dilation_scalar: Tensor::from_scalar(dilation as f32),
-            groups_scalar: Tensor::from_scalar(groups as f32),
             _act: std::marker::PhantomData,
         }
     }
@@ -304,11 +289,6 @@ impl FusedConvBn<NoAct> {
             in_channels,
             out_channels,
             kernel_size,
-            eps_scalar: Tensor::from_scalar(eps as f32),
-            stride_scalar: Tensor::from_scalar(stride as f32),
-            padding_scalar: Tensor::from_scalar(padding as f32),
-            dilation_scalar: Tensor::from_scalar(dilation as f32),
-            groups_scalar: Tensor::from_scalar(groups as f32),
             _act: std::marker::PhantomData,
         }
     }

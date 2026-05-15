@@ -61,13 +61,22 @@ impl Tensor {
     pub fn max(&self, dim: i32, keepdim: bool) -> Tensor {
         let ndim = self.inner.ndim() as i32;
         let norm_dim = if dim < 0 { ndim + dim } else { dim } as usize;
-        Tensor::exec_aot(&[self], |g, ins| {
+        let output = Tensor::exec_aot(&[self], |g, ins| {
             vec![g.reduce_max(&ins[0], norm_dim, keepdim)]
         })
         .expect("Tensor::max: AOT execution failed")
         .into_iter()
         .next()
-        .unwrap()
+        .unwrap();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let inputs = vec![self.clone()];
+            let backward =
+                std::sync::Arc::new(autograd::MaximumBackward::new(edges, inputs));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 
     pub fn mean(&self, dim: i32, keepdim: bool) -> Tensor {
@@ -102,6 +111,15 @@ impl Tensor {
             vec![c]
         })
         .expect("Tensor::cumsum: AOT execution failed");
-        result.into_iter().next().unwrap()
+        let output = result.into_iter().next().unwrap();
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let inputs = vec![self.clone()];
+            let backward =
+                std::sync::Arc::new(autograd::CumSumBackward::new(edges, inputs));
+            Self::attach_grad_fn(output, backward)
+        } else {
+            output
+        }
     }
 }

@@ -2,6 +2,7 @@ use crate::nn::linear::Linear;
 use crate::nn::Module;
 use crate::tensor::Tensor;
 use crate::{impl_training_state, nn::TrainingState};
+use parking_lot::RwLock;
 
 pub struct MultiHeadAttention {
     pub q_proj: Option<Linear>,
@@ -19,6 +20,7 @@ pub struct MultiHeadAttention {
     pub qkv_proj: Option<Linear>,
     // Pre-allocated scale tensor to avoid per-forward allocation
     scale: f32,
+    pub causal_mask_cache: RwLock<Option<(i64, Tensor)>>,
 }
 
 impl MultiHeadAttention {
@@ -54,6 +56,7 @@ impl MultiHeadAttention {
             training: TrainingState::new(),
             qkv_proj: None,
             scale: 1.0 / (head_dim as f32).sqrt(),
+            causal_mask_cache: RwLock::new(None),
         }
     }
 
@@ -85,7 +88,18 @@ impl MultiHeadAttention {
             training: TrainingState::new(),
             qkv_proj: Some(qkv_proj),
             scale: 1.0 / (head_dim as f32).sqrt(),
+            causal_mask_cache: RwLock::new(None),
         }
+    }
+
+    fn build_causal_mask(seq_len: i64) -> Tensor {
+        let mut mask_data = vec![0.0f32; (seq_len * seq_len) as usize];
+        for i in 0..seq_len as usize {
+            for j in (i + 1)..seq_len as usize {
+                mask_data[i * seq_len as usize + j] = f32::NEG_INFINITY;
+            }
+        }
+        Tensor::from_vec(mask_data, vec![seq_len, seq_len])
     }
 
     pub fn forward_impl(&self, x: &Tensor) -> Tensor {
@@ -166,14 +180,22 @@ impl MultiHeadAttention {
 
         // 4. Apply causal mask if enabled
         if self.causal {
-            // Create upper triangular mask with -inf above the diagonal
-            let mut mask_data = vec![0.0f32; (seq_len * seq_len) as usize];
-            for i in 0..seq_len as usize {
-                for j in (i + 1)..seq_len as usize {
-                    mask_data[i * seq_len as usize + j] = f32::NEG_INFINITY;
+            let cached = self.causal_mask_cache.read();
+            let mask = if let Some((cached_seq, cached_mask)) = cached.as_ref() {
+                if *cached_seq == seq_len {
+                    cached_mask.clone()
+                } else {
+                    drop(cached);
+                    let mask = Self::build_causal_mask(seq_len);
+                    *self.causal_mask_cache.write() = Some((seq_len, mask.clone()));
+                    mask
                 }
-            }
-            let mask = Tensor::from_vec(mask_data, vec![seq_len, seq_len]);
+            } else {
+                drop(cached);
+                let mask = Self::build_causal_mask(seq_len);
+                *self.causal_mask_cache.write() = Some((seq_len, mask.clone()));
+                mask
+            };
             attn_scores = attn_scores.add(&mask);
         }
 

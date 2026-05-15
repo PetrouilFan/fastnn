@@ -350,6 +350,8 @@ unsafe fn gemv_row_u8x4_scalar(
     k: usize,
     k_packed: usize,
 ) -> f32 {
+    // NOTE: U8x4 values are stored as SIGNED i8 (range -128..127), not unsigned u8.
+    // The cast (bytes[j] as i8) as f32 correctly interprets the packed data.
     let mut total = 0.0f32;
     for p in 0..k_packed {
         let w = weights_u32[row_offset + p];

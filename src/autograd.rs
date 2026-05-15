@@ -882,6 +882,10 @@ stub_backward!(BCEWithLogitsBackward, 2);
 stub_backward!(HuberLossBackward, 2);
 stub_backward!(ViewBackward, 1);
 
+stub_backward!(ErfBackward, 1);
+stub_backward!(CumSumBackward, 1);
+stub_backward!(GatherBackward, 2);
+
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 
 /// Build a backward computation graph from a forward graph and a loss node.
@@ -2100,32 +2104,38 @@ pub fn build_backward_graph(
                 // d(x^e)/de = ln(x) * x^e = ln(x) * output
                 if let Some(&x_id) = node.inputs.first() {
                     let one = create_constant_scalar(1.0f32, &[], IrDType::F32, &mut grad_graph);
-                    let exponent_id = node.inputs.get(1).copied().unwrap_or(x_id);
                     let x_type = forward_graph.get_node(x_id).map(|n| n.output_type.clone());
                     // dx = grad * exponent * Pow(x, exponent - 1)
-                    let exp_minus_1 = grad_graph.add_node(
-                        Opcode::Sub,
-                        vec![exponent_id, one],
-                        TensorType::new(vec![], IrDType::F32),
-                    );
-                    let x_pow = grad_graph.add_node(
-                        Opcode::Pow,
-                        vec![x_id, exp_minus_1],
-                        x_type
-                            .clone()
-                            .unwrap_or(TensorType::new(vec![], IrDType::F32)),
-                    );
-                    let dx_unscaled = grad_graph.add_node(
-                        Opcode::Mul,
-                        vec![exponent_id, x_pow],
-                        TensorType::new(vec![], IrDType::F32),
-                    );
-                    let dx = grad_graph.add_node(
-                        Opcode::Mul,
-                        vec![grad_id, dx_unscaled],
-                        x_type.unwrap_or(TensorType::new(vec![], IrDType::F32)),
-                    );
-                    accumulate_grad(&mut grad_graph, &mut grads, x_id, dx);
+                    let exponent_id = if node.inputs.len() >= 2 {
+                        node.inputs.get(1).copied()
+                    } else {
+                        None
+                    };
+                    if let Some(exp_id) = exponent_id {
+                        let exp_minus_1 = grad_graph.add_node(
+                            Opcode::Sub,
+                            vec![exp_id, one],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        let x_pow = grad_graph.add_node(
+                            Opcode::Pow,
+                            vec![x_id, exp_minus_1],
+                            x_type
+                                .clone()
+                                .unwrap_or(TensorType::new(vec![], IrDType::F32)),
+                        );
+                        let dx_unscaled = grad_graph.add_node(
+                            Opcode::Mul,
+                            vec![exp_id, x_pow],
+                            TensorType::new(vec![], IrDType::F32),
+                        );
+                        let dx = grad_graph.add_node(
+                            Opcode::Mul,
+                            vec![grad_id, dx_unscaled],
+                            x_type.unwrap_or(TensorType::new(vec![], IrDType::F32)),
+                        );
+                        accumulate_grad(&mut grad_graph, &mut grads, x_id, dx);
+                    }
                 }
                 // Gradient for the exponent (less common, but mathematically correct)
                 if node.inputs.len() > 1 {

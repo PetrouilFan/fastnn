@@ -22,9 +22,10 @@ impl Dropout {
 impl Module for Dropout {
     fn forward(&self, x: &Tensor) -> Tensor {
         if self.training.is_training() {
+            let effective_p = self.p.min(0.999);
+            let scale = 1.0 / (1.0 - effective_p) as f32;
+            let keep_prob = 1.0 - effective_p;
             let x_data = x.as_f32_slice();
-            let scale = 1.0 / (1.0 - self.p) as f32;
-            let keep_prob = 1.0 - self.p;
             let numel = x_data.len();
 
             let mut rng = rand::thread_rng();

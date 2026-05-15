@@ -1284,7 +1284,15 @@ impl Tensor {
 
     pub fn try_erf(&self) -> Result<Tensor, BackendError> {
         let result = exec_single(&[self], |g, ins| vec![g.erf(&ins[0])])?;
-        Ok(result)
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            let edges = autograd::make_edge(self);
+            let inputs = vec![self.clone()];
+            let backward =
+                std::sync::Arc::new(autograd::ErfBackward::new(edges, inputs));
+            Ok(Self::attach_grad_fn(result, backward))
+        } else {
+            Ok(result)
+        }
     }
 
     pub fn erf(&self) -> Tensor {

@@ -62,6 +62,17 @@ impl FusionPass for MatMulAddRelu {
                 .copied()
                 .collect();
 
+            // Guard: only fuse if the non-MatMul input looks like a bias (1D or [1, N])
+            if bias_input.len() == 1 {
+                let bias_id = bias_input[0];
+                if let Some(bias_node) = graph.get_node(bias_id) {
+                    let rank = bias_node.output_type.shape.len();
+                    if rank >= 2 {
+                        continue;
+                    }
+                }
+            }
+
             let fused_id = graph.next_id;
             graph.next_id += 1;
 
