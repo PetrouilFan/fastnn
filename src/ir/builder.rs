@@ -1722,61 +1722,131 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, out_tt)
     }
 
+    /// Scale a gradient by a constant factor (for loss scaling / gradient unscaling).
+    /// Backward: d_input = d_output * scale (correctly scales the gradient).
+    pub fn gradient_scale(&self, input: &GraphTensor, scale: f32) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, input.dtype());
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("scale".to_string(), scale.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::GradientScale,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     // ── Optimizer ops (v2.1 training via IR) ───────────────────────────────
 
+    /// Detect if a tensor has a packed quantized dtype (U4 or U8).
+    fn is_packed_dtype(dtype: &IrDType) -> bool {
+        matches!(dtype, IrDType::U4 { .. } | IrDType::U8 { .. })
+    }
+
+    /// Extract the bit width from a packed dtype (4 for U4, 8 for U8).
+    fn packed_bit_width(dtype: &IrDType) -> usize {
+        match dtype {
+            IrDType::U4 { .. } => 4,
+            IrDType::U8 { .. } => 8,
+            _ => panic!("packed_bit_width called on non-packed dtype: {:?}", dtype),
+        }
+    }
+
+    /// Automatically wrap an optimizer weight input with Dequantize/Quantize
+    /// when the weight has a packed quantized dtype (U4/U8).
+    ///
+    /// If the weight is already F32, returns the weight unchanged.
+    /// Otherwise returns (dequantized_weight, bit_width) where the caller
+    /// should quantize the optimizer's output.
+    fn unwrap_quantized_weight(&self, weight: &GraphTensor) -> (GraphTensor, Option<usize>) {
+        let dtype = weight.tensor_type().dtype.clone();
+        if Self::is_packed_dtype(&dtype) {
+            let bw = Self::packed_bit_width(&dtype);
+            (self.dequantize(weight), Some(bw))
+        } else {
+            (weight.clone(), None)
+        }
+    }
+
     /// SGD weight update: weight -= lr * (grad + weight_decay * weight)
+    ///
+    /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
+    /// is automatically wrapped with Dequantize/Quantize so the update
+    /// happens in full precision.
     pub fn apply_sgd(
         &self, weight: &GraphTensor, grad: &GraphTensor, lr: f32,
     ) -> GraphTensor {
+        let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
-        let tt = weight.tensor_type().clone();
+        let tt = w.tensor_type().clone();  // F32 after dequantize
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
                 Opcode::SgdUpdate,
-                vec![weight.node_id, grad.node_id],
+                vec![w.node_id, grad.node_id],
                 tt.clone(),
                 attrs,
             )
         };
-        GraphTensor::new(self.clone(), node_id, tt)
+        let result = GraphTensor::new(self.clone(), node_id, tt);
+        if let Some(bit_width) = bw {
+            self.quantize(&result, bit_width)
+        } else {
+            result
+        }
     }
 
     /// Adam weight update: full Adam optimizer step.
     /// weight -= lr * (m / (1 - beta1^t)) / (sqrt(v / (1 - beta2^t)) + eps)
+    ///
+    /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
+    /// is automatically wrapped with Dequantize/Quantize.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_adam(
         &self, weight: &GraphTensor, grad: &GraphTensor,
         m: &GraphTensor, v: &GraphTensor,
         lr: f32, beta1: f32, beta2: f32, eps: f32, t: u64,
     ) -> GraphTensor {
+        let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
         attrs.insert("beta1".to_string(), beta1.to_string());
         attrs.insert("beta2".to_string(), beta2.to_string());
         attrs.insert("eps".to_string(), eps.to_string());
         attrs.insert("t".to_string(), t.to_string());
-        let tt = weight.tensor_type().clone();
+        let tt = w.tensor_type().clone();  // F32 after dequantize
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
                 Opcode::AdamUpdate,
-                vec![weight.node_id, grad.node_id, m.node_id, v.node_id],
+                vec![w.node_id, grad.node_id, m.node_id, v.node_id],
                 tt.clone(),
                 attrs,
             )
         };
-        GraphTensor::new(self.clone(), node_id, tt)
+        let result = GraphTensor::new(self.clone(), node_id, tt);
+        if let Some(bit_width) = bw {
+            self.quantize(&result, bit_width)
+        } else {
+            result
+        }
     }
 
     /// AdamW weight update: Adam with decoupled weight decay.
+    ///
+    /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
+    /// is automatically wrapped with Dequantize/Quantize.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_adamw(
         &self, weight: &GraphTensor, grad: &GraphTensor,
         m: &GraphTensor, v: &GraphTensor,
         lr: f32, beta1: f32, beta2: f32, eps: f32, t: u64, weight_decay: f32,
     ) -> GraphTensor {
+        let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
         attrs.insert("beta1".to_string(), beta1.to_string());
@@ -1784,17 +1854,22 @@ impl GraphBuilder {
         attrs.insert("eps".to_string(), eps.to_string());
         attrs.insert("t".to_string(), t.to_string());
         attrs.insert("weight_decay".to_string(), weight_decay.to_string());
-        let tt = weight.tensor_type().clone();
+        let tt = w.tensor_type().clone();  // F32 after dequantize
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
                 Opcode::AdamWUpdate,
-                vec![weight.node_id, grad.node_id, m.node_id, v.node_id],
+                vec![w.node_id, grad.node_id, m.node_id, v.node_id],
                 tt.clone(),
                 attrs,
             )
         };
-        GraphTensor::new(self.clone(), node_id, tt)
+        let result = GraphTensor::new(self.clone(), node_id, tt);
+        if let Some(bit_width) = bw {
+            self.quantize(&result, bit_width)
+        } else {
+            result
+        }
     }
 
     // ── Autograd / Backward ───────────────────────────────────────────────
@@ -2717,5 +2792,158 @@ mod tests {
         let updated_v = read_f32(&result[3]);
         assert!(updated_m.iter().any(|&x| x > 0.0), "Adam m should be non-zero after update");
         assert!(updated_v.iter().any(|&x| x > 0.0), "Adam v should be non-zero after update");
+    }
+
+    #[test]
+    fn test_training_with_adam_f16_state() {
+        let g = GraphBuilder::new();
+        // Model: y = x @ W, loss = mean(y)
+        let x = g.input(&[1, 4], IrDType::F32);
+        let W = g.parameter(&[4, 2], IrDType::F32);
+
+        let mm = g.matmul(&x, &W);
+        let loss = g.reduce_mean(&mm, 0, false);
+
+        // Backward
+        let grads = g.backward(&loss).unwrap();
+        let dW = &grads[1];
+
+        // Adam with F16 state tensors — m and v are F16
+        let m = g.parameter(&[4, 2], IrDType::F16);
+        let v = g.parameter(&[4, 2], IrDType::F16);
+        let updated_W = g.apply_adam(&W, dW, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1);
+
+        let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        // m and v are F16 — provide f16 data (all zeros)
+        let m_data: Vec<u8> = vec![0u8; 8 * 2]; // 8 elements * 2 bytes = 16 bytes
+        let v_data: Vec<u8> = vec![0u8; 8 * 2];
+
+        let result = g.compile_and_execute(
+            &[&loss, &updated_W, &m, &v],
+            CpuBackend,
+            &[&x_data, &W_data, &m_data, &v_data],
+        ).unwrap();
+
+        // W should be updated by Adam
+        let updated_W_vals = read_f32(&result[1]);
+        assert_eq!(updated_W_vals.len(), 8);
+        let W_init: Vec<f32> = read_f32(&W_data);
+        assert!(updated_W_vals.iter().zip(W_init.iter()).any(|(n, o)| (n - o).abs() > 1e-6),
+            "W should be updated by Adam with F16 state");
+
+        // m and v should be non-zero after update (read as F16)
+        let updated_m_raw = &result[2];
+        let updated_v_raw = &result[3];
+        assert_eq!(updated_m_raw.len(), 16, "m should be 16 bytes (8 F16 values)");
+        assert_eq!(updated_v_raw.len(), 16, "v should be 16 bytes (8 F16 values)");
+
+        // Convert F16 back to f32 for verification
+        let updated_m_f32: Vec<f32> = updated_m_raw.chunks_exact(2)
+            .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect();
+        let updated_v_f32: Vec<f32> = updated_v_raw.chunks_exact(2)
+            .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect();
+        assert!(updated_m_f32.iter().any(|&x| x > 0.0), "Adam F16 m should be non-zero");
+        assert!(updated_v_f32.iter().any(|&x| x > 0.0), "Adam F16 v should be non-zero");
+    }
+
+    #[test]
+    fn test_training_with_adamw_f16_state() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let W = g.parameter(&[4, 2], IrDType::F32);
+
+        let mm = g.matmul(&x, &W);
+        let loss = g.reduce_mean(&mm, 0, false);
+
+        let grads = g.backward(&loss).unwrap();
+        let dW = &grads[1];
+
+        // AdamW with F16 state
+        let m = g.parameter(&[4, 2], IrDType::F16);
+        let v = g.parameter(&[4, 2], IrDType::F16);
+        let updated_W = g.apply_adamw(&W, dW, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1, 0.01);
+
+        let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        let m_data: Vec<u8> = vec![0u8; 16];
+        let v_data: Vec<u8> = vec![0u8; 16];
+
+        let result = g.compile_and_execute(
+            &[&loss, &updated_W, &m, &v],
+            CpuBackend,
+            &[&x_data, &W_data, &m_data, &v_data],
+        ).unwrap();
+
+        let updated_W_vals = read_f32(&result[1]);
+        let W_init: Vec<f32> = read_f32(&W_data);
+        assert!(updated_W_vals.iter().zip(W_init.iter()).any(|(n, o)| (n - o).abs() > 1e-6),
+            "W should be updated by AdamW with F16 state");
+
+        // Verify F16 state was updated
+        let updated_m_raw = &result[2];
+        let updated_m_f32: Vec<f32> = updated_m_raw.chunks_exact(2)
+            .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
+            .collect();
+        assert!(updated_m_f32.iter().any(|&x| x > 0.0), "AdamW F16 m should be non-zero");
+    }
+
+    /// Test gradient scaling via loss scaling pattern:
+    /// scaled_loss = loss * scale → backward → grads are scaled → unscale → optimizer
+    /// This uses existing MulScalar ops — no new opcode needed.
+    #[test]
+    fn test_gradient_scaling_with_loss_scaling() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let W = g.parameter(&[4, 2], IrDType::F32);
+
+        let mm = g.matmul(&x, &W);
+        let loss = g.reduce_mean(&mm, 0, false);
+
+        // Loss scaling: multiply loss by scale factor
+        let scale = 16.0f32;
+        let scale_t = g.constant_scalar(scale);
+        let scaled_loss = g.mul_scalar(&loss, &scale_t);
+        let grads = g.backward(&scaled_loss).unwrap();
+        let dW_scaled = &grads[1];
+
+        // Unscale: divide gradient by scale (multiply by 1/scale)
+        let inv_scale_t = g.constant_scalar(1.0 / scale);
+        let dW = g.mul_scalar(dW_scaled, &inv_scale_t);
+        let updated_W = g.apply_sgd(&W, &dW, 0.1);
+
+        // Without scaling: grads should be different
+        let g2 = GraphBuilder::new();
+        let x2 = g2.input(&[1, 4], IrDType::F32);
+        let W2 = g2.parameter(&[4, 2], IrDType::F32);
+        let mm2 = g2.matmul(&x2, &W2);
+        let loss2 = g2.reduce_mean(&mm2, 0, false);
+        let grads2 = g2.backward(&loss2).unwrap();
+        let dW2 = &grads2[1];
+        let updated_W2 = g2.apply_sgd(&W2, dW2, 0.1);
+
+        let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+
+        // With scaling
+        let result_scaled = g.compile_and_execute(
+            &[&loss, &updated_W], CpuBackend,
+            &[&x_data, &W_data],
+        ).unwrap();
+        // Without scaling (reference)
+        let result_ref = g2.compile_and_execute(
+            &[&loss2, &updated_W2], CpuBackend,
+            &[&x_data, &W_data],
+        ).unwrap();
+
+        // Scaled-then-unscaled should produce the same weight update as no scaling
+        let w_scaled = read_f32(&result_scaled[1]);
+        let w_ref = read_f32(&result_ref[1]);
+        for (i, (s, r)) in w_scaled.iter().zip(w_ref.iter()).enumerate() {
+            assert!((s - r).abs() < 1e-5,
+                "Scaled+unscaled weight[{}] = {}, ref = {}, diff = {}", i, s, r, (s - r).abs());
+        }
     }
 }

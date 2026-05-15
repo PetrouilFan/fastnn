@@ -1733,6 +1733,22 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
+            Opcode::GradientScale => {
+                // Forward: y = x * scale  (scale is an attribute)
+                // Backward: d_input = d_output * scale
+                if let Some(&input_id) = node.inputs.first() {
+                    let scale_attr = node.attrs.get("scale")
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .unwrap_or(1.0);
+                    let scale_const = create_constant_scalar(scale_attr, &[], IrDType::F32, &mut grad_graph);
+                    let d_input = grad_graph.add_node(
+                        Opcode::MulScalar,
+                        vec![grad_id, scale_const],
+                        TensorType::new(vec![], IrDType::F32),  // shape doesn't matter, will be broadcast
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, d_input);
+                }
+            }
         }
     }
     
