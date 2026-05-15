@@ -121,6 +121,9 @@ pub mod cpu;
 /// Wgpu (GPU) backend implementation (WGSL compute shaders)
 pub mod wgpu;
 
+/// Standalone runtime for executing pre-compiled plans
+pub mod runtime;
+
 /// Re-export the MemoryPlan from the compiler passes module
 pub use crate::compiler::passes::memory_planning::MemoryPlan;
 

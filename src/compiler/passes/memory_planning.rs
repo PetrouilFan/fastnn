@@ -1,10 +1,11 @@
 #![allow(dead_code)]
 
 use crate::ir::node::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// A single allocation slot in the arena
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllocSlot {
     pub offset: usize,
     pub size: usize,
@@ -13,7 +14,7 @@ pub struct AllocSlot {
 }
 
 /// The complete memory plan
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryPlan {
     pub total_size: usize,
     pub slots: HashMap<NodeId, AllocSlot>,
