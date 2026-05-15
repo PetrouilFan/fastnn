@@ -406,10 +406,7 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
     use crate::backend::cpu::CpuBackend;
 
     // Input data order must match the order inputs were registered (all_input_tensors)
-    let input_refs: Vec<&[u8]> = all_input_tensors
-        .iter()
-        .map(|t| t.as_bytes())
-        .collect();
+    let input_refs: Vec<&[u8]> = all_input_tensors.iter().map(|t| t.as_bytes()).collect();
     let grad_refs: Vec<&GraphTensor> = grad_tensors.iter().collect();
 
     let mut results = match builder.compile_and_execute(&grad_refs, CpuBackend, &input_refs) {

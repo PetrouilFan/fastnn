@@ -970,7 +970,7 @@ fn try_extract_native_layer(b: &Bound<'_, PyAny>) -> Option<Arc<dyn Module>> {
 fn build_native_layers(py: Python<'_>, layers: &[Py<PyAny>]) -> Option<Vec<Arc<dyn Module>>> {
     let mut native = Vec::with_capacity(layers.len());
     for layer in layers {
-        native.push(try_extract_native_layer(&layer.bind(py))?);
+        native.push(try_extract_native_layer(layer.bind(py))?);
     }
     Some(native)
 }
