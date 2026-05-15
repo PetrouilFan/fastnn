@@ -9,14 +9,53 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
     - run: cargo test --lib
     - run: cargo build --release
+
+  build-wheels:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install system dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libatlas-base-dev
+    - uses: PyO3/maturin-action@v1
+      with:
+        command: build
+        args: --release --out dist
+    - name: Upload wheels
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.os }}
+        path: dist/*.whl
+
+  create-release:
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
     - uses: softprops/action-gh-release@v2
       with:
         generate_release_notes: true
+        files: |
+          dist/*.whl

@@ -1,20 +1,20 @@
 # fastnn
 
-**fastnn** is a high-performance neural network inference library built from scratch in Rust, with seamless Python bindings. The v2.0.0 release introduces a complete **ahead-of-time (AOT) compiler pipeline** built on a first-class IR — replacing the legacy DAG/layer dispatch with a unified graph-based compilation path that supports **operator fusion, shape inference, memory planning, and native 4-bit/8-bit weight quantization** as first-class compiler passes.
+**fastnn** is a high-performance neural network inference library built from scratch in Rust, with seamless Python bindings. The v2.1.0 release introduces a complete **ahead-of-time (AOT) compiler pipeline** built on a first-class IR — replacing the legacy DAG/layer dispatch with a unified graph-based compilation path that supports **operator fusion, shape inference, memory planning, and native 4-bit/8-bit weight quantization** as first-class compiler passes.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
 [![Rust: stable](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
 
-> **Version:** v2.0.0 — AOT compiler pipeline, IR-based execution, native U4/U8 quantization
+> **Version:** v2.1.0 — AOT compiler pipeline, IR-based execution, native U4/U8 quantization
 
 ---
 
-## What's New in v2.0.0
+## What's New in v2.1.0
 
 ### AOT Compiler Pipeline
 
-The v2.0.0 release replaces the old DAG/layer dispatch with a **fully compiled execution path**:
+The v2.1.0 release replaces the old DAG/layer dispatch with a **fully compiled execution path**:
 
 ```
 ComputeGraph → Shape Inference → Operator Fusion → Quantization (opt.) → Memory Planning → Backend Compile → Execute
