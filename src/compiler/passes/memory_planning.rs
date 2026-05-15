@@ -308,7 +308,7 @@ pub fn plan_memory_with_env(
 
     let mut slots: HashMap<NodeId, AllocSlot> = HashMap::new();
     let mut secondary_slots: HashMap<(NodeId, usize), AllocSlot> = HashMap::new();
-    let mut active: Vec<(usize, NodeId, usize)> = Vec::new();
+    let mut active: Vec<(usize, NodeId, usize, bool)> = Vec::new();
     let mut free_list: Vec<FreeBlock> = Vec::new();
     let mut arena_top: usize = 0;
 
@@ -316,14 +316,27 @@ pub fn plan_memory_with_env(
         let mut i = 0;
         while i < active.len() {
             if active[i].0 < info.live_range.0 {
-                let (_, expired_id, _expired_size) = active.swap_remove(i);
-                if let Some(slot) = slots.get(&expired_id) {
-                    // Free the aligned size (the slot stores info.size,
-                    // but we allocated align_up(info.size, 8) bytes).
+                let (_expired_end, expired_id, _expired_size, was_secondary) = active.swap_remove(i);
+                // IMPORTANT: only free the slot that corresponds to this
+                // specific active entry.  When a node has both a primary and
+                // a secondary output (e.g. MaxPool), two separate entries
+                // are pushed to `active` — one for each.  Freeing both slots
+                // on every expiry would double-free the same memory region
+                // into the free list, creating duplicate entries that let
+                // the allocator hand out overlapping addresses for different
+                // live ranges.
+                if was_secondary {
+                    if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
+                        eprintln!("[DBG_FREE] nid={} secondary off={} sz={}", expired_id, slot.offset, slot.size);
+                        add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
+                    } else {
+                        eprintln!("[DBG_FREE] nid={} secondary MISSING", expired_id);
+                    }
+                } else if let Some(slot) = slots.get(&expired_id) {
+                    eprintln!("[DBG_FREE] nid={} primary off={} sz={}", expired_id, slot.offset, slot.size);
                     add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
-                }
-                if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
-                    add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
+                } else {
+                    eprintln!("[DBG_FREE] nid={} primary MISSING", expired_id);
                 }
             } else {
                 i += 1;
@@ -383,7 +396,7 @@ pub fn plan_memory_with_env(
             slots.insert(info.node_id, slot);
         }
 
-        active.push((info.live_range.1, info.node_id, info.size));
+        active.push((info.live_range.1, info.node_id, info.size, info.is_secondary));
     }
 
     Ok(MemoryPlan {
