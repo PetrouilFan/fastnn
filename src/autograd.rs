@@ -167,10 +167,8 @@ fn collect_leaf_tensors(nodes: &[Arc<dyn Node>]) -> Vec<Tensor> {
     for node in nodes {
         for input in node.inputs() {
             let tid = input.id();
-            if seen.insert(tid) {
-                if input.requires_grad() && input.grad_fn().is_none() {
-                    leaf_tensors.push(input.clone());
-                }
+            if seen.insert(tid) && input.requires_grad() && input.grad_fn().is_none() {
+                leaf_tensors.push(input.clone());
             }
         }
     }
@@ -229,7 +227,7 @@ fn infer_reduction_params(input_shape: &[i64], output_shape: &[i64]) -> (usize, 
             }
         }
         (0, true)
-    } else if output_shape.is_empty() || output_shape == &[1] {
+    } else if output_shape.is_empty() || *output_shape == [1] {
         // Reduced to scalar — default to dim 0
         (0, false)
     } else {
@@ -454,14 +452,13 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
         // Accumulate: if a gradient already exists, add the new one to it
         let final_grad = if let Some(existing_grad) = tensor.grad() {
             // Use raw AOT addition (no autograd, gradients are not differentiable)
-            let sum = Tensor::exec_aot(&[&existing_grad, &new_grad], |g, ins| {
+            Tensor::exec_aot(&[&existing_grad, &new_grad], |g, ins| {
                 vec![g.add(&ins[0], &ins[1])]
             })
             .expect("backward: gradient accumulation failed")
             .into_iter()
             .next()
-            .unwrap();
-            sum
+            .unwrap()
         } else {
             new_grad
         };
@@ -1312,14 +1309,11 @@ pub fn build_backward_graph(
             }
             Opcode::BiasAdd => {
                 let effective_grad = match node.attrs.get("fused_op").map(|s| s.as_str()) {
-                    Some("OpRelu") => {
-                        let grad_input = grad_graph.add_node(
-                            Opcode::Mul,
-                            vec![grad_id, node_id],
-                            node.output_type.clone(),
-                        );
-                        grad_input
-                    }
+                    Some("OpRelu") => grad_graph.add_node(
+                        Opcode::Mul,
+                        vec![grad_id, node_id],
+                        node.output_type.clone(),
+                    ),
                     _ => grad_id,
                 };
                 if let Some(&input_id) = node.inputs.first() {

@@ -253,6 +253,7 @@ pub(super) fn dispatch_quantized_conv_gpu(
 ///
 /// Uploads the given data to the GPU, runs the quantized matmul shader,
 /// and returns the f32 output as a `Vec<f32>`.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_quantized_gemm_gpu(
     activations: &[f32],   // [M, K_padded]
     packed_weights: &[u8], // packed weight bytes [N * K_packed * 4]

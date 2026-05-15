@@ -85,8 +85,8 @@ impl Optimizer for Adam {
             let m_update = grad.mul_scalar(beta1_c);
             self.m[i].mul_scalar_(beta1).add_(&m_update);
 
-            // v = beta2 * v + (1 - beta2) * grad^2 (fixed inefficient squaring)
-            let grad_sq = grad.pow(2.0);
+            // v = beta2 * v + (1 - beta2) * grad^2
+            let grad_sq = grad.mul(&grad);
             let beta2_c = 1.0 - beta2;
             let v_update = grad_sq.mul_scalar(beta2_c);
             self.v[i].mul_scalar_(beta2).add_(&v_update);

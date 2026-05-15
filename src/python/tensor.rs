@@ -131,11 +131,10 @@ impl PyTensor {
 
     /// DLPack device query protocol
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // (device_type, device_id) per DLPack spec
-        // 1 = kDLCPU
         match self.inner.device() {
             crate::storage::Device::Cpu => (1, 0),
-            crate::storage::Device::Wgpu(_) => (1, 0), // Report as CPU for DLPack compatibility
+            crate::storage::Device::Wgpu(device_id) => (2, device_id as i32),
+
         }
     }
 

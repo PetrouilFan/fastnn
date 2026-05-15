@@ -73,7 +73,7 @@ impl Optimizer for RMSprop {
             }
 
             // Update square average: avg = alpha * avg + (1 - alpha) * grad^2
-            let grad_sq = grad.pow(2.0).mul_scalar(1.0 - alpha);
+            let grad_sq = grad.mul(&grad).mul_scalar(1.0 - alpha);
             self.square_avg[i].mul_scalar_(alpha).add_(&grad_sq);
 
             // Compute denominator
@@ -82,7 +82,7 @@ impl Optimizer for RMSprop {
                 let grad_avg_update = grad.mul_scalar(1.0 - alpha);
                 self.grad_avg[i].mul_scalar_(alpha).add_(&grad_avg_update);
                 // denom = sqrt(avg - avg_grad^2) + eps
-                let grad_avg_sq = self.grad_avg[i].pow(2.0);
+                let grad_avg_sq = self.grad_avg[i].mul(&self.grad_avg[i]);
                 self.square_avg[i]
                     .clone()
                     .sub(&grad_avg_sq)

@@ -195,8 +195,8 @@ impl FusionPass for BackwardReluMatMul {
             let to_remove: Vec<NodeId> = std::iter::once(p.da_id)
                 .chain(std::iter::once(p.db_id))
                 .chain(std::iter::once(p.drelu_id))
-                .chain(p.a_t_id.into_iter())
-                .chain(p.b_t_id.into_iter())
+                .chain(p.a_t_id)
+                .chain(p.b_t_id)
                 .collect();
             for &id in &to_remove {
                 graph.remove_node(id);
@@ -234,7 +234,7 @@ impl FusionPass for BackwardMatMulAddRelu {
             let drelu_id = match consumers
                 .iter()
                 .find(|&&cid| {
-                    graph.get_node(cid).map_or(false, |n| {
+                    graph.get_node(cid).is_some_and(|n| {
                         n.opcode == Opcode::Mul
                             && n.attrs.get("op").map(|s| s.as_str()) == Some("relu_backward")
                     })
@@ -251,7 +251,7 @@ impl FusionPass for BackwardMatMulAddRelu {
                 .filter(|&&cid| {
                     graph
                         .get_node(cid)
-                        .map_or(false, |n| n.opcode == Opcode::ReduceSum)
+                        .is_some_and(|n| n.opcode == Opcode::ReduceSum)
                 })
                 .copied()
                 .collect();
