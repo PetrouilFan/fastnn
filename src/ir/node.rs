@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type NodeId = usize;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Opcode {
     Add,
     Sub,
@@ -497,7 +497,7 @@ impl DimExpr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum IrDType {
     F32,
     F16,
@@ -605,7 +605,7 @@ impl IrDType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TensorType {
     pub shape: Vec<DimExpr>,
     pub dtype: IrDType,
@@ -667,7 +667,7 @@ impl TensorType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TensorValue {
     Float(f32),
     Int(i64),
@@ -677,7 +677,7 @@ pub enum TensorValue {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IRNode {
     pub id: NodeId,
     pub opcode: Opcode,
@@ -701,7 +701,7 @@ impl IRNode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputeGraph {
     pub nodes: Vec<IRNode>,
     pub inputs: Vec<NodeId>,
@@ -903,5 +903,19 @@ impl ComputeGraph {
         }
         self.inputs.retain(|&i| i != id);
         self.outputs.retain(|&i| i != id);
+    }
+
+    /// Save the ComputeGraph to a .fnn binary file.
+    pub fn save_fnn(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = bincode::serialize(self)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// Load a ComputeGraph from a .fnn binary file created by [`save_fnn`](Self::save_fnn).
+    pub fn load_fnn(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let bytes = std::fs::read(path)?;
+        let graph: ComputeGraph = bincode::deserialize(&bytes)?;
+        Ok(graph)
     }
 }
