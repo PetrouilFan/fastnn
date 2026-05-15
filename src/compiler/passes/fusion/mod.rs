@@ -2,6 +2,7 @@ use crate::ir::node::ComputeGraph;
 
 pub mod op_relu;
 pub mod matmul_add_relu;
+pub mod residual_add_norm;
 pub mod backward;
 
 pub trait FusionPass {
@@ -45,6 +46,15 @@ fn apply_backward_matmul_add_relu(_graph: &mut ComputeGraph) -> Result<bool, Str
     Ok(false)
 }
 
+#[cfg(feature = "fusion-residual-add-norm")]
+fn apply_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, String> {
+    residual_add_norm::FusedResidualAddNorm::fuse(graph)
+}
+#[cfg(not(feature = "fusion-residual-add-norm"))]
+fn apply_residual_add_norm(_graph: &mut ComputeGraph) -> Result<bool, String> {
+    Ok(false)
+}
+
 pub fn fuse_operators(graph: &mut ComputeGraph) -> Result<(), String> {
     // Pass ordering: more specific patterns first, general fallbacks last.
     // MatMulAddRelu must precede OpRelu so that BiasAdd→Relu isn't consumed
@@ -54,6 +64,7 @@ pub fn fuse_operators(graph: &mut ComputeGraph) -> Result<(), String> {
         changed = false;
         changed |= apply_matmul_add_relu(graph)?;
         changed |= apply_op_relu(graph)?;
+        changed |= apply_residual_add_norm(graph)?;
         changed |= apply_backward_relu_matmul(graph)?;
         changed |= apply_backward_matmul_add_relu(graph)?;
     }

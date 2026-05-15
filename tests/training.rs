@@ -367,6 +367,132 @@ fn test_adamw_mv_persist_across_steps() {
     );
 }
 
+// ─── Muon Tests ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_muon_mlp_converges() {
+    let (graph, loss_id, params, param_data, batch_inputs) = build_mlp();
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let mut model = executor
+        .compile_train(
+            &graph,
+            loss_id,
+            &params,
+            &param_data.iter().map(|d| &d[..]).collect::<Vec<_>>(),
+            &batch_inputs,
+            None,
+            &TrainConfig {
+                optimizer: OptimizerConfig::Muon {
+                    lr: 0.05,
+                    beta1: 0.9,
+                    weight_decay: 0.0,
+                },
+                quantize: None,
+            },
+        )
+        .expect("compile_train with Muon should succeed");
+
+    let x_data = f32_bytes(&[1.0, 2.0, 3.0, 4.0]);
+
+    let mut losses = Vec::new();
+    for _ in 0..20 {
+        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        losses.push(loss);
+    }
+
+    assert!(
+        losses[losses.len() - 1] < losses[0] * 0.5,
+        "Muon: loss did not converge (first={:.6}, last={:.6})",
+        losses[0],
+        losses[losses.len() - 1]
+    );
+}
+
+// ─── Lion Tests ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_lion_mlp_converges() {
+    let (graph, loss_id, params, param_data, batch_inputs) = build_mlp();
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let mut model = executor
+        .compile_train(
+            &graph,
+            loss_id,
+            &params,
+            &param_data.iter().map(|d| &d[..]).collect::<Vec<_>>(),
+            &batch_inputs,
+            None,
+            &TrainConfig {
+                optimizer: OptimizerConfig::Lion {
+                    lr: 0.05,
+                    beta1: 0.9,
+                    beta2: 0.99,
+                },
+                quantize: None,
+            },
+        )
+        .expect("compile_train with Lion should succeed");
+
+    let x_data = f32_bytes(&[1.0, 2.0, 3.0, 4.0]);
+
+    let mut losses = Vec::new();
+    for _ in 0..20 {
+        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        losses.push(loss);
+    }
+
+    assert!(
+        losses[losses.len() - 1] < losses[0] * 0.5,
+        "Lion: loss did not converge (first={:.6}, last={:.6})",
+        losses[0],
+        losses[losses.len() - 1]
+    );
+}
+
+// ─── RMSprop Tests ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_rmsprop_mlp_converges() {
+    let (graph, loss_id, params, param_data, batch_inputs) = build_mlp();
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let mut model = executor
+        .compile_train(
+            &graph,
+            loss_id,
+            &params,
+            &param_data.iter().map(|d| &d[..]).collect::<Vec<_>>(),
+            &batch_inputs,
+            None,
+            &TrainConfig {
+                optimizer: OptimizerConfig::RMSprop {
+                    lr: 0.05,
+                    beta: 0.99,
+                    eps: 1e-8,
+                },
+                quantize: None,
+            },
+        )
+        .expect("compile_train with RMSprop should succeed");
+
+    let x_data = f32_bytes(&[1.0, 2.0, 3.0, 4.0]);
+
+    let mut losses = Vec::new();
+    for _ in 0..20 {
+        let loss = model.train_step(&[&x_data]).expect("train_step should succeed");
+        losses.push(loss);
+    }
+
+    assert!(
+        losses[losses.len() - 1] < losses[0] * 0.5,
+        "RMSprop: loss did not converge (first={:.6}, last={:.6})",
+        losses[0],
+        losses[losses.len() - 1]
+    );
+}
+
 // ─── Edge Cases ──────────────────────────────────────────────────────────────
 
 #[test]

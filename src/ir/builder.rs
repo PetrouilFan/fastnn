@@ -1926,6 +1926,106 @@ impl GraphBuilder {
         }
     }
 
+    /// Muon weight update: momentum-based optimizer with orthogonalized gradient.
+    /// m = beta1 * m + (1-beta1) * grad
+    /// weight -= lr * (m + weight_decay * weight)
+    ///
+    /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
+    /// is automatically wrapped with Dequantize/Quantize.
+    pub fn apply_muon(
+        &self, weight: &GraphTensor, grad: &GraphTensor,
+        m: &GraphTensor,
+        lr: f32, beta1: f32, weight_decay: f32,
+    ) -> GraphTensor {
+        let (w, bw) = self.unwrap_quantized_weight(weight);
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("lr".to_string(), lr.to_string());
+        attrs.insert("beta1".to_string(), beta1.to_string());
+        attrs.insert("weight_decay".to_string(), weight_decay.to_string());
+        let tt = w.tensor_type().clone();
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::MuonUpdate,
+                vec![w.node_id, grad.node_id, m.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        let result = GraphTensor::new(self.clone(), node_id, tt);
+        if let Some(bit_width) = bw {
+            self.quantize(&result, bit_width)
+        } else {
+            result
+        }
+    }
+
+    /// Lion weight update: sign( momentum ) based optimizer.
+    /// m = beta2 * m + (1-beta2) * grad
+    /// weight -= lr * sign(beta1 * m + (1-beta1) * grad)
+    ///
+    /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
+    /// is automatically wrapped with Dequantize/Quantize.
+    pub fn apply_lion(
+        &self, weight: &GraphTensor, grad: &GraphTensor, m: &GraphTensor,
+        lr: f32, beta1: f32, beta2: f32,
+    ) -> GraphTensor {
+        let (w, bw) = self.unwrap_quantized_weight(weight);
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("lr".to_string(), lr.to_string());
+        attrs.insert("beta1".to_string(), beta1.to_string());
+        attrs.insert("beta2".to_string(), beta2.to_string());
+        let tt = w.tensor_type().clone();
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::LionUpdate,
+                vec![w.node_id, grad.node_id, m.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        let result = GraphTensor::new(self.clone(), node_id, tt);
+        if let Some(bit_width) = bw {
+            self.quantize(&result, bit_width)
+        } else {
+            result
+        }
+    }
+
+    /// RMSprop weight update.
+    /// v = beta * v + (1-beta) * grad^2
+    /// weight -= lr * grad / (sqrt(v) + eps)
+    ///
+    /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
+    /// is automatically wrapped with Dequantize/Quantize.
+    pub fn apply_rmsprop(
+        &self, weight: &GraphTensor, grad: &GraphTensor, v: &GraphTensor,
+        lr: f32, beta: f32, eps: f32,
+    ) -> GraphTensor {
+        let (w, bw) = self.unwrap_quantized_weight(weight);
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("lr".to_string(), lr.to_string());
+        attrs.insert("beta".to_string(), beta.to_string());
+        attrs.insert("eps".to_string(), eps.to_string());
+        let tt = w.tensor_type().clone();
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node_with_attrs(
+                Opcode::RmspropUpdate,
+                vec![w.node_id, grad.node_id, v.node_id],
+                tt.clone(),
+                attrs,
+            )
+        };
+        let result = GraphTensor::new(self.clone(), node_id, tt);
+        if let Some(bit_width) = bw {
+            self.quantize(&result, bit_width)
+        } else {
+            result
+        }
+    }
+
     // ── Autograd / Backward ───────────────────────────────────────────────
 
     /// Build the backward graph for a given loss tensor.

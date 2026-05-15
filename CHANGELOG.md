@@ -1,5 +1,29 @@
 # Changelog
 
+## [2.2.0] - 2026-05-15
+
+### Added
+- Compiled training extended to 6 optimizers: Muon, Lion, RMSprop now supported
+  alongside existing SGD and AdamW
+- residual + add + norm fusion pass for transformer architectures
+- WGPU packed shaders: U4/U8 quantized inference entirely on GPU with per-channel
+  dequantization via WGSL compute shaders
+- FlashAttention SIMD optimization: tiled online-softmax with AVX-512/AVX2 tile matmul
+- ONNX quantized op exporters: QLinearMatMul, QLinearConv with per-channel scale/zp
+- CLI enhancement: `fastnn-runtime compile` (ONNX → .fnnc) and `fastnn-runtime quantize`
+- 52 new compiler pass tests (type_inference, auto_cast, activation_quantization,
+  shape_inference, memory_planning, edge cases)
+- ARM NEON validation suite: CI cross-compilation, NEON kernel tests,
+  cross-architecture consistency tests, Raspberry Pi benchmark runner
+- WGPU integration test suite: 20+ GPU tests for all backend ops
+- New feature gates: `fusion-residual-add-norm`
+
+### Changed
+- FlashAttention Python binding now uses tiled online-softmax (2-4x speedup)
+- WGPU quantized matmul/conv dispatch uses GPU-only unpacking (no CPU copy)
+- README roadmap updated to reflect v2.2 completion
+- `docs/training.md` expanded with compiled training guide
+
 ## v2.1.0 — Modular Fusion, Shape Specialization, CLI Runtime & Error Handling
 
 This release completes the v2.x compiler pipeline with modular fusion passes (forward + backward),

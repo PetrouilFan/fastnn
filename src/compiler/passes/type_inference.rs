@@ -43,7 +43,8 @@ fn expected_input_dtype(opcode: &Opcode, input_index: usize) -> Option<IrDType> 
         Opcode::Cast => None, // already has the right input
 
         // Optimizer ops accept F32 gradients.
-        Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate => {
+        Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate
+        | Opcode::MuonUpdate | Opcode::LionUpdate | Opcode::RmspropUpdate => {
             if input_index == 0 {
                 Some(IrDType::F32) // weight
             } else {
@@ -243,5 +244,169 @@ mod tests {
         infer_types(&mut graph).unwrap();
         let count_after = graph.node_count();
         assert_eq!(count_before, count_after);
+    }
+
+    /// Test that type inference inserts QuantizeActivations before
+    /// a DequantizeActivations node whose input is F32 (expects I8).
+    #[test]
+    fn test_type_inference_inserts_quantize_activations() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+        );
+        // DequantizeActivations expects I8 input, so F32 is a mismatch
+        let dq_id = graph.add_node(
+            Opcode::DequantizeActivations, vec![input_id],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id]);
+        graph.set_outputs(vec![dq_id]);
+
+        let count_before = graph.node_count();
+        infer_types(&mut graph).unwrap();
+        let count_after = graph.node_count();
+        // QuantizeActivations (F32→I8) should be inserted before DequantizeActivations
+        assert_eq!(count_after, count_before + 1);
+
+        let dq_node = graph.get_node(dq_id).unwrap();
+        let inserted_id = dq_node.inputs[0];
+        let inserted_node = graph.get_node(inserted_id).unwrap();
+        assert_eq!(inserted_node.opcode, Opcode::QuantizeActivations);
+        assert_eq!(inserted_node.output_type.dtype, IrDType::I8);
+    }
+
+    /// Test that type inference inserts DequantizeActivations before
+    /// a QuantizeActivations node whose input is I8 (expects F32).
+    #[test]
+    fn test_type_inference_inserts_dequantize_activations() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::I8),
+        );
+        // QuantizeActivations expects F32 input, so I8 is a mismatch
+        let qa_id = graph.add_node(
+            Opcode::QuantizeActivations, vec![input_id],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::I8),
+        );
+        graph.set_inputs(vec![input_id]);
+        graph.set_outputs(vec![qa_id]);
+
+        let count_before = graph.node_count();
+        infer_types(&mut graph).unwrap();
+        let count_after = graph.node_count();
+        // DequantizeActivations (I8→F32) should be inserted before QuantizeActivations
+        assert_eq!(count_after, count_before + 1);
+
+        let qa_node = graph.get_node(qa_id).unwrap();
+        let inserted_id = qa_node.inputs[0];
+        let inserted_node = graph.get_node(inserted_id).unwrap();
+        assert_eq!(inserted_node.opcode, Opcode::DequantizeActivations);
+        assert_eq!(inserted_node.output_type.dtype, IrDType::F32);
+    }
+
+    /// Test that type inference inserts ToF16 when a ToF16 node
+    /// receives non-F32 input.
+    #[test]
+    fn test_type_inference_inserts_to_f16() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F16),
+        );
+        // ToF16 expects F32 input, so F16 input is a mismatch
+        let to_f16_id = graph.add_node(
+            Opcode::ToF16, vec![input_id],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F16),
+        );
+        graph.set_inputs(vec![input_id]);
+        graph.set_outputs(vec![to_f16_id]);
+
+        let count_before = graph.node_count();
+        infer_types(&mut graph).unwrap();
+        let count_after = graph.node_count();
+        // A ToF32 (F16→F32) or other conversion should be inserted
+        // conversion_between(F16, F32) = Some(ToF32)
+        assert_eq!(count_after, count_before + 1);
+
+        let node = graph.get_node(to_f16_id).unwrap();
+        let inserted_id = node.inputs[0];
+        let inserted_node = graph.get_node(inserted_id).unwrap();
+        assert_eq!(inserted_node.opcode, Opcode::ToF32);
+    }
+
+    /// Test that type inference is idempotent — running twice produces the same graph.
+    #[test]
+    fn test_type_inference_idempotent() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+        );
+        let dq_id = graph.add_node(
+            Opcode::DequantizeActivations, vec![input_id],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id]);
+        graph.set_outputs(vec![dq_id]);
+
+        infer_types(&mut graph).unwrap();
+        let count_1 = graph.node_count();
+
+        // Second run should not change the graph
+        infer_types(&mut graph).unwrap();
+        let count_2 = graph.node_count();
+        assert_eq!(count_1, count_2);
+    }
+
+    /// Test that type inference handles Quantize node with non-F32 input correctly.
+    #[test]
+    fn test_type_inference_quantize_with_non_f32_input() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::I8),
+        );
+        // Quantize expects F32 input, so I8 is a mismatch
+        let q_id = graph.add_node(
+            Opcode::Quantize, vec![input_id],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::U4 { scales: vec![], zero_points: vec![] }),
+        );
+        graph.set_inputs(vec![input_id]);
+        graph.set_outputs(vec![q_id]);
+
+        infer_types(&mut graph).unwrap();
+        // DequantizeActivations (I8→F32) should be inserted
+        let q_node = graph.get_node(q_id).unwrap();
+        let inserted_id = q_node.inputs[0];
+        let inserted_node = graph.get_node(inserted_id).unwrap();
+        assert_eq!(inserted_node.opcode, Opcode::DequantizeActivations);
+    }
+
+    /// Test that Const nodes retain their declared type (pass doesn't change them).
+    #[test]
+    fn test_type_inference_constants_unchanged() {
+        let mut graph = ComputeGraph::new();
+        let const_id = graph.add_node(
+            Opcode::Constant(crate::ir::node::TensorValue::Float(42.0)),
+            vec![],
+            TensorType::new(vec![], IrDType::F32),
+        );
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+        );
+        let add_id = graph.add_node(
+            Opcode::Add, vec![input_id, const_id],
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id]);
+        graph.set_outputs(vec![add_id]);
+
+        let dtype_before = graph.get_node(const_id).unwrap().output_type.dtype.clone();
+        infer_types(&mut graph).unwrap();
+        let dtype_after = graph.get_node(const_id).unwrap().output_type.dtype.clone();
+        assert_eq!(dtype_before, dtype_after);
     }
 }

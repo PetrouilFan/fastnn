@@ -232,6 +232,17 @@ pub fn plan_memory_with_env(
                 }
             };
 
+            // Debug: log MaxPool last_use decisions
+            if matches!(node.opcode, Opcode::MaxPool) {
+                let consumers = graph.consumers(node_id);
+                eprintln!("[FNN_DBG_MPLAN] MaxPool nid={} pos={} n_consumers={} consumers={:?} in_outputs={} in_required={}",
+                    node_id, position.get(&node_id).copied().unwrap_or(0),
+                    consumers.len(), consumers,
+                    graph.outputs.contains(&node_id),
+                    graph.required_nodes.contains(&node_id));
+                eprintln!("[FNN_DBG_MPLAN]   first_use={} last_use={} order.len={}", first_use, last_use, order.len());
+            }
+
             alloc_infos.push(AllocInfo {
                 node_id,
                 size,
@@ -253,12 +264,28 @@ pub fn plan_memory_with_env(
                         first_use
                     }
                 } else {
-                    consumers.iter()
+                    let consumer_last = consumers.iter()
                         .filter_map(|cid| position.get(cid))
                         .copied()
                         .max()
-                        .unwrap_or(first_use)
+                        .unwrap_or(first_use);
+                    // If the node is a graph output, the secondary output must
+                    // also live until the end, because the secondary slot's
+                    // allocation is in the same arena and freeing it early
+                    // changes the free-list state — which can cause a later
+                    // allocation to land adjacent to or (in edge cases) overlap
+                    // with the primary slot's data.
+                    if graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id) {
+                        order.len() - 1
+                    } else {
+                        consumer_last
+                    }
                 };
+                // Debug: log MaxPool SECONDARY lifetime
+                if matches!(node.opcode, Opcode::MaxPool) {
+                    eprintln!("[FNN_DBG_MPLAN] MaxPool nid={} SECONDARY first_use={} last_use={} in_outputs={}",
+                        node_id, first_use, last_use, graph.outputs.contains(&node_id));
+                }
                 alloc_infos.push(AllocInfo {
                     node_id,
                     size: sec_size,

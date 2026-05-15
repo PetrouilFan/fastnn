@@ -154,5 +154,5 @@ src/
 
 - **Conv2d**: CPU-only for quantized; WGPU f32 conv supported
 - **Control flow**: Loop, If ops recorded but not supported
-- **GPU quantization**: U4/U8 quantized kernels are CPU-only (WGPU fallback); WGSL shaders planned for v2.2
-- **Training**: ONNX models are inference-only; IR training pipeline is experimental (v2.1)
+- **GPU quantization**: U4/U8 quantized kernels run on GPU via WGSL compute shaders (v2.2)
+- **Training**: ONNX models can be used with the compiled training pipeline (v2.2)

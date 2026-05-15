@@ -56,8 +56,23 @@ pub fn compile_train_model(
             eps: eps.unwrap_or(1e-8) as f32,
             weight_decay: weight_decay as f32,
         },
+        "muon" => OptimizerConfig::Muon {
+            lr: lr as f32,
+            beta1: beta1.unwrap_or(0.9) as f32,
+            weight_decay: weight_decay as f32,
+        },
+        "lion" => OptimizerConfig::Lion {
+            lr: lr as f32,
+            beta1: beta1.unwrap_or(0.9) as f32,
+            beta2: beta2.unwrap_or(0.999) as f32,
+        },
+        "rmsprop" => OptimizerConfig::RMSprop {
+            lr: lr as f32,
+            beta: beta1.unwrap_or(0.99) as f32,
+            eps: eps.unwrap_or(1e-8) as f32,
+        },
         _ => return Err(PyRuntimeError::new_err(format!(
-            "compile_train_model: unknown optimizer '{optimizer}', expected 'sgd' or 'adamw'"
+            "compile_train_model: unknown optimizer '{optimizer}', expected 'sgd', 'adamw', 'muon', 'lion', or 'rmsprop'"
         ))),
     };
 
