@@ -479,23 +479,6 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
         }
     }
 
-    // Debug: print all nodes whose output type contains Symbol or Bounded dims
-    let mut symbol_count = 0;
-    for &node_id in &order {
-        if let Some(node) = graph.get_node(node_id) {
-            let has_symbol = node.output_type.shape.iter().any(|d| matches!(d, DimExpr::Symbol(_) | DimExpr::Bounded { .. }));
-            if has_symbol {
-                symbol_count += 1;
-                if symbol_count <= 30 {
-                    eprintln!("[SHAPE_DEBUG] node {} ({:?}): shape={:?}",
-                        node.name, node.opcode, node.output_type.shape);
-                }
-            }
-        }
-    }
-    eprintln!("[SHAPE_DEBUG] Summary: {} nodes with Symbol/Bounded dims out of {} total",
-        symbol_count, order.len());
-
     Ok(())
 }
 
