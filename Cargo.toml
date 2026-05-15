@@ -9,7 +9,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 pyo3          = { version = "0.28", features = ["extension-module", "abi3-py312"] }
-rayon         = "1.8"
+rayon         = { version = "1.8", optional = true }
 smallvec      = { version = "1.11", features = ["union", "const_generics"] }
 safetensors   = "0.4"
 half          = "2.3"
@@ -36,7 +36,7 @@ ndarray      = { version = "0.16", features = ["blas"] }
 default = ["simd", "parallel", "simd_avx512"]
 openblas = ["blas-src/openblas-src"]
 blas = []
-parallel = []
+parallel = ["rayon"]
 simd = []
 prefetch = []
 simd_avx512 = []

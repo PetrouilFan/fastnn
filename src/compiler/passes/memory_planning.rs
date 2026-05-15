@@ -123,8 +123,9 @@ fn add_to_free_list(free_list: &mut Vec<FreeBlock>, offset: usize, size: usize) 
     free_list.insert(pos, FreeBlock { offset, size });
 }
 
-/// Find the smallest free block that fits the requested size (best-fit)
-fn find_best_fit(free_list: &mut Vec<FreeBlock>, size: usize) -> Option<usize> {
+/// Find the smallest free block that fits the requested size (best-fit).
+/// Returns the (index, offset) of the matching block without modifying the list.
+fn find_best_fit(free_list: &[FreeBlock], size: usize) -> Option<(usize, usize)> {
     let mut best_idx = None;
     let mut best_size = usize::MAX;
 
@@ -135,22 +136,7 @@ fn find_best_fit(free_list: &mut Vec<FreeBlock>, size: usize) -> Option<usize> {
         }
     }
 
-    if let Some(idx) = best_idx {
-        let block = &free_list[idx];
-        let offset = block.offset;
-        let remaining = block.size - size;
-
-        if remaining == 0 {
-            free_list.remove(idx);
-        } else {
-            free_list[idx].offset = offset + size;
-            free_list[idx].size = remaining;
-        }
-
-        Some(offset)
-    } else {
-        None
-    }
+    best_idx.map(|idx| (idx, free_list[idx].offset))
 }
 
 /// Compute the byte size of a tensor's storage, optionally using a ShapeEnv
@@ -291,33 +277,46 @@ pub fn plan_memory_with_env(
             if active[i].0 < info.live_range.0 {
                 let (_, expired_id, _expired_size) = active.swap_remove(i);
                 if let Some(slot) = slots.get(&expired_id) {
-                    add_to_free_list(&mut free_list, slot.offset, slot.size);
+                    // Free the aligned size (the slot stores info.size,
+                    // but we allocated align_up(info.size, 8) bytes).
+                    add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
                 }
                 if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
-                    add_to_free_list(&mut free_list, slot.offset, slot.size);
+                    add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
                 }
             } else {
                 i += 1;
             }
         }
 
-        let raw_offset = find_best_fit(&mut free_list, info.size);
+        // Round up size to 8 bytes so all allocations start at 8-byte
+        // aligned offsets (satisfies both f32 4-byte and i64 8-byte alignment).
+        let size_aligned = align_up(info.size, 8);
 
-        let offset = match raw_offset {
-            Some(off) => {
-                // Align the free-list offset to 8 bytes (satisfies both
-                // f32 4-byte and i64 8-byte alignment requirements).
-                let aligned = align_up(off, 8);
-                // If alignment created a gap, return the excess to the free list.
-                if aligned > off {
-                    let gap = aligned - off;
-                    add_to_free_list(&mut free_list, off, gap);
+        let offset = match find_best_fit(&free_list, size_aligned) {
+            Some((idx, block_off)) => {
+                let block_end = block_off + free_list[idx].size;
+                // Remove the original block from the free list.
+                free_list.remove(idx);
+                // Allocation starts at the block offset (already 8-aligned
+                // because all free-list entries were created from aligned
+                // allocations).
+                let alloc_start = block_off;
+                let alloc_end = alloc_start + size_aligned;
+                // Return leftover space before the allocation (should be 0
+                // since block_off is always aligned).
+                if alloc_start > block_off {
+                    add_to_free_list(&mut free_list, block_off, alloc_start - block_off);
                 }
-                aligned
+                // Return leftover space after the allocation.
+                if alloc_end < block_end {
+                    add_to_free_list(&mut free_list, alloc_end, block_end - alloc_end);
+                }
+                alloc_start
             }
             None => {
                 let off = align_up(arena_top, 8);
-                arena_top = off + info.size;
+                arena_top = off + size_aligned;
                 off
             }
         };

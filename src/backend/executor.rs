@@ -317,12 +317,6 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             .map(|n| resolve_shape_lenient(&n.output_type.shape, shape_env))
             .collect();
 
-        // DEBUG: Log every node through validation
-        eprintln!(
-            "[validate_shapes] node={} op={:?} name='{}' input_shapes={:?}",
-            node_id, node.opcode, node.name, input_shapes
-        );
-
         match &node.opcode {
             Opcode::MatMul => {
                 if input_shapes.len() < 2 {

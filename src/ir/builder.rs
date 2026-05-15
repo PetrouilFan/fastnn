@@ -1247,9 +1247,6 @@ impl GraphBuilder {
         shape: &GraphTensor,
         attrs: HashMap<String, String>,
     ) -> GraphTensor {
-        eprintln!("[expand_op] input_shape={:?} target_shape={:?}",
-            input.shape(),
-            attrs.get("expand_shape"));
         // If an "expand_shape" attr was provided by the DAG builder, compute
         // the broadcast output shape already here, so the output TensorType
         // is correct for memory planning.
@@ -1283,7 +1280,6 @@ impl GraphBuilder {
                     };
                     broadcast_shape.push(DimExpr::Known(data_dim.max(target_dim)));
                 }
-                eprintln!("[expand_op] computed broadcast shape={:?}", broadcast_shape);
                 TensorType::new(broadcast_shape, input.dtype())
             }
         } else {
