@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 pub type NodeId = usize;
 
@@ -724,13 +726,43 @@ impl IRNode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ComputeGraph {
     pub nodes: Vec<IRNode>,
     pub inputs: Vec<NodeId>,
     pub outputs: Vec<NodeId>,
     pub required_nodes: Vec<NodeId>,
     pub next_id: NodeId,
+    #[serde(skip)]
+    node_index: FxHashMap<NodeId, usize>,
+    #[serde(skip)]
+    consumers_map: Mutex<FxHashMap<NodeId, Vec<NodeId>>>,
+    #[serde(skip)]
+    consumers_map_dirty: AtomicBool,
+    #[serde(skip)]
+    sorted_nodes_cache: Mutex<Option<Vec<NodeId>>>,
+    #[serde(skip)]
+    sorted_nodes_gen: AtomicU64,
+    #[serde(skip)]
+    graph_gen: AtomicU64,
+}
+
+impl Clone for ComputeGraph {
+    fn clone(&self) -> Self {
+        ComputeGraph {
+            nodes: self.nodes.clone(),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            required_nodes: self.required_nodes.clone(),
+            next_id: self.next_id,
+            node_index: self.node_index.clone(),
+            consumers_map: Mutex::new(self.consumers_map.lock().unwrap().clone()),
+            consumers_map_dirty: AtomicBool::new(self.consumers_map_dirty.load(Ordering::Relaxed)),
+            sorted_nodes_cache: Mutex::new(self.sorted_nodes_cache.lock().unwrap().clone()),
+            sorted_nodes_gen: AtomicU64::new(self.sorted_nodes_gen.load(Ordering::Relaxed)),
+            graph_gen: AtomicU64::new(self.graph_gen.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl ComputeGraph {
@@ -742,6 +774,24 @@ impl ComputeGraph {
             outputs: Vec::new(),
             required_nodes: Vec::new(),
             next_id: 1,
+            node_index: FxHashMap::default(),
+            consumers_map: Mutex::new(FxHashMap::default()),
+            consumers_map_dirty: AtomicBool::new(false),
+            sorted_nodes_cache: Mutex::new(None),
+            sorted_nodes_gen: AtomicU64::new(0),
+            graph_gen: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn mark_mutated(&mut self) {
+        self.graph_gen.fetch_add(1, Ordering::Release);
+        self.consumers_map_dirty.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn rebuild_node_index(&mut self) {
+        self.node_index.clear();
+        for (i, node) in self.nodes.iter().enumerate() {
+            self.node_index.insert(node.id, i);
         }
     }
 
@@ -762,6 +812,8 @@ impl ComputeGraph {
             attrs: HashMap::new(),
             name: String::new(),
         });
+        self.node_index.insert(id, self.nodes.len() - 1);
+        self.mark_mutated();
         id
     }
 
@@ -783,6 +835,8 @@ impl ComputeGraph {
             attrs: HashMap::new(),
             name: name.to_string(),
         });
+        self.node_index.insert(id, self.nodes.len() - 1);
+        self.mark_mutated();
         id
     }
 
@@ -805,6 +859,8 @@ impl ComputeGraph {
             attrs,
             name: String::new(),
         });
+        self.node_index.insert(id, self.nodes.len() - 1);
+        self.mark_mutated();
         id
     }
 
@@ -835,15 +891,32 @@ impl ComputeGraph {
             attrs: HashMap::new(),
             name: String::new(),
         });
+        self.node_index.insert(id, self.nodes.len() - 1);
+        self.mark_mutated();
         id
     }
 
     pub fn get_node(&self, id: NodeId) -> Option<&IRNode> {
+        if let Some(&idx) = self.node_index.get(&id) {
+            if let Some(node) = self.nodes.get(idx) {
+                if node.id == id {
+                    return Some(node);
+                }
+            }
+        }
         self.nodes.iter().find(|n| n.id == id)
     }
 
     pub fn get_node_mut(&mut self, id: NodeId) -> Option<&mut IRNode> {
-        self.nodes.iter_mut().find(|n| n.id == id)
+        let cache_hit = self.node_index.get(&id).copied();
+        if let Some(idx) = cache_hit {
+            if self.nodes.get(idx).map_or(false, |n| n.id == id) {
+                return self.nodes.get_mut(idx);
+            }
+        }
+        self.rebuild_node_index();
+        let idx = self.node_index.get(&id)?;
+        self.nodes.get_mut(*idx)
     }
 
     pub fn node_count(&self) -> usize {
@@ -865,6 +938,16 @@ impl ComputeGraph {
     }
 
     pub fn topological_sort(&self) -> Vec<NodeId> {
+        let gen = self.graph_gen.load(Ordering::Acquire);
+        {
+            let cache = self.sorted_nodes_cache.lock().unwrap();
+            if let Some(cached) = cache.as_ref() {
+                if self.sorted_nodes_gen.load(Ordering::Acquire) == gen {
+                    return cached.clone();
+                }
+            }
+        }
+
         let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
         let mut adjacency: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
 
@@ -916,15 +999,28 @@ impl ComputeGraph {
             panic!("ComputeGraph::topological_sort: cycle detected in the computation graph");
         }
 
+        let mut cache = self.sorted_nodes_cache.lock().unwrap();
+        *cache = Some(sorted.clone());
+        self.sorted_nodes_gen.store(gen, Ordering::Release);
         sorted
     }
 
     pub fn consumers(&self, node_id: NodeId) -> Vec<NodeId> {
-        self.nodes
-            .iter()
-            .filter(|n| n.inputs.contains(&node_id))
-            .map(|n| n.id)
-            .collect()
+        if self.consumers_map_dirty.load(Ordering::Acquire) {
+            let mut map: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
+            for node in &self.nodes {
+                for &input_id in &node.inputs {
+                    map.entry(input_id).or_default().push(node.id);
+                }
+            }
+            let mut consumers_map = self.consumers_map.lock().unwrap();
+            *consumers_map = map;
+            self.consumers_map_dirty.store(false, Ordering::Release);
+            consumers_map.get(&node_id).cloned().unwrap_or_default()
+        } else {
+            let consumers_map = self.consumers_map.lock().unwrap();
+            consumers_map.get(&node_id).cloned().unwrap_or_default()
+        }
     }
 
     pub fn remove_node(&mut self, id: NodeId) {
@@ -935,6 +1031,8 @@ impl ComputeGraph {
         self.inputs.retain(|&i| i != id);
         self.outputs.retain(|&i| i != id);
         self.required_nodes.retain(|&i| i != id);
+        self.rebuild_node_index();
+        self.mark_mutated();
     }
 
     /// Save the ComputeGraph to a .fnn binary file.

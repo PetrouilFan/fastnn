@@ -221,8 +221,7 @@ impl Tensor {
                 let backward = autograd::AddBackward::new(edges, inputs);
                 let mut meta = autograd::AutogradMeta::new_non_leaf(true);
                 meta.grad_fn = Some(std::sync::Arc::new(backward));
-                Arc::make_mut(&mut output.inner).autograd_meta =
-                    Some(Arc::new(std::sync::Mutex::new(meta)));
+                Arc::make_mut(&mut output.inner).set_autograd_meta(meta);
             }
             return Ok(output);
         }

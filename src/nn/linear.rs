@@ -2,6 +2,7 @@
 use crate::nn::{Module, TrainingState};
 use crate::tensor::Tensor;
 
+#[derive(Clone)]
 pub struct Linear {
     pub weight: Tensor,
     pub bias: Option<Tensor>,

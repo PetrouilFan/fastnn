@@ -2,6 +2,15 @@ use super::FusionPass;
 use crate::ir::node::{ComputeGraph, IRNode, NodeId, Opcode};
 use std::collections::{HashMap, HashSet};
 
+fn activation_fused_name(opcode: Opcode) -> Option<&'static str> {
+    match opcode {
+        Opcode::Relu => Some("MatMulAddRelu"),
+        Opcode::Gelu => Some("MatMulAddGelu"),
+        Opcode::Silu => Some("MatMulAddSilu"),
+        _ => None,
+    }
+}
+
 pub struct MatMulAddRelu;
 
 impl FusionPass for MatMulAddRelu {
@@ -45,14 +54,18 @@ impl FusionPass for MatMulAddRelu {
                 continue;
             }
 
-            let relu_id = add_consumers[0];
-            if to_remove.contains(&relu_id) {
+            let act_id = add_consumers[0];
+            if to_remove.contains(&act_id) {
                 continue;
             }
 
-            let relu = match graph.get_node(relu_id) {
-                Some(n) if n.opcode == Opcode::Relu => n.clone(),
+            let act = match graph.get_node(act_id) {
+                Some(n) => n.clone(),
                 _ => continue,
+            };
+            let fused_name = match activation_fused_name(act.opcode) {
+                Some(name) => name,
+                None => continue,
             };
 
             let bias_input: Vec<NodeId> = add
@@ -80,13 +93,13 @@ impl FusionPass for MatMulAddRelu {
             fused_inputs.extend(bias_input);
 
             let mut attrs = HashMap::new();
-            attrs.insert("fused_op".to_string(), "MatMulAddRelu".to_string());
+            attrs.insert("fused_op".to_string(), fused_name.to_string());
 
             let fused_node = IRNode {
                 id: fused_id,
                 opcode: Opcode::MatMul,
                 inputs: fused_inputs,
-                output_type: relu.output_type.clone(),
+                output_type: act.output_type.clone(),
                 secondary_output_type: None,
                 attrs,
                 name: format!("fused_{}", matmul.name),
@@ -96,20 +109,20 @@ impl FusionPass for MatMulAddRelu {
 
             to_remove.insert(matmul_id);
             to_remove.insert(add_id);
-            to_remove.insert(relu_id);
+            to_remove.insert(act_id);
 
-            let relu_consumers: Vec<NodeId> = graph.consumers(relu_id);
-            for consumer_id in relu_consumers {
+            let act_consumers: Vec<NodeId> = graph.consumers(act_id);
+            for consumer_id in act_consumers {
                 if let Some(consumer) = graph.get_node_mut(consumer_id) {
                     for input in consumer.inputs.iter_mut() {
-                        if *input == relu_id {
+                        if *input == act_id {
                             *input = fused_id;
                         }
                     }
                 }
             }
 
-            if let Some(output) = graph.outputs.iter_mut().find(|o| **o == relu_id) {
+            if let Some(output) = graph.outputs.iter_mut().find(|o| **o == act_id) {
                 *output = fused_id;
             }
 

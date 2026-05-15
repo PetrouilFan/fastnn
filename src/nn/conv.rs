@@ -6,6 +6,7 @@ use crate::{
 };
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct Conv2d {
     pub weight: Tensor,
     pub bias: Option<Tensor>,
@@ -172,6 +173,7 @@ impl Module for Conv2d {
     impl_training_state!(self, self.training);
 }
 
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct ConvTranspose2d {
     pub weight: Tensor,
@@ -292,6 +294,7 @@ impl Module for ConvTranspose2d {
     impl_training_state!(self, self.training);
 }
 
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct Conv1d {
     pub weight: Tensor,
@@ -435,6 +438,7 @@ impl Module for Conv1d {
     impl_training_state!(self, self.training);
 }
 
+#[derive(Clone)]
 pub struct Conv3d {
     pub weight: Tensor,
     pub bias: Option<Tensor>,

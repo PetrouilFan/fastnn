@@ -2549,6 +2549,10 @@ mod tests {
 
     #[test]
     fn test_symbolic_flatten_conv_concat() {
+        // Save/restore global dim-max so parallel test ordering doesn't break us
+        let saved_max =
+            crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+
         let g = GraphBuilder::new();
         let n = DimExpr::Symbol("N".into());
         let c = DimExpr::Known(3);
@@ -2575,13 +2579,14 @@ mod tests {
         let y = g.input_with_dims(&[n, c, h, w], IrDType::F32);
         let cat = g.concat(&[&x, &y], 0);
         let cat_shape = cat.shape();
+        let expected_max = 2 * crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             cat_shape[0],
             DimExpr::Bounded {
                 sym: "2*N".into(),
-                max: 16384
+                max: expected_max,
             },
-            "concat along symbolic dim should produce canonical 2*N"
+            "concat along symbolic dim should produce canonical 2*N",
         );
 
         // Concat along known dim
@@ -2592,6 +2597,8 @@ mod tests {
             DimExpr::Known(6),
             "concat along known dim should produce sum: 3+3=6"
         );
+
+        crate::ir::node::SYMBOL_DIM_MAX.store(saved_max, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]

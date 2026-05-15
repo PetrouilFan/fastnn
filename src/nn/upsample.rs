@@ -1,6 +1,7 @@
 use crate::nn::Module;
 use crate::tensor::Tensor;
 
+#[derive(Clone)]
 pub struct Upsample {
     pub scale_h: usize,
     pub scale_w: usize,

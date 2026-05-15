@@ -217,7 +217,11 @@ impl Backend for CpuBackend {
                     let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
                     let kernel_name = match (fused_type, is_quantized) {
                         (Some("MatMulAddRelu"), _) => "fused_matmul_add_relu",
+                        (Some("MatMulAddGelu"), _) => "fused_matmul_add_gelu",
+                        (Some("MatMulAddSilu"), _) => "fused_matmul_add_silu",
                         (Some("OpRelu"), false) => "matmul_relu",
+                        (Some("OpGelu"), false) => "matmul_gelu",
+                        (Some("OpSilu"), false) => "matmul_silu",
                         (_, true)
                             if input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
                         {
@@ -292,6 +296,7 @@ impl Backend for CpuBackend {
                         None
                     };
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
@@ -316,17 +321,39 @@ impl Backend for CpuBackend {
                         Opcode::Minimum => "min_f32",
                         _ => unreachable!(),
                     };
-                    // Op+Relu fusion: if fused_op is "OpRelu", use the fused kernel name
-                    if node.attrs.get("fused_op").map(|s| s.as_str()) == Some("OpRelu") {
-                        kernel = match node.opcode {
-                            Opcode::Add => "add_relu_f32",
-                            Opcode::Sub => "sub_relu_f32",
-                            Opcode::Mul => "mul_relu_f32",
-                            Opcode::Div => "div_relu_f32",
-                            _ => unreachable!(),
-                        };
+                    // Op+Activation fusion: if fused_op is set, use the fused kernel name
+                    match node.attrs.get("fused_op").map(|s| s.as_str()) {
+                        Some("OpRelu") => {
+                            kernel = match node.opcode {
+                                Opcode::Add => "add_relu_f32",
+                                Opcode::Sub => "sub_relu_f32",
+                                Opcode::Mul => "mul_relu_f32",
+                                Opcode::Div => "div_relu_f32",
+                                _ => unreachable!(),
+                            };
+                        }
+                        Some("OpGelu") => {
+                            kernel = match node.opcode {
+                                Opcode::Add => "add_gelu_f32",
+                                Opcode::Sub => "sub_gelu_f32",
+                                Opcode::Mul => "mul_gelu_f32",
+                                Opcode::Div => "div_gelu_f32",
+                                _ => unreachable!(),
+                            };
+                        }
+                        Some("OpSilu") => {
+                            kernel = match node.opcode {
+                                Opcode::Add => "add_silu_f32",
+                                Opcode::Sub => "sub_silu_f32",
+                                Opcode::Mul => "mul_silu_f32",
+                                Opcode::Div => "div_silu_f32",
+                                _ => unreachable!(),
+                            };
+                        }
+                        _ => {}
                     }
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
@@ -401,6 +428,7 @@ impl Backend for CpuBackend {
                         extra_params.push(max.to_bits() as usize);
                     }
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
@@ -516,6 +544,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(3).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name,
                         input_slices,
                         output_slice,
@@ -541,6 +570,7 @@ impl Backend for CpuBackend {
                         0
                     };
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "norm_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -590,6 +620,7 @@ impl Backend for CpuBackend {
                         .unwrap_or(1);
 
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "softmax".to_string(),
                         input_slices,
                         output_slice,
@@ -608,6 +639,7 @@ impl Backend for CpuBackend {
                         .map(|s| s.iter().skip(2).product::<u64>())
                         .unwrap_or(1) as usize;
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "biasadd".to_string(),
                         input_slices,
                         output_slice,
@@ -639,6 +671,7 @@ impl Backend for CpuBackend {
                             .collect::<Vec<_>>()
                     );
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "concat".to_string(),
                         input_slices,
                         output_slice,
@@ -696,6 +729,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(3).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "pool_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -722,6 +756,7 @@ impl Backend for CpuBackend {
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "pad_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -738,6 +773,7 @@ impl Backend for CpuBackend {
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "gather".to_string(),
                         input_slices,
                         output_slice,
@@ -771,6 +807,7 @@ impl Backend for CpuBackend {
                         .map(|s| s[dim + 1..].iter().product::<u64>() as usize)
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "slice_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -782,6 +819,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::ScatterNd => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "scatter_nd".to_string(),
                         input_slices,
                         output_slice,
@@ -816,6 +854,7 @@ impl Backend for CpuBackend {
                         crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
                     }) as usize;
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "reduce_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -847,6 +886,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(1).cloned())
                         .unwrap_or(DimExpr::Known(n as u64));
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "transpose_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -880,6 +920,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(2).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "conv1d".to_string(),
                         input_slices,
                         output_slice,
@@ -929,6 +970,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(4).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "conv3d".to_string(),
                         input_slices,
                         output_slice,
@@ -973,6 +1015,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(3).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "conv_transpose2d".to_string(),
                         input_slices,
                         output_slice,
@@ -986,6 +1029,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Prelu => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "prelu".to_string(),
                         input_slices,
                         output_slice,
@@ -1002,6 +1046,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse::<f32>().ok())
                         .unwrap_or(1e-5);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "rms_norm".to_string(),
                         input_slices,
                         output_slice,
@@ -1013,6 +1058,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Embedding => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "embedding".to_string(),
                         input_slices,
                         output_slice,
@@ -1024,6 +1070,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Pow => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "pow_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1035,6 +1082,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::GtScalar => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "gt_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1046,6 +1094,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::LtScalar => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "lt_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1057,6 +1106,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::EqScalar => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "eq_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1068,6 +1118,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::AddScalar => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "add_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1079,6 +1130,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::MulScalar => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "mul_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1090,6 +1142,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::DivScalar => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "div_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1111,6 +1164,7 @@ impl Backend for CpuBackend {
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(-1);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "argmax".to_string(),
                         input_slices,
                         output_slice,
@@ -1146,6 +1200,7 @@ impl Backend for CpuBackend {
                         _ => "upsample_bilinear2d",
                     };
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
@@ -1167,6 +1222,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "adaptive_avg_pool2d".to_string(),
                         input_slices,
                         output_slice,
@@ -1183,6 +1239,7 @@ impl Backend for CpuBackend {
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "repeat".to_string(),
                         input_slices,
                         output_slice,
@@ -1209,6 +1266,7 @@ impl Backend for CpuBackend {
                         .and_then(|r| r.parse().ok())
                         .unwrap_or(0);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "cumsum".to_string(),
                         input_slices,
                         output_slice,
@@ -1220,6 +1278,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Erf => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "erf_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1240,6 +1299,7 @@ impl Backend for CpuBackend {
                     params.extend_from_slice(&dims);
                     params.extend(input_shape.iter().map(|&s| s as usize));
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "flip".to_string(),
                         input_slices,
                         output_slice,
@@ -1251,6 +1311,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Where => {
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "where_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1272,6 +1333,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(-1);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "topk_fused".to_string(),
                         input_slices,
                         output_slice,
@@ -1289,6 +1351,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.01);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "sgd_update_f32".to_string(),
                         input_slices, // [weight, grad] — weight must be same slot as output
                         output_slice,
@@ -1340,6 +1403,7 @@ impl Backend for CpuBackend {
                         "adam_update_f32"
                     };
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices, // [weight, grad, m, v]
                         output_slice,
@@ -1401,6 +1465,7 @@ impl Backend for CpuBackend {
                         "adamw_update_f32"
                     };
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices, // [weight, grad, m, v]
                         output_slice,
@@ -1434,6 +1499,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.0);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "muon_update_f32".to_string(),
                         input_slices, // [weight, grad, m]
                         output_slice,
@@ -1464,6 +1530,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.999);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "lion_update_f32".to_string(),
                         input_slices, // [weight, grad, m]
                         output_slice,
@@ -1494,6 +1561,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(1e-8);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "rmsprop_update_f32".to_string(),
                         input_slices, // [weight, grad, v]
                         output_slice,
@@ -1552,6 +1620,7 @@ impl Backend for CpuBackend {
                             .map(|s| vec![BufferSlice::new(s.offset, s.size)])
                             .unwrap_or_default();
                         instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                             kernel_name: "cast".to_string(),
                             input_slices,
                             output_slice,
@@ -1592,6 +1661,7 @@ impl Backend for CpuBackend {
                         numel
                     };
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
@@ -1639,6 +1709,7 @@ impl Backend for CpuBackend {
                         params.push(zp.to_bits() as usize);
                     }
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "dequantize_kernel".to_string(),
                         input_slices,
                         output_slice,
@@ -1654,6 +1725,7 @@ impl Backend for CpuBackend {
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "to_f16".to_string(),
                         input_slices,
                         output_slice,
@@ -1669,6 +1741,7 @@ impl Backend for CpuBackend {
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "to_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1685,6 +1758,7 @@ impl Backend for CpuBackend {
                         .unwrap_or(1);
                     // Output buffer: [scale(f32)][zp(f32)][i8_data(numel bytes)]
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "quantize_activations".to_string(),
                         input_slices,
                         output_slice,
@@ -1700,6 +1774,7 @@ impl Backend for CpuBackend {
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "dequantize_activations".to_string(),
                         input_slices,
                         output_slice,
@@ -1722,6 +1797,7 @@ impl Backend for CpuBackend {
                         .unwrap_or("layer_norm");
                     let kernel_name = format!("fused_residual_add_{}", norm_type);
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name,
                         input_slices, // [residual, main_output, weight, optional_bias]
                         output_slice,
@@ -1743,6 +1819,7 @@ impl Backend for CpuBackend {
                         .unwrap_or(1);
                     if !input_slices.is_empty() {
                         instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                             kernel_name: "gradient_scale".to_string(),
                             input_slices,
                             output_slice,
@@ -1785,6 +1862,7 @@ impl Backend for CpuBackend {
                     }
 
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "expand_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1815,6 +1893,7 @@ impl Backend for CpuBackend {
                         .map(|slot| BufferSlice::new(slot.offset, slot.size))
                         .collect();
                     instructions.push(Instruction::CallKernel {
+            node_id: Some(node_id),
                         kernel_name: "range_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1883,6 +1962,7 @@ impl Backend for CpuBackend {
                     params,
                     param_dims,
                     weight_meta,
+                    ..
                 } => {
                     let out_start = output_slice.offset;
                     let out_end = output_slice.offset + output_slice.size;
@@ -2792,44 +2872,9 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Use BLAS for large matrices, parallel scalar for medium, sequential scalar for tiny.
-                                // The parallel scalar loop (rayon par_chunks_mut) competes with BLAS for medium
-                                // sizes; sequential scalar is only used for the tiniest matmuls.
-                                #[cfg(not(feature = "parallel"))]
-                                let threshold = 32;
-                                #[cfg(feature = "parallel")]
-                                let threshold = 16384;
-                                if m * _k * n >= threshold {
-                                    matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                } else {
-                                    #[cfg(not(feature = "parallel"))]
-                                    {
-                                        for i in 0..m {
-                                            for j in 0..n {
-                                                let mut sum = 0.0f32;
-                                                for kk in 0.._k {
-                                                    sum += a[i * _k + kk] * b[kk * n + j];
-                                                }
-                                                out_f32[i * n + j] = sum;
-                                            }
-                                        }
-                                    }
-                                    #[cfg(feature = "parallel")]
-                                    {
-                                        use rayon::prelude::*;
-                                        out_f32.par_chunks_mut(n).enumerate().for_each(
-                                            |(i, row)| {
-                                                for j in 0..n {
-                                                    let mut sum = 0.0f32;
-                                                    for kk in 0.._k {
-                                                        sum += a[i * _k + kk] * b[kk * n + j];
-                                                    }
-                                                    row[j] = sum;
-                                                }
-                                            },
-                                        );
-                                    }
-                                }
+                                // Use matrixmultiply::sgemm for all sizes — it handles small matrices
+                                // efficiently via its own tiling and is heavily optimized.
+                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
                             }
                         }
                         "fused_matmul_add_relu" => {
@@ -2852,7 +2897,7 @@ impl Backend for CpuBackend {
                                 };
                                 let matmul_params =
                                     resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[_m, _k, n] = &matmul_params[..] else {
+                                let &[m, _k, n] = &matmul_params[..] else {
                                     return Err(BackendError::Dispatch(
                                         "fused_matmul_add_relu: expected params [M,K,N]".into(),
                                     ));
@@ -2861,32 +2906,85 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0.._m {
-                                        for j in 0..n {
-                                            let mut sum = 0.0f32;
-                                            for kk in 0.._k {
-                                                sum += a[i * _k + kk] * b[kk * n + j];
-                                            }
-                                            sum += if j < bias.len() { bias[j] } else { 0.0 };
-                                            out_f32[i * n + j] = sum.max(0.0);
-                                        }
-                                    }
+                                // Use matrixmultiply::sgemm for the matmul, then add bias + relu
+                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
+                                for i in 0..out_f32.len() {
+                                    out_f32[i] = (out_f32[i] + if i % n < bias.len() { bias[i % n] } else { 0.0 }).max(0.0);
                                 }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-                                        for j in 0..n {
-                                            let mut sum = 0.0f32;
-                                            for kk in 0.._k {
-                                                sum += a[i * _k + kk] * b[kk * n + j];
-                                            }
-                                            sum += if j < bias.len() { bias[j] } else { 0.0 };
-                                            row[j] = sum.max(0.0);
-                                        }
-                                    });
+                            }
+                        }
+                        "fused_matmul_add_gelu" => {
+                            if let [a_slice, b_slice, bias_slice] = &input_slices[..] {
+                                let (a, b, bias) = {
+                                    let d = arena.data_mut();
+                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
+                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                    )
+                                    .to_vec();
+                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
+                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                    )
+                                    .to_vec();
+                                    let bias_f32 = bytemuck::cast_slice::<_, f32>(
+                                        &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
+                                    )
+                                    .to_vec();
+                                    (a_f32, b_f32, bias_f32)
+                                };
+                                let matmul_params =
+                                    resolve_params(params, param_dims, shape_env, 3)?;
+                                let &[m, _k, n] = &matmul_params[..] else {
+                                    return Err(BackendError::Dispatch(
+                                        "fused_matmul_add_gelu: expected params [M,K,N]".into(),
+                                    ));
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
+                                for i in 0..out_f32.len() {
+                                    let x = out_f32[i] + if i % n < bias.len() { bias[i % n] } else { 0.0 };
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    out_f32[i] = 0.5 * x * (1.0 + t);
+                                }
+                            }
+                        }
+                        "fused_matmul_add_silu" => {
+                            if let [a_slice, b_slice, bias_slice] = &input_slices[..] {
+                                let (a, b, bias) = {
+                                    let d = arena.data_mut();
+                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
+                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                    )
+                                    .to_vec();
+                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
+                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                    )
+                                    .to_vec();
+                                    let bias_f32 = bytemuck::cast_slice::<_, f32>(
+                                        &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
+                                    )
+                                    .to_vec();
+                                    (a_f32, b_f32, bias_f32)
+                                };
+                                let matmul_params =
+                                    resolve_params(params, param_dims, shape_env, 3)?;
+                                let &[m, _k, n] = &matmul_params[..] else {
+                                    return Err(BackendError::Dispatch(
+                                        "fused_matmul_add_silu: expected params [M,K,N]".into(),
+                                    ));
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
+                                for i in 0..out_f32.len() {
+                                    let x = out_f32[i] + if i % n < bias.len() { bias[i % n] } else { 0.0 };
+                                    out_f32[i] = x / (1.0 + (-x).exp());
                                 }
                             }
                         }
@@ -2907,7 +3005,7 @@ impl Backend for CpuBackend {
                                 };
                                 let matmul_params =
                                     resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[_m, _k, n] = &matmul_params[..] else {
+                                let &[m, _k, n] = &matmul_params[..] else {
                                     return Err(BackendError::Dispatch(
                                         "matmul_relu: expected params [M,K,N]".into(),
                                     ));
@@ -2916,30 +3014,78 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0.._m {
-                                        for j in 0..n {
-                                            let mut sum = 0.0f32;
-                                            for kk in 0.._k {
-                                                sum += a[i * _k + kk] * b[kk * n + j];
-                                            }
-                                            out_f32[i * n + j] = sum.max(0.0);
-                                        }
-                                    }
+                                // Use matrixmultiply::sgemm for the matmul, then apply relu
+                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
+                                for v in out_f32.iter_mut() {
+                                    *v = v.max(0.0);
                                 }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-                                        for j in 0..n {
-                                            let mut sum = 0.0f32;
-                                            for kk in 0.._k {
-                                                sum += a[i * _k + kk] * b[kk * n + j];
-                                            }
-                                            row[j] = sum.max(0.0);
-                                        }
-                                    });
+                            }
+                        }
+                        "matmul_gelu" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let matmul_params =
+                                    resolve_params(params, param_dims, shape_env, 3)?;
+                                let &[m, _k, n] = &matmul_params[..] else {
+                                    return Err(BackendError::Dispatch(
+                                        "matmul_gelu: expected params [M,K,N]".into(),
+                                    ));
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
+                                for v in out_f32.iter_mut() {
+                                    let x = *v;
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    *v = 0.5 * x * (1.0 + t);
+                                }
+                            }
+                        }
+                        "matmul_silu" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let matmul_params =
+                                    resolve_params(params, param_dims, shape_env, 3)?;
+                                let &[m, _k, n] = &matmul_params[..] else {
+                                    return Err(BackendError::Dispatch(
+                                        "matmul_silu: expected params [M,K,N]".into(),
+                                    ));
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
+                                for v in out_f32.iter_mut() {
+                                    *v = *v / (1.0 + (-*v).exp());
                                 }
                             }
                         }
@@ -2994,20 +3140,15 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Slice activations and outputs per batch item
-                                let batch_inputs: Vec<Vec<f32>> = (0..m)
-                                    .map(|i| activations[i * k..(i + 1) * k].to_vec())
-                                    .collect();
-                                let mut batch_outputs: Vec<Vec<f32>> =
-                                    (0..m).map(|_i| vec![0.0f32; n]).collect();
-                                crate::backend::cpu::microkernels::gemm_cpu::<U4x8>(
+                                // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
+                                crate::backend::cpu::microkernels::gemm_cpu_flat::<U4x8>(
                                     &pt,
-                                    &batch_inputs,
-                                    &mut batch_outputs,
+                                    &activations,
+                                    out_f32,
+                                    m,  // num_pixels
+                                    k,  // col_w
+                                    n,  // oc
                                 );
-                                for i in 0..m {
-                                    out_f32[i * n..(i + 1) * n].copy_from_slice(&batch_outputs[i]);
-                                }
                             }
                         }
                         "matmul_u8" => {
@@ -3061,19 +3202,15 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let batch_inputs: Vec<Vec<f32>> = (0..m)
-                                    .map(|i| activations[i * k..(i + 1) * k].to_vec())
-                                    .collect();
-                                let mut batch_outputs: Vec<Vec<f32>> =
-                                    (0..m).map(|_i| vec![0.0f32; n]).collect();
-                                crate::backend::cpu::microkernels::gemm_cpu::<U8x4>(
+                                // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
+                                crate::backend::cpu::microkernels::gemm_cpu_flat::<U8x4>(
                                     &pt,
-                                    &batch_inputs,
-                                    &mut batch_outputs,
+                                    &activations,
+                                    out_f32,
+                                    m,  // num_pixels = batch rows
+                                    k,  // col_w = input features per row
+                                    n,  // oc = output features per row
                                 );
-                                for i in 0..m {
-                                    out_f32[i * n..(i + 1) * n].copy_from_slice(&batch_outputs[i]);
-                                }
                             }
                         }
                         "reduce_f32" => {
@@ -3607,6 +3744,360 @@ impl Backend for CpuBackend {
                                 }
                             }
                         }
+                        // ── Fused elementwise + GELU ─────────────────────
+                        "add_gelu_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..out_len {
+                                        let x = a[i % a_len] + b[i % b_len];
+                                        let x3 = x * x * x;
+                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                        let t = tanh_arg.tanh();
+                                        out_f32[i] = 0.5 * x * (1.0 + t);
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                                        |(i, o)| {
+                                            let x = a[i % a_len] + b[i % b_len];
+                                            let x3 = x * x * x;
+                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                            let t = tanh_arg.tanh();
+                                            *o = 0.5 * x * (1.0 + t);
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        "sub_gelu_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..out_len {
+                                        let x = a[i % a_len] - b[i % b_len];
+                                        let x3 = x * x * x;
+                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                        let t = tanh_arg.tanh();
+                                        out_f32[i] = 0.5 * x * (1.0 + t);
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                                        |(i, o)| {
+                                            let x = a[i % a_len] - b[i % b_len];
+                                            let x3 = x * x * x;
+                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                            let t = tanh_arg.tanh();
+                                            *o = 0.5 * x * (1.0 + t);
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        "mul_gelu_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..out_len {
+                                        let x = a[i % a_len] * b[i % b_len];
+                                        let x3 = x * x * x;
+                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                        let t = tanh_arg.tanh();
+                                        out_f32[i] = 0.5 * x * (1.0 + t);
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                                        |(i, o)| {
+                                            let x = a[i % a_len] * b[i % b_len];
+                                            let x3 = x * x * x;
+                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                            let t = tanh_arg.tanh();
+                                            *o = 0.5 * x * (1.0 + t);
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        "div_gelu_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..out_len {
+                                        let x = a[i % a_len] / b[i % b_len];
+                                        let x3 = x * x * x;
+                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                        let t = tanh_arg.tanh();
+                                        out_f32[i] = 0.5 * x * (1.0 + t);
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                                        |(i, o)| {
+                                            let x = a[i % a_len] / b[i % b_len];
+                                            let x3 = x * x * x;
+                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                            let t = tanh_arg.tanh();
+                                            *o = 0.5 * x * (1.0 + t);
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        // ── Fused elementwise + SiLU ─────────────────────
+                        "add_silu_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..out_len {
+                                        let x = a[i % a_len] + b[i % b_len];
+                                        out_f32[i] = x / (1.0 + (-x).exp());
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                                        |(i, o)| {
+                                            let x = a[i % a_len] + b[i % b_len];
+                                            *o = x / (1.0 + (-x).exp());
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        "sub_silu_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..out_len {
+                                        let x = a[i % a_len] - b[i % b_len];
+                                        out_f32[i] = x / (1.0 + (-x).exp());
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                                        |(i, o)| {
+                                            let x = a[i % a_len] - b[i % b_len];
+                                            *o = x / (1.0 + (-x).exp());
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        "mul_silu_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..out_len {
+                                        let x = a[i % a_len] * b[i % b_len];
+                                        out_f32[i] = x / (1.0 + (-x).exp());
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                                        |(i, o)| {
+                                            let x = a[i % a_len] * b[i % b_len];
+                                            *o = x / (1.0 + (-x).exp());
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        "div_silu_f32" => {
+                            if let [a_slice, b_slice] = &input_slices[..] {
+                                let (a, b) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
+                                        )
+                                        .to_vec(),
+                                    )
+                                };
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                let out_len = out_f32.len();
+                                let a_len = a.len();
+                                let b_len = b.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..out_len {
+                                        let x = a[i % a_len] / b[i % b_len];
+                                        out_f32[i] = x / (1.0 + (-x).exp());
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                                        |(i, o)| {
+                                            let x = a[i % a_len] / b[i % b_len];
+                                            *o = x / (1.0 + (-x).exp());
+                                        },
+                                    );
+                                }
+                            }
+                        }
                         "conv2d" => {
                             if let [input_slice, weight_slice] = &input_slices[..] {
                                 let (input_data, weight_data) = {
@@ -3643,11 +4134,11 @@ impl Backend for CpuBackend {
                                 let c_per_group = c / groups.max(1);
                                 let n = input_data.len() / (c * h * w).max(1);
                                 let f = weight_data.len() / (c_per_group * kh * kw).max(1);
-                                let h_out = (h + 2 * padding)
+                                let _h_out = (h + 2 * padding)
                                     .saturating_sub(dilation * (kh - 1) + 1)
                                     / stride
                                     + 1;
-                                let w_out = (w + 2 * padding)
+                                let _w_out = (w + 2 * padding)
                                     .saturating_sub(dilation * (kw - 1) + 1)
                                     / stride
                                     + 1;
@@ -3656,61 +4147,17 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                for nn in 0..n {
-                                    for ff in 0..f {
-                                        let g = ff / (f / groups.max(1));
-                                        for hh in 0..h_out {
-                                            for ww in 0..w_out {
-                                                let mut sum = 0.0f32;
-                                                for cc in 0..c_per_group {
-                                                    for kkh in 0..kh {
-                                                        for kkw in 0..kw {
-                                                            let h_in = hh * stride + kkh;
-                                                            let w_in = ww * stride + kkw;
-                                                            if h_in >= padding && w_in >= padding {
-                                                                let h_in_s = h_in - padding;
-                                                                let w_in_s = w_in - padding;
-                                                                if h_in_s < h && w_in_s < w {
-                                                                    let input_idx = nn
-                                                                        * (c * h * w)
-                                                                        + (g * c_per_group + cc)
-                                                                            * (h * w)
-                                                                        + h_in_s * w
-                                                                        + w_in_s;
-                                                                    let weight_idx =
-                                                                        ff * c_per_group * kh * kw
-                                                                            + cc * kh * kw
-                                                                            + kkh * kw
-                                                                            + kkw;
-                                                                    if input_idx < input_data.len()
-                                                                        && weight_idx
-                                                                            < weight_data.len()
-                                                                    {
-                                                                        sum += input_data
-                                                                            [input_idx]
-                                                                            * weight_data
-                                                                                [weight_idx];
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                if !bias_data.is_empty() {
-                                                    sum += bias_data[ff % bias_data.len()];
-                                                }
-                                                let out_idx = nn * (f * h_out * w_out)
-                                                    + ff * (h_out * w_out)
-                                                    + hh * w_out
-                                                    + ww;
-
-                                                if out_idx < out_f32.len() {
-                                                    out_f32[out_idx] = sum;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                // Delegate to the tiled SIMD-friendly microkernel
+                                crate::backend::cpu::microkernels::conv2d_f32_tiled(
+                                    &input_data,
+                                    &weight_data,
+                                    &bias_data,
+                                    out_f32,
+                                    n, c, h, w, f,
+                                    kh, kw,
+                                    stride, padding, dilation,
+                                    groups,
+                                );
                             }
                         }
                         "conv2d_u4" | "conv2d_u8" => {
@@ -3857,21 +4304,19 @@ impl Backend for CpuBackend {
                                                     }
                                                 }
                                             }
-                                            let batch_inputs: Vec<Vec<f32>> = (0..num_pixels)
-                                                .map(|p| {
-                                                    col_matrix[p * col_w..(p + 1) * col_w].to_vec()
-                                                })
-                                                .collect();
-                                            let mut batch_outputs: Vec<Vec<f32>> =
-                                                (0..num_pixels).map(|_| vec![0.0f32; oc]).collect();
-                                            crate::backend::cpu::microkernels::gemm_cpu(
+                                            // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
+                                            let mut temp_out = vec![0.0f32; num_pixels * oc];
+                                            crate::backend::cpu::microkernels::gemm_cpu_flat(
                                                 &pt,
-                                                &batch_inputs,
-                                                &mut batch_outputs,
+                                                &col_matrix,
+                                                &mut temp_out,
+                                                num_pixels,
+                                                col_w,
+                                                oc,
                                             );
                                             for pixel in 0..num_pixels {
                                                 for ff in 0..oc {
-                                                    let mut val = batch_outputs[pixel][ff];
+                                                    let mut val = temp_out[pixel * oc + ff];
                                                     if !bias_data.is_empty() && ff < bias_data.len()
                                                     {
                                                         val += bias_data[ff];
@@ -5529,55 +5974,41 @@ impl Backend for CpuBackend {
                         }
                         // ── Optimizer kernels ───────────────────────
                         "sgd_update_f32" => {
-                            let (w_init, grad, lr) = {
+                            let w_new = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
                                 let w_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[0].offset
                                         ..input_slices[0].offset + input_slices[0].size],
-                                )
-                                .to_vec();
-                                let grad = bytemuck::cast_slice::<_, f32>(
+                                );
+                                let g_slice = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[1].offset
                                         ..input_slices[1].offset + input_slices[1].size],
-                                )
-                                .to_vec();
+                                );
                                 let lr = f32::from_bits(params[0] as u32);
-                                (w_init, grad, lr)
+                                let mut w_new = w_init.to_vec();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..w_new.len() {
+                                        w_new[i] -= lr * g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    w_new.par_iter_mut().enumerate().for_each(|(i, w)| {
+                                        *w -= lr * g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                    });
+                                }
+                                w_new
                             };
-                            #[cfg(not(feature = "parallel"))]
-                            {
-                                let w_new: Vec<f32> = w_init
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, &wi)| {
-                                        wi - lr * grad.get(i % grad.len()).copied().unwrap_or(0.0)
-                                    })
-                                    .collect();
-                                let d = arena.data_mut();
-                                let w_off = input_slices[0].offset;
-                                let w_sz = input_slices[0].size;
-                                bytemuck::cast_slice_mut::<_, f32>(&mut d[w_off..w_off + w_sz])
-                                    .copy_from_slice(&w_new);
-                                bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                    .copy_from_slice(&w_new);
-                            }
-                            #[cfg(feature = "parallel")]
-                            {
-                                use rayon::prelude::*;
-                                let mut w_new = w_init.clone();
-                                w_new.par_iter_mut().enumerate().for_each(|(i, w)| {
-                                    *w = w_init[i]
-                                        - lr * grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                });
-                                let d = arena.data_mut();
-                                let w_off = input_slices[0].offset;
-                                let w_sz = input_slices[0].size;
-                                bytemuck::cast_slice_mut::<_, f32>(&mut d[w_off..w_off + w_sz])
-                                    .copy_from_slice(&w_new);
-                                bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                    .copy_from_slice(&w_new);
-                            }
+                            let d = arena.data_mut();
+                            let w_off = input_slices[0].offset;
+                            let w_sz = input_slices[0].size;
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[w_off..w_off + w_sz])
+                                .copy_from_slice(&w_new);
+                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                .copy_from_slice(&w_new);
                         }
                         "gradient_scale" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -5613,70 +6044,66 @@ impl Backend for CpuBackend {
                             }
                         }
                         "adam_update_f32" => {
-                            let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
+                            let (w_new, m_new, v_new) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
                                 let w_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[0].offset
                                         ..input_slices[0].offset + input_slices[0].size],
-                                )
-                                .to_vec();
+                                );
+                                let g_slice = bytemuck::cast_slice::<_, f32>(
+                                    &d_ref[input_slices[1].offset
+                                        ..input_slices[1].offset + input_slices[1].size],
+                                );
                                 let m_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[2].offset
                                         ..input_slices[2].offset + input_slices[2].size],
-                                )
-                                .to_vec();
+                                );
                                 let v_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[3].offset
                                         ..input_slices[3].offset + input_slices[3].size],
-                                )
-                                .to_vec();
-                                let grad = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[1].offset
-                                        ..input_slices[1].offset + input_slices[1].size],
-                                )
-                                .to_vec();
+                                );
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
                                 let t = params[4] as f32;
-                                (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t)
-                            };
-                            let bias_corr1 = 1.0 - beta1.powi(t as i32);
-                            let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                            let _len = w_init.len();
-                            let mut w_new = w_init.clone();
-                            let mut m_new = m_init.clone();
-                            let mut v_new = v_init.clone();
-                            #[cfg(not(feature = "parallel"))]
-                            {
-                                for i in 0.._len {
-                                    let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                    m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                    v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                    let m_hat = m_new[i] / bias_corr1;
-                                    let v_hat = v_new[i] / bias_corr2;
-                                    w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+                                let bias_corr1 = 1.0 - beta1.powi(t as i32);
+                                let bias_corr2 = 1.0 - beta2.powi(t as i32);
+                                let _len = w_init.len();
+                                let mut w_new = w_init.to_vec();
+                                let mut m_new = m_init.to_vec();
+                                let mut v_new = v_init.to_vec();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0.._len {
+                                        let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                        v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                        let m_hat = m_new[i] / bias_corr1;
+                                        let v_hat = v_new[i] / bias_corr2;
+                                        w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+                                    }
                                 }
-                            }
-                            #[cfg(feature = "parallel")]
-                            {
-                                use rayon::prelude::*;
-                                w_new
-                                    .par_iter_mut()
-                                    .zip(m_new.par_iter_mut())
-                                    .zip(v_new.par_iter_mut())
-                                    .enumerate()
-                                    .for_each(|(i, ((w, m), v))| {
-                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                        *m = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                        *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                        let m_hat = *m / bias_corr1;
-                                        let v_hat = *v / bias_corr2;
-                                        *w -= lr * m_hat / (v_hat.sqrt() + eps);
-                                    });
-                            }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    w_new
+                                        .par_iter_mut()
+                                        .zip(m_new.par_iter_mut())
+                                        .zip(v_new.par_iter_mut())
+                                        .enumerate()
+                                        .for_each(|(i, ((w, m), v))| {
+                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            *m = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                            *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                            let m_hat = *m / bias_corr1;
+                                            let v_hat = *v / bias_corr2;
+                                            *w -= lr * m_hat / (v_hat.sqrt() + eps);
+                                        });
+                                }
+                                (w_new, m_new, v_new)
+                            };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
                                 &mut d[input_slices[0].offset
@@ -5697,79 +6124,72 @@ impl Backend for CpuBackend {
                             .copy_from_slice(&v_new);
                         }
                         "adamw_update_f32" => {
-                            let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd) = {
+                            // input_slices: [0]=weight, [1]=grad, [2]=momentum(m),
+                            //   [3]=velocity(v); output slot aliases weight.
+                            // Phase 1: read initial values from arena into local Vecs
+                            let (w_new, m_new, v_new) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
                                 let w_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[0].offset
                                         ..input_slices[0].offset + input_slices[0].size],
-                                )
-                                .to_vec();
+                                );
+                                let g_slice = bytemuck::cast_slice::<_, f32>(
+                                    &d_ref[input_slices[1].offset
+                                        ..input_slices[1].offset + input_slices[1].size],
+                                );
                                 let m_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[2].offset
                                         ..input_slices[2].offset + input_slices[2].size],
-                                )
-                                .to_vec();
+                                );
                                 let v_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[3].offset
                                         ..input_slices[3].offset + input_slices[3].size],
-                                )
-                                .to_vec();
-                                let grad = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[1].offset
-                                        ..input_slices[1].offset + input_slices[1].size],
-                                )
-                                .to_vec();
+                                );
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
                                 let t = params[4] as f32;
                                 let wd = f32::from_bits(params[5] as u32);
-                                (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd)
-                            };
-                            let bias_corr1 = 1.0 - beta1.powi(t as i32);
-                            let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                            let _len = w_init.len();
-                            let mut w_new = w_init.clone();
-                            let mut m_new = m_init.clone();
-                            let mut v_new = v_init.clone();
-                            #[cfg(not(feature = "parallel"))]
-                            {
-                                for i in 0.._len {
+                                let bias_corr1 = 1.0 - beta1.powi(t as i32);
+                                let bias_corr2 = 1.0 - beta2.powi(t as i32);
+                                let mut w_new = w_init.to_vec();
+                                let mut m_new = m_init.to_vec();
+                                let mut v_new = v_init.to_vec();
+                                // Phase 2: compute (uses local vecs, no arena access)
+                                #[cfg(not(feature = "parallel"))]
+                                for i in 0..w_new.len() {
                                     w_new[i] -= lr * wd * w_init[i];
-                                    let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                    let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
                                     m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                     v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                     let m_hat = m_new[i] / bias_corr1;
                                     let v_hat = v_new[i] / bias_corr2;
                                     w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
                                 }
-                            }
-                            #[cfg(feature = "parallel")]
-                            {
-                                use rayon::prelude::*;
-                                w_new
-                                    .par_iter_mut()
-                                    .zip(m_new.par_iter_mut())
-                                    .zip(v_new.par_iter_mut())
-                                    .enumerate()
-                                    .for_each(|(i, ((w, m), v))| {
-                                        *w -= lr * wd * w_init[i];
-                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                        *m = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                        *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                        let m_hat = *m / bias_corr1;
-                                        let v_hat = *v / bias_corr2;
-                                        *w -= lr * m_hat / (v_hat.sqrt() + eps);
-                                    });
-                            }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    w_new
+                                        .par_iter_mut()
+                                        .zip(m_new.par_iter_mut())
+                                        .zip(v_new.par_iter_mut())
+                                        .enumerate()
+                                        .for_each(|(i, ((w, m), v))| {
+                                            *w -= lr * wd * w_init[i];
+                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            *m = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                            *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                            let m_hat = *m / bias_corr1;
+                                            let v_hat = *v / bias_corr2;
+                                            *w -= lr * m_hat / (v_hat.sqrt() + eps);
+                                        });
+                                }
+                                (w_new, m_new, v_new)
+                            };
+                            // Phase 3: write back into arena (arena borrow dropped after Phase 1)
                             let d = arena.data_mut();
-                            bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[input_slices[0].offset
-                                    ..input_slices[0].offset + input_slices[0].size],
-                            )
-                            .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -5784,50 +6204,47 @@ impl Backend for CpuBackend {
                             .copy_from_slice(&v_new);
                         }
                         "muon_update_f32" => {
-                            let (w_init, grad, m_init, lr, beta1, wd) = {
+                            let (w_new, m_new) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
                                 let w_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[0].offset
                                         ..input_slices[0].offset + input_slices[0].size],
-                                )
-                                .to_vec();
-                                let grad = bytemuck::cast_slice::<_, f32>(
+                                );
+                                let g_slice = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[1].offset
                                         ..input_slices[1].offset + input_slices[1].size],
-                                )
-                                .to_vec();
+                                );
                                 let m_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[2].offset
                                         ..input_slices[2].offset + input_slices[2].size],
-                                )
-                                .to_vec();
+                                );
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let wd = f32::from_bits(params[2] as u32);
-                                (w_init, grad, m_init, lr, beta1, wd)
-                            };
-                            let mut w_new = w_init.clone();
-                            let mut m_new = m_init.clone();
-                            #[cfg(not(feature = "parallel"))]
-                            {
-                                for i in 0..w_init.len() {
-                                    let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                    m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                    w_new[i] = w_init[i] - lr * (m_new[i] + wd * w_init[i]);
+                                let mut w_new = w_init.to_vec();
+                                let mut m_new = m_init.to_vec();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..w_init.len() {
+                                        let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                        w_new[i] = w_init[i] - lr * (m_new[i] + wd * w_init[i]);
+                                    }
                                 }
-                            }
-                            #[cfg(feature = "parallel")]
-                            {
-                                use rayon::prelude::*;
-                                (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
-                                    .enumerate()
-                                    .for_each(|(i, (w, m))| {
-                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                        *m = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                        *w = w_init[i] - lr * (*m + wd * w_init[i]);
-                                    });
-                            }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
+                                        .enumerate()
+                                        .for_each(|(i, (w, m))| {
+                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            *m = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                            *w = w_init[i] - lr * (*m + wd * w_init[i]);
+                                        });
+                                }
+                                (w_new, m_new)
+                            };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
                                 &mut d[input_slices[0].offset
@@ -5843,52 +6260,49 @@ impl Backend for CpuBackend {
                             .copy_from_slice(&m_new);
                         }
                         "lion_update_f32" => {
-                            let (w_init, m_init, grad, lr, beta1, beta2) = {
+                            let (w_new, m_new) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
                                 let w_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[0].offset
                                         ..input_slices[0].offset + input_slices[0].size],
-                                )
-                                .to_vec();
+                                );
+                                let g_slice = bytemuck::cast_slice::<_, f32>(
+                                    &d_ref[input_slices[1].offset
+                                        ..input_slices[1].offset + input_slices[1].size],
+                                );
                                 let m_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[2].offset
                                         ..input_slices[2].offset + input_slices[2].size],
-                                )
-                                .to_vec();
-                                let grad = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[1].offset
-                                        ..input_slices[1].offset + input_slices[1].size],
-                                )
-                                .to_vec();
+                                );
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
-                                (w_init, m_init, grad, lr, beta1, beta2)
-                            };
-                            let mut w_new = w_init.clone();
-                            let mut m_new = m_init.clone();
-                            #[cfg(not(feature = "parallel"))]
-                            {
-                                for i in 0..w_init.len() {
-                                    let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                    m_new[i] = beta2 * m_init[i] + (1.0 - beta2) * g;
-                                    let update = beta1 * m_new[i] + (1.0 - beta1) * g;
-                                    w_new[i] -= lr * update.signum();
+                                let mut w_new = w_init.to_vec();
+                                let mut m_new = m_init.to_vec();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..w_init.len() {
+                                        let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        m_new[i] = beta2 * m_init[i] + (1.0 - beta2) * g;
+                                        let update = beta1 * m_new[i] + (1.0 - beta1) * g;
+                                        w_new[i] -= lr * update.signum();
+                                    }
                                 }
-                            }
-                            #[cfg(feature = "parallel")]
-                            {
-                                use rayon::prelude::*;
-                                (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
-                                    .enumerate()
-                                    .for_each(|(i, (w, m))| {
-                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                        *m = beta2 * m_init[i] + (1.0 - beta2) * g;
-                                        let update = beta1 * *m + (1.0 - beta1) * g;
-                                        *w -= lr * update.signum();
-                                    });
-                            }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
+                                        .enumerate()
+                                        .for_each(|(i, (w, m))| {
+                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            *m = beta2 * m_init[i] + (1.0 - beta2) * g;
+                                            let update = beta1 * *m + (1.0 - beta1) * g;
+                                            *w -= lr * update.signum();
+                                        });
+                                }
+                                (w_new, m_new)
+                            };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
                                 &mut d[input_slices[0].offset
@@ -5904,50 +6318,47 @@ impl Backend for CpuBackend {
                             .copy_from_slice(&m_new);
                         }
                         "rmsprop_update_f32" => {
-                            let (w_init, v_init, grad, lr, beta, eps) = {
+                            let (w_new, v_new) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
                                 let w_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[0].offset
                                         ..input_slices[0].offset + input_slices[0].size],
-                                )
-                                .to_vec();
+                                );
+                                let g_slice = bytemuck::cast_slice::<_, f32>(
+                                    &d_ref[input_slices[1].offset
+                                        ..input_slices[1].offset + input_slices[1].size],
+                                );
                                 let v_init = bytemuck::cast_slice::<_, f32>(
                                     &d_ref[input_slices[2].offset
                                         ..input_slices[2].offset + input_slices[2].size],
-                                )
-                                .to_vec();
-                                let grad = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[1].offset
-                                        ..input_slices[1].offset + input_slices[1].size],
-                                )
-                                .to_vec();
+                                );
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta = f32::from_bits(params[1] as u32);
                                 let eps = f32::from_bits(params[2] as u32);
-                                (w_init, v_init, grad, lr, beta, eps)
-                            };
-                            let mut w_new = w_init.clone();
-                            let mut v_new = v_init.clone();
-                            #[cfg(not(feature = "parallel"))]
-                            {
-                                for i in 0..w_init.len() {
-                                    let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                    v_new[i] = beta * v_init[i] + (1.0 - beta) * g * g;
-                                    w_new[i] -= lr * g / (v_new[i].sqrt() + eps);
+                                let mut w_new = w_init.to_vec();
+                                let mut v_new = v_init.to_vec();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for i in 0..w_init.len() {
+                                        let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        v_new[i] = beta * v_init[i] + (1.0 - beta) * g * g;
+                                        w_new[i] -= lr * g / (v_new[i].sqrt() + eps);
+                                    }
                                 }
-                            }
-                            #[cfg(feature = "parallel")]
-                            {
-                                use rayon::prelude::*;
-                                (w_new.par_iter_mut().zip(v_new.par_iter_mut()))
-                                    .enumerate()
-                                    .for_each(|(i, (w, v))| {
-                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                        *v = beta * v_init[i] + (1.0 - beta) * g * g;
-                                        *w -= lr * g / (v.sqrt() + eps);
-                                    });
-                            }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    (w_new.par_iter_mut().zip(v_new.par_iter_mut()))
+                                        .enumerate()
+                                        .for_each(|(i, (w, v))| {
+                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            *v = beta * v_init[i] + (1.0 - beta) * g * g;
+                                            *w -= lr * g / (v.sqrt() + eps);
+                                        });
+                                }
+                                (w_new, v_new)
+                            };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
                                 &mut d[input_slices[0].offset

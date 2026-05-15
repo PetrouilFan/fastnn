@@ -42,13 +42,21 @@ impl PyTensor {
         let buffer = PyBuffer::<f32>::get(buf)?;
         let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
         let data_len: usize = shape.iter().product::<i64>() as usize;
-        let mut data = vec![0.0f32; data_len];
-        buffer.copy_to_slice(py, &mut data)?;
+        let nbytes = data_len * 4;
+        let mut storage_bytes = vec![0u8; nbytes];
+        let f32_slice = bytemuck::cast_slice_mut(&mut storage_bytes);
+        buffer.copy_to_slice(py, f32_slice)?;
         let device = device
             .as_ref()
             .and_then(|s| crate::storage::Device::from_str_label(s))
             .unwrap_or_else(crate::python::get_default_device);
-        Ok(PyTensor::from_tensor(crate::tensor::Tensor::from_vec_with_device(data, shape, device)))
+        let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
+        let storage = std::sync::Arc::new(
+            crate::storage::Storage::from_vec_owned(storage_bytes, DType::F32, device)
+        );
+        Ok(PyTensor::from_tensor(
+            crate::tensor::Tensor::new(crate::tensor::TensorImpl::new(storage, sizes, DType::F32))
+        ))
     }
 
     #[getter]

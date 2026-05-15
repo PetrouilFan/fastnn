@@ -3,6 +3,7 @@ use crate::nn::norm::BatchNorm2d;
 use crate::nn::Module;
 use crate::tensor::Tensor;
 
+#[derive(Clone)]
 pub struct ResidualBlock {
     pub conv1: Conv2d,
     pub bn1: BatchNorm2d,

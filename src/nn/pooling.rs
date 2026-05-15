@@ -3,6 +3,7 @@ use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct MaxPool2d {
     #[allow(dead_code)]
     kernel_size: i64,
@@ -85,6 +86,7 @@ impl Module for MaxPool2d {
     }
 }
 
+#[derive(Clone)]
 pub struct AvgPool1d {
     #[allow(dead_code)]
     kernel_size: i64,
@@ -146,6 +148,7 @@ impl Module for AvgPool1d {
     }
 }
 
+#[derive(Clone)]
 pub struct MaxPool1d {
     #[allow(dead_code)]
     kernel_size: i64,
@@ -214,6 +217,7 @@ impl Module for MaxPool1d {
     }
 }
 
+#[derive(Clone)]
 pub struct AvgPool2d {
     #[allow(dead_code)]
     kernel_size: i64,

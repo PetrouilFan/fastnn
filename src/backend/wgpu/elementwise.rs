@@ -40,6 +40,14 @@ pub(super) fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
         "div_relu_f32" => Some(34),
         "mish_f32" => Some(35),
         "erf_f32" => Some(36),
+        "add_gelu_f32" => Some(37),
+        "sub_gelu_f32" => Some(38),
+        "mul_gelu_f32" => Some(39),
+        "div_gelu_f32" => Some(40),
+        "add_silu_f32" => Some(41),
+        "sub_silu_f32" => Some(42),
+        "mul_silu_f32" => Some(43),
+        "div_silu_f32" => Some(44),
         _ => None,
     }
 }

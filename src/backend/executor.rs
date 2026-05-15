@@ -19,7 +19,9 @@
 use crate::autograd::build_backward_graph;
 use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan};
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
-use crate::compiler::passes::{memory_planning, operator_fusion, quantization, shape_inference};
+use crate::compiler::passes::{
+    dead_code_elimination, memory_planning, operator_fusion, quantization, shape_inference,
+};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -107,11 +109,17 @@ impl<B: Backend> GraphExecutor<B> {
                 .map_err(|e| BackendError::Compilation(format!("optimizer wrapping: {e}")))?;
         }
 
-        // ── Phase 3: Memory planning ──────────────────────────────────────
+        // ── Phase 3: Dead code elimination ────────────────────────────────
+        let removed = dead_code_elimination::eliminate_dead_code(&mut graph);
+        if removed > 0 {
+            eprintln!("DCE removed {} dead node(s)", removed);
+        }
+
+        // ── Phase 4: Memory planning ──────────────────────────────────────
         let memory_plan = memory_planning::plan_memory(&graph)
             .map_err(|e| BackendError::Compilation(format!("memory planning: {e}")))?;
 
-        // ── Phase 4: Backend compilation ──────────────────────────────────
+        // ── Phase 5: Backend compilation ──────────────────────────────────
         let plan = self.backend.compile(&graph, &memory_plan)?;
 
         Ok((plan, memory_plan, graph))
@@ -130,7 +138,7 @@ impl<B: Backend> GraphExecutor<B> {
     pub fn execute(
         &self,
         graph: &ComputeGraph,
-        _plan: &ExecutablePlan,
+        plan: &ExecutablePlan,
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
@@ -140,15 +148,17 @@ impl<B: Backend> GraphExecutor<B> {
         validate_shapes(graph, &shape_env)
             .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
-        // Tighten memory plan using runtime-resolved shapes, then rebuild
-        // the ExecutablePlan instructions to use the tightened BufferSlices.
-        // This shrinks the arena from SYMBOL_DIM_MAX worst-case to actual
-        // sizes — saving up to 90%+ arena memory for dynamic shapes.
+        // Tighten memory plan using runtime-resolved shapes, then adjust
+        // the existing plan's slices and params in-place via tighten_slices.
+        // This avoids a full backend re-compilation while still shrinking
+        // the arena from SYMBOL_DIM_MAX worst-case to actual sizes.
         let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
-        let tightened_plan = self
-            .backend
-            .compile(graph, &tightened_memory_plan)
-            .map_err(|e| BackendError::Dispatch(format!("retighten compile: {e}")))?;
+        let tightened_plan = tighten_slices(
+            plan,
+            memory_plan,
+            &tightened_memory_plan,
+            graph,
+        )?;
 
         // Safety check: every node's resolved output must fit in its slot.
         for (&node_id, slot) in &tightened_memory_plan.slots {
@@ -175,7 +185,6 @@ impl<B: Backend> GraphExecutor<B> {
         }
 
         // Allocate tightened arena
-        eprintln!("[FNN_DBG_EXEC] Arena size={}", tightened_plan.arena_size);
         let arena = self.backend.allocate_arena(tightened_plan.arena_size);
 
         // Write input data into the arena at tightened input slots
@@ -200,172 +209,9 @@ impl<B: Backend> GraphExecutor<B> {
         // Dispatch the tightened plan
         self.backend.dispatch(&tightened_plan, &arena, &shape_env)?;
 
-        // Dump ALL slots sorted by offset
-        {
-            let mut all: Vec<_> = tightened_memory_plan
-                .slots
-                .iter()
-                .map(|(&nid, s)| {
-                    (
-                        s.offset,
-                        s.size,
-                        nid,
-                        false,
-                        graph
-                            .get_node(nid)
-                            .map(|n| format!("{:?}", n.opcode))
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect();
-            for (&(nid, _), s) in &tightened_memory_plan.secondary_slots {
-                all.push((
-                    s.offset,
-                    s.size,
-                    nid,
-                    true,
-                    graph
-                        .get_node(nid)
-                        .map(|n| format!("{:?}", n.opcode))
-                        .unwrap_or_default(),
-                ));
-            }
-            all.sort_by_key(|(off, _, _, _, _)| *off);
-            // Only show slots near MaxPool regions
-            let maxpool_off: Vec<usize> = tightened_memory_plan
-                .slots
-                .iter()
-                .filter(|(&nid, _)| {
-                    graph
-                        .get_node(nid)
-                        .map(|n| matches!(n.opcode, Opcode::MaxPool))
-                        .unwrap_or(false)
-                })
-                .map(|(_, s)| s.offset)
-                .collect();
-            for &(off, sz, nid, is_sec, ref op) in &all {
-                let near = maxpool_off.iter().any(|&mp_off| {
-                    off.abs_diff(mp_off) < 2000000 // within 2MB
-                });
-                if near
-                    || matches!(op.as_str(), "MaxPool" | "Concat" | "BiasAdd" | "Mul" if op == "Mul" && sz > 100000)
-                {
-                    eprintln!(
-                        "[FNN_DBG_SLOT] nid={} {:10} {}off={} sz={}",
-                        nid,
-                        op,
-                        if is_sec { "SEC " } else { "    " },
-                        off,
-                        sz
-                    );
-                }
-            }
-        }
-        let mut all_slots: Vec<(usize, usize, NodeId, bool)> = Vec::new();
-        for (&nid, slot) in &tightened_memory_plan.slots {
-            all_slots.push((slot.offset, slot.size, nid, false));
-        }
-        for (&(nid, _), slot) in &tightened_memory_plan.secondary_slots {
-            all_slots.push((slot.offset, slot.size, nid, true));
-        }
-        all_slots.sort_by_key(|(off, _, _, _)| *off);
-
-        // Build topological position lookup for live-range checks
-        let exec_order = graph.topological_sort();
-        let exec_pos: HashMap<NodeId, usize> = exec_order
-            .iter()
-            .enumerate()
-            .map(|(i, &nid)| (nid, i))
-            .collect();
-
-        // Compute live ranges: for each node, find its last consumer or output position
-        fn slot_live_range(
-            nid: NodeId,
-            exec_len: usize,
-            exec_pos: &HashMap<NodeId, usize>,
-            graph: &ComputeGraph,
-            required_nodes: &[NodeId],
-            outputs: &[NodeId],
-        ) -> (usize, usize) {
-            let first = exec_pos.get(&nid).copied().unwrap_or(0);
-            let consumers: Vec<NodeId> = graph.consumers(nid);
-            let is_output = outputs.contains(&nid);
-            let is_required = required_nodes.contains(&nid);
-            let last = if is_output || is_required {
-                exec_len - 1
-            } else if consumers.is_empty() {
-                first
-            } else {
-                consumers
-                    .iter()
-                    .filter_map(|c| exec_pos.get(c))
-                    .copied()
-                    .max()
-                    .unwrap_or(first)
-            };
-            (first, last)
-        }
-
-        // Find if any slot overlaps with MaxPool primary slots
-        let maxpool_primary: Vec<(usize, usize, NodeId)> = tightened_memory_plan
-            .slots
-            .iter()
-            .filter(|(&nid, _)| {
-                graph
-                    .get_node(nid)
-                    .map(|n| matches!(n.opcode, Opcode::MaxPool))
-                    .unwrap_or(false)
-            })
-            .map(|(&nid, slot)| (slot.offset, slot.size, nid))
-            .collect();
-
-        for &(mp_off, mp_sz, mp_nid) in &maxpool_primary {
-            let mp_end = mp_off + mp_sz;
-            let mp_lr = slot_live_range(
-                mp_nid,
-                exec_order.len(),
-                &exec_pos,
-                graph,
-                &graph.required_nodes,
-                &graph.outputs,
-            );
-            for &(slot_off, slot_sz, slot_nid, is_sec) in &all_slots {
-                let slot_end = slot_off + slot_sz;
-                // Check if this slot overlaps with the MaxPool primary (excluding the MaxPool's own secondary)
-                if slot_nid == mp_nid {
-                    continue;
-                }
-                let addr_overlap = slot_off < mp_end && mp_off < slot_end;
-                if !addr_overlap {
-                    continue;
-                }
-                let slot_lr = slot_live_range(
-                    slot_nid,
-                    exec_order.len(),
-                    &exec_pos,
-                    graph,
-                    &graph.required_nodes,
-                    &graph.outputs,
-                );
-                let lr_overlap = slot_lr.0 <= mp_lr.1 && mp_lr.0 <= slot_lr.1;
-                let op = graph
-                    .get_node(slot_nid)
-                    .map(|n| format!("{:?}", n.opcode))
-                    .unwrap_or_default();
-                let mp_op = graph
-                    .get_node(mp_nid)
-                    .map(|n| format!("{:?}", n.opcode))
-                    .unwrap_or_default();
-                eprintln!("[FNN_DBG_OVERLAP] MaxPool {} nid={} [{}, {}) lr=({},{}) overlaps with {} nid={}{} [{}, {}) lr=({},{}) live_range_overlap={}",
-                    mp_op, mp_nid, mp_off, mp_end, mp_lr.0, mp_lr.1,
-                    op, slot_nid, if is_sec { " SECONDARY" } else { "" }, slot_off, slot_end, slot_lr.0, slot_lr.1,
-                    if lr_overlap { "YES *** BUG ***" } else { "no (safe reuse)" });
-            }
-        }
-
         // Read output data — compute actual sizes via shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
-        for (out_idx, &output_node_id) in graph.outputs.iter().enumerate() {
+        for (_out_idx, &output_node_id) in graph.outputs.iter().enumerate() {
             let slot = tightened_memory_plan
                 .slots
                 .get(&output_node_id)
@@ -376,7 +222,7 @@ impl<B: Backend> GraphExecutor<B> {
                     ))
                 })?;
 
-            let (actual_size, resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
+            let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
                 let resolved_shape =
                     resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
                         BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
@@ -394,25 +240,6 @@ impl<B: Backend> GraphExecutor<B> {
             };
 
             let data = self.backend.read_arena(&arena, slot.offset, actual_size);
-            // Debug: log first f32 value for MaxPool outputs
-            if actual_size >= 4 {
-                let first_bytes: [u8; 4] = data[..4].try_into().unwrap_or([0; 4]);
-                let first = f32::from_le_bytes(first_bytes);
-                let opcode_str = graph
-                    .get_node(output_node_id)
-                    .map(|n| format!("{:?}", n.opcode))
-                    .unwrap_or_else(|| "?".to_string());
-                eprintln!(
-                    "[FNN_DBG_EXEC] out[{}] nid={} op={:?} off={} sz={} shape={:?} first_f32={}",
-                    out_idx,
-                    output_node_id,
-                    opcode_str,
-                    slot.offset,
-                    actual_size,
-                    resolved_shape,
-                    first
-                );
-            }
             outputs.push(data);
         }
 
@@ -516,10 +343,13 @@ impl<B: Backend> GraphExecutor<B> {
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
         let (plan, memory_plan) = if let Some(shape_env) = batch_shape_env {
             let tightened_mp = memory_plan.tighten(&final_graph, shape_env);
-            let tightened_plan = self
-                .backend
-                .compile(&final_graph, &tightened_mp)
-                .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
+            let tightened_plan = tighten_slices(
+                &plan,
+                &memory_plan,
+                &tightened_mp,
+                &final_graph,
+            )
+            .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
             (tightened_plan, tightened_mp)
         } else {
             (plan, memory_plan)
@@ -687,6 +517,103 @@ impl<B: Backend> CompiledTrainingModel<B> {
     }
 }
 
+/// Rebuild an [`ExecutablePlan`] from a tightened [`MemoryPlan`] without a
+/// full backend re-compilation.
+///
+/// For each instruction:
+/// - [`BufferSlice`] offsets/sizes are updated to match the tightened slots.
+/// - [`Instruction::CallKernel`] parameters (M, K, N, etc.) are re-resolved
+///   from `tightened_memory_plan.tightened_params`.
+///
+/// This is a lightweight alternative to calling [`Backend::compile`] again —
+/// it avoids re-running fusion checks, quantization detection, and all other
+/// backend lowering logic that is unchanged after tightening.
+pub fn tighten_slices(
+    plan: &ExecutablePlan,
+    _original_memory_plan: &MemoryPlan,
+    tightened_memory_plan: &MemoryPlan,
+    graph: &ComputeGraph,
+) -> Result<ExecutablePlan, BackendError> {
+    let mut tightened = plan.clone();
+
+    // Build an offset → tightened_size map for non-CallKernel instructions
+    // (Fill, MemCopy, WriteConst) that don't carry a node_id.
+    let mut offset_size: HashMap<usize, usize> = HashMap::new();
+    for (_node_id, slot) in &tightened_memory_plan.slots {
+        offset_size.insert(slot.offset, slot.size);
+    }
+    for (_key, slot) in &tightened_memory_plan.secondary_slots {
+        offset_size.insert(slot.offset, slot.size);
+    }
+
+    for instr in &mut tightened.instructions {
+        match instr {
+            Instruction::CallKernel {
+                input_slices,
+                output_slice,
+                secondary_output_slice,
+                params,
+                node_id,
+                ..
+            } => {
+                if let Some(nid) = node_id {
+                    // ── Update output_slice from tightened memory plan ──
+                    if let Some(slot) = tightened_memory_plan.slots.get(nid) {
+                        output_slice.offset = slot.offset;
+                        output_slice.size = slot.size;
+                    }
+                    // ── Update secondary_output_slice ──
+                    if let Some(sec_slice) = secondary_output_slice.as_mut() {
+                        if let Some(slot) = tightened_memory_plan.secondary_slots.get(&(*nid, 1))
+                        {
+                            sec_slice.offset = slot.offset;
+                            sec_slice.size = slot.size;
+                        }
+                    }
+                    // ── Update input slices from the graph ──
+                    if let Some(node) = graph.get_node(*nid) {
+                        for (i, slice) in input_slices.iter_mut().enumerate() {
+                            if let Some(&input_nid) = node.inputs.get(i) {
+                                if let Some(slot) = tightened_memory_plan.slots.get(&input_nid) {
+                                    slice.offset = slot.offset;
+                                    slice.size = slot.size;
+                                }
+                            }
+                        }
+                    }
+                    // ── Update kernel params from tightened memory plan ──
+                    if let Some(tightened_params) =
+                        tightened_memory_plan.tightened_params.get(nid)
+                    {
+                        *params = tightened_params.clone();
+                    }
+                }
+            }
+            Instruction::MemCopy { dst, src } => {
+                if let Some(&sz) = offset_size.get(&dst.offset) {
+                    dst.size = dst.size.min(sz);
+                }
+                if let Some(&sz) = offset_size.get(&src.offset) {
+                    src.size = src.size.min(sz);
+                }
+            }
+            Instruction::Fill { dst, .. } => {
+                if let Some(&sz) = offset_size.get(&dst.offset) {
+                    dst.size = dst.size.min(sz);
+                }
+            }
+            Instruction::WriteConst { dst, .. } => {
+                if let Some(&sz) = offset_size.get(&dst.offset) {
+                    dst.size = dst.size.min(sz);
+                }
+            }
+        }
+    }
+
+    tightened.arena_size = tightened_memory_plan.total_size;
+    Ok(tightened)
+}
+
 /// Compute the byte size of a tensor described by shape dims and element size.
 /// Uses [`TensorType::byte_size`] under the hood.
 pub fn tensor_byte_size(shape: &[DimExpr], elem_byte_size: usize) -> usize {
@@ -806,14 +733,15 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             Opcode::Concat => {
                 if input_shapes.len() < 2 {
                     return Err(format!(
-                        "Concat node {}: expected at least 2 inputs, got {}",
+                        "Concat node {} ({}): expected at least 2 inputs, got {}",
                         node_id,
+                        node.name,
                         input_shapes.len()
                     ));
                 }
                 let rank = input_shapes[0].len();
                 let axis = resolve_axis(&node.attrs, "axis", rank)
-                    .map_err(|e| format!("Concat node {}: {e}", node_id))?;
+                    .map_err(|e| format!("Concat node {} ({}): {e}", node_id, node.name))?;
                 // Skip dim compatibility checks if any input contains
                 // unresolved Symbol dims (resolved to SYMBOL_DIM_MAX).
                 let symbol_max =
@@ -823,8 +751,9 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     for (i, s) in input_shapes.iter().enumerate().skip(1) {
                         if s.len() != rank {
                             return Err(format!(
-                                "Concat node {}: rank mismatch input 0 ({}) vs input {} ({})",
+                                "Concat node {} ({}): rank mismatch input 0 ({}) vs input {} ({})",
                                 node_id,
+                                node.name,
                                 rank,
                                 i,
                                 s.len()
@@ -833,8 +762,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                         for j in 0..rank {
                             if j != axis && s[j] != input_shapes[0][j] {
                                 return Err(format!(
-                                    "Concat node {}: dim {} mismatch at axis {}: {} vs {}",
-                                    node_id, j, axis, s[j], input_shapes[0][j]
+                                    "Concat node {} ({}): dim {} mismatch at axis {}: {} vs {}",
+                                    node_id, node.name, j, axis, s[j], input_shapes[0][j]
                                 ));
                             }
                         }

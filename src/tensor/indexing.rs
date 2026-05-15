@@ -42,6 +42,7 @@ impl TensorImpl {
 
         let mut t = self.new_view_from(sizes, strides, storage_offset);
         t.autograd_meta = None;
+        t.requires_grad = false;
         t.into()
     }
 }

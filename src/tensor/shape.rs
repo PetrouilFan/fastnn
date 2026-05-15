@@ -87,8 +87,7 @@ impl TensorImpl {
             };
             if meta_lock.requires_grad {
                 let new_meta = AutogradMeta::new_non_leaf(true);
-                Arc::make_mut(&mut new_tensor.inner).autograd_meta =
-                    Some(Arc::new(std::sync::Mutex::new(new_meta)));
+                Arc::make_mut(&mut new_tensor.inner).set_autograd_meta(new_meta);
             }
         }
         new_tensor
@@ -275,7 +274,7 @@ impl TensorImpl {
                 requires_grad: true,
                 is_leaf: false,
             };
-            tensor.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+            tensor.set_autograd_meta(meta);
         }
 
         tensor.into()
