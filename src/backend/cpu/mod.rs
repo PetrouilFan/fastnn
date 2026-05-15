@@ -299,6 +299,7 @@ impl Backend for CpuBackend {
                         params: vec![m, k, n],
                         param_dims: Some(vec![m_dim, k_dim, n_dim]),
                         weight_meta,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Add
@@ -334,6 +335,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Relu
@@ -408,6 +410,7 @@ impl Backend for CpuBackend {
                         params: extra_params,
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Reshape | Opcode::Flatten | Opcode::Squeeze | Opcode::Unsqueeze => {
@@ -527,6 +530,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::BatchNorm | Opcode::LayerNorm => {
@@ -548,6 +552,7 @@ impl Backend for CpuBackend {
                         params: vec![eps.to_bits() as usize, is_batch_norm],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Softmax => {
@@ -597,6 +602,7 @@ impl Backend for CpuBackend {
                         params: vec![axis_dim, stride],
                         param_dims: Some(vec![axis_dim_dim, DimExpr::Known(stride as u64)]),
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::BiasAdd => {
@@ -615,6 +621,7 @@ impl Backend for CpuBackend {
                         params: vec![channel_stride],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Concat => {
@@ -623,21 +630,6 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
-                    let input_ids_str = node
-                        .inputs
-                        .iter()
-                        .map(|id| id.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    eprintln!(
-                        "[FNN_DBG_CONCAT_COMPILE] nid={} op=Concat inputs=[{}] input_slices={:?}",
-                        node_id,
-                        input_ids_str,
-                        input_slices
-                            .iter()
-                            .map(|s| (s.offset, s.size))
-                            .collect::<Vec<_>>()
-                    );
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "concat".to_string(),
                         input_slices,
@@ -646,6 +638,7 @@ impl Backend for CpuBackend {
                         params: vec![axis],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::MaxPool | Opcode::AvgPool => {
@@ -713,6 +706,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Pad => {
@@ -729,6 +723,7 @@ impl Backend for CpuBackend {
                         params: pads,
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Gather => {
@@ -745,6 +740,7 @@ impl Backend for CpuBackend {
                         params: vec![axis],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Slice => {
@@ -778,6 +774,7 @@ impl Backend for CpuBackend {
                         params: vec![dim, start, end, stride],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::ScatterNd => {
@@ -789,6 +786,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => {
@@ -826,6 +824,7 @@ impl Backend for CpuBackend {
                         // reduce over symbolic batch dim N).
                         param_dims: Some(vec![group_size_dim]),
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Transpose => {
@@ -854,6 +853,7 @@ impl Backend for CpuBackend {
                         params: vec![m, n],
                         param_dims: Some(vec![m_dim, n_dim]),
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Conv1d => {
@@ -887,6 +887,7 @@ impl Backend for CpuBackend {
                         params: vec![stride, padding, input_c, input_w, kernel_w],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Conv3d => {
@@ -939,6 +940,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::ConvTranspose2d => {
@@ -982,6 +984,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Prelu => {
@@ -993,6 +996,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::RMSNorm => {
@@ -1009,6 +1013,7 @@ impl Backend for CpuBackend {
                         params: vec![eps.to_bits() as usize],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Embedding => {
@@ -1020,6 +1025,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Pow => {
@@ -1031,6 +1037,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::GtScalar => {
@@ -1042,6 +1049,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::LtScalar => {
@@ -1053,6 +1061,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::EqScalar => {
@@ -1064,6 +1073,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::AddScalar => {
@@ -1075,6 +1085,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::MulScalar => {
@@ -1086,6 +1097,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::DivScalar => {
@@ -1097,6 +1109,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 // Input nodes have no producer instruction — data is written
@@ -1118,6 +1131,7 @@ impl Backend for CpuBackend {
                         params: vec![axis as usize],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d => {
@@ -1153,6 +1167,7 @@ impl Backend for CpuBackend {
                         params: vec![scale_h, scale_w, h_in, w_in],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::AdaptiveAvgPool2d => {
@@ -1174,6 +1189,7 @@ impl Backend for CpuBackend {
                         params: vec![out_h, out_w],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Repeat => {
@@ -1190,6 +1206,7 @@ impl Backend for CpuBackend {
                         params: repeats,
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::CumSum => {
@@ -1216,6 +1233,7 @@ impl Backend for CpuBackend {
                         params: vec![dim, exclusive, rev],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Erf => {
@@ -1227,6 +1245,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Flip => {
@@ -1247,6 +1266,7 @@ impl Backend for CpuBackend {
                         params,
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Where => {
@@ -1258,6 +1278,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::TopK => {
@@ -1279,6 +1300,7 @@ impl Backend for CpuBackend {
                         params: vec![k, axis as usize],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 // ── Optimizer ops ──────────────────────────────────
@@ -1296,6 +1318,7 @@ impl Backend for CpuBackend {
                         params: vec![lr.to_bits() as usize],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::AdamUpdate => {
@@ -1353,6 +1376,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::AdamWUpdate => {
@@ -1415,6 +1439,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::MuonUpdate => {
@@ -1445,6 +1470,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::LionUpdate => {
@@ -1475,6 +1501,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::RmspropUpdate => {
@@ -1505,6 +1532,7 @@ impl Backend for CpuBackend {
                         ],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Shape => {
@@ -1559,6 +1587,7 @@ impl Backend for CpuBackend {
                             params: vec![in_byte_size, out_byte_size],
                             param_dims: None,
                             weight_meta: None,
+                            node_id: Some(node_id),
                         });
                     }
                 }
@@ -1599,6 +1628,7 @@ impl Backend for CpuBackend {
                         params: vec![num_channels, num_elems_per_channel, numel],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Dequantize => {
@@ -1646,6 +1676,7 @@ impl Backend for CpuBackend {
                         params,
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::ToF16 => {
@@ -1661,6 +1692,7 @@ impl Backend for CpuBackend {
                         params: vec![numel],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::ToF32 => {
@@ -1676,6 +1708,7 @@ impl Backend for CpuBackend {
                         params: vec![numel],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::QuantizeActivations => {
@@ -1692,6 +1725,7 @@ impl Backend for CpuBackend {
                         params: vec![numel],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::DequantizeActivations => {
@@ -1707,6 +1741,7 @@ impl Backend for CpuBackend {
                         params: vec![numel],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::FusedResidualAddNorm => {
@@ -1729,6 +1764,7 @@ impl Backend for CpuBackend {
                         params: vec![eps.to_bits() as usize],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::GradientScale => {
@@ -1750,6 +1786,7 @@ impl Backend for CpuBackend {
                             params: vec![numel, scale.to_bits() as usize],
                             param_dims: None,
                             weight_meta: None,
+                            node_id: Some(node_id),
                         });
                     }
                 }
@@ -1792,6 +1829,7 @@ impl Backend for CpuBackend {
                         params,
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 Opcode::Tile => {
@@ -1822,6 +1860,7 @@ impl Backend for CpuBackend {
                         params: vec![],
                         param_dims: None,
                         weight_meta: None,
+                        node_id: Some(node_id),
                     });
                 }
                 #[allow(unreachable_patterns)]
@@ -1850,30 +1889,7 @@ impl Backend for CpuBackend {
         arena: &CpuBuffer,
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
-        // ── Debug: collect MaxPool primary output ranges ──────────────
-        let maxpool_ranges: Vec<(usize, usize)> = {
-            let mut v = Vec::new();
-            for instr in &plan.instructions {
-                if let Instruction::CallKernel {
-                    kernel_name,
-                    params,
-                    output_slice,
-                    ..
-                } = instr
-                {
-                    if kernel_name == "pool_f32" && params.len() >= 4 && params[3] == 1 {
-                        v.push((output_slice.offset, output_slice.size));
-                    }
-                }
-            }
-            v
-        };
-        // Track: after each MaxPool kernel, snapshot its first f32 value;
-        // after every other instruction, check if any snapshot changed.
-        let mut maxpool_snapshot: Vec<Option<f32>> = vec![None; maxpool_ranges.len()];
-        let mut maxpool_seen: Vec<bool> = vec![false; maxpool_ranges.len()];
-
-        for (instr_idx, instr) in plan.instructions.iter().enumerate() {
+        for instr in plan.instructions.iter() {
             match instr {
                 Instruction::CallKernel {
                     kernel_name,
@@ -1883,6 +1899,7 @@ impl Backend for CpuBackend {
                     params,
                     param_dims,
                     weight_meta,
+                    node_id: _,
                 } => {
                     let out_start = output_slice.offset;
                     let out_end = output_slice.offset + output_slice.size;
@@ -3897,7 +3914,7 @@ impl Backend for CpuBackend {
                         "concat" => {
                             if !input_slices.is_empty() {
                                 let mut output_offset = 0;
-                                for (si, slice) in input_slices.iter().enumerate() {
+                                for (_si, slice) in input_slices.iter().enumerate() {
                                     let input_data = {
                                         let d = arena.data_mut();
                                         bytemuck::cast_slice::<_, f32>(
@@ -3905,8 +3922,6 @@ impl Backend for CpuBackend {
                                         )
                                         .to_vec()
                                     };
-                                    let input_first = input_data.first().copied().unwrap_or(0.0);
-                                    let input_numel = input_data.len();
                                     let out_f32 = {
                                         let d = arena.data_mut();
                                         bytemuck::cast_slice_mut::<_, f32>(
@@ -3916,10 +3931,6 @@ impl Backend for CpuBackend {
                                     let end = (output_offset + input_data.len()).min(out_f32.len());
                                     out_f32[output_offset..end]
                                         .copy_from_slice(&input_data[..end - output_offset]);
-                                    eprintln!(
-                                        "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} first_f32={}",
-                                        out_start, out_end, si, slice.offset, slice.size, input_numel, input_first
-                                    );
                                     output_offset += input_data.len();
                                 }
                             }
@@ -4012,11 +4023,7 @@ impl Backend for CpuBackend {
                                                 if out_idx < out_f32.len() {
                                                     out_f32[out_idx] = val;
                                                 }
-                                                // Debug: log first MaxPool write value
-                                                if nn == 0 && cc == 0 && hh == 0 && ww == 0 {
-                                                    eprintln!("[FNN_DBG_POOL] MaxPool out_start={} wrote={}",
-                                                        out_start, val);
-                                                }
+
                                                 // Write argmax index if this is max pooling
                                                 if let Some(ref mut idx_out) = indices_out {
                                                     if out_idx < idx_out.len() {
@@ -6727,109 +6734,7 @@ impl Backend for CpuBackend {
                 }
             }
 
-            // ── Debug: per-instruction MaxPool canary check ──────────
-            // After the current instruction has executed, check whether
-            // any MaxPool primary slot has been overwritten.
-            {
-                let d = arena.data_mut();
-                // Determine if this instruction IS a MaxPool kernel, and
-                // if so, which index in maxpool_ranges it corresponds to.
-                let is_mp_and_idx: Option<usize> = match instr {
-                    Instruction::CallKernel {
-                        kernel_name,
-                        params,
-                        output_slice,
-                        ..
-                    } if kernel_name == "pool_f32" && params.len() >= 4 && params[3] == 1 => {
-                        maxpool_ranges
-                            .iter()
-                            .position(|&(off, _)| off == output_slice.offset)
-                    }
-                    _ => None,
-                };
 
-                if let Some(mp_idx) = is_mp_and_idx {
-                    // This instruction just wrote MaxPool data → snapshot
-                    let (mp_off, mp_sz) = maxpool_ranges[mp_idx];
-                    if mp_sz >= 4 && mp_off + 4 <= d.len() {
-                        let bytes: [u8; 4] = d[mp_off..mp_off + 4].try_into().unwrap_or([0; 4]);
-                        maxpool_snapshot[mp_idx] = Some(f32::from_le_bytes(bytes));
-                        maxpool_seen[mp_idx] = true;
-                        // Also log the kernel's output_slice for reference
-                        if let Instruction::CallKernel {
-                            kernel_name,
-                            output_slice,
-                            ..
-                        } = instr
-                        {
-                            eprintln!(
-                                "[FNN_DBG_CANARY] MaxPool nid={}: off={} sz={} first_f32={} (AFTER kernel={} out=[{},{})",
-                                mp_idx, mp_off, mp_sz,
-                                maxpool_snapshot[mp_idx].unwrap(),
-                                kernel_name,
-                                output_slice.offset,
-                                output_slice.offset + output_slice.size,
-                            );
-                        }
-                    }
-                } else {
-                    // Not a MaxPool kernel — check if any MaxPool was corrupted
-                    for (mp_idx, &(mp_off, mp_sz)) in maxpool_ranges.iter().enumerate() {
-                        if !maxpool_seen[mp_idx] {
-                            continue; // MaxPool hasn't executed yet
-                        }
-                        if let Some(expected) = maxpool_snapshot[mp_idx] {
-                            if mp_sz >= 4 && mp_off + 4 <= d.len() {
-                                let bytes: [u8; 4] =
-                                    d[mp_off..mp_off + 4].try_into().unwrap_or([0; 4]);
-                                let actual = f32::from_le_bytes(bytes);
-                                if actual.to_bits() != expected.to_bits() {
-                                    let desc = match instr {
-                                        Instruction::CallKernel {
-                                            kernel_name,
-                                            output_slice,
-                                            ..
-                                        } => format!(
-                                            "kernel={} out=[{},{})",
-                                            kernel_name,
-                                            output_slice.offset,
-                                            output_slice.offset + output_slice.size
-                                        ),
-                                        Instruction::MemCopy { dst, src } => {
-                                            format!(
-                                                "MemCopy dst=[{},{}) src=[{},{})",
-                                                dst.offset,
-                                                dst.offset + dst.size,
-                                                src.offset,
-                                                src.offset + src.size
-                                            )
-                                        }
-                                        Instruction::Fill { dst, value } => {
-                                            format!(
-                                                "Fill dst=[{},{}) value={}",
-                                                dst.offset,
-                                                dst.offset + dst.size,
-                                                value
-                                            )
-                                        }
-                                        Instruction::WriteConst { dst, .. } => {
-                                            format!(
-                                                "WriteConst dst=[{},{})",
-                                                dst.offset,
-                                                dst.offset + dst.size
-                                            )
-                                        }
-                                    };
-                                    eprintln!(
-                                        "[FNN_DBG_CORRUPT] MaxPool mp_off={} expected={} actual={} AFTER instr_idx={} {}",
-                                        mp_off, expected, actual, instr_idx, desc
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
 
         Ok(())
