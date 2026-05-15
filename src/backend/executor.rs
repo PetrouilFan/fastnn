@@ -156,10 +156,11 @@ impl<B: Backend> GraphExecutor<B> {
                 }
             }
         }
-        // Allocate arena — instructions reference the original (max-estimate)
-        // slot sizes, so we must use the original arena_size.
-        // MemoryPlan::tighten() is available for users who recompile with a
-        // fully-resolved ShapeEnv.
+        // Allocate arena.  The plan was compiled with worst-case SYMBOL_DIM_MAX
+        // sizes; at runtime the ShapeEnv resolves symbolic dims to actual values.
+        // TODO: invoke memory_plan.tighten() here and rebuild the ExecutablePlan's
+        // instruction BufferSlices to match the tightened sizes (saves up to 90%
+        // arena memory for dynamic shapes).
         let arena = self.backend.allocate_arena(plan.arena_size);
 
         // Write input data into the arena at the slots for graph input nodes
