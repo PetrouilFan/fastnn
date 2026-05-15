@@ -5,6 +5,7 @@ Converts ONNX models (.onnx) to ComputeGraph JSON (.fnn) format.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -181,7 +182,7 @@ def _extract_attrs(onnx_node) -> Dict[str, Any]:
         val = _get_attr(onnx_node, key, None)
         if val is not None:
             if isinstance(val, np.ndarray):
-                attrs[key] = val.flatten().tolist()
+                attrs[key] = val.tolist()
             elif isinstance(val, list):
                 attrs[key] = list(val)
             elif isinstance(val, (int, float, str, bool)):
@@ -286,7 +287,7 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
         nid += 1
 
     for name, arr in init_map.items():
-        params[name] = {"data": arr.flatten().tolist(), "shape": list(arr.shape), "dtype": "F32", "is_constant": True}
+        params[name] = {"data": arr.tobytes(), "shape": list(arr.shape), "dtype": "F32", "is_constant": True}
 
     out_to_nid: Dict[str, int] = {}
     onnx_nodes: List[Tuple[int, Any]] = []
@@ -311,7 +312,7 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
         for suffix, idx in _OP_PARAM_SLOTS.get(onn.op_type, []):
             if idx < len(onn.input) and onn.input[idx] in init_map:
                 arr = init_map[onn.input[idx]]
-                params[f"{oname}.{suffix}"] = {"data": arr.flatten().tolist(), "shape": list(arr.shape), "dtype": "F32", "is_constant": True}
+                params[f"{oname}.{suffix}"] = {"data": arr.tobytes(), "shape": list(arr.shape), "dtype": "F32", "is_constant": True}
 
         if onn.op_type == "Gemm":
             nodes.append({"id": oid, "opcode": "MatMul", "inputs": list(ins), "output_shape": osd, "attrs": {"alpha": attrs.get("alpha", 1.0), "transB": attrs.get("transB", 0)}, "name": f"{oname}_matmul"})
@@ -322,7 +323,7 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
                 alpha = _get_attr(onn, "alpha", 1.0)
                 if alpha != 1.0:
                     weight = (weight * alpha).astype(weight.dtype)
-                params[f"{oname}.weight"] = {"data": weight.flatten().tolist(), "shape": list(weight.shape), "dtype": "F32", "is_constant": True}
+                params[f"{oname}.weight"] = {"data": weight.tobytes(), "shape": list(weight.shape), "dtype": "F32", "is_constant": True}
             if len(onn.input) > 2 and onn.input[2] in init_map:
                 bias = init_map[onn.input[2]]
                 beta = _get_attr(onn, "beta", 1.0)
@@ -332,18 +333,18 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
                 nid += 1
                 nodes.append({"id": bid, "opcode": "BiasAdd", "inputs": [oid], "output_shape": osd, "attrs": {}, "name": f"{oname}_bias"})
                 out_to_nid[onn.output[0]] = bid
-                params[f"{oname}.bias"] = {"data": bias.flatten().tolist(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
+                params[f"{oname}.bias"] = {"data": bias.tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
 
         elif onn.op_type == "Add":
             bias = init_map.get(onn.input[1])
             if bias is not None:
-                params[f"{oname}.bias"] = {"data": bias.flatten().tolist(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
+                params[f"{oname}.bias"] = {"data": bias.tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
             nodes.append({"id": oid, "opcode": "BiasAdd" if bias is not None else "Add", "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type == "Sub":
             bias = init_map.get(onn.input[1])
             if bias is not None:
-                params[f"{oname}.bias"] = {"data": (-bias).flatten().tolist(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
+                params[f"{oname}.bias"] = {"data": (-bias).tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
             nodes.append({"id": oid, "opcode": "BiasSub" if bias is not None else "Sub", "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type == "Constant":
@@ -351,7 +352,7 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
             if value is not None:
                 try:
                     const_arr = onnx.numpy_helper.to_array(value)
-                    params[f"{oname}.value"] = {"data": const_arr.flatten().tolist(), "shape": list(const_arr.shape), "dtype": "F32", "is_constant": True}
+                    params[f"{oname}.value"] = {"data": const_arr.tobytes(), "shape": list(const_arr.shape), "dtype": "F32", "is_constant": True}
                 except Exception:
                     pass
             nodes.append({"id": oid, "opcode": ir_op, "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
@@ -359,7 +360,7 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
         elif onn.op_type == "Reshape":
             shape_arr = init_map.get(onn.input[1])
             if shape_arr is not None:
-                attrs["shape"] = shape_arr.flatten().tolist()
+                attrs["shape"] = shape_arr.tolist()
             nodes.append({"id": oid, "opcode": ir_op, "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
 
         else:
@@ -375,8 +376,19 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
     return {"nodes": nodes, "inputs": gin_ids, "outputs": out_ids, "params": params}
 
 
+def _convert_bytes(obj):
+    if isinstance(obj, dict):
+        return {k: _convert_bytes(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_convert_bytes(v) for v in obj]
+    if isinstance(obj, bytes):
+        return base64.b64encode(obj).decode('ascii')
+    return obj
+
+
 def import_onnx(onnx_path: str, fnn_path: str, config: Optional[Any] = None) -> Dict[str, Any]:
     cg = import_onnx_to_compute_graph(onnx_path, config=config)
+    cg = _convert_bytes(cg)
     with open(fnn_path, "w") as f:
         json.dump(cg, f, indent=2)
     num_params = sum(1 for p in cg.get("params", {}).values() if p.get("is_constant", False))

@@ -1,6 +1,6 @@
 use super::FusionPass;
 use crate::ir::node::{ComputeGraph, IRNode, NodeId, Opcode};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct MatMulAddRelu;
 
@@ -11,7 +11,7 @@ impl FusionPass for MatMulAddRelu {
 
     fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
         let mut fused = false;
-        let mut to_remove: Vec<NodeId> = Vec::new();
+        let mut to_remove: HashSet<NodeId> = HashSet::new();
         let mut new_nodes: Vec<IRNode> = Vec::new();
         let node_ids: Vec<NodeId> = graph.nodes.iter().map(|n| n.id).collect();
 
@@ -94,9 +94,9 @@ impl FusionPass for MatMulAddRelu {
 
             new_nodes.push(fused_node);
 
-            to_remove.push(matmul_id);
-            to_remove.push(add_id);
-            to_remove.push(relu_id);
+            to_remove.insert(matmul_id);
+            to_remove.insert(add_id);
+            to_remove.insert(relu_id);
 
             let relu_consumers: Vec<NodeId> = graph.consumers(relu_id);
             for consumer_id in relu_consumers {
@@ -116,8 +116,8 @@ impl FusionPass for MatMulAddRelu {
             fused = true;
         }
 
-        for id in &to_remove {
-            graph.remove_node(*id);
+        for &id in &to_remove {
+            graph.remove_node(id);
         }
 
         for node in new_nodes {

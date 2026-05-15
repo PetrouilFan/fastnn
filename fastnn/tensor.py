@@ -41,7 +41,7 @@ def tensor(data, shape, device=None, dtype=None):
     if isinstance(data, np.ndarray):
         data = _ensure_tensor_ready(data)
         shape = shape if shape is not None else list(data.shape)
-        return _core.tensor_from_data(data.flatten().tolist(), shape, device)
+        return _core.PyTensor.from_buffer(data, device)
     if isinstance(data, Tensor):
         # Already a fastnn tensor — return as-is (or reshape if needed)
         if shape is not None and list(data.shape) != list(shape):
@@ -124,4 +124,3 @@ __all__ = [
     "ones_like",
     "full_like",
 ]
-

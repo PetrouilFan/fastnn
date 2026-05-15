@@ -67,7 +67,7 @@ pub(super) fn dim_scalar(dim: i32) -> Tensor {
 
 impl Tensor {
     pub fn from_scalar(value: f32) -> Self {
-        let mut storage = Arc::new(Storage::new_cpu(DType::F32, 4));
+        let mut storage = get_storage_pool().acquire_uninit(4, Device::Cpu);
         let storage_mut = Arc::make_mut(&mut storage);
         let Storage::Cpu(cpu_storage) = storage_mut else {
             panic!("Expected CPU storage");
@@ -86,7 +86,19 @@ impl Tensor {
 
     pub fn from_vec(values: Vec<f32>, shape: Vec<i64>) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
+        let nbytes = values.len() * 4;
+        let mut storage = get_storage_pool().acquire_uninit(nbytes, Device::Cpu);
+        let Storage::Cpu(cpu) = Arc::make_mut(&mut storage) else {
+            panic!("Expected CPU storage");
+        };
+        let data = Arc::make_mut(&mut cpu.data);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr(),
+                data.as_mut_ptr() as *mut f32,
+                values.len(),
+            );
+        }
         Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 

@@ -29,7 +29,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
 
     for &node_id in &order {
         let node = match graph.get_node(node_id) {
-            Some(n) => n.clone(),
+            Some(n) => n,
             None => continue,
         };
 
@@ -45,7 +45,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
         // The weight is typically input[1] (input[0] is the activation).
         if let Some(&weight_id) = node.inputs.get(1) {
             let weight_node = match graph.get_node(weight_id) {
-                Some(n) => n.clone(),
+                Some(n) => n,
                 None => continue,
             };
 
@@ -72,7 +72,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
     for (const_id, _consumer_id) in to_quantize {
         // Clone needed data before mutable borrow.
         let const_node = match graph.get_node(const_id) {
-            Some(n) => n.clone(),
+            Some(n) => n,
             None => continue,
         };
 
@@ -217,7 +217,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
 
     for &node_id in &order {
         let node = match graph.get_node(node_id) {
-            Some(n) => n.clone(),
+            Some(n) => n,
             None => continue,
         };
 

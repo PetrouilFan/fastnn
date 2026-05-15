@@ -6,6 +6,12 @@
 use crate::storage::{DType, Device};
 use crate::tensor::Tensor;
 
+thread_local! {
+    static FLASH_SCRATCH: std::cell::RefCell<Vec<f32>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
 const TILE_SIZE: usize = 32;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -77,7 +83,11 @@ fn flash_attention_single(
     scale: f32,
     causal: bool,
 ) {
-    let mut s_buf = vec![0.0f32; TILE_SIZE * TILE_SIZE];
+    let mut s_buf = FLASH_SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.resize(TILE_SIZE * TILE_SIZE, 0.0f32);
+        std::mem::take(&mut *buf)
+    });
     let mut m = [f32::NEG_INFINITY; TILE_SIZE];
     let mut l = [0.0f32; TILE_SIZE];
     let mut o_tile = vec![0.0f32; TILE_SIZE * dv];
@@ -162,6 +172,9 @@ fn flash_attention_single(
             dst.copy_from_slice(src);
         }
     }
+    FLASH_SCRATCH.with(|cell| {
+        *cell.borrow_mut() = s_buf;
+    });
 }
 
 fn matmul_tile(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32) -> Vec<f32> {

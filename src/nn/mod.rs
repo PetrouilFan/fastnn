@@ -26,6 +26,14 @@ pub trait Module: Send + Sync {
     fn train_mode(&self);
     fn eval_mode(&self);
     fn is_training(&self) -> bool;
+
+    fn parameters_ref(&self) -> Vec<&Tensor> {
+        vec![]
+    }
+
+    fn named_parameters_ref(&self) -> Vec<(&str, &Tensor)> {
+        vec![]
+    }
 }
 
 /// Helper to clear gradient from a tensor.
@@ -130,10 +138,22 @@ macro_rules! impl_nn_named_params {
             }
             params
         }
+
+        fn named_parameters_ref(&self) -> Vec<(&str, &$crate::tensor::Tensor)> {
+            let mut params = vec![($wname, &self.$weight)];
+            if let Some(ref b) = self.$bias {
+                params.push(($bname, b));
+            }
+            params
+        }
     };
     ($weight:ident, $wname:literal) => {
         fn named_parameters(&self) -> Vec<(String, $crate::tensor::Tensor)> {
             vec![($wname.to_string(), self.$weight.clone())]
+        }
+
+        fn named_parameters_ref(&self) -> Vec<(&str, &$crate::tensor::Tensor)> {
+            vec![($wname, &self.$weight)]
         }
     };
 }

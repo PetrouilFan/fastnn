@@ -74,7 +74,7 @@ pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), String> {
 
     for &node_id in &order {
         let node = match graph.get_node(node_id) {
-            Some(n) => n.clone(),
+            Some(n) => n,
             None => continue,
         };
 

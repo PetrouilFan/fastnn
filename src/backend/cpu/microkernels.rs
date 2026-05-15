@@ -50,7 +50,11 @@ thread_local! {
 fn with_scratch<R>(size: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
     PACKED_SCRATCH.with(|cell| {
         let mut buf = cell.borrow_mut();
-        buf.resize(size, 0.0);
+        if size > buf.len() {
+            buf.resize(size, 0.0);
+        } else {
+            buf.truncate(size);
+        }
         f(&mut buf)
     })
 }

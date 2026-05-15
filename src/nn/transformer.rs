@@ -80,14 +80,33 @@ impl TransformerBlock {
         let attn_dropped = self.dropout.forward(&attn_output);
         let x = attn_dropped.add(x);
 
-        // Layer 2: Feed-forward with residual connection and dropout
-        let x_norm2 = self.norm2.forward(&x);
+        // Fused sub-layer AOT: norm2 → ff1 (matmul + bias + gelu) → ff2 (matmul + bias)
+        let ff_out = Tensor::exec_aot(
+            &[
+                &x,
+                &self.norm2.weight,
+                &self.norm2.bias,
+                &self.ff1.weight,
+                self.ff1.bias.as_ref().unwrap(),
+                &self.ff2.weight,
+                self.ff2.bias.as_ref().unwrap(),
+            ],
+            |g, ins| {
+                let x_norm2 = g.layer_norm(&ins[0], &ins[1], &ins[2], 1e-5);
+                let mm1 = g.matmul(&x_norm2, &ins[3]);
+                let biased1 = g.bias_add(&mm1, &ins[4]);
+                let gelu_out = g.gelu(&biased1);
+                let mm2 = g.matmul(&gelu_out, &ins[5]);
+                let out = g.bias_add(&mm2, &ins[6]);
+                vec![out]
+            },
+        )
+        .expect("TransformerBlock::forward: fused sub-layer AOT failed")
+        .into_iter()
+        .next()
+        .unwrap();
 
-        // Fused feed-forward: linear -> gelu
-        let ff_gelu = x_norm2.fused_linear_gelu(&self.ff1.weight, self.ff1.bias.as_ref());
-        let ff_out = self.ff2.forward(&ff_gelu);
         let ff_dropped = self.dropout.forward(&ff_out);
-
         ff_dropped.add(&x)
     }
 }

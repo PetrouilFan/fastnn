@@ -623,6 +623,21 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
+                    let input_ids_str = node
+                        .inputs
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    eprintln!(
+                        "[FNN_DBG_CONCAT_COMPILE] nid={} op=Concat inputs=[{}] input_slices={:?}",
+                        node_id,
+                        input_ids_str,
+                        input_slices
+                            .iter()
+                            .map(|s| (s.offset, s.size))
+                            .collect::<Vec<_>>()
+                    );
                     instructions.push(Instruction::CallKernel {
                         kernel_name: "concat".to_string(),
                         input_slices,
@@ -3882,7 +3897,7 @@ impl Backend for CpuBackend {
                         "concat" => {
                             if !input_slices.is_empty() {
                                 let mut output_offset = 0;
-                                for slice in input_slices {
+                                for (si, slice) in input_slices.iter().enumerate() {
                                     let input_data = {
                                         let d = arena.data_mut();
                                         bytemuck::cast_slice::<_, f32>(
@@ -3890,6 +3905,8 @@ impl Backend for CpuBackend {
                                         )
                                         .to_vec()
                                     };
+                                    let input_first = input_data.first().copied().unwrap_or(0.0);
+                                    let input_numel = input_data.len();
                                     let out_f32 = {
                                         let d = arena.data_mut();
                                         bytemuck::cast_slice_mut::<_, f32>(
@@ -3899,6 +3916,10 @@ impl Backend for CpuBackend {
                                     let end = (output_offset + input_data.len()).min(out_f32.len());
                                     out_f32[output_offset..end]
                                         .copy_from_slice(&input_data[..end - output_offset]);
+                                    eprintln!(
+                                        "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} first_f32={}",
+                                        out_start, out_end, si, slice.offset, slice.size, input_numel, input_first
+                                    );
                                     output_offset += input_data.len();
                                 }
                             }

@@ -647,8 +647,9 @@ def _fetch_batch(
 
     Shared helper used by both _PrefetchIterator and _MultiProcessIterator.
     """
-    if hasattr(dataset, 'batch_get'):
-        samples = dataset.batch_get(batch_indices)
+    batch_get = getattr(dataset, 'batch_get', None)
+    if batch_get is not None:
+        samples = batch_get(batch_indices)
     else:
         samples = [dataset[i] for i in batch_indices]
     return collate_fn(samples)

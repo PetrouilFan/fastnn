@@ -141,7 +141,6 @@ impl<'a> OnnxConverter<'a> {
         for name in self.output_names {
             if let Some(gt) = self.name_to_id.get(name.as_str()) {
                 let nid = gt.node_id();
-                eprintln!("[FNN_DBG_CONV] output '{}' -> node_id={}", name, nid);
                 output_ids.push(nid);
             } else {
                 self.errors.push(format!("output '{}' not found", name));
@@ -151,7 +150,6 @@ impl<'a> OnnxConverter<'a> {
         let mut graph = self.graph.to_graph();
         graph.inputs = input_ids;
         graph.outputs = output_ids;
-        eprintln!("[FNN_DBG_CONV] graph.outputs = {:?}", graph.outputs);
 
         if !self.errors.is_empty() {
             return Err(format!(
@@ -736,19 +734,7 @@ impl<'a> OnnxConverter<'a> {
                 // Range(start, limit, step) — produces a 1D F32 tensor.
                 // All 3 inputs are 0D scalars in the ONNX model.
                 if ins.len() >= 3 {
-                    eprintln!(
-                        "[converter] Range node '{}': ins shapes={:?} {:?} {:?}",
-                        node.name,
-                        ins[0].shape(),
-                        ins[1].shape(),
-                        ins[2].shape(),
-                    );
                     let gt = self.graph.range_op(&ins[0], &ins[1], &ins[2]);
-                    eprintln!(
-                        "[converter] Range node '{}': output shape={:?}",
-                        node.name,
-                        gt.shape()
-                    );
                     self.out(node, gt);
                 } else {
                     return Err("Range needs 3 inputs (start, limit, step)".to_string());
