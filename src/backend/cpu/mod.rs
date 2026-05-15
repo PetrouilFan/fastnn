@@ -151,17 +151,16 @@ impl Backend for CpuBackend {
                 .map(|n| n.output_type.shape.clone())
                 .collect();
 
-            let output_slice = memory_plan
-                .slots
-                .get(&node_id)
-                .map(|slot| BufferSlice::new(slot.offset, slot.size))
-                .ok_or_else(|| {
-                    BackendError::Compilation(format!(
-                        "node {} ({:?}) has no memory slot",
-                        node_id, node.opcode
-                    ))
-                })?;
-
+                        let output_slice = memory_plan
+                    .slots
+                    .get(&node_id)
+                    .map(|slot| BufferSlice::new(slot.offset, slot.size))
+                    .ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "node {} ({:?}) has no memory slot",
+                            node_id, node.opcode
+                        ))
+                    })?;
             let secondary_output_slice = memory_plan
                 .secondary_slots
                 .get(&(node_id, 1))
@@ -1169,10 +1168,49 @@ impl Backend for CpuBackend {
                         });
                     }
                 }
-                Opcode::Expand | Opcode::Tile => {
-                    // For Expand/Tile, fall back to MemCopy of first input.
-                    // Correct behavior requires broadcasting which is not
-                    // yet implemented at the backend level.
+                Opcode::Expand => {
+                    // Expand broadcasts input[0] to the shape specified by input[1].
+                    // Resolve input and output shapes at compile time and pack them
+                    // into params: [max_rank, in_d0, in_d1, ..., out_d0, out_d1, ...].
+                    // The kernel uses these to compute broadcast strides.
+                    let data_shape_dims = input_shape_dims.first().cloned().unwrap_or_default();
+                    let out_shape_dims = node.output_type.shape.clone();
+                    let out_rank = out_shape_dims.len();
+                    let data_rank = data_shape_dims.len();
+                    let max_rank = out_rank.max(data_rank);
+
+                    // Resolve to concrete values (Known dims, safe in YOLO pipeline)
+                    let resolve = |d: &DimExpr| d.evaluate().unwrap_or(1) as usize;
+
+                    // Build params: [max_rank, padded_in_dims..., padded_out_dims...]
+                    let mut params = vec![max_rank];
+                    for i in 0..max_rank {
+                        if i < max_rank - data_rank {
+                            params.push(1);
+                        } else {
+                            params.push(resolve(&data_shape_dims[i - (max_rank - data_rank)]));
+                        }
+                    }
+                    for i in 0..max_rank {
+                        if i < max_rank - out_rank {
+                            params.push(1);
+                        } else {
+                            params.push(resolve(&out_shape_dims[i - (max_rank - out_rank)]));
+                        }
+                    }
+
+                    instructions.push(Instruction::CallKernel {
+                        kernel_name: "expand_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params,
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Tile => {
+                    // Tile copies first input (no broadcast yet).
                     if let Some(&input_id) = node.inputs.first() {
                         if let Some(in_slot) = memory_plan.slots.get(&input_id) {
                             instructions.push(Instruction::MemCopy {
@@ -3384,7 +3422,12 @@ impl Backend for CpuBackend {
                             let (w_init, grad, lr) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                // w_init must be read from input_slices[0] (the weight's slot),
+                                // NOT from out_start..out_end (the output slot), because the
+                                // memory planner does NOT alias the SgdUpdate output with the
+                                // weight input — they have overlapping live ranges.  Reading
+                                // from the output slot would give uninitialized/garbage data.
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).to_vec();
                                 let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
                                 let lr = f32::from_bits(params[0] as u32);
                                 (w_init, grad, lr)
@@ -3419,7 +3462,10 @@ impl Backend for CpuBackend {
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                // Read w_init from the weight input slot (input_slices[0]) — NOT
+                                // from the output slot — because the memory planner may not alias
+                                // the optimizer output with the weight input when live ranges overlap.
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).to_vec();
                                 let m_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).to_vec();
                                 let v_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).to_vec();
                                 let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
@@ -3453,7 +3499,7 @@ impl Backend for CpuBackend {
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).to_vec();
                                 let m_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]).to_vec();
                                 let v_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]).to_vec();
                                 let grad = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[1].offset..input_slices[1].offset + input_slices[1].size]).to_vec();
@@ -3497,7 +3543,8 @@ impl Backend for CpuBackend {
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                // w_init from weight input (input_slices[0]), not output slot
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).to_vec();
                                 // m and v are F16 — read as half::f16 bytes, convert to f32
                                 let m_raw: Vec<u16> = d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]
                                     .chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
@@ -3546,7 +3593,7 @@ impl Backend for CpuBackend {
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[out_start..out_end]).to_vec();
+                                let w_init = bytemuck::cast_slice::<_, f32>(&d_ref[input_slices[0].offset..input_slices[0].offset + input_slices[0].size]).to_vec();
                                 let m_raw: Vec<u16> = d_ref[input_slices[2].offset..input_slices[2].offset + input_slices[2].size]
                                     .chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
                                 let v_raw: Vec<u16> = d_ref[input_slices[3].offset..input_slices[3].offset + input_slices[3].size]
@@ -3612,6 +3659,84 @@ impl Backend for CpuBackend {
                                     d[out_start..end].copy_from_slice(&out_bytes[..end - out_start]);
                                 }
                                 // Same-size casts handled by MemCopy at compile time
+                            }
+                        }
+                        "expand_f32" => {
+                            // Expand broadcasts input[0] (f32 data) using target
+                            // shape input[1] (i64 dims).  params layout:
+                            //   [max_rank, in_d0..in_dN, out_d0..out_dN]
+                            if input_slices.len() < 2 {
+                                return Err(BackendError::Dispatch(
+                                    "expand_f32 needs 2 inputs (data + shape)".into()
+                                ));
+                            }
+                            let max_rank = *params.first().ok_or_else(||
+                                BackendError::Dispatch("expand_f32: missing max_rank".into())
+                            )?;
+                            if params.len() < 1 + max_rank * 2 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "expand_f32: expected {} params, got {}",
+                                    1 + max_rank * 2, params.len()
+                                )));
+                            }
+                            // Extract padded input dims and output dims
+                            let in_dims: Vec<usize> = params[1..1 + max_rank].to_vec();
+                            let out_dims: Vec<usize> = params[1 + max_rank..1 + max_rank * 2].to_vec();
+
+                            let data_slice = &input_slices[0];
+                            let shape_slice = &input_slices[1];
+                            let data_numel = data_slice.size / 4; // f32 = 4 bytes
+                            let out_numel = output_slice.size / 4;
+
+                            let d = arena.data_mut();
+
+                            // Read target shape tensor (I64 values giving output dims)
+                            // This is the runtime version of the shape; we use compile-time
+                            // dims from params as the source of truth.
+                            let _shape_data: Vec<i64> = bytemuck::cast_slice::<_, i64>(
+                                &d[shape_slice.offset..shape_slice.offset + shape_slice.size]
+                            ).to_vec();
+
+                            // Read input data
+                            let in_f32: Vec<f32> = bytemuck::cast_slice::<_, f32>(
+                                &d[data_slice.offset..data_slice.offset + data_slice.size]
+                            ).to_vec();
+
+                            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
+                                &mut d[out_start..out_start + output_slice.size]
+                            );
+
+                            // Broadcast: for each output element, map back to input coords
+                            for out_linear in 0..out_numel {
+                                // Unravel output linear index -> output coords
+                                let mut out_coord = vec![0usize; max_rank];
+                                let mut remaining = out_linear;
+                                for i in (0..max_rank).rev() {
+                                    out_coord[i] = remaining % out_dims[i];
+                                    remaining /= out_dims[i];
+                                }
+
+                                // Map output coords to input coords (broadcast)
+                                let mut in_linear: usize = 0;
+                                let mut in_stride = 1usize;
+                                for i in (0..max_rank).rev() {
+                                    let in_dim = in_dims[i];
+                                    let out_dim = out_dims[i];
+                                    let in_coord = if in_dim == out_dim {
+                                        out_coord[i]
+                                    } else if in_dim == 1 {
+                                        0 // broadcast
+                                    } else {
+                                        // Should not happen if shapes are valid
+                                        0
+                                    };
+                                    in_linear += in_coord * in_stride;
+                                    in_stride *= in_dim;
+                                }
+
+                                if in_linear < data_numel {
+                                    out_f32[out_linear] = in_f32[in_linear];
+                                }
                             }
                         }
                         "range_f32" => {

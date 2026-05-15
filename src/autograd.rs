@@ -983,18 +983,67 @@ pub fn build_backward_graph(
                 }
             }
             Opcode::ReduceSum => {
+                // Forward: y = sum(x, dims)
+                // Backward: dx = dy  (broadcast reduced dims back to input shape)
                 if let Some(&input_id) = node.inputs.first() {
                     let input_type = forward_graph.get_node(input_id).map(|n| n.output_type.clone()).unwrap();
-                    let ones = create_constant_scalar(1.0f32, &input_type.shape, input_type.dtype.clone(), &mut grad_graph);
-                    accumulate_grad(&mut grad_graph, &mut grads, input_id, ones);
+                    // Get the gradient's output type from grad_graph (all nodes live there)
+                    let grad_type = grad_graph.get_node(grad_id).map(|n| n.output_type.clone()).unwrap();
+                    let input_numel = input_type.numel().unwrap_or(1);
+                    let grad_numel = grad_type.numel().unwrap_or(1);
+                    if input_numel == grad_numel {
+                        // Same element count: reshape grad to input shape (adds dims, no data change)
+                        let reshaped = grad_graph.add_node(
+                            Opcode::Reshape, vec![grad_id], input_type.clone(),
+                        );
+                        accumulate_grad(&mut grad_graph, &mut grads, input_id, reshaped);
+                    } else {
+                        // Scalar gradient (e.g., reduce over all dims): broadcast via MulScalar
+                        let ones = create_constant_scalar(1.0, &input_type.shape, input_type.dtype.clone(), &mut grad_graph);
+                        let scaled = grad_graph.add_node(
+                            Opcode::MulScalar, vec![ones, grad_id], input_type.clone(),
+                        );
+                        accumulate_grad(&mut grad_graph, &mut grads, input_id, scaled);
+                    }
                 }
             }
             Opcode::ReduceMean => {
+                // Forward: y = mean(x, dims)
+                // Backward: dx = dy / n
+                //
+                // We must NOT use total input numel as n;  instead compute n
+                // as the PRODUCT of the REDUCED dimensions only:
+                //
+                //     n = input_numel / output_numel
+                //
+                // This correctly handles cases like mean([[a,b]], dim=0) where
+                // the reduced dim has size 1 (n=1, total numel=2).
                 if let Some(&input_id) = node.inputs.first() {
                     let input_type = forward_graph.get_node(input_id).map(|n| n.output_type.clone()).unwrap();
-                    let n = input_type.numel().unwrap_or(1) as f32;
-                    let scale = create_constant_scalar(1.0 / n, &input_type.shape, input_type.dtype.clone(), &mut grad_graph);
-                    accumulate_grad(&mut grad_graph, &mut grads, input_id, scale);
+                    // Get the gradient's output type from grad_graph (all nodes live there)
+                    let grad_type = grad_graph.get_node(grad_id).map(|n| n.output_type.clone()).unwrap();
+                    let input_numel = input_type.numel().unwrap_or(1);
+                    let output_numel = node.output_type.numel().unwrap_or(1);
+                    let grad_numel = grad_type.numel().unwrap_or(1);
+                    // n = product of reduced dim sizes = total_input / total_output
+                    let n = (input_numel as f32) / (output_numel as f32);
+                    let inv_n = create_constant_scalar(1.0 / n, &input_type.shape, input_type.dtype.clone(), &mut grad_graph);
+                    if input_numel == grad_numel {
+                        // Same element count: reshape grad to input shape, then Mul element-wise
+                        let reshaped = grad_graph.add_node(
+                            Opcode::Reshape, vec![grad_id], input_type.clone(),
+                        );
+                        let scaled_grad = grad_graph.add_node(
+                            Opcode::Mul, vec![reshaped, inv_n], input_type.clone(),
+                        );
+                        accumulate_grad(&mut grad_graph, &mut grads, input_id, scaled_grad);
+                    } else {
+                        // Scalar gradient: MulScalar broadcasts the scalar across all elements
+                        let scaled_grad = grad_graph.add_node(
+                            Opcode::MulScalar, vec![inv_n, grad_id], input_type.clone(),
+                        );
+                        accumulate_grad(&mut grad_graph, &mut grads, input_id, scaled_grad);
+                    }
                 }
             }
             Opcode::Sqrt => {
@@ -1721,7 +1770,7 @@ pub fn build_backward_graph(
                 }
             }
             Opcode::Prelu | Opcode::Embedding
-            | Opcode::AddScalar | Opcode::MulScalar | Opcode::DivScalar
+            | Opcode::AddScalar | Opcode::DivScalar
             | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
             | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
             | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where
@@ -1733,6 +1782,31 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                 }
             }
+            Opcode::MulScalar => {
+                // Forward: y = a * b  (element-wise multiply with broadcasting)
+                // Backward: da = dy * b,  db = dy * a
+                if node.inputs.len() >= 2 {
+                    let a_id = node.inputs[0];
+                    let b_id = node.inputs[1];
+                    let a_type = forward_graph.get_node(a_id).map(|n| n.output_type.clone());
+                    let b_type = forward_graph.get_node(b_id).map(|n| n.output_type.clone());
+                    // The gradient for each input has the same shape as the input,
+                    // so use the forward input's output type (which is the TensorValue
+                    // shape that determines buffer size).
+                    let da = grad_graph.add_node(
+                        Opcode::MulScalar,
+                        vec![grad_id, b_id],
+                        a_type.unwrap_or(TensorType::new(vec![], IrDType::F32)),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, a_id, da);
+                    let db = grad_graph.add_node(
+                        Opcode::MulScalar,
+                        vec![grad_id, a_id],
+                        b_type.unwrap_or(TensorType::new(vec![], IrDType::F32)),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, b_id, db);
+                }
+            }
             Opcode::GradientScale => {
                 // Forward: y = x * scale  (scale is an attribute)
                 // Backward: d_input = d_output * scale
@@ -1741,10 +1815,12 @@ pub fn build_backward_graph(
                         .and_then(|s| s.parse::<f32>().ok())
                         .unwrap_or(1.0);
                     let scale_const = create_constant_scalar(scale_attr, &[], IrDType::F32, &mut grad_graph);
+                    let input_type = forward_graph.get_node(input_id).map(|n| n.output_type.clone())
+                        .unwrap_or(TensorType::new(vec![], IrDType::F32));
                     let d_input = grad_graph.add_node(
                         Opcode::MulScalar,
                         vec![grad_id, scale_const],
-                        TensorType::new(vec![], IrDType::F32),  // shape doesn't matter, will be broadcast
+                        input_type,  // use the input's shape so the gradient buffer is correctly sized
                     );
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, d_input);
                 }

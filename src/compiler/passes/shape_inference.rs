@@ -121,7 +121,14 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => inputs.first().map(|i| {
                 let mut s = i.output_type.shape.clone();
                 if let Some(axis_str) = node.attrs.get("axis") {
-                    if let Ok(axis) = axis_str.parse::<usize>() {
+                    if let Ok(axis_i64) = axis_str.parse::<i64>() {
+                        let rank = s.len();
+                        let axis = if axis_i64 < 0 {
+                            let r = rank as i64;
+                            if r > 0 { ((r + axis_i64 % r) % r) as usize } else { 0 }
+                        } else {
+                            axis_i64 as usize
+                        };
                         if axis < s.len() {
                             s.remove(axis);
                         }
@@ -131,11 +138,18 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             }),
             Opcode::Concat => {
                 if !inputs.is_empty() {
-                    let axis: usize = node
+                    let axis_i64: i64 = node
                         .attrs
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
+                    let rank = inputs[0].output_type.shape.len();
+                    let axis = if axis_i64 < 0 {
+                        let r = rank as i64;
+                        if r > 0 { ((r + axis_i64 % r) % r) as usize } else { 0 }
+                    } else {
+                        axis_i64 as usize
+                    };
                     let mut shape = inputs[0].output_type.shape.clone();
                     if axis < shape.len() {
                         let mut total = DimExpr::Known(0);
@@ -189,8 +203,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     let pad_w = pads.get(1).copied().unwrap_or(0)
                         + pads.get(3).copied().unwrap_or(0);
                     eprintln!(
-                        "[shape_inference] Pool node={} name='{}' kernel={} stride={} pads={:?} pad_h={} pad_w={}",
-                        node_id, node.name, kernel, stride, pads, pad_h, pad_w
+                        "[shape_inference] Pool node={} name='{}' input_shape={:?} kernel={} stride={} pads={:?} pad_h={} pad_w={}",
+                        node_id, node.name, input_shape, kernel, stride, pads, pad_h, pad_w
                     );
                     Some(
                         input_shape
@@ -396,21 +410,55 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                 inputs.first().map(|i| i.output_type.shape.clone())
             }
             Opcode::Expand => {
-                // Expand output shape: from the second input (target shape) if available,
-                // or broadcast the first input shape.
+                // Expand output shape: try to use the DAG builder's pre-computed
+                // "expand_shape" attr, which contains concrete target dims.
                 if inputs.len() >= 2 {
-                    // Try to resolve the second input's values if it's a constant
-                    let target_shape = &inputs[1].output_type.shape;
-                    if target_shape.len() == 1 {
-                        // Shape is a 1D tensor; output rank = value[0], but we
-                        // can only use the known dims if they're Known values.
-                        // For dynamic shapes, fall back to the data shape.
-                        // Since we can't read constant values here without evaluation,
-                        // just use the data shape as fallback.
-                        Some(inputs[0].output_type.shape.clone())
+                    let inferred = if let Some(shape_str) = node.attrs.get("expand_shape") {
+                        let target: Vec<u64> = shape_str
+                            .split(',')
+                            .filter_map(|s| s.trim().parse::<u64>().ok())
+                            .collect();
+                        if !target.is_empty() {
+                            let data_shape = &inputs[0].output_type.shape;
+                            let data_rank = data_shape.len();
+                            let target_rank = target.len();
+                            let max_rank = data_rank.max(target_rank);
+                            let mut broadcast_shape = Vec::with_capacity(max_rank);
+                            for i in 0..max_rank {
+                                let data_dim = if i < max_rank - data_rank {
+                                    1u64
+                                } else {
+                                    let idx = i - (max_rank - data_rank);
+                                    match data_shape[idx] {
+                                        DimExpr::Known(v) => v,
+                                        _ => 1u64,
+                                    }
+                                };
+                                let target_dim = if i < max_rank - target_rank {
+                                    1u64
+                                } else {
+                                    target[i - (max_rank - target_rank)]
+                                };
+                                broadcast_shape.push(DimExpr::Known(data_dim.max(target_dim)));
+                            }
+                            eprintln!("[shape_inference] Expand node={} data_shape={:?} target={:?} => broadcast={:?}",
+                                node_id, inputs[0].output_type.shape, target, broadcast_shape);
+                            eprintln!("  data_rank={} target_rank={} max_rank={}", data_rank, target_rank, max_rank);
+                            Some(broadcast_shape)
+                        } else {
+                            // Fallback: use data shape
+                            eprintln!("[shape_inference] Expand node={} expand_shape={:?} target parse empty, fallback to data shape {:?}",
+                                node_id, node.attrs.get("expand_shape"), inputs[0].output_type.shape);
+                            Some(inputs[0].output_type.shape.clone())
+                        }
                     } else {
+                        // No expand_shape attr: fallback to data shape.
+                        // The expand kernel will read the target shape at runtime.
+                        eprintln!("[shape_inference] Expand node={} no expand_shape attr, fallback to data shape {:?}",
+                            node_id, inputs[0].output_type.shape);
                         Some(inputs[0].output_type.shape.clone())
-                    }
+                    };
+                    inferred
                 } else {
                     inputs.first().map(|i| i.output_type.shape.clone())
                 }
