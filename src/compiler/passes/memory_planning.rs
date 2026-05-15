@@ -232,17 +232,6 @@ pub fn plan_memory_with_env(
                 }
             };
 
-            // Debug: log MaxPool last_use decisions
-            if matches!(node.opcode, Opcode::MaxPool) {
-                let consumers = graph.consumers(node_id);
-                eprintln!("[FNN_DBG_MPLAN] MaxPool nid={} pos={} n_consumers={} consumers={:?} in_outputs={} in_required={}",
-                    node_id, position.get(&node_id).copied().unwrap_or(0),
-                    consumers.len(), consumers,
-                    graph.outputs.contains(&node_id),
-                    graph.required_nodes.contains(&node_id));
-                eprintln!("[FNN_DBG_MPLAN]   first_use={} last_use={} order.len={}", first_use, last_use, order.len());
-            }
-
             alloc_infos.push(AllocInfo {
                 node_id,
                 size,
@@ -281,11 +270,6 @@ pub fn plan_memory_with_env(
                         consumer_last
                     }
                 };
-                // Debug: log MaxPool SECONDARY lifetime
-                if matches!(node.opcode, Opcode::MaxPool) {
-                    eprintln!("[FNN_DBG_MPLAN] MaxPool nid={} SECONDARY first_use={} last_use={} in_outputs={}",
-                        node_id, first_use, last_use, graph.outputs.contains(&node_id));
-                }
                 alloc_infos.push(AllocInfo {
                     node_id,
                     size: sec_size,
@@ -327,16 +311,10 @@ pub fn plan_memory_with_env(
                 // live ranges.
                 if was_secondary {
                     if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
-                        eprintln!("[DBG_FREE] nid={} secondary off={} sz={}", expired_id, slot.offset, slot.size);
                         add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
-                    } else {
-                        eprintln!("[DBG_FREE] nid={} secondary MISSING", expired_id);
                     }
                 } else if let Some(slot) = slots.get(&expired_id) {
-                    eprintln!("[DBG_FREE] nid={} primary off={} sz={}", expired_id, slot.offset, slot.size);
                     add_to_free_list(&mut free_list, slot.offset, align_up(slot.size, 8));
-                } else {
-                    eprintln!("[DBG_FREE] nid={} primary MISSING", expired_id);
                 }
             } else {
                 i += 1;
