@@ -9,12 +9,12 @@ pub fn sum_last_dim_contiguous(a: &Tensor, dim_size: usize, num_rows: usize) -> 
     let a_ptr = a.data_ptr_f32();
 
     let mut result_data = vec![0.0f32; num_rows];
-    let out_ptr = result_data.as_mut_ptr();
 
     #[cfg(feature = "parallel")]
     {
         if num_rows > 64 {
             use rayon::prelude::*;
+            let out_ptr = result_data.as_mut_ptr();
             let a_usize = a_ptr as usize;
             let out_usize = out_ptr as usize;
             (0..num_rows).into_par_iter().for_each(|row| {

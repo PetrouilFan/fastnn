@@ -1,6 +1,6 @@
 [package]
 name = "fastnn"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 
 [lib]
@@ -45,9 +45,10 @@ simd_avx512 = []
 neon = []
 
 # ── Fusion passes (compile-time modular) ─────────────────────────────
-fusion-forward = ["fusion-op-relu", "fusion-matmul-add-relu"]
+fusion-forward = ["fusion-op-relu", "fusion-matmul-add-relu", "fusion-residual-add-norm"]
 fusion-op-relu = []
 fusion-matmul-add-relu = []
+fusion-residual-add-norm = []
 fusion-backward = []
 
 # ── CLI binary ────────────────────────────────────────────────────────
@@ -97,6 +98,16 @@ harness = false
 [[bench]]
 name = "packed_dispatch_bench"
 path = "benches/packed_dispatch_bench.rs"
+harness = false
+
+[[bench]]
+name = "compiled_training_vs_pytorch"
+path = "benches/compiled_training_vs_pytorch.rs"
+harness = false
+
+[[bench]]
+name = "wgpu_inference"
+path = "benches/wgpu_inference.rs"
 harness = false
 
 

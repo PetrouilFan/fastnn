@@ -16,7 +16,7 @@
 //! The runtime skips shape inference, operator fusion, and memory planning —
 //! it just loads the plan, maps the arena, and dispatches.
 
-use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan};
+use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
 use crate::ir::node::ShapeEnv;
 
 /// A minimal runtime that loads and executes pre-compiled plans.

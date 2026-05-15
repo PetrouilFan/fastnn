@@ -1680,7 +1680,9 @@ pub fn build_backward_graph(
             Opcode::Constant(_) | Opcode::Input
             | Opcode::GtScalar | Opcode::LtScalar | Opcode::EqScalar
             | Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate
-            | Opcode::Shape | Opcode::Range => {
+            | Opcode::MuonUpdate | Opcode::LionUpdate | Opcode::RmspropUpdate
+            | Opcode::Shape | Opcode::Range
+            | Opcode::FusedResidualAddNorm => {
             }
             Opcode::Transpose => {
                 // gradient of transpose is transpose with inverse permutation

@@ -6,7 +6,9 @@
 #![allow(dead_code)]
 #![allow(clippy::missing_safety_doc)]
 
-use crate::dtypes::{F16x2, F32x1, PackedWord, U4x8, U8x4};
+#[cfg(feature = "simd")]
+use crate::dtypes::{F16x2, U4x8, U8x4};
+use crate::dtypes::{F32x1, PackedWord};
 use crate::packed_tensor::PackedTensor;
 use std::sync::OnceLock;
 
@@ -307,6 +309,7 @@ pub fn gemv_packed_simd<T: PackedWord>(
 // U8x4: AVX2 int8→f32 widening + FMA
 // ============================================================
 
+#[cfg(feature = "simd")]
 #[allow(unused_variables)]
 fn gemv_u8x4_dispatch(weights: &PackedTensor<U8x4>, activation: &[f32], output: &mut [f32]) {
     let shape = weights.shape();
@@ -513,6 +516,7 @@ unsafe fn gemv_row_u8x4_avx512(
 // U4x8: AVX2 nibble extraction → int32 → f32 → FMA
 // ============================================================
 
+#[cfg(feature = "simd")]
 #[allow(unused_variables)]
 fn gemv_u4x8_dispatch(weights: &PackedTensor<U4x8>, activation: &[f32], output: &mut [f32]) {
     let shape = weights.shape();
@@ -690,6 +694,7 @@ unsafe fn gemv_row_u4x8_avx512(
 // F16x2: F16C hardware half→float conversion + FMA
 // ============================================================
 
+#[cfg(feature = "simd")]
 #[allow(unused_variables)]
 fn gemv_f16x2_dispatch(weights: &PackedTensor<F16x2>, activation: &[f32], output: &mut [f32]) {
     let shape = weights.shape();
@@ -1548,8 +1553,6 @@ pub unsafe fn blocked_row_matmul(
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let use_simd = a_stride_1 == 1 && b_stride_1 == 1 && n >= 8;
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-    let use_simd = false;
 
     for j in 0..n {
         *out_ptr.add(out_off + j) = 0.0;
@@ -2028,5 +2031,269 @@ pub unsafe fn conv2d_im2col(
                 }
             }
         });
+    }
+}
+
+// ============================================================
+// NEON kernel correctness tests
+// ============================================================
+
+#[cfg(test)]
+mod neon_tests {
+    use super::*;
+
+    fn test_vector(len: usize) -> Vec<f32> {
+        (0..len).map(|i| (i as f32) * 0.25).collect()
+    }
+
+    fn random_vector(len: usize) -> Vec<f32> {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        (0..len).map(|_| rng.gen_range(-1.0..1.0)).collect()
+    }
+
+    fn assert_f32_slice_eq(actual: &[f32], expected: &[f32], eps: f32) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "length mismatch: {} vs {}",
+            actual.len(),
+            expected.len()
+        );
+        for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let diff = (a - e).abs();
+            assert!(
+                diff < eps,
+                "mismatch at index {}: actual={} expected={} diff={}",
+                i,
+                a,
+                e,
+                diff
+            );
+        }
+    }
+
+    fn softmax_scalar(logits: &[f32]) -> Vec<f32> {
+        let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exps: Vec<f32> = logits.iter().map(|&x| (x - max).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        exps.iter().map(|&x| x / sum).collect()
+    }
+
+    #[test]
+    fn test_fma_f32_scalar() {
+        let a = test_vector(16);
+        let b = test_vector(16);
+        let result = fma_f32_scalar(&a, &b);
+        let expected: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        assert!((result - expected).abs() < 1e-6, "fma scalar mismatch");
+    }
+
+    #[test]
+    fn test_fma_f32_slice_consistency() {
+        let a = random_vector(256);
+        let b = random_vector(256);
+        let result = fma_f32_slice(&a, &b);
+        let expected: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        assert!((result - expected).abs() < 1e-4, "fma slice mismatch");
+    }
+
+    #[test]
+    fn test_fma_f32_slice_various_lengths() {
+        for len in [1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 64, 128] {
+            let a = random_vector(len);
+            let b = random_vector(len);
+            let result = fma_f32_slice(&a, &b);
+            let expected: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+            assert!(
+                (result - expected).abs() < 1e-4,
+                "fma slice mismatch for len={}: result={} expected={}",
+                len,
+                result,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemv_generic_fallback_vs_scalar() {
+        let m = 4;
+        let k = 16;
+        let weights_f32 = random_vector(m * k);
+        let activations = random_vector(k);
+
+        let packed = PackedTensor::<F32x1>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
+
+        let mut output_generic = vec![0.0f32; m];
+        gemv_generic_fallback(&packed, &activations, &mut output_generic);
+
+        for row in 0..m {
+            let dot: f32 = (0..k)
+                .map(|j| weights_f32[row * k + j] * activations[j])
+                .sum();
+            assert!(
+                (output_generic[row] - dot).abs() < 1e-4,
+                "row {} mismatch: {} vs {}",
+                row,
+                output_generic[row],
+                dot
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemv_dispatch_f32x1_vs_scalar() {
+        let m = 4;
+        let k = 32;
+        let weights_f32 = random_vector(m * k);
+        let activations = random_vector(k);
+
+        let packed = PackedTensor::<F32x1>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
+
+        let mut output = vec![0.0f32; m];
+        gemv_cpu(&packed, &activations, &mut output);
+
+        for row in 0..m {
+            let dot: f32 = (0..k)
+                .map(|j| weights_f32[row * k + j] * activations[j])
+                .sum();
+            assert!(
+                (output[row] - dot).abs() < 1e-4,
+                "row {} mismatch: {} vs {}",
+                row,
+                output[row],
+                dot
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemv_dispatch_u8x4_self_consistency() {
+        let m = 4;
+        let k = 32;
+        let weights_f32: Vec<f32> = (0..m * k).map(|i| ((i % 32) as f32) - 16.0).collect();
+        let activations = random_vector(k);
+
+        let packed = PackedTensor::<U8x4>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
+
+        let mut output_simd = vec![0.0f32; m];
+        gemv_cpu(&packed, &activations, &mut output_simd);
+
+        let mut output_fallback = vec![0.0f32; m];
+        gemv_generic_fallback(&packed, &activations, &mut output_fallback);
+
+        assert_f32_slice_eq(&output_simd, &output_fallback, 1e-5);
+    }
+
+    #[test]
+    fn test_gemv_dispatch_u4x8_self_consistency() {
+        let m = 4;
+        let k = 32;
+        let weights_f32: Vec<f32> = (0..m * k).map(|i| ((i % 8) as f32) - 4.0).collect();
+        let activations = random_vector(k);
+
+        let packed = PackedTensor::<U4x8>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
+
+        let mut output_simd = vec![0.0f32; m];
+        gemv_cpu(&packed, &activations, &mut output_simd);
+
+        let mut output_fallback = vec![0.0f32; m];
+        gemv_generic_fallback(&packed, &activations, &mut output_fallback);
+
+        assert_f32_slice_eq(&output_simd, &output_fallback, 1e-5);
+    }
+
+    #[test]
+    fn test_simd_dot_product() {
+        let a = random_vector(256);
+        let b = random_vector(256);
+        let result = unsafe { simd_dot_product(&a, &b, a.len()) };
+        let expected: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        assert!((result - expected).abs() < 1e-4, "simd dot mismatch");
+    }
+
+    #[test]
+    fn test_softmax_numerical_stability() {
+        let logits = vec![1000.0, 1010.0, 1000.0];
+        let result = softmax_scalar(&logits);
+        let sum: f32 = result.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "softmax sum={} != 1.0", sum);
+        assert!(result[1] > 0.5, "softmax should peak at max logit");
+    }
+
+    #[test]
+    fn test_softmax_consistency() {
+        let logits = random_vector(128);
+        let result = softmax_scalar(&logits);
+        let sum: f32 = result.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "softmax sum={} != 1.0", sum);
+        for &v in &result {
+            assert!(v >= 0.0 && v <= 1.0, "softmax value {} out of range", v);
+        }
+    }
+
+    #[test]
+    fn test_gemm_cpu_batched_consistency() {
+        let batch = 4;
+        let m = 4;
+        let k = 32;
+        let weights_f32 = random_vector(m * k);
+        let packed = PackedTensor::<F32x1>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
+
+        let batch_inputs: Vec<Vec<f32>> = (0..batch).map(|_| random_vector(k)).collect();
+        let mut outputs = vec![vec![0.0f32; m]; batch];
+
+        gemm_cpu(&packed, &batch_inputs, &mut outputs);
+
+        for (bi, input) in batch_inputs.iter().enumerate() {
+            for row in 0..m {
+                let dot: f32 = (0..k).map(|j| weights_f32[row * k + j] * input[j]).sum();
+                assert!(
+                    (outputs[bi][row] - dot).abs() < 1e-3,
+                    "batch {} row {} mismatch: {} vs {}",
+                    bi,
+                    row,
+                    outputs[bi][row],
+                    dot
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_gemv_packed_tiled_consistency() {
+        let m = 8;
+        let k = 128;
+        let weights_f32 = random_vector(m * k);
+        let activations = random_vector(k);
+
+        let packed = PackedTensor::<F32x1>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
+        let mut output_tiled = vec![0.0f32; m];
+        gemv_packed_tiled(&packed, &activations, &mut output_tiled);
+
+        for row in 0..m {
+            let dot: f32 = (0..k)
+                .map(|j| weights_f32[row * k + j] * activations[j])
+                .sum();
+            assert!(
+                (output_tiled[row] - dot).abs() < 1e-3,
+                "row {} mismatch: {} vs {}",
+                row,
+                output_tiled[row],
+                dot
+            );
+        }
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    #[test]
+    fn test_neon_compiles_and_dispatches() {
+        eprintln!(
+            "NEON arch detected — verifying neon feature: {}",
+            cfg!(feature = "neon")
+        );
+        let a = random_vector(128);
+        let b = random_vector(128);
+        let _result = fma_f32_slice(&a, &b);
     }
 }

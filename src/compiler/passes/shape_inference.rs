@@ -348,7 +348,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     None
                 }
             }
-            Opcode::Prelu | Opcode::RMSNorm => {
+            Opcode::Prelu | Opcode::RMSNorm | Opcode::FusedResidualAddNorm => {
                 inputs.first().map(|i| i.output_type.shape.clone())
             }
             Opcode::Embedding => {
@@ -469,6 +469,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
             | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where
             | Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate
+            | Opcode::MuonUpdate | Opcode::LionUpdate | Opcode::RmspropUpdate
             | Opcode::GradientScale => None,
         };
 

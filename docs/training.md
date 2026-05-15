@@ -1,6 +1,116 @@
 # Training
 
-FastNN provides utilities for building training pipelines: datasets, data loaders, optimizers, LR schedulers, and callbacks.
+## Compiled Training (v2.2)
+
+FastNN v2.2 supports **compiled training** — the entire forward+backward+optimizer
+pipeline is compiled ahead of time into an `ExecutablePlan` that executes
+with a single dispatch call, reusing a persistent memory arena across steps.
+
+### Supported Optimizers
+
+| Optimizer | Opcode | State | Compiled Support |
+|-----------|--------|-------|-----------------|
+| SGD       | SgdUpdate | None | ✅ |
+| Adam      | AdamUpdate | m, v | ✅ |
+| AdamW     | AdamWUpdate | m, v | ✅ |
+| Muon      | MuonUpdate | None | ✅ (v2.2) |
+| Lion      | LionUpdate | m | ✅ (v2.2) |
+| RMSprop   | RmspropUpdate | v | ✅ (v2.2) |
+
+### Python API
+
+```python
+import fastnn as fnn
+
+# Build your model graph (using the GraphBuilder or ONNX)
+# Serialize to bytes
+graph_bytes = ...
+
+# Compile for training
+model = fnn.compile_train_model(
+    graph_bytes=graph_bytes,
+    loss_node_id=...,
+    param_ids=[...],
+    param_data=[...],
+    batch_input_ids=[...],
+    optimizer="adamw",       # "sgd", "adamw", "muon", "lion", "rmsprop"
+    lr=0.001,
+    weight_decay=0.01,
+)
+
+# Training loop
+for epoch in range(10):
+    for batch in dataloader:
+        loss = model.train_step([batch_bytes])
+        print(f"loss = {loss:.4f}")
+```
+
+### Rust API
+
+```rust
+use fastnn::backend::cpu::CpuBackend;
+use fastnn::backend::executor::GraphExecutor;
+use fastnn::compiler::passes::training::{OptimizerConfig, TrainConfig};
+use fastnn::ir::builder::GraphBuilder;
+
+// Build graph
+let g = GraphBuilder::new();
+let x = g.input(&[1, 4], IrDType::F32);
+let w = g.parameter(&[4, 2], IrDType::F32);
+let mm = g.matmul(&x, &w);
+let loss = g.reduce_mean(&mm, 0, false);
+let graph = g.to_graph();
+let param_data = vec![w_bytes];
+
+// Compile
+let executor = GraphExecutor::new(CpuBackend);
+let mut model = executor.compile_train(
+    &graph,
+    loss.node_id(),
+    &[w.node_id()],
+    &param_data,
+    &[x.node_id()],
+    None,
+    &TrainConfig {
+        optimizer: OptimizerConfig::AdamW {
+            lr: 0.001, beta1: 0.9, beta2: 0.999,
+            eps: 1e-8, weight_decay: 0.01,
+        },
+        quantize: None,
+    },
+).unwrap();
+
+// Train
+for step in 0..100 {
+    let loss = model.train_step(&[batch_bytes]).unwrap();
+    println!("Step {}: loss = {}", step, loss);
+}
+```
+
+### Shape Tightening
+
+When using dynamic batch dimensions, pass concrete shapes via
+`batch_shape_env` to tighten memory allocation:
+
+```rust
+let mut shape_env = ShapeEnv::new();
+shape_env.bind("batch", 2);
+shape_env.bind("seq", 128);
+
+let mut model = executor.compile_train(
+    &graph, loss_id, &params, &param_data, &inputs,
+    Some(&shape_env),  // tighten with concrete shapes
+    &config,
+).unwrap();
+```
+
+This shrinks the memory arena from worst-case (85+ GB) to actual sizes (~40 KB).
+
+---
+
+## Eager Mode Training
+
+FastNN also provides utilities for building training pipelines: datasets, data loaders, optimizers, LR schedulers, and callbacks.
 
 ## Dataset
 

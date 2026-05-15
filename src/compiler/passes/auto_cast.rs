@@ -349,4 +349,131 @@ mod tests {
             "activation should be quantized when activation_quant is enabled"
         );
     }
+
+    /// Test auto_cast with U8 quantization (not just U4).
+    #[test]
+    fn test_auto_cast_u8_weights() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        let weight_id = make_weight_constant(&mut graph, 4, 4, 1.0);
+        let mm_id = graph.add_node(
+            Opcode::MatMul, vec![input_id, weight_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id, weight_id]);
+        graph.set_outputs(vec![mm_id]);
+
+        crate::compiler::passes::shape_inference::infer_shapes(&mut graph).unwrap();
+
+        let opts = AutoCastOptions {
+            weight_bit_width: Some(8),
+            enable_activation_quant: false,
+        };
+        auto_cast(&mut graph, &opts).unwrap();
+
+        let weight_node = graph.get_node(weight_id).unwrap();
+        assert!(
+            matches!(weight_node.output_type.dtype, IrDType::U8 { .. }),
+            "weight should be quantized to U8 after auto_cast with bit_width=8"
+        );
+    }
+
+    /// Test auto_cast with no options (no-op).
+    #[test]
+    fn test_auto_cast_noop_when_no_options() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        let weight_id = make_weight_constant(&mut graph, 4, 4, 1.0);
+        let mm_id = graph.add_node(
+            Opcode::MatMul, vec![input_id, weight_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+        );
+        graph.set_inputs(vec![input_id, weight_id]);
+        graph.set_outputs(vec![mm_id]);
+
+        crate::compiler::passes::shape_inference::infer_shapes(&mut graph).unwrap();
+
+        let opts = AutoCastOptions::default();
+        let changes = auto_cast(&mut graph, &opts).unwrap();
+        assert_eq!(changes, 0, "no options should produce zero changes");
+
+        // All nodes should remain F32
+        for node in &graph.nodes {
+            assert_eq!(
+                node.output_type.dtype,
+                IrDType::F32,
+                "node {} should remain F32", node.id
+            );
+        }
+    }
+
+    /// Test auto_cast with Conv2d weights (not just MatMul).
+    #[test]
+    fn test_auto_cast_conv2d_weights() {
+        let mut graph = ComputeGraph::new();
+        let input_id = graph.add_node(
+            Opcode::Input, vec![],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(3), DimExpr::Known(8), DimExpr::Known(8)], IrDType::F32),
+        );
+
+        // Conv2d weight: [out_channels, in_channels, kh, kw] = [4, 3, 3, 3]
+        let numel = 4 * 3 * 3 * 3;
+        let weight_data: Vec<u8> = std::iter::repeat(1.0f32)
+            .take(numel)
+            .flat_map(|v: f32| v.to_le_bytes())
+            .collect();
+        let tt = TensorType::new(
+            vec![
+                DimExpr::Known(4),
+                DimExpr::Known(3),
+                DimExpr::Known(3),
+                DimExpr::Known(3),
+            ],
+            IrDType::F32,
+        );
+        let weight_id = graph.add_node(
+            Opcode::Constant(crate::ir::node::TensorValue::Data {
+                bytes: weight_data,
+                tensor_type: tt.clone(),
+            }),
+            vec![],
+            tt,
+        );
+
+        let conv_id = graph.add_node_with_attrs(
+            Opcode::Conv2d, vec![input_id, weight_id],
+            TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4), DimExpr::Known(6), DimExpr::Known(6)], IrDType::F32),
+            {
+                let mut m = std::collections::HashMap::new();
+                m.insert("stride".to_string(), "1".to_string());
+                m.insert("padding".to_string(), "0".to_string());
+                m.insert("dilation".to_string(), "1".to_string());
+                m.insert("groups".to_string(), "1".to_string());
+                m
+            },
+        );
+
+        graph.set_inputs(vec![input_id, weight_id]);
+        graph.set_outputs(vec![conv_id]);
+
+        crate::compiler::passes::shape_inference::infer_shapes(&mut graph).unwrap();
+
+        let opts = AutoCastOptions {
+            weight_bit_width: Some(4),
+            enable_activation_quant: false,
+        };
+        auto_cast(&mut graph, &opts).unwrap();
+
+        let weight_node = graph.get_node(weight_id).unwrap();
+        assert!(
+            matches!(weight_node.output_type.dtype, IrDType::U4 { .. }),
+            "Conv2d weight should be quantized after auto_cast"
+        );
+    }
 }

@@ -115,10 +115,19 @@ pub enum Opcode {
     AdamUpdate,
     /// AdamW weight update: Adam with decoupled weight decay
     AdamWUpdate,
+    /// Muon weight update: orthogonalized gradient update
+    MuonUpdate,
+    /// Lion weight update: sign( momentum ) based optimizer
+    LionUpdate,
+    /// RMSprop weight update: RMSprop optimizer step
+    RmspropUpdate,
     /// Scale gradient by a constant factor (for loss scaling / gradient unscaling).
     /// Backward: dx = dy * scale (correctly scales the gradient).
     /// Attribute `"scale"`: f32 scale factor.
     GradientScale,
+    // ── v2.2 fusion opcodes ────────────────────────────────────────
+    /// Fused residual add + layer_norm/rms_norm: output = norm(input + residual)
+    FusedResidualAddNorm,
 }
 
 /// Default maximum extent assumed for a purely symbolic dimension (no Bounded bound).

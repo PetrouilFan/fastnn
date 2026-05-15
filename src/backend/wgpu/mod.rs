@@ -340,8 +340,11 @@ fn try_gpu_dispatch(
             let scales = weight_meta.as_ref()
                 .map(|m| m.scales.clone())
                 .unwrap_or_default();
+            let zero_points = weight_meta.as_ref()
+                .map(|m| m.zero_points.clone())
+                .unwrap_or_default();
             quantized::dispatch_quantized_matmul_gpu(
-                arena, input_slices, output_slice, &resolved_params, bit_width, &scales,
+                arena, input_slices, output_slice, &resolved_params, bit_width, &scales, &zero_points,
             )
         }
         "conv2d_u4" | "conv2d_u8" => {

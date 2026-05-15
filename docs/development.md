@@ -1,6 +1,6 @@
-# Development Architecture (v2.0.0)
+# Development Architecture (v2.2.0)
 
-FastNN v2.0.0+ uses an ahead-of-time (AOT) compilation pipeline backed by a graph IR, compiler passes, and backend code generation. The v1 eager-mode path (`PackedLinear`, `PackedConv2d`, `backends/`) has been removed in favor of the unified AOT pipeline.
+FastNN v2.2.0+ uses an ahead-of-time (AOT) compilation pipeline backed by a graph IR, compiler passes, and backend code generation. The v1 eager-mode path (`PackedLinear`, `PackedConv2d`, `backends/`) has been removed in favor of the unified AOT pipeline. v2.2 adds compiled training (forward+backward+optimizer pipeline), FlashAttention SIMD, WGPU quantized inference, and residual+add+norm fusion.
 
 ## Rust Source Layout
 
@@ -124,7 +124,7 @@ src/
 
 v2.0.0 has two execution paths:
 
-### AOT-compiled path (v2, recommended)
+### AOT-compiled inference path (v2, recommended)
 
 ```
 ONNX model or GraphBuilder
@@ -144,6 +144,28 @@ ONNX model or GraphBuilder
         │
         ▼
   GraphExecutor::run()
+```
+
+### AOT-compiled training path (v2.2)
+
+```
+ComputeGraph with loss node
+        │
+        ▼
+  build_backward_graph() — constructs gradient graph
+        │
+        ▼
+  Compiler passes:
+    shape_inference → operator_fusion (forward+backward)
+    → quantization (opt.) → memory_planning
+        │
+        ▼
+  Training pass — inserts optimizer update nodes
+    (SGD, AdamW, Muon, Lion, or RMSprop)
+        │
+        ▼
+  CompiledTrainingModel — single dispatch per step
+    train_step(inputs) → loss scalar
 ```
 
 1. **IR construction** — Build a `ComputeGraph` programmatically via `GraphBuilder`, or import an ONNX model through `OnnxConverter`.
@@ -194,9 +216,10 @@ All passes implement a common `Pass` trait registered in `passes/mod.rs`. They t
 | Pass | File | Description |
 |------|------|-------------|
 | `ShapeInferencePass` | `passes/shape_inference.rs` | Propagates `DimExpr` through the graph, resolving symbolic dims via `ShapeEnv` |
-| `OperatorFusionPass` | `passes/operator_fusion.rs` | Fuses MatMul+Add, Conv2d+Add, and +ReLU into single fused op nodes |
+| `OperatorFusionPass` | `passes/operator_fusion.rs` | Fuses MatMul+Add, Conv2d+Add, +ReLU, and residual+add+norm into single fused op nodes |
 | `QuantizationPass` | `passes/quantization.rs` | Replaces weight-bearing ops with U4/U8 quantized variants; attaches `QuantizedWeightMeta` with per-channel scales |
 | `MemoryPlanningPass` | `passes/memory_planning.rs` | Arena-based memory planning using live-range analysis; emits a `MemoryPlan` that maximizes buffer reuse |
+| `TrainingPass` | `passes/training.rs` | (v2.2) Compiles forward+backward+optimizer pipeline into a single `ExecutablePlan` with persistent arena |
 
 Passes are run in order: shape inference → fusion → quantization → memory planning. The `compile_with_plan_and_quantize` function in `backend/executor.rs` orchestrates the full pipeline.
 
@@ -219,7 +242,7 @@ The `Backend::execute_node` method receives a single `IRNode`, its input buffers
 - `microkernels.rs` for AVX2, AVX-512, and SWAR inner loops (including quantized matmul/conv)
 - `reductions_fast.rs` for optimized reduction kernels
 
-`WgpuBackend` dispatches through per-op shader modules (`matmul.rs`, `conv.rs`, `softmax.rs`, `quantized.rs`, etc.) and manages a pipeline cache (`pipeline.rs`) and GPU context (`context.rs`).
+`WgpuBackend` dispatches through per-op shader modules (`matmul.rs`, `conv.rs`, `softmax.rs`, `quantized.rs`, etc.) and manages a pipeline cache (`pipeline.rs`) and GPU context (`context.rs`). Since v2.2, quantized U4/U8 ops run on GPU via WGSL compute shaders with per-channel dequantization.
 
 ### `onnx/` — ONNX import
 
@@ -229,8 +252,9 @@ The `Backend::execute_node` method receives a single `IRNode`, its input buffers
 
 `autograd.rs` provides:
 - `build_backward_graph()` which constructs a `ComputeGraph` for the v2 IR training path
+- Used by the compiled training pipeline (v2.2) to produce joint forward+backward+optimizer graphs
 
-When using the AOT path, call `build_backward_graph` on the forward `ComputeGraph` to produce a joint forward+backward graph that can be compiled and executed by `GraphExecutor`.
+When using the AOT path, call `build_backward_graph` on the forward `ComputeGraph` to produce a joint forward+backward graph that can be compiled and executed by `GraphExecutor`. The compiled training path (`compile_train`) extends this with optimizer update nodes for SGD, AdamW, Muon, Lion, or RMSprop.
 
 ### `dtypes/` and `swar/` — Packed precision types
 

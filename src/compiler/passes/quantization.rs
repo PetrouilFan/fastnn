@@ -208,6 +208,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
         let is_optimizer = matches!(
             node.opcode,
             Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate
+            | Opcode::MuonUpdate | Opcode::LionUpdate | Opcode::RmspropUpdate
         );
         if !is_optimizer {
             continue;
