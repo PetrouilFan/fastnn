@@ -1,5 +1,5 @@
-use crate::backend::BackendError;
 use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::BackendError;
 
 pub(super) fn dispatch_conv_gpu(
     arena: &super::WgpuBuffer,
@@ -30,8 +30,9 @@ pub(super) fn dispatch_conv_gpu(
     let nw = weight_data.len();
     let no = output_slice.size / 4;
 
-    let (n, oc, c, kh, kw, h, w) = infer_conv_dims(ni, nw, no, stride, padding, dilation, groups)
-        .ok_or_else(|| BackendError::Dispatch("conv2d: could not infer dimensions".into()))?;
+    let (n, oc, c, kh, kw, h, w) =
+        infer_conv_dims(ni, nw, no, stride, padding, dilation, groups)
+            .ok_or_else(|| BackendError::Dispatch("conv2d: could not infer dimensions".into()))?;
 
     let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
     let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
@@ -93,10 +94,22 @@ pub(super) fn dispatch_conv_gpu(
             label: Some("conv_bg"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_input.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_weight.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: buf_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf_input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf_weight.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf_params.as_entire_binding(),
+                },
             ],
         });
 

@@ -459,8 +459,7 @@ impl GpuContext {
         });
 
         *staging_guard = Some(new_buffer.clone());
-        self.staging_buffer_size
-            .store(new_size, Ordering::Relaxed);
+        self.staging_buffer_size.store(new_size, Ordering::Relaxed);
         new_buffer
     }
 
@@ -482,8 +481,7 @@ impl GpuContext {
         });
 
         *staging_guard = Some(new_buffer.clone());
-        self.staging_buffer_size
-            .store(new_size, Ordering::Relaxed);
+        self.staging_buffer_size.store(new_size, Ordering::Relaxed);
         new_buffer
     }
 
@@ -906,52 +904,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 /// Generate the dot product logic for the shader based on the packed type.
 fn generate_dot_logic<T: PackedWord>() -> String {
     match T::BIT_WIDTH {
-        4 => {
-            concat!(
-                "        let act_base = k * ITEMS;\n",
-                "        let act0 = vec4<f32>(\n",
-                "            activations[act_base],\n",
-                "            activations[act_base + 1u],\n",
-                "            activations[act_base + 2u],\n",
-                "            activations[act_base + 3u],\n",
-                "        );\n",
-                "        let act1 = vec4<f32>(\n",
-                "            activations[act_base + 4u],\n",
-                "            activations[act_base + 5u],\n",
-                "            activations[act_base + 6u],\n",
-                "            activations[act_base + 7u],\n",
-                "        );\n",
-                "        acc += dot(unpacked[0], act0) + dot(unpacked[1], act1);\n",
-            )
-            .to_string()
-        }
-        8 => {
-            concat!(
-                "        let act_base = k * ITEMS;\n",
-                "        let act0 = vec4<f32>(\n",
-                "            activations[act_base],\n",
-                "            activations[act_base + 1u],\n",
-                "            activations[act_base + 2u],\n",
-                "            activations[act_base + 3u],\n",
-                "        );\n",
-                "        acc += dot(unpacked, act0);\n",
-            )
-            .to_string()
-        }
-        16 => {
-            concat!(
-                "        let act_base = k * ITEMS;\n",
-                "        let act0 = vec2<f32>(\n",
-                "            activations[act_base],\n",
-                "            activations[act_base + 1u],\n",
-                "        );\n",
-                "        acc += dot(unpacked, act0);\n",
-            )
-            .to_string()
-        }
-        _ => {
-            "        acc += unpacked * activations[k];\n".to_string()
-        }
+        4 => concat!(
+            "        let act_base = k * ITEMS;\n",
+            "        let act0 = vec4<f32>(\n",
+            "            activations[act_base],\n",
+            "            activations[act_base + 1u],\n",
+            "            activations[act_base + 2u],\n",
+            "            activations[act_base + 3u],\n",
+            "        );\n",
+            "        let act1 = vec4<f32>(\n",
+            "            activations[act_base + 4u],\n",
+            "            activations[act_base + 5u],\n",
+            "            activations[act_base + 6u],\n",
+            "            activations[act_base + 7u],\n",
+            "        );\n",
+            "        acc += dot(unpacked[0], act0) + dot(unpacked[1], act1);\n",
+        )
+        .to_string(),
+        8 => concat!(
+            "        let act_base = k * ITEMS;\n",
+            "        let act0 = vec4<f32>(\n",
+            "            activations[act_base],\n",
+            "            activations[act_base + 1u],\n",
+            "            activations[act_base + 2u],\n",
+            "            activations[act_base + 3u],\n",
+            "        );\n",
+            "        acc += dot(unpacked, act0);\n",
+        )
+        .to_string(),
+        16 => concat!(
+            "        let act_base = k * ITEMS;\n",
+            "        let act0 = vec2<f32>(\n",
+            "            activations[act_base],\n",
+            "            activations[act_base + 1u],\n",
+            "        );\n",
+            "        acc += dot(unpacked, act0);\n",
+        )
+        .to_string(),
+        _ => "        acc += unpacked * activations[k];\n".to_string(),
     }
 }
 

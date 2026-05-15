@@ -2,11 +2,32 @@ use crate::ir::node::*;
 use std::collections::HashMap;
 
 pub enum OptimizerConfig {
-    SGD { lr: f32, weight_decay: f32 },
-    AdamW { lr: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32 },
-    Muon { lr: f32, beta1: f32, weight_decay: f32 },
-    Lion { lr: f32, beta1: f32, beta2: f32 },
-    RMSprop { lr: f32, beta: f32, eps: f32 },
+    SGD {
+        lr: f32,
+        weight_decay: f32,
+    },
+    AdamW {
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+    },
+    Muon {
+        lr: f32,
+        beta1: f32,
+        weight_decay: f32,
+    },
+    Lion {
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+    },
+    RMSprop {
+        lr: f32,
+        beta: f32,
+        eps: f32,
+    },
 }
 
 pub struct TrainConfig {
@@ -35,9 +56,9 @@ pub fn inject_optimizer(
     let mut state_input_nodes = Vec::with_capacity(params_with_grads.len());
 
     for &(param_id, grad_id) in params_with_grads {
-        let param_node = graph.get_node(param_id).ok_or_else(|| {
-            format!("param node {} not found in graph", param_id)
-        })?;
+        let param_node = graph
+            .get_node(param_id)
+            .ok_or_else(|| format!("param node {} not found in graph", param_id))?;
         let param_type = param_node.output_type.clone();
         let param_name = param_node.name.clone();
 
@@ -162,7 +183,11 @@ pub fn inject_optimizer(
                 updated_param_nodes.push(adamw_id);
                 state_input_nodes.push(vec![m_id, v_id]);
             }
-            OptimizerConfig::Muon { lr, beta1, weight_decay } => {
+            OptimizerConfig::Muon {
+                lr,
+                beta1,
+                weight_decay,
+            } => {
                 let m_id = graph.add_node(
                     Opcode::Input,
                     vec![],

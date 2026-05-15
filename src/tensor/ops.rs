@@ -8,7 +8,6 @@ use crate::storage::{DType, Device, Storage};
 use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::Arc;
 
-
 use super::Tensor;
 
 /// Convenience: build + compile a single-output AOT graph, return the result
@@ -104,9 +103,7 @@ impl Tensor {
             return Ok(output);
         }
 
-        let output = exec_single(&[self, other], |g, ins| {
-            vec![g.add(&ins[0], &ins[1])]
-        })?;
+        let output = exec_single(&[self, other], |g, ins| vec![g.add(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let edges = {
                 let mut edges = autograd::make_edge(self);
@@ -880,7 +877,8 @@ impl Tensor {
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
-        self.try_sub(other).expect("Tensor::sub: AOT execution failed")
+        self.try_sub(other)
+            .expect("Tensor::sub: AOT execution failed")
     }
 
     pub fn try_mul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
@@ -900,7 +898,8 @@ impl Tensor {
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
-        self.try_mul(other).expect("Tensor::mul: AOT execution failed")
+        self.try_mul(other)
+            .expect("Tensor::mul: AOT execution failed")
     }
 
     pub fn try_div(&self, other: &Tensor) -> Result<Tensor, BackendError> {
@@ -920,7 +919,8 @@ impl Tensor {
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
-        self.try_div(other).expect("Tensor::div: AOT execution failed")
+        self.try_div(other)
+            .expect("Tensor::div: AOT execution failed")
     }
 
     pub fn try_matmul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
@@ -940,7 +940,8 @@ impl Tensor {
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
-        self.try_matmul(other).expect("Tensor::matmul: AOT execution failed")
+        self.try_matmul(other)
+            .expect("Tensor::matmul: AOT execution failed")
     }
 
     pub fn try_neg(&self) -> Result<Tensor, BackendError> {
@@ -1020,7 +1021,8 @@ impl Tensor {
     }
 
     pub fn sigmoid(&self) -> Tensor {
-        self.try_sigmoid().expect("Tensor::sigmoid: AOT execution failed")
+        self.try_sigmoid()
+            .expect("Tensor::sigmoid: AOT execution failed")
     }
 
     pub fn try_tanh(&self) -> Result<Tensor, BackendError> {
@@ -1072,7 +1074,10 @@ impl Tensor {
     }
 
     pub fn try_leaky_relu(&self, negative_slope: f32) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.leaky_relu(&ins[0], negative_slope)])?;
+        let output = exec_single(
+            &[self],
+            |g, ins| vec![g.leaky_relu(&ins[0], negative_slope)],
+        )?;
         if autograd::is_grad_enabled() && self.requires_grad() {
             let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
@@ -1084,7 +1089,8 @@ impl Tensor {
     }
 
     pub fn leaky_relu(&self, negative_slope: f32) -> Tensor {
-        self.try_leaky_relu(negative_slope).expect("Tensor::leaky_relu: AOT execution failed")
+        self.try_leaky_relu(negative_slope)
+            .expect("Tensor::leaky_relu: AOT execution failed")
     }
 
     pub fn try_softplus(&self, _beta: f32, _threshold: f32) -> Result<Tensor, BackendError> {
@@ -1100,7 +1106,8 @@ impl Tensor {
     }
 
     pub fn softplus(&self, beta: f32, threshold: f32) -> Tensor {
-        self.try_softplus(beta, threshold).expect("Tensor::softplus: AOT execution failed")
+        self.try_softplus(beta, threshold)
+            .expect("Tensor::softplus: AOT execution failed")
     }
 
     pub fn try_hardswish(&self) -> Result<Tensor, BackendError> {
@@ -1116,7 +1123,8 @@ impl Tensor {
     }
 
     pub fn hardswish(&self) -> Tensor {
-        self.try_hardswish().expect("Tensor::hardswish: AOT execution failed")
+        self.try_hardswish()
+            .expect("Tensor::hardswish: AOT execution failed")
     }
 
     pub fn try_mish(&self) -> Result<Tensor, BackendError> {
@@ -1148,7 +1156,8 @@ impl Tensor {
     }
 
     pub fn elu(&self, alpha: f32) -> Tensor {
-        self.try_elu(alpha).expect("Tensor::elu: AOT execution failed")
+        self.try_elu(alpha)
+            .expect("Tensor::elu: AOT execution failed")
     }
 
     pub fn try_softmax(&self, dim: i32) -> Result<Tensor, BackendError> {
@@ -1164,7 +1173,8 @@ impl Tensor {
     }
 
     pub fn softmax(&self, dim: i32) -> Tensor {
-        self.try_softmax(dim).expect("Tensor::softmax: AOT execution failed")
+        self.try_softmax(dim)
+            .expect("Tensor::softmax: AOT execution failed")
     }
 
     pub fn try_sqrt(&self) -> Result<Tensor, BackendError> {
@@ -1206,7 +1216,8 @@ impl Tensor {
     }
 
     pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {
-        self.try_clamp(min_val, max_val).expect("Tensor::clamp: AOT execution failed")
+        self.try_clamp(min_val, max_val)
+            .expect("Tensor::clamp: AOT execution failed")
     }
 
     pub fn try_pow(&self, exponent: f32) -> Result<Tensor, BackendError> {
@@ -1223,7 +1234,8 @@ impl Tensor {
     }
 
     pub fn pow(&self, exponent: f32) -> Tensor {
-        self.try_pow(exponent).expect("Tensor::pow: AOT execution failed")
+        self.try_pow(exponent)
+            .expect("Tensor::pow: AOT execution failed")
     }
 
     pub fn try_abs(&self) -> Result<Tensor, BackendError> {
@@ -1255,7 +1267,8 @@ impl Tensor {
     }
 
     pub fn log_softmax(&self, dim: i32) -> Tensor {
-        self.try_log_softmax(dim).expect("Tensor::log_softmax: AOT execution failed")
+        self.try_log_softmax(dim)
+            .expect("Tensor::log_softmax: AOT execution failed")
     }
 
     pub fn as_i64_slice(&self) -> Vec<i64> {

@@ -1,5 +1,5 @@
-use crate::backend::BackendError;
 use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::BackendError;
 
 pub(super) fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
     match kernel_name {
@@ -54,8 +54,12 @@ pub(super) fn dispatch_elementwise_gpu(
 ) -> Result<Vec<f32>, BackendError> {
     with_wgpu_context(|ctx| -> Result<Vec<f32>, BackendError> {
         let shader_src = build_elementwise_shader();
-        super::pipeline::ensure_compute_pipeline(ctx, &format!("element_wise_{}", opcode), &shader_src)
-            .map_err(BackendError::Dispatch)?;
+        super::pipeline::ensure_compute_pipeline(
+            ctx,
+            &format!("element_wise_{}", opcode),
+            &shader_src,
+        )
+        .map_err(BackendError::Dispatch)?;
 
         let buf0 = ctx.create_buffer(bytemuck::cast_slice(input0), "ew_input0");
         let buf1 = ctx.create_buffer(bytemuck::cast_slice(input1), "ew_input1");

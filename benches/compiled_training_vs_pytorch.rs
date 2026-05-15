@@ -52,9 +52,12 @@ fn main() {
     let graph = g.to_graph();
     let loss_id = loss.node_id();
     let param_ids = vec![
-        w1.node_id(), b1.node_id(),
-        w2.node_id(), b2.node_id(),
-        w3.node_id(), b3.node_id(),
+        w1.node_id(),
+        b1.node_id(),
+        w2.node_id(),
+        b2.node_id(),
+        w3.node_id(),
+        b3.node_id(),
     ];
     let batch_input_ids = vec![x.node_id(), targets.node_id()];
 
@@ -64,7 +67,11 @@ fn main() {
 
     // Parameter initial values (small random)
     let rng_data = |n: usize| -> Vec<u8> {
-        f32_bytes(&(0..n).map(|i| (i as f32 * 0.01).sin() * 0.1).collect::<Vec<_>>())
+        f32_bytes(
+            &(0..n)
+                .map(|i| (i as f32 * 0.01).sin() * 0.1)
+                .collect::<Vec<_>>(),
+        )
     };
     let w1_data = rng_data(64 * 128);
     let b1_data = f32_bytes(&vec![0.0f32; 128]);
@@ -84,9 +91,7 @@ fn main() {
             &graph,
             loss_id,
             &param_ids,
-            &[
-                &w1_data, &b1_data, &w2_data, &b2_data, &w3_data, &b3_data,
-            ],
+            &[&w1_data, &b1_data, &w2_data, &b2_data, &w3_data, &b3_data],
             &batch_input_ids,
             None,
             &TrainConfig {
@@ -132,9 +137,7 @@ fn main() {
     );
     println!(
         "  {:<30} {:>10.4} ms  {:>6.2}x",
-        "Compiled (AOT)",
-        compiled_ms,
-        1.0
+        "Compiled (AOT)", compiled_ms, 1.0
     );
     println!("  Naive (eager)             TBD (autograd chain needs fix)");
     println!();

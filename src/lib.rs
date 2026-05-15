@@ -31,8 +31,8 @@
 pub mod error;
 pub mod io;
 pub mod iterator;
-pub mod onnx;
 pub mod nn;
+pub mod onnx;
 pub mod optim;
 pub mod python;
 pub mod residual;
@@ -54,16 +54,16 @@ pub use tensor::Tensor;
 // and their kernel backends have been removed. The AOT pipeline's
 // quantized dispatch (matmul_u4, conv2d_u4) uses PackedTensor and
 // dtypes internally via backend/cpu/microkernels.rs.
-pub mod packed_tensor;
 pub mod dtypes;
+pub mod packed_tensor;
 // swar ops — used by microkernels.rs for quantized relu backward
 pub mod swar;
 
 // v2.0.0 AOT compiler infrastructure
-pub mod ir;
+pub mod autograd;
 pub mod backend;
 pub mod compiler;
-pub mod autograd;
+pub mod ir;
 
 // Re-export the graph builder API for convenience
 pub use ir::builder::{GraphBuilder, GraphTensor};

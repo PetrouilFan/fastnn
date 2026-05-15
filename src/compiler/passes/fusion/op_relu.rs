@@ -1,10 +1,12 @@
-use crate::ir::node::{ComputeGraph, Opcode, NodeId};
 use super::FusionPass;
+use crate::ir::node::{ComputeGraph, NodeId, Opcode};
 
 pub struct OpRelu;
 
 impl FusionPass for OpRelu {
-    fn name() -> &'static str { "OpRelu" }
+    fn name() -> &'static str {
+        "OpRelu"
+    }
 
     fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
         let mut fused = false;
@@ -44,7 +46,9 @@ impl FusionPass for OpRelu {
             };
 
             if let Some(op_mut) = graph.get_node_mut(op_id) {
-                op_mut.attrs.insert("fused_op".to_string(), "OpRelu".to_string());
+                op_mut
+                    .attrs
+                    .insert("fused_op".to_string(), "OpRelu".to_string());
                 op_mut.output_type = relu.output_type.clone();
             }
 

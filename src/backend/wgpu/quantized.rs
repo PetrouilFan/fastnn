@@ -11,8 +11,8 @@
 //! The conv2d path performs im2col on the CPU and then reuses the same
 //! quantized-matmul GPU pipeline.
 
-use crate::backend::BackendError;
 use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::BackendError;
 
 // ─============================================================================
 // Quantized matmul dispatch (GPU)
@@ -74,7 +74,15 @@ pub(super) fn dispatch_quantized_matmul_gpu(
     };
 
     let result = dispatch_quantized_gemm_gpu(
-        &act_padded, &packed_bytes, m, padded_k, n, items, bit_width, scales, zero_points,
+        &act_padded,
+        &packed_bytes,
+        m,
+        padded_k,
+        n,
+        items,
+        bit_width,
+        scales,
+        zero_points,
     )?;
 
     let out = arena.data_mut();
@@ -132,7 +140,9 @@ pub(super) fn dispatch_quantized_conv_gpu(
 
     let input_data = read_f32(0);
     if input_data.is_empty() {
-        return Err(BackendError::Dispatch("quantized_conv: empty activation input".into()));
+        return Err(BackendError::Dispatch(
+            "quantized_conv: empty activation input".into(),
+        ));
     }
 
     let packed_bytes = if 1 < input_slices.len() {
@@ -155,8 +165,16 @@ pub(super) fn dispatch_quantized_conv_gpu(
 
     let dk_h = (kernel_h - 1) * dilation + 1;
     let dk_w = (kernel_w - 1) * dilation + 1;
-    let output_h = if h + 2 * padding >= dk_h { (h + 2 * padding - dk_h) / stride + 1 } else { 0 };
-    let output_w = if w + 2 * padding >= dk_w { (w + 2 * padding - dk_w) / stride + 1 } else { 0 };
+    let output_h = if h + 2 * padding >= dk_h {
+        (h + 2 * padding - dk_h) / stride + 1
+    } else {
+        0
+    };
+    let output_w = if w + 2 * padding >= dk_w {
+        (w + 2 * padding - dk_w) / stride + 1
+    } else {
+        0
+    };
     if output_h == 0 || output_w == 0 {
         return Ok(());
     }
@@ -166,7 +184,9 @@ pub(super) fn dispatch_quantized_conv_gpu(
     let col_h = n_batch * output_h * output_w;
     let f = packed_bytes.len() * 8 / (col_w * bit_width).max(1);
     if f == 0 {
-        return Err(BackendError::Dispatch("quantized_conv: computed zero output channels".into()));
+        return Err(BackendError::Dispatch(
+            "quantized_conv: computed zero output channels".into(),
+        ));
     }
 
     // CPU im2col: [N, C, H, W] → [N*H_out*W_out, C*KH*KW]
@@ -184,10 +204,12 @@ pub(super) fn dispatch_quantized_conv_gpu(
                                 if h_in >= 0 && h_in < h as i64 && w_in >= 0 && w_in < w as i64 {
                                     let src = nn * (c * h * w)
                                         + (g * c_per_group + cc) * (h * w)
-                                        + h_in as usize * w + w_in as usize;
+                                        + h_in as usize * w
+                                        + w_in as usize;
                                     let dst = row * col_w
                                         + (g * c_per_group + cc) * (kernel_h * kernel_w)
-                                        + kh * kernel_w + kw;
+                                        + kh * kernel_w
+                                        + kw;
                                     if src < input_data.len() && dst < col_matrix.len() {
                                         col_matrix[dst] = input_data[src];
                                     }
@@ -202,8 +224,15 @@ pub(super) fn dispatch_quantized_conv_gpu(
 
     let padded_k = col_w.div_ceil(items) * items;
     let result = dispatch_quantized_gemm_gpu(
-        &col_matrix, &packed_bytes, col_h, padded_k, f,
-        items, bit_width, scales, zero_points,
+        &col_matrix,
+        &packed_bytes,
+        col_h,
+        padded_k,
+        f,
+        items,
+        bit_width,
+        scales,
+        zero_points,
     )?;
 
     let out = arena.data_mut();
@@ -225,8 +254,8 @@ pub(super) fn dispatch_quantized_conv_gpu(
 /// Uploads the given data to the GPU, runs the quantized matmul shader,
 /// and returns the f32 output as a `Vec<f32>`.
 fn dispatch_quantized_gemm_gpu(
-    activations: &[f32],    // [M, K_padded]
-    packed_weights: &[u8],  // packed weight bytes [N * K_packed * 4]
+    activations: &[f32],   // [M, K_padded]
+    packed_weights: &[u8], // packed weight bytes [N * K_packed * 4]
     m: usize,
     k_padded: usize,
     n: usize,
@@ -297,12 +326,30 @@ fn dispatch_quantized_gemm_gpu(
             label: Some("qgemm_bg"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_weight.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_act.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_scale.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: buf_zp.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: buf_out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: buf_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf_weight.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf_act.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf_scale.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf_zp.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: buf_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: buf_params.as_entire_binding(),
+                },
             ],
         });
 

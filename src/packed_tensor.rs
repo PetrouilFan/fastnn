@@ -160,7 +160,11 @@ impl<T: PackedWord> PackedTensor<T> {
 
         // Per-row packing: word `i` = (row * k_packed + word_in_row)
         let k_packed = inner_stride.div_ceil(items);
-        let m = if self.shape.len() >= 2 { self.shape[0] } else { 1 };
+        let m = if self.shape.len() >= 2 {
+            self.shape[0]
+        } else {
+            1
+        };
         let actual_words = m * k_packed;
 
         for (i, word) in self.data[..actual_words].iter().enumerate() {
@@ -421,8 +425,16 @@ impl<T: PackedWord> PackedTensor<T> {
         let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
         for row in 0..m {
-            let row_scale = if scales.len() == 1 { scales[0] } else { scales[row] };
-            let inv_s = if row_scale != 1.0 { 1.0 / row_scale } else { 1.0 };
+            let row_scale = if scales.len() == 1 {
+                scales[0]
+            } else {
+                scales[row]
+            };
+            let inv_s = if row_scale != 1.0 {
+                1.0 / row_scale
+            } else {
+                1.0
+            };
             for word in 0..k_packed {
                 let chunk_idx = row * k_packed + word;
                 let mut arr = T::Array::default();
@@ -498,7 +510,11 @@ impl<T: PackedWord> PackedTensor<T> {
         let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
         for row in 0..m {
-            let inv_scale = if scales[row] != 0.0 { 1.0 / scales[row] } else { 1.0 };
+            let inv_scale = if scales[row] != 0.0 {
+                1.0 / scales[row]
+            } else {
+                1.0
+            };
             let zp = zeros[row];
             for word in 0..k_packed {
                 let chunk_idx = row * k_packed + word;
@@ -544,10 +560,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size.is_power_of_two(),
             "block_size must be a power of 2"
         );
-        assert!(
-            self.shape.len() >= 2,
-            "Block-major requires 2D+ tensor"
-        );
+        assert!(self.shape.len() >= 2, "Block-major requires 2D+ tensor");
         let m = self.shape[0];
         let inner: usize = self.shape[1..].iter().product();
         let k_packed = inner.div_ceil(T::ITEMS);
@@ -581,7 +594,8 @@ impl<T: PackedWord> PackedTensor<T> {
             let src_row = m_aligned + local_row;
             let src_base = src_row * k_packed;
             let dst_base = block_words + local_row * k_packed;
-            reordered[dst_base..(dst_base + k_packed)].copy_from_slice(&self.data[src_base..(src_base + k_packed)]);
+            reordered[dst_base..(dst_base + k_packed)]
+                .copy_from_slice(&self.data[src_base..(src_base + k_packed)]);
         }
 
         // Copy remaining SIMD margin
@@ -827,7 +841,10 @@ mod tests {
             assert!(
                 (val - expected).abs() <= tol,
                 "get({}) mismatch: got={}, expected={}, tol={}",
-                i, val, expected, tol
+                i,
+                val,
+                expected,
+                tol
             );
         }
 
@@ -839,11 +856,15 @@ mod tests {
         let expected_5 = 225.0f32;
         assert!(
             (t2.get(1) - expected_1).abs() <= tol,
-            "set/get(1) mismatch: got={}, expected={}", t2.get(1), expected_1
+            "set/get(1) mismatch: got={}, expected={}",
+            t2.get(1),
+            expected_1
         );
         assert!(
             (t2.get(5) - expected_5).abs() <= tol,
-            "set/get(5) mismatch: got={}, expected={}", t2.get(5), expected_5
+            "set/get(5) mismatch: got={}, expected={}",
+            t2.get(5),
+            expected_5
         );
 
         // Verify to_f32_vec matches (uses separate iteration logic)
@@ -852,7 +873,9 @@ mod tests {
             assert!(
                 (orig - rec).abs() <= tol,
                 "to_f32_vec mismatch at {}: orig={}, rec={}",
-                i, orig, rec
+                i,
+                orig,
+                rec
             );
         }
     }

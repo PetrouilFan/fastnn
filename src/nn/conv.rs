@@ -143,8 +143,16 @@ impl Module for Conv2d {
                 // Manually expand bias to full spatial dims to avoid
                 // broadcasting issues in the element-wise add kernel.
                 let conv_shape = conv.shape();
-                let h_out = if conv_shape.len() > 2 { conv_shape[2] as usize } else { 1 };
-                let w_out = if conv_shape.len() > 3 { conv_shape[3] as usize } else { 1 };
+                let h_out = if conv_shape.len() > 2 {
+                    conv_shape[2] as usize
+                } else {
+                    1
+                };
+                let w_out = if conv_shape.len() > 3 {
+                    conv_shape[3] as usize
+                } else {
+                    1
+                };
                 let bias_vals = bias.as_f32_slice();
                 let out_c = self.out_channels as usize;
                 let mut expanded = Vec::with_capacity(out_c * h_out * w_out);

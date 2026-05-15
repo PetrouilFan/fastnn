@@ -110,7 +110,10 @@ fn test_matmul_u4_end_to_end() {
             assert!(
                 rel_err < 0.5,
                 "U4 output[{}] = {} vs f32 = {} (rel_err = {:.3})",
-                i, u4_val, f32_val, rel_err
+                i,
+                u4_val,
+                f32_val,
+                rel_err
             );
         }
     }
@@ -136,7 +139,10 @@ fn test_matmul_u8_end_to_end() {
             assert!(
                 rel_err < 0.15,
                 "U8 output[{}] = {} vs f32 = {} (rel_err = {:.3})",
-                i, u8_val, f32_val, rel_err
+                i,
+                u8_val,
+                f32_val,
+                rel_err
             );
         }
     }
@@ -149,17 +155,27 @@ fn test_matmul_u4_output_shape_correct() {
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
 
     let output = run_matmul(1, 4, 2, &weight, &input, Some(4));
-    assert_eq!(output.len(), 2, "Output should have 2 elements for [1,4]@[4,2]");
+    assert_eq!(
+        output.len(),
+        2,
+        "Output should have 2 elements for [1,4]@[4,2]"
+    );
 }
 
 #[test]
 fn test_matmul_u8_output_shape_correct() {
     // [3, 4] @ [4, 2] = [3, 2]
     let weight: Vec<f32> = vec![1.0, 0.0, 0.0, 1.0, 0.5, 0.5, 0.5, 0.5];
-    let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, -1.0, -2.0, -3.0, -4.0];
+    let input: Vec<f32> = vec![
+        1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, -1.0, -2.0, -3.0, -4.0,
+    ];
 
     let output = run_matmul(3, 4, 2, &weight, &input, Some(8));
-    assert_eq!(output.len(), 6, "Output should have 6 elements for [3,4]@[4,2]");
+    assert_eq!(
+        output.len(),
+        6,
+        "Output should have 6 elements for [3,4]@[4,2]"
+    );
 }
 
 // ── Conv2d tests ──────────────────────────────────────────────────────
@@ -177,17 +193,43 @@ fn test_conv2d_u4_end_to_end() {
     let input: Vec<f32> = vec![0.5; 25]; // [1, 1, 5, 5]
 
     let output_f32 = run_conv2d(
-        1, in_channels, out_channels, 5, 5, kernel_size, 1, 0,
-        &weight, &input, None,
+        1,
+        in_channels,
+        out_channels,
+        5,
+        5,
+        kernel_size,
+        1,
+        0,
+        &weight,
+        &input,
+        None,
     );
     let output_u4 = run_conv2d(
-        1, in_channels, out_channels, 5, 5, kernel_size, 1, 0,
-        &weight, &input, Some(4),
+        1,
+        in_channels,
+        out_channels,
+        5,
+        5,
+        kernel_size,
+        1,
+        0,
+        &weight,
+        &input,
+        Some(4),
     );
 
     // Output should have 18 elements (1 * 2 * 3 * 3)
-    assert_eq!(output_f32.len(), 18, "f32 conv2d output should have 18 elements");
-    assert_eq!(output_u4.len(), 18, "U4 conv2d output should have 18 elements");
+    assert_eq!(
+        output_f32.len(),
+        18,
+        "f32 conv2d output should have 18 elements"
+    );
+    assert_eq!(
+        output_u4.len(),
+        18,
+        "U4 conv2d output should have 18 elements"
+    );
 
     // U4 quantized conv2d output should be within reasonable tolerance
     let mut u4_correct = 0;
@@ -227,16 +269,34 @@ fn test_conv2d_u8_end_to_end() {
     let input: Vec<f32> = vec![0.5; 25]; // [1, 1, 5, 5]
 
     let output_u8 = run_conv2d(
-        1, in_channels, out_channels, 5, 5, kernel_size, 1, 0,
-        &weight, &input, Some(8),
+        1,
+        in_channels,
+        out_channels,
+        5,
+        5,
+        kernel_size,
+        1,
+        0,
+        &weight,
+        &input,
+        Some(8),
     );
 
     // Output should have 18 elements (1 * 2 * 3 * 3)
-    assert_eq!(output_u8.len(), 18, "U8 conv2d output should have 18 elements");
+    assert_eq!(
+        output_u8.len(),
+        18,
+        "U8 conv2d output should have 18 elements"
+    );
 
     // All outputs should be finite numbers
     for (i, &val) in output_u8.iter().enumerate() {
-        assert!(val.is_finite(), "Output[{}] should be finite, got {}", i, val);
+        assert!(
+            val.is_finite(),
+            "Output[{}] should be finite, got {}",
+            i,
+            val
+        );
     }
 }
 
@@ -265,9 +325,15 @@ fn test_compile_with_quantize_rejects_invalid_bit_width() {
     assert!(result.is_err(), "Bit width 16 should be rejected");
 
     // None and Some(4) and Some(8) should succeed
-    assert!(executor.compile_with_plan_and_quantize(&graph, None).is_ok());
-    assert!(executor.compile_with_plan_and_quantize(&graph, Some(4)).is_ok());
-    assert!(executor.compile_with_plan_and_quantize(&graph, Some(8)).is_ok());
+    assert!(executor
+        .compile_with_plan_and_quantize(&graph, None)
+        .is_ok());
+    assert!(executor
+        .compile_with_plan_and_quantize(&graph, Some(4))
+        .is_ok());
+    assert!(executor
+        .compile_with_plan_and_quantize(&graph, Some(8))
+        .is_ok());
 }
 
 #[test]
@@ -283,7 +349,10 @@ fn test_graph_builder_compile_with_quantize() {
 
     // Compile without quantization
     let result_no_q = gb.compile_with_quantize(&[&output], CpuBackend, None);
-    assert!(result_no_q.is_ok(), "compile without quantize should succeed");
+    assert!(
+        result_no_q.is_ok(),
+        "compile without quantize should succeed"
+    );
 
     // Compile with U4 quantization
     let result_u4 = gb.compile_with_quantize(&[&output], CpuBackend, Some(4));
@@ -295,19 +364,31 @@ fn test_graph_builder_compile_with_quantize() {
 
     // Verify quantized graphs contain U4/U8 weight nodes
     let (_, _, u4_graph) = result_u4.unwrap();
-    let has_u4 = u4_graph.nodes.iter().any(|n| matches!(&n.output_type.dtype, IrDType::U4 { .. }));
+    let has_u4 = u4_graph
+        .nodes
+        .iter()
+        .any(|n| matches!(&n.output_type.dtype, IrDType::U4 { .. }));
     assert!(has_u4, "U4-compiled graph should contain a U4 weight node");
 
     let (_, _, u8_graph) = result_u8.unwrap();
-    let has_u8 = u8_graph.nodes.iter().any(|n| matches!(&n.output_type.dtype, IrDType::U8 { .. }));
+    let has_u8 = u8_graph
+        .nodes
+        .iter()
+        .any(|n| matches!(&n.output_type.dtype, IrDType::U8 { .. }));
     assert!(has_u8, "U8-compiled graph should contain a U8 weight node");
 
     // No-quantize graph should have no U4/U8 nodes
     let (_, _, f32_graph) = result_no_q.unwrap();
-    let has_packed = f32_graph.nodes.iter().any(|n|
-        matches!(&n.output_type.dtype, IrDType::U4 { .. } | IrDType::U8 { .. })
+    let has_packed = f32_graph.nodes.iter().any(|n| {
+        matches!(
+            &n.output_type.dtype,
+            IrDType::U4 { .. } | IrDType::U8 { .. }
+        )
+    });
+    assert!(
+        !has_packed,
+        "f32-compiled graph should not contain packed weight nodes"
     );
-    assert!(!has_packed, "f32-compiled graph should not contain packed weight nodes");
 }
 
 #[test]
@@ -327,7 +408,9 @@ fn test_quantized_matmul_preserves_output_sign() {
                 output_f32[i].signum(),
                 output_u8[i].signum(),
                 "Sign mismatch at index {}: f32={}, u8={}",
-                i, output_f32[i], output_u8[i]
+                i,
+                output_f32[i],
+                output_u8[i]
             );
         }
     }
@@ -343,6 +426,11 @@ fn test_quantize_none_produces_f32_pipeline() {
 
     // All outputs should be finite
     for (i, &val) in output.iter().enumerate() {
-        assert!(val.is_finite(), "Output[{}] should be finite, got {}", i, val);
+        assert!(
+            val.is_finite(),
+            "Output[{}] should be finite, got {}",
+            i,
+            val
+        );
     }
 }

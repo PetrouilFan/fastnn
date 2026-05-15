@@ -52,19 +52,32 @@ fn compare_gpu_vs_cpu(
 
     assert_eq!(cpu.len(), wgpu.len());
 
-    cpu.into_iter().zip(wgpu).enumerate().map(|(i, (cpu_f32, wgpu_f32))| {
-        assert_eq!(cpu_f32.len(), wgpu_f32.len(), "output {} length mismatch", i);
-        for (j, (c, g)) in cpu_f32.iter().zip(wgpu_f32.iter()).enumerate() {
-            let diff = (c - g).abs();
-            let tol = if c.abs() > 0.1 { c.abs() * 0.01 } else { 0.01 };
-            assert!(
-                diff < tol,
-                "output {} elem {}: GPU={} CPU={} diff={}",
-                i, j, g, c, diff
+    cpu.into_iter()
+        .zip(wgpu)
+        .enumerate()
+        .map(|(i, (cpu_f32, wgpu_f32))| {
+            assert_eq!(
+                cpu_f32.len(),
+                wgpu_f32.len(),
+                "output {} length mismatch",
+                i
             );
-        }
-        (cpu_f32, wgpu_f32)
-    }).collect()
+            for (j, (c, g)) in cpu_f32.iter().zip(wgpu_f32.iter()).enumerate() {
+                let diff = (c - g).abs();
+                let tol = if c.abs() > 0.1 { c.abs() * 0.01 } else { 0.01 };
+                assert!(
+                    diff < tol,
+                    "output {} elem {}: GPU={} CPU={} diff={}",
+                    i,
+                    j,
+                    g,
+                    c,
+                    diff
+                );
+            }
+            (cpu_f32, wgpu_f32)
+        })
+        .collect()
 }
 
 // ── MatMul ────────────────────────────────────────────────────────────
@@ -130,9 +143,18 @@ fn test_wgpu_elementwise_add() {
     let b = g.input(&[4], IrDType::F32);
     let c = g.add(&a, &b);
 
-    let pairs =
-        compare_gpu_vs_cpu(&g, &[&c], &[&f32_data(&[1.0, 2.0, 3.0, 4.0]), &f32_data(&[5.0, 6.0, 7.0, 8.0])]);
-    assert_eq!(read_f32(&bytemuck::cast_slice(&pairs[0].0)), &[6.0, 8.0, 10.0, 12.0]);
+    let pairs = compare_gpu_vs_cpu(
+        &g,
+        &[&c],
+        &[
+            &f32_data(&[1.0, 2.0, 3.0, 4.0]),
+            &f32_data(&[5.0, 6.0, 7.0, 8.0]),
+        ],
+    );
+    assert_eq!(
+        read_f32(&bytemuck::cast_slice(&pairs[0].0)),
+        &[6.0, 8.0, 10.0, 12.0]
+    );
 }
 
 #[test]
@@ -248,7 +270,11 @@ fn test_wgpu_softmax_stability() {
     let softmax_out = &pairs[0].0;
     assert_eq!(softmax_out.len(), 4);
     for &v in softmax_out {
-        assert!(v.is_finite(), "softmax with large values should be stable, got {}", v);
+        assert!(
+            v.is_finite(),
+            "softmax with large values should be stable, got {}",
+            v
+        );
     }
 }
 
@@ -279,7 +305,11 @@ fn test_wgpu_conv2d_small() {
         .compile_and_execute(&[&out], WgpuBackend, &[&input_data])
         .unwrap();
     let out_f32 = read_f32(&result[0]);
-    assert_eq!(out_f32.len(), 4, "conv2d [1,1,4,4] with 3x3 filter, stride 1, pad 0 -> [1,1,2,2]");
+    assert_eq!(
+        out_f32.len(),
+        4,
+        "conv2d [1,1,4,4] with 3x3 filter, stride 1, pad 0 -> [1,1,2,2]"
+    );
     for &v in &out_f32 {
         assert!(v.is_finite(), "conv2d output should be finite, got {}", v);
     }
@@ -312,7 +342,11 @@ fn test_wgpu_conv2d_multichannel() {
     let out_f32 = read_f32(&result[0]);
     assert_eq!(out_f32.len(), 4 * 2 * 2, "conv out [1,4,2,2]");
     for &v in &out_f32 {
-        assert!(v.is_finite(), "conv multichannel output should be finite, got {}", v);
+        assert!(
+            v.is_finite(),
+            "conv multichannel output should be finite, got {}",
+            v
+        );
     }
 }
 
