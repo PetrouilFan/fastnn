@@ -17,7 +17,7 @@
 
 use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
 use crate::compiler::passes::{memory_planning, operator_fusion, quantization, shape_inference};
-use crate::ir::node::{ComputeGraph, DimExpr, Opcode, ShapeEnv};
+use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv};
 use std::sync::atomic::Ordering;
 
 /// An ahead-of-time graph executor that compiles and dispatches
@@ -96,6 +96,11 @@ impl<B: Backend> GraphExecutor<B> {
             }
             quantization::quantize_weights(&mut graph, bit_width)
                 .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+
+            // After quantizing weights, wrap any optimizer ops that now have
+            // quantized weight inputs with Dequantize/Quantize.
+            quantization::wrap_quantized_optimizer(&mut graph)
+                .map_err(|e| BackendError::Compilation(format!("optimizer wrapping: {e}")))?;
         }
 
         // ── Phase 3: Memory planning ──────────────────────────────────────
@@ -197,7 +202,14 @@ impl<B: Backend> GraphExecutor<B> {
                         "output node {}: {e}", output_node_id
                     )))?;
                 let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-                let computed = actual_numel * node.output_type.dtype.byte_size();
+                // For packed dtypes (U4/U8), use packed_byte_size which accounts
+                // for the header + SIMD margin. For standard dtypes, use numel * byte_size.
+                let computed = match &node.output_type.dtype {
+                    IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                        node.output_type.dtype.packed_byte_size(actual_numel)
+                    }
+                    _ => actual_numel * node.output_type.dtype.byte_size(),
+                };
                 if computed > slot.size {
                     return Err(BackendError::Dispatch(format!(
                         "output node {}: resolved size {} exceeds allocated slot size {} \
