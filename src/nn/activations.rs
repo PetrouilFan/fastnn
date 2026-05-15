@@ -34,11 +34,15 @@ macro_rules! impl_activation_via_tensor {
         pub struct $name;
 
         impl $name {
-            pub fn new() -> Self { $name }
+            pub fn new() -> Self {
+                $name
+            }
         }
 
         impl Default for $name {
-            fn default() -> Self { Self::new() }
+            fn default() -> Self {
+                Self::new()
+            }
         }
 
         impl Module for $name {

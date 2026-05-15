@@ -29,8 +29,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 
-use crate::backend::{Backend, BackendError, ExecutablePlan};
 use crate::backend::executor::GraphExecutor;
+use crate::backend::{Backend, BackendError, ExecutablePlan};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::ir::node::*;
 
@@ -70,31 +70,58 @@ pub struct GraphTensor {
 impl GraphTensor {
     /// Create a new graph tensor handle (internal) with output_index = 0.
     pub fn new(builder: GraphBuilder, node_id: NodeId, tensor_type: TensorType) -> Self {
-        Self { builder, node_id, tensor_type, output_index: 0 }
+        Self {
+            builder,
+            node_id,
+            tensor_type,
+            output_index: 0,
+        }
     }
 
     /// Create a new graph tensor handle with a specific output index.
-    pub fn new_with_output_index(builder: GraphBuilder, node_id: NodeId, tensor_type: TensorType, output_index: usize) -> Self {
-        Self { builder, node_id, tensor_type, output_index }
+    pub fn new_with_output_index(
+        builder: GraphBuilder,
+        node_id: NodeId,
+        tensor_type: TensorType,
+        output_index: usize,
+    ) -> Self {
+        Self {
+            builder,
+            node_id,
+            tensor_type,
+            output_index,
+        }
     }
 
     /// The underlying `NodeId` in the `ComputeGraph`.
-    pub fn node_id(&self) -> NodeId { self.node_id }
+    pub fn node_id(&self) -> NodeId {
+        self.node_id
+    }
 
     /// The symbolic shape of this tensor.
-    pub fn shape(&self) -> &[DimExpr] { &self.tensor_type.shape }
+    pub fn shape(&self) -> &[DimExpr] {
+        &self.tensor_type.shape
+    }
 
     /// The data type of this tensor.
-    pub fn dtype(&self) -> IrDType { self.tensor_type.dtype.clone() }
+    pub fn dtype(&self) -> IrDType {
+        self.tensor_type.dtype.clone()
+    }
 
     /// Full type information (shape + dtype).
-    pub fn tensor_type(&self) -> &TensorType { &self.tensor_type }
+    pub fn tensor_type(&self) -> &TensorType {
+        &self.tensor_type
+    }
 
     /// Return a reference to the builder that owns this tensor.
-    pub fn builder(&self) -> &GraphBuilder { &self.builder }
+    pub fn builder(&self) -> &GraphBuilder {
+        &self.builder
+    }
 
     /// Return the output index of this tensor in a multi-output node.
-    pub fn output_index(&self) -> usize { self.output_index }
+    pub fn output_index(&self) -> usize {
+        self.output_index
+    }
 }
 
 // =============================================================================
@@ -129,11 +156,9 @@ impl std::ops::Neg for GraphTensor {
     fn neg(self) -> Self {
         let output_type = self.tensor_type.clone();
         let mut inner = self.builder.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Neg,
-            vec![self.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Neg, vec![self.node_id], output_type.clone());
         GraphTensor::new(self.builder.clone(), node_id, output_type)
     }
 }
@@ -237,11 +262,10 @@ impl GraphBuilder {
     pub fn add(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
         let output_type = a.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Add,
-            vec![a.node_id, b.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Add, vec![a.node_id, b.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -249,11 +273,10 @@ impl GraphBuilder {
     pub fn sub(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
         let output_type = a.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Sub,
-            vec![a.node_id, b.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Sub, vec![a.node_id, b.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -261,11 +284,10 @@ impl GraphBuilder {
     pub fn mul(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
         let output_type = a.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Mul,
-            vec![a.node_id, b.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Mul, vec![a.node_id, b.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -273,11 +295,10 @@ impl GraphBuilder {
     pub fn div(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
         let output_type = a.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Div,
-            vec![a.node_id, b.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Div, vec![a.node_id, b.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -287,23 +308,45 @@ impl GraphBuilder {
         let b_shape = b.shape();
         // m = second-to-last dim of a (the "M" in MxK @ KxN).
         // a_shape.first() would be the batch dim, not M.
-                    let m = a_shape.get(a_shape.len().saturating_sub(2))
-            .cloned().unwrap_or(DimExpr::Known(0));
-        let _k_a = a_shape.get(a_shape.len().saturating_sub(1))
-            .cloned().unwrap_or(DimExpr::Known(0));
-        let _k_b = b_shape.get(b_shape.len().saturating_sub(2))
-            .cloned().unwrap_or(DimExpr::Known(0));
+        let m = a_shape
+            .get(a_shape.len().saturating_sub(2))
+            .cloned()
+            .unwrap_or(DimExpr::Known(0));
+        let _k_a = a_shape
+            .get(a_shape.len().saturating_sub(1))
+            .cloned()
+            .unwrap_or(DimExpr::Known(0));
+        let _k_b = b_shape
+            .get(b_shape.len().saturating_sub(2))
+            .cloned()
+            .unwrap_or(DimExpr::Known(0));
         let n = b_shape.last().cloned().unwrap_or(DimExpr::Known(0));
 
         // Broadcast batch dimensions
         let batch_dims: Vec<DimExpr> = {
-            let ba = if a_shape.len() > 2 { &a_shape[..a_shape.len() - 2] } else { &[] };
-            let bb = if b_shape.len() > 2 { &b_shape[..b_shape.len() - 2] } else { &[] };
+            let ba = if a_shape.len() > 2 {
+                &a_shape[..a_shape.len() - 2]
+            } else {
+                &[]
+            };
+            let bb = if b_shape.len() > 2 {
+                &b_shape[..b_shape.len() - 2]
+            } else {
+                &[]
+            };
             let max = ba.len().max(bb.len());
             let mut result = Vec::with_capacity(max);
             for i in 0..max {
-                let da = if i < ba.len() { &ba[ba.len() - 1 - i] } else { &DimExpr::Known(1) };
-                let db = if i < bb.len() { &bb[bb.len() - 1 - i] } else { &DimExpr::Known(1) };
+                let da = if i < ba.len() {
+                    &ba[ba.len() - 1 - i]
+                } else {
+                    &DimExpr::Known(1)
+                };
+                let db = if i < bb.len() {
+                    &bb[bb.len() - 1 - i]
+                } else {
+                    &DimExpr::Known(1)
+                };
                 result.push(match (da, db) {
                     (DimExpr::Known(1), other) => other.clone(),
                     (other, DimExpr::Known(1)) => other.clone(),
@@ -329,14 +372,26 @@ impl GraphBuilder {
     }
 
     /// Convolution 2D.
-    pub fn conv2d(&self, input: &GraphTensor, weight: &GraphTensor,
-                  stride: usize, padding: usize) -> GraphTensor {
+    pub fn conv2d(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        stride: usize,
+        padding: usize,
+    ) -> GraphTensor {
         self.conv2d_with_params(input, weight, stride, padding, 1, 1)
     }
 
     /// Convolution 2D with full parameter control.
-    pub fn conv2d_with_params(&self, input: &GraphTensor, weight: &GraphTensor,
-                              stride: usize, padding: usize, dilation: usize, groups: usize) -> GraphTensor {
+    pub fn conv2d_with_params(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
@@ -354,10 +409,7 @@ impl GraphBuilder {
             DimExpr::Known(1)
         };
 
-        let output_type = TensorType::new(
-            vec![batch, out_channels, h_out, w_out],
-            input.dtype(),
-        );
+        let output_type = TensorType::new(vec![batch, out_channels, h_out, w_out], input.dtype());
 
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
@@ -379,11 +431,9 @@ impl GraphBuilder {
     pub fn relu(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Relu,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Relu, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -391,11 +441,9 @@ impl GraphBuilder {
     pub fn gelu(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Gelu,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Gelu, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -403,11 +451,9 @@ impl GraphBuilder {
     pub fn silu(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Silu,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Silu, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -415,11 +461,10 @@ impl GraphBuilder {
     pub fn sigmoid(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Sigmoid,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Sigmoid, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -427,11 +472,9 @@ impl GraphBuilder {
     pub fn tanh(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Tanh,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Tanh, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -439,11 +482,9 @@ impl GraphBuilder {
     pub fn exp(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Exp,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Exp, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -451,11 +492,9 @@ impl GraphBuilder {
     pub fn log(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Log,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Log, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -463,11 +502,9 @@ impl GraphBuilder {
     pub fn sqrt(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Sqrt,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Sqrt, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -475,11 +512,9 @@ impl GraphBuilder {
     pub fn neg(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Neg,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Neg, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -487,11 +522,9 @@ impl GraphBuilder {
     pub fn abs(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Abs,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Abs, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -533,11 +566,10 @@ impl GraphBuilder {
     pub fn softplus(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Softplus,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Softplus, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -545,11 +577,10 @@ impl GraphBuilder {
     pub fn hardswish(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Hardswish,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Hardswish, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -573,11 +604,9 @@ impl GraphBuilder {
     pub fn sign(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Sign,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Sign, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -585,11 +614,10 @@ impl GraphBuilder {
     pub fn logical_not(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::LogicalNot,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::LogicalNot, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -597,11 +625,10 @@ impl GraphBuilder {
     pub fn log_softmax(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::LogSoftmax,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::LogSoftmax, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -609,11 +636,9 @@ impl GraphBuilder {
     pub fn mish(&self, input: &GraphTensor) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Mish,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Mish, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -658,7 +683,10 @@ impl GraphBuilder {
         let mut inner = self.inner.borrow_mut();
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("axis".to_string(), axis.to_string());
-        attrs.insert("keepdim".to_string(), if keepdim { "1" } else { "0" }.to_string());
+        attrs.insert(
+            "keepdim".to_string(),
+            if keepdim { "1" } else { "0" }.to_string(),
+        );
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::ReduceMax,
             vec![input.node_id],
@@ -703,12 +731,8 @@ impl GraphBuilder {
         if let Some(n) = inner.graph.get_node_mut(node_id) {
             n.attrs = attrs;
         }
-        let values = GraphTensor::new_with_output_index(
-            self.clone(), node_id, val_type, 0,
-        );
-        let indices = GraphTensor::new_with_output_index(
-            self.clone(), node_id, idx_type, 1,
-        );
+        let values = GraphTensor::new_with_output_index(self.clone(), node_id, val_type, 0);
+        let indices = GraphTensor::new_with_output_index(self.clone(), node_id, idx_type, 1);
         (values, indices)
     }
 
@@ -734,11 +758,10 @@ impl GraphBuilder {
         output_shape.reverse();
         let output_type = TensorType::new(output_shape, input.dtype());
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Transpose,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Transpose, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -748,9 +771,10 @@ impl GraphBuilder {
     /// Sets the "perm" attribute on the IR node so shape inference can use it.
     pub fn transpose_with_perm(&self, input: &GraphTensor, perm: &[usize]) -> GraphTensor {
         let input_shape = input.shape();
-        let output_shape: Vec<DimExpr> = perm.iter().map(|&i| {
-            input_shape.get(i).cloned().unwrap_or(DimExpr::Known(0))
-        }).collect();
+        let output_shape: Vec<DimExpr> = perm
+            .iter()
+            .map(|&i| input_shape.get(i).cloned().unwrap_or(DimExpr::Known(0)))
+            .collect();
         let output_type = TensorType::new(output_shape, input.dtype());
         let mut attrs = std::collections::HashMap::new();
         let perm_str: Vec<String> = perm.iter().map(|d| d.to_string()).collect();
@@ -776,11 +800,10 @@ impl GraphBuilder {
         };
         let output_type = TensorType::new(vec![first, rest], input.dtype());
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Flatten,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Flatten, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -873,12 +896,10 @@ impl GraphBuilder {
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), dim.to_string());
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node_with_attrs(
-            Opcode::Concat,
-            input_ids,
-            output_type.clone(),
-            attrs,
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node_with_attrs(Opcode::Concat, input_ids, output_type.clone(), attrs);
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -951,21 +972,45 @@ impl GraphBuilder {
     ///
     /// Returns (pooled_values, argmax_indices).
     /// The indices are flat offsets within each pooling window (I64).
-    pub fn max_pool2d(&self, input: &GraphTensor, kernel_size: usize, stride: usize, padding: usize) -> (GraphTensor, GraphTensor) {
+    pub fn max_pool2d(
+        &self,
+        input: &GraphTensor,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+    ) -> (GraphTensor, GraphTensor) {
         let a_shape = input.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let channels = a_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
         let h_out = if a_shape.len() > 2 {
-            conv_spatial_dim(&a_shape[2], &DimExpr::Known(kernel_size as u64), stride, padding)
+            conv_spatial_dim(
+                &a_shape[2],
+                &DimExpr::Known(kernel_size as u64),
+                stride,
+                padding,
+            )
         } else {
             DimExpr::Known(1)
         };
         let w_out = if a_shape.len() > 3 {
-            conv_spatial_dim(&a_shape[3], &DimExpr::Known(kernel_size as u64), stride, padding)
+            conv_spatial_dim(
+                &a_shape[3],
+                &DimExpr::Known(kernel_size as u64),
+                stride,
+                padding,
+            )
         } else {
             DimExpr::Known(1)
         };
-        let output_type = TensorType::new(vec![batch.clone(), channels.clone(), h_out.clone(), w_out.clone()], input.dtype());
+        let output_type = TensorType::new(
+            vec![
+                batch.clone(),
+                channels.clone(),
+                h_out.clone(),
+                w_out.clone(),
+            ],
+            input.dtype(),
+        );
         let idx_type = TensorType::new(vec![batch, channels, h_out, w_out], IrDType::I64);
         let mut attrs = HashMap::new();
         attrs.insert("kernel_size".to_string(), kernel_size.to_string());
@@ -987,17 +1032,33 @@ impl GraphBuilder {
     }
 
     /// Average pooling 2D.
-    pub fn avg_pool2d(&self, input: &GraphTensor, kernel_size: usize, stride: usize, padding: usize) -> GraphTensor {
+    pub fn avg_pool2d(
+        &self,
+        input: &GraphTensor,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+    ) -> GraphTensor {
         let a_shape = input.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let channels = a_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
         let h_out = if a_shape.len() > 2 {
-            conv_spatial_dim(&a_shape[2], &DimExpr::Known(kernel_size as u64), stride, padding)
+            conv_spatial_dim(
+                &a_shape[2],
+                &DimExpr::Known(kernel_size as u64),
+                stride,
+                padding,
+            )
         } else {
             DimExpr::Known(1)
         };
         let w_out = if a_shape.len() > 3 {
-            conv_spatial_dim(&a_shape[3], &DimExpr::Known(kernel_size as u64), stride, padding)
+            conv_spatial_dim(
+                &a_shape[3],
+                &DimExpr::Known(kernel_size as u64),
+                stride,
+                padding,
+            )
         } else {
             DimExpr::Known(1)
         };
@@ -1021,14 +1082,28 @@ impl GraphBuilder {
     // =========================================================================
 
     /// Batch normalization.
-    pub fn batch_norm(&self, input: &GraphTensor, weight: &GraphTensor, bias: &GraphTensor, running_mean: &GraphTensor, running_var: &GraphTensor, eps: f64) -> GraphTensor {
+    pub fn batch_norm(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        bias: &GraphTensor,
+        running_mean: &GraphTensor,
+        running_var: &GraphTensor,
+        eps: f64,
+    ) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut attrs = HashMap::new();
         attrs.insert("eps".to_string(), eps.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::BatchNorm,
-            vec![input.node_id, weight.node_id, bias.node_id, running_mean.node_id, running_var.node_id],
+            vec![
+                input.node_id,
+                weight.node_id,
+                bias.node_id,
+                running_mean.node_id,
+                running_var.node_id,
+            ],
             output_type.clone(),
             attrs,
         );
@@ -1036,7 +1111,13 @@ impl GraphBuilder {
     }
 
     /// Layer normalization.
-    pub fn layer_norm(&self, input: &GraphTensor, weight: &GraphTensor, bias: &GraphTensor, eps: f64) -> GraphTensor {
+    pub fn layer_norm(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        bias: &GraphTensor,
+        eps: f64,
+    ) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut attrs = HashMap::new();
         attrs.insert("eps".to_string(), eps.to_string());
@@ -1067,7 +1148,10 @@ impl GraphBuilder {
         }
         let output_type = TensorType::new(output_shape, input.dtype());
         let mut attrs = HashMap::new();
-        let pads_str: Vec<String> = pads.iter().map(|(lo, hi)| format!("{},{}", lo, hi)).collect();
+        let pads_str: Vec<String> = pads
+            .iter()
+            .map(|(lo, hi)| format!("{},{}", lo, hi))
+            .collect();
         attrs.insert("pads".to_string(), pads_str.join(","));
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
@@ -1104,7 +1188,12 @@ impl GraphBuilder {
     }
 
     /// Scatter ND updates into a tensor.
-    pub fn scatter_nd(&self, input: &GraphTensor, indices: &GraphTensor, updates: &GraphTensor) -> GraphTensor {
+    pub fn scatter_nd(
+        &self,
+        input: &GraphTensor,
+        indices: &GraphTensor,
+        updates: &GraphTensor,
+    ) -> GraphTensor {
         let output_type = input.tensor_type.clone();
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
@@ -1121,11 +1210,9 @@ impl GraphBuilder {
         let output_shape = vec![DimExpr::Known(input_rank as u64)];
         let output_type = TensorType::new(output_shape, IrDType::I64);
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Shape,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::Shape, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -1152,8 +1239,14 @@ impl GraphBuilder {
     pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
-            4 => IrDType::U4 { scales: vec![], zero_points: vec![] },
-            8 => IrDType::U8 { scales: vec![], zero_points: vec![] },
+            4 => IrDType::U4 {
+                scales: vec![],
+                zero_points: vec![],
+            },
+            8 => IrDType::U8 {
+                scales: vec![],
+                zero_points: vec![],
+            },
             _ => panic!("quantize: bit_width must be 4 or 8, got {}", bit_width),
         };
         let output_type = TensorType::new(output_shape, output_dtype);
@@ -1174,11 +1267,10 @@ impl GraphBuilder {
         let output_shape = input.shape().to_vec();
         let output_type = TensorType::new(output_shape, IrDType::F32);
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Dequantize,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node(Opcode::Dequantize, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -1187,11 +1279,9 @@ impl GraphBuilder {
         let output_shape = input.shape().to_vec();
         let output_type = TensorType::new(output_shape, IrDType::F16);
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::ToF16,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::ToF16, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -1200,11 +1290,9 @@ impl GraphBuilder {
         let output_shape = input.shape().to_vec();
         let output_type = TensorType::new(output_shape, IrDType::F32);
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::ToF32,
-            vec![input.node_id],
-            output_type.clone(),
-        );
+        let node_id = inner
+            .graph
+            .add_node(Opcode::ToF32, vec![input.node_id], output_type.clone());
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -1318,11 +1406,13 @@ impl GraphBuilder {
     /// Range(start, limit, step) — produces a 1D F32 tensor.
     /// All three inputs must be 0D (scalar) tensors.
     /// Output is a 1D F32 tensor of dynamic length.
-    pub fn range_op(&self, start: &GraphTensor, limit: &GraphTensor, step: &GraphTensor) -> GraphTensor {
-        let output_type = TensorType::new(
-            vec![DimExpr::Symbol("N".to_string())],
-            IrDType::F32,
-        );
+    pub fn range_op(
+        &self,
+        start: &GraphTensor,
+        limit: &GraphTensor,
+        step: &GraphTensor,
+    ) -> GraphTensor {
+        let output_type = TensorType::new(vec![DimExpr::Symbol("N".to_string())], IrDType::F32);
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Range,
@@ -1337,7 +1427,13 @@ impl GraphBuilder {
     // =========================================================================
 
     /// Convolution 1D.
-    pub fn conv1d(&self, input: &GraphTensor, weight: &GraphTensor, stride: usize, padding: usize) -> GraphTensor {
+    pub fn conv1d(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        stride: usize,
+        padding: usize,
+    ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
@@ -1362,7 +1458,13 @@ impl GraphBuilder {
     }
 
     /// Convolution 3D.
-    pub fn conv3d(&self, input: &GraphTensor, weight: &GraphTensor, stride: usize, padding: usize) -> GraphTensor {
+    pub fn conv3d(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        stride: usize,
+        padding: usize,
+    ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
@@ -1382,7 +1484,10 @@ impl GraphBuilder {
         } else {
             DimExpr::Known(1)
         };
-        let output_type = TensorType::new(vec![batch, out_channels, d_out, h_out, w_out], input.dtype());
+        let output_type = TensorType::new(
+            vec![batch, out_channels, d_out, h_out, w_out],
+            input.dtype(),
+        );
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
@@ -1397,7 +1502,13 @@ impl GraphBuilder {
     }
 
     /// Transposed convolution 2D.
-    pub fn conv_transpose2d(&self, input: &GraphTensor, weight: &GraphTensor, stride: usize, padding: usize) -> GraphTensor {
+    pub fn conv_transpose2d(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        stride: usize,
+        padding: usize,
+    ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
@@ -1410,7 +1521,8 @@ impl GraphBuilder {
                 _ => {
                     let h_val = a_shape[2].evaluate().unwrap_or(0);
                     let kh_val = w_shape[2].evaluate().unwrap_or(1);
-                    let estimated = (h_val.saturating_sub(1)) * stride as u64 + kh_val - 2 * padding as u64;
+                    let estimated =
+                        (h_val.saturating_sub(1)) * stride as u64 + kh_val - 2 * padding as u64;
                     DimExpr::Bounded {
                         sym: format!("conv_trans_spatial({})", estimated),
                         max: estimated,
@@ -1428,7 +1540,8 @@ impl GraphBuilder {
                 _ => {
                     let w_val = a_shape[3].evaluate().unwrap_or(0);
                     let kw_val = w_shape[3].evaluate().unwrap_or(1);
-                    let estimated = (w_val.saturating_sub(1)) * stride as u64 + kw_val - 2 * padding as u64;
+                    let estimated =
+                        (w_val.saturating_sub(1)) * stride as u64 + kw_val - 2 * padding as u64;
                     DimExpr::Bounded {
                         sym: format!("conv_trans_spatial({})", estimated),
                         max: estimated,
@@ -1597,7 +1710,10 @@ impl GraphBuilder {
 
     /// Upsample using nearest-neighbor interpolation.
     pub fn upsample_nearest2d(
-        &self, input: &GraphTensor, scale_h: usize, scale_w: usize,
+        &self,
+        input: &GraphTensor,
+        scale_h: usize,
+        scale_w: usize,
     ) -> GraphTensor {
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("scale_h".to_string(), scale_h.to_string());
@@ -1628,7 +1744,10 @@ impl GraphBuilder {
 
     /// Upsample using bilinear interpolation.
     pub fn upsample_bilinear2d(
-        &self, input: &GraphTensor, scale_h: usize, scale_w: usize,
+        &self,
+        input: &GraphTensor,
+        scale_h: usize,
+        scale_w: usize,
     ) -> GraphTensor {
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("scale_h".to_string(), scale_h.to_string());
@@ -1659,7 +1778,10 @@ impl GraphBuilder {
 
     /// Adaptive average pooling to a fixed output size.
     pub fn adaptive_avg_pool2d(
-        &self, input: &GraphTensor, output_h: usize, output_w: usize,
+        &self,
+        input: &GraphTensor,
+        output_h: usize,
+        output_w: usize,
     ) -> GraphTensor {
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("output_h".to_string(), output_h.to_string());
@@ -1694,39 +1816,45 @@ impl GraphBuilder {
         let repeats_str: Vec<String> = repeats.iter().map(|r| r.to_string()).collect();
         attrs.insert("repeats".to_string(), repeats_str.join(","));
         let input_shape = input.shape();
-        let out_shape: Vec<DimExpr> = input_shape.iter().zip(repeats.iter())
+        let out_shape: Vec<DimExpr> = input_shape
+            .iter()
+            .zip(repeats.iter())
             .map(|(d, &r)| d.mul(&DimExpr::Known(r as u64)))
             .collect();
         let tt = TensorType::new(out_shape, input.dtype());
         let node_id = {
             let mut inner = self.inner.borrow_mut();
-            inner.graph.add_node_with_attrs(
-                Opcode::Repeat,
-                vec![input.node_id],
-                tt.clone(),
-                attrs,
-            )
+            inner
+                .graph
+                .add_node_with_attrs(Opcode::Repeat, vec![input.node_id], tt.clone(), attrs)
         };
         GraphTensor::new(self.clone(), node_id, tt)
     }
 
     /// Cumulative sum along a dimension.
     pub fn cumsum(
-        &self, input: &GraphTensor, dim: usize, exclusive: bool, reverse: bool,
+        &self,
+        input: &GraphTensor,
+        dim: usize,
+        exclusive: bool,
+        reverse: bool,
     ) -> GraphTensor {
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("dim".to_string(), dim.to_string());
-        attrs.insert("exclusive".to_string(), (if exclusive { 1 } else { 0 }).to_string());
-        attrs.insert("reverse".to_string(), (if reverse { 1 } else { 0 }).to_string());
+        attrs.insert(
+            "exclusive".to_string(),
+            (if exclusive { 1 } else { 0 }).to_string(),
+        );
+        attrs.insert(
+            "reverse".to_string(),
+            (if reverse { 1 } else { 0 }).to_string(),
+        );
         let tt = TensorType::new(input.shape().to_vec(), input.dtype());
         let node_id = {
             let mut inner = self.inner.borrow_mut();
-            inner.graph.add_node_with_attrs(
-                Opcode::CumSum,
-                vec![input.node_id],
-                tt.clone(),
-                attrs,
-            )
+            inner
+                .graph
+                .add_node_with_attrs(Opcode::CumSum, vec![input.node_id], tt.clone(), attrs)
         };
         GraphTensor::new(self.clone(), node_id, tt)
     }
@@ -1736,7 +1864,9 @@ impl GraphBuilder {
         let tt = TensorType::new(input.shape().to_vec(), input.dtype());
         let node_id = {
             let mut inner = self.inner.borrow_mut();
-            inner.graph.add_node(Opcode::Erf, vec![input.node_id], tt.clone())
+            inner
+                .graph
+                .add_node(Opcode::Erf, vec![input.node_id], tt.clone())
         };
         GraphTensor::new(self.clone(), node_id, tt)
     }
@@ -1749,19 +1879,19 @@ impl GraphBuilder {
         let tt = TensorType::new(input.shape().to_vec(), input.dtype());
         let node_id = {
             let mut inner = self.inner.borrow_mut();
-            inner.graph.add_node_with_attrs(
-                Opcode::Flip,
-                vec![input.node_id],
-                tt.clone(),
-                attrs,
-            )
+            inner
+                .graph
+                .add_node_with_attrs(Opcode::Flip, vec![input.node_id], tt.clone(), attrs)
         };
         GraphTensor::new(self.clone(), node_id, tt)
     }
 
     /// Element-wise where: selects elements from x where condition is true, else from y.
     pub fn where_tensor(
-        &self, condition: &GraphTensor, x: &GraphTensor, y: &GraphTensor,
+        &self,
+        condition: &GraphTensor,
+        x: &GraphTensor,
+        y: &GraphTensor,
     ) -> GraphTensor {
         let x_shape = x.shape();
         let out_tt = TensorType::new(x_shape.to_vec(), x.dtype());
@@ -1830,13 +1960,11 @@ impl GraphBuilder {
     /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
     /// is automatically wrapped with Dequantize/Quantize so the update
     /// happens in full precision.
-    pub fn apply_sgd(
-        &self, weight: &GraphTensor, grad: &GraphTensor, lr: f32,
-    ) -> GraphTensor {
+    pub fn apply_sgd(&self, weight: &GraphTensor, grad: &GraphTensor, lr: f32) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
-        let tt = w.tensor_type().clone();  // F32 after dequantize
+        let tt = w.tensor_type().clone(); // F32 after dequantize
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
@@ -1861,9 +1989,16 @@ impl GraphBuilder {
     /// is automatically wrapped with Dequantize/Quantize.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_adam(
-        &self, weight: &GraphTensor, grad: &GraphTensor,
-        m: &GraphTensor, v: &GraphTensor,
-        lr: f32, beta1: f32, beta2: f32, eps: f32, t: u64,
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        m: &GraphTensor,
+        v: &GraphTensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
     ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
@@ -1872,7 +2007,7 @@ impl GraphBuilder {
         attrs.insert("beta2".to_string(), beta2.to_string());
         attrs.insert("eps".to_string(), eps.to_string());
         attrs.insert("t".to_string(), t.to_string());
-        let tt = w.tensor_type().clone();  // F32 after dequantize
+        let tt = w.tensor_type().clone(); // F32 after dequantize
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
@@ -1896,9 +2031,17 @@ impl GraphBuilder {
     /// is automatically wrapped with Dequantize/Quantize.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_adamw(
-        &self, weight: &GraphTensor, grad: &GraphTensor,
-        m: &GraphTensor, v: &GraphTensor,
-        lr: f32, beta1: f32, beta2: f32, eps: f32, t: u64, weight_decay: f32,
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        m: &GraphTensor,
+        v: &GraphTensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+        weight_decay: f32,
     ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
@@ -1908,7 +2051,7 @@ impl GraphBuilder {
         attrs.insert("eps".to_string(), eps.to_string());
         attrs.insert("t".to_string(), t.to_string());
         attrs.insert("weight_decay".to_string(), weight_decay.to_string());
-        let tt = w.tensor_type().clone();  // F32 after dequantize
+        let tt = w.tensor_type().clone(); // F32 after dequantize
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
@@ -1933,9 +2076,13 @@ impl GraphBuilder {
     /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
     /// is automatically wrapped with Dequantize/Quantize.
     pub fn apply_muon(
-        &self, weight: &GraphTensor, grad: &GraphTensor,
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
         m: &GraphTensor,
-        lr: f32, beta1: f32, weight_decay: f32,
+        lr: f32,
+        beta1: f32,
+        weight_decay: f32,
     ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
@@ -1967,8 +2114,13 @@ impl GraphBuilder {
     /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
     /// is automatically wrapped with Dequantize/Quantize.
     pub fn apply_lion(
-        &self, weight: &GraphTensor, grad: &GraphTensor, m: &GraphTensor,
-        lr: f32, beta1: f32, beta2: f32,
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        m: &GraphTensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
     ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
@@ -2000,8 +2152,13 @@ impl GraphBuilder {
     /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
     /// is automatically wrapped with Dequantize/Quantize.
     pub fn apply_rmsprop(
-        &self, weight: &GraphTensor, grad: &GraphTensor, v: &GraphTensor,
-        lr: f32, beta: f32, eps: f32,
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        v: &GraphTensor,
+        lr: f32,
+        beta: f32,
+        eps: f32,
     ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
@@ -2110,7 +2267,8 @@ impl GraphBuilder {
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
         let executor = GraphExecutor::new(backend);
-        let (plan, memory_plan, compiled_graph) = executor.compile_with_plan_and_quantize(&graph, quantize)?;
+        let (plan, memory_plan, compiled_graph) =
+            executor.compile_with_plan_and_quantize(&graph, quantize)?;
 
         Ok((plan, memory_plan, compiled_graph))
     }
@@ -2147,7 +2305,8 @@ impl GraphBuilder {
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
         let executor = GraphExecutor::new(backend);
-        let (plan, memory_plan, compiled_graph) = executor.compile_with_plan_and_quantize(&graph, quantize)?;
+        let (plan, memory_plan, compiled_graph) =
+            executor.compile_with_plan_and_quantize(&graph, quantize)?;
         executor.execute(&compiled_graph, &plan, &memory_plan, inputs)
     }
 
@@ -2201,7 +2360,12 @@ where
 
 /// Compute the spatial output dimension for a convolution:
 /// `out = (input + 2*padding - kernel) / stride + 1`.
-fn conv_spatial_dim(input_dim: &DimExpr, kernel_dim: &DimExpr, stride: usize, padding: usize) -> DimExpr {
+fn conv_spatial_dim(
+    input_dim: &DimExpr,
+    kernel_dim: &DimExpr,
+    stride: usize,
+    padding: usize,
+) -> DimExpr {
     let s = stride as u64;
     let p = padding as u64;
     match (input_dim, kernel_dim) {
@@ -2213,12 +2377,12 @@ fn conv_spatial_dim(input_dim: &DimExpr, kernel_dim: &DimExpr, stride: usize, pa
             let h_val = input_dim.evaluate();
             let k_val = kernel_dim.evaluate();
             match (h_val, k_val) {
-                (Some(h), Some(k)) => {
-                    DimExpr::Known(((h + 2 * p).saturating_sub(k)) / s + 1)
-                }
+                (Some(h), Some(k)) => DimExpr::Known(((h + 2 * p).saturating_sub(k)) / s + 1),
                 _ => {
                     // Cannot fully evaluate — produce a Bounded expression with provenance
-                    let h_eval = input_dim.evaluate().unwrap_or(SYMBOL_DIM_MAX.load(Ordering::Relaxed));
+                    let h_eval = input_dim
+                        .evaluate()
+                        .unwrap_or(SYMBOL_DIM_MAX.load(Ordering::Relaxed));
                     let k_eval = kernel_dim.evaluate().unwrap_or(1);
                     let estimated = ((h_eval + 2 * p).saturating_sub(k_eval)) / s + 1;
                     let sym_name = match (input_dim, kernel_dim) {
@@ -2244,7 +2408,9 @@ fn conv_spatial_dim(input_dim: &DimExpr, kernel_dim: &DimExpr, stride: usize, pa
 }
 
 impl Default for GraphBuilder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // =============================================================================
@@ -2277,7 +2443,9 @@ mod tests {
         let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
         let b_data = f32_data(&[5.0, 6.0, 7.0, 8.0]);
 
-        let result = g.compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data]).unwrap();
+        let result = g
+            .compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data])
+            .unwrap();
         let out = read_f32(&result[0]);
 
         assert_eq!(out, vec![6.0, 8.0, 10.0, 12.0]);
@@ -2299,16 +2467,29 @@ mod tests {
         // The matmul output should preserve the symbolic batch dim
         let logits_shape = logits.shape();
         assert_eq!(logits_shape.len(), 2, "matmul shape should be 2D");
-        assert_eq!(logits_shape[0], DimExpr::Symbol("N".into()),
-            "batch dim should remain symbolic through matmul");
-        assert_eq!(logits_shape[1], DimExpr::Known(10),
-            "feature dim should be 10");
+        assert_eq!(
+            logits_shape[0],
+            DimExpr::Symbol("N".into()),
+            "batch dim should remain symbolic through matmul"
+        );
+        assert_eq!(
+            logits_shape[1],
+            DimExpr::Known(10),
+            "feature dim should be 10"
+        );
 
         // After reduce_mean on axis 1 (no keepdim): shape should be [N]
         let loss_shape = loss.shape();
-        assert_eq!(loss_shape.len(), 1, "loss shape should be 1D after reduce_mean");
-        assert_eq!(loss_shape[0], DimExpr::Symbol("N".into()),
-            "batch dim should remain symbolic through reduce_mean");
+        assert_eq!(
+            loss_shape.len(),
+            1,
+            "loss shape should be 1D after reduce_mean"
+        );
+        assert_eq!(
+            loss_shape[0],
+            DimExpr::Symbol("N".into()),
+            "batch dim should remain symbolic through reduce_mean"
+        );
     }
 
     #[test]
@@ -2321,7 +2502,9 @@ mod tests {
         let a_data = f32_data(&[1.0, 2.0, 3.0]);
         let b_data = f32_data(&[4.0, 5.0, 6.0]);
 
-        let result = g.compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data]).unwrap();
+        let result = g
+            .compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data])
+            .unwrap();
         let out = read_f32(&result[0]);
 
         assert_eq!(out, vec![5.0, 7.0, 9.0]);
@@ -2341,13 +2524,13 @@ mod tests {
         let a_data = f32_data(&[10.0, 20.0]);
         let b_data = f32_data(&[2.0, 5.0]);
 
-        let result = g.compile_and_execute(
-            &[&s, &m, &d, &n], CpuBackend, &[&a_data, &b_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(&[&s, &m, &d, &n], CpuBackend, &[&a_data, &b_data])
+            .unwrap();
 
-        assert_eq!(read_f32(&result[0]), vec![8.0, 15.0]);   // sub
+        assert_eq!(read_f32(&result[0]), vec![8.0, 15.0]); // sub
         assert_eq!(read_f32(&result[1]), vec![20.0, 100.0]); // mul
-        assert_eq!(read_f32(&result[2]), vec![5.0, 4.0]);    // div
+        assert_eq!(read_f32(&result[2]), vec![5.0, 4.0]); // div
         assert_eq!(read_f32(&result[3]), vec![-10.0, -20.0]); // neg
     }
 
@@ -2358,7 +2541,9 @@ mod tests {
         let r = g.relu(&a);
 
         let a_data = f32_data(&[-2.0, -1.0, 0.0, 1.0, 2.0]);
-        let result = g.compile_and_execute(&[&r], CpuBackend, &[&a_data]).unwrap();
+        let result = g
+            .compile_and_execute(&[&r], CpuBackend, &[&a_data])
+            .unwrap();
         assert_eq!(read_f32(&result[0]), vec![0.0, 0.0, 0.0, 1.0, 2.0]);
     }
 
@@ -2375,23 +2560,38 @@ mod tests {
         let flat = g.flatten(&x);
         let flat_shape = flat.shape();
         assert_eq!(flat_shape.len(), 2, "flatten should produce 2D shape");
-        assert_eq!(flat_shape[0], DimExpr::Symbol("N".into()),
-            "flatten should preserve symbolic batch dim");
-        assert_eq!(flat_shape[1], DimExpr::Known(3072),
-            "flatten should compute product of remaining dims: 3*32*32=3072");
+        assert_eq!(
+            flat_shape[0],
+            DimExpr::Symbol("N".into()),
+            "flatten should preserve symbolic batch dim"
+        );
+        assert_eq!(
+            flat_shape[1],
+            DimExpr::Known(3072),
+            "flatten should compute product of remaining dims: 3*32*32=3072"
+        );
 
         // Concat along batch dim
         let y = g.input_with_dims(&[n, c, h, w], IrDType::F32);
         let cat = g.concat(&[&x, &y], 0);
         let cat_shape = cat.shape();
-        assert_eq!(cat_shape[0], DimExpr::Bounded { sym: "2*N".into(), max: 16384 },
-            "concat along symbolic dim should produce canonical 2*N");
+        assert_eq!(
+            cat_shape[0],
+            DimExpr::Bounded {
+                sym: "2*N".into(),
+                max: 16384
+            },
+            "concat along symbolic dim should produce canonical 2*N"
+        );
 
         // Concat along known dim
         let cat_c = g.concat(&[&x, &y], 1);
         let cat_c_shape = cat_c.shape();
-        assert_eq!(cat_c_shape[1], DimExpr::Known(6),
-            "concat along known dim should produce sum: 3+3=6");
+        assert_eq!(
+            cat_c_shape[1],
+            DimExpr::Known(6),
+            "concat along known dim should produce sum: 3+3=6"
+        );
     }
 
     #[test]
@@ -2415,36 +2615,55 @@ mod tests {
         let w_data = f32_data(&(0..640).map(|i| (i % 10) as f32).collect::<Vec<_>>());
 
         // Execute with batch=3
-        let result_3 = executor.execute(
-            &compiled_graph, &plan, &memory_plan, &[&x_data_3, &w_data],
-        ).unwrap();
+        let result_3 = executor
+            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_3, &w_data])
+            .unwrap();
         let out_3 = read_f32(&result_3[0]);
         // Output should be [3, 10] = 30 elements
-        assert_eq!(out_3.len(), 30, "batch=3 should produce 30 elements, got {}", out_3.len());
+        assert_eq!(
+            out_3.len(),
+            30,
+            "batch=3 should produce 30 elements, got {}",
+            out_3.len()
+        );
 
         // Batch = 1: input data is 1*64*4 = 256 bytes — same compiled plan
         let x_data_1 = f32_data(&(0..64).map(|i| i as f32).collect::<Vec<_>>());
-        let result_1 = executor.execute(
-            &compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data],
-        ).unwrap();
+        let result_1 = executor
+            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data])
+            .unwrap();
         let out_1 = read_f32(&result_1[0]);
         // Output should be [1, 10] = 10 elements
-        assert_eq!(out_1.len(), 10, "batch=1 should produce 10 elements, got {}", out_1.len());
+        assert_eq!(
+            out_1.len(),
+            10,
+            "batch=1 should produce 10 elements, got {}",
+            out_1.len()
+        );
 
         // Verify the actual values are correct by computing manually for batch=1
         // x = [0,1,2,...,63], w column j = [j%10, j%10, ..., j%10] (64 times)
         // logits[0,j] = sum_{k=0}^{63} k * (j%10)
         let expected_0 = (0..64).map(|k| k as f32 * (0 % 10) as f32).sum::<f32>();
-        assert!((out_1[0] - expected_0).abs() < 1e-3,
-            "expected logit[0,0]={}, got {}", expected_0, out_1[0]);
+        assert!(
+            (out_1[0] - expected_0).abs() < 1e-3,
+            "expected logit[0,0]={}, got {}",
+            expected_0,
+            out_1[0]
+        );
 
         // Batch = 7 (another shape) — verify the pattern generalizes
         let x_data_7 = f32_data(&(0..448).map(|i| i as f32).collect::<Vec<_>>()); // 7*64 = 448 f32s
-        let result_7 = executor.execute(
-            &compiled_graph, &plan, &memory_plan, &[&x_data_7, &w_data],
-        ).unwrap();
+        let result_7 = executor
+            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_7, &w_data])
+            .unwrap();
         let out_7 = read_f32(&result_7[0]);
-        assert_eq!(out_7.len(), 70, "batch=7 should produce 70 elements, got {}", out_7.len());
+        assert_eq!(
+            out_7.len(),
+            70,
+            "batch=7 should produce 70 elements, got {}",
+            out_7.len()
+        );
     }
 
     #[test]
@@ -2461,26 +2680,42 @@ mod tests {
 
         // Test with batch=2: input data is 2*4*4 = 32 bytes
         let x_data_2 = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
-        let result_2 = g.compile_and_execute(
-            &[&mean, &sum], CpuBackend, &[&x_data_2],
-        ).unwrap();
+        let result_2 = g
+            .compile_and_execute(&[&mean, &sum], CpuBackend, &[&x_data_2])
+            .unwrap();
         // mean = [(1+2+3+4)/4=2.5, (5+6+7+8)/4=6.5]
-        assert_eq!(read_f32(&result_2[0]), vec![2.5, 6.5],
-            "reduce_mean with batch=2 failed: got {:?}", read_f32(&result_2[0]));
+        assert_eq!(
+            read_f32(&result_2[0]),
+            vec![2.5, 6.5],
+            "reduce_mean with batch=2 failed: got {:?}",
+            read_f32(&result_2[0])
+        );
         // sum = [1+2+3+4=10, 5+6+7+8=26]
-        assert_eq!(read_f32(&result_2[1]), vec![10.0, 26.0],
-            "reduce_sum with batch=2 failed: got {:?}", read_f32(&result_2[1]));
+        assert_eq!(
+            read_f32(&result_2[1]),
+            vec![10.0, 26.0],
+            "reduce_sum with batch=2 failed: got {:?}",
+            read_f32(&result_2[1])
+        );
 
         // Test with batch=1: input data is 1*4*4 = 16 bytes
         let x_data_1 = f32_data(&[10.0, 20.0, 30.0, 40.0]);
-        let result_1 = g.compile_and_execute(
-            &[&mean, &sum], CpuBackend, &[&x_data_1],
-        ).unwrap();
+        let result_1 = g
+            .compile_and_execute(&[&mean, &sum], CpuBackend, &[&x_data_1])
+            .unwrap();
         // mean = 25, sum = 100
-        assert_eq!(read_f32(&result_1[0]), vec![25.0],
-            "reduce_mean with batch=1 failed: got {:?}", read_f32(&result_1[0]));
-        assert_eq!(read_f32(&result_1[1]), vec![100.0],
-            "reduce_sum with batch=1 failed: got {:?}", read_f32(&result_1[1]));
+        assert_eq!(
+            read_f32(&result_1[0]),
+            vec![25.0],
+            "reduce_mean with batch=1 failed: got {:?}",
+            read_f32(&result_1[0])
+        );
+        assert_eq!(
+            read_f32(&result_1[1]),
+            vec![100.0],
+            "reduce_sum with batch=1 failed: got {:?}",
+            read_f32(&result_1[1])
+        );
     }
 
     #[test]
@@ -2496,12 +2731,19 @@ mod tests {
         let b_data = f32_data(&(0..320).map(|i| i as f32).collect::<Vec<_>>());
 
         let result = g.compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data]);
-        assert!(result.is_err(), "expected shape mismatch error, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected shape mismatch error, got {:?}",
+            result
+        );
         let err = result.err().unwrap();
         let msg = format!("{}", err);
         // Compile catches this, so error should mention MatMul or inner dim
-        assert!(msg.contains("MatMul") || msg.contains("inner dim"),
-            "expected matmul shape error, got: {}", msg);
+        assert!(
+            msg.contains("MatMul") || msg.contains("inner dim"),
+            "expected matmul shape error, got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -2516,11 +2758,20 @@ mod tests {
         let b_data = f32_data(&(0..8).map(|i| i as f32).collect::<Vec<_>>());
 
         let result = g.compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data]);
-        assert!(result.is_err(), "expected broadcast error, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected broadcast error, got {:?}",
+            result
+        );
         let err = result.err().unwrap();
         let msg = format!("{}", err);
-        assert!(msg.contains("broadcast") || msg.contains("Broadcast") || msg.contains("shape validation"),
-            "expected broadcast shape error, got: {}", msg);
+        assert!(
+            msg.contains("broadcast")
+                || msg.contains("Broadcast")
+                || msg.contains("shape validation"),
+            "expected broadcast shape error, got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -2543,9 +2794,9 @@ mod tests {
         // Execute with batch=2
         let x_data_2 = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let w_data = f32_data(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
-        let result_2 = executor.execute(
-            &compiled_graph, &plan, &memory_plan, &[&x_data_2, &w_data],
-        ).unwrap();
+        let result_2 = executor
+            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_2, &w_data])
+            .unwrap();
         let out_2 = read_f32(&result_2[0]);
         // batch=2, feat=3 → 6 elements
         // Row 0: [1,2,3,4] @ W = [1*1+2*0+3*0+4*1=5, 1*0+2*1+3*0+4*1=6, 1*0+2*0+3*1+4*1=7]
@@ -2556,13 +2807,18 @@ mod tests {
 
         // Execute SAME plan with batch=1 — no recompilation
         let x_data_1 = f32_data(&[10.0, 20.0, 30.0, 40.0]);
-        let result_1 = executor.execute(
-            &compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data],
-        ).unwrap();
+        let result_1 = executor
+            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data])
+            .unwrap();
         let out_1 = read_f32(&result_1[0]);
         // batch=1, feat=3 → 3 elements
         // [10,20,30,40] @ W = [10+40=50, 20+40=60, 30+40=70]
-        assert_eq!(out_1.len(), 3, "batch=1 should produce 3 elements, got {}", out_1.len());
+        assert_eq!(
+            out_1.len(),
+            3,
+            "batch=1 should produce 3 elements, got {}",
+            out_1.len()
+        );
         assert!((out_1[0] - 50.0).abs() < 1e-4);
         assert!((out_1[2] - 70.0).abs() < 1e-4);
     }
@@ -2598,13 +2854,17 @@ mod tests {
         // Weight data = 64*128*4 = 32768 bytes
         let w_data = f32_data(&(0..8192).map(|i| (i % 128) as f32).collect::<Vec<_>>());
 
-        let result = g.compile_and_execute(
-            &[&out], CpuBackend, &[&a_data, &bias_data, &w_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(&[&out], CpuBackend, &[&a_data, &bias_data, &w_data])
+            .unwrap();
         let out_f32 = read_f32(&result[0]);
         // Output should be [2, 3, 128] = 768 elements
-        assert_eq!(out_f32.len(), 768,
-            "multi-symbol output should be 2*3*128=768 elements, got {}", out_f32.len());
+        assert_eq!(
+            out_f32.len(),
+            768,
+            "multi-symbol output should be 2*3*128=768 elements, got {}",
+            out_f32.len()
+        );
     }
 
     #[test]
@@ -2619,9 +2879,9 @@ mod tests {
         let ab = g.abs(&a);
 
         let a_data = f32_data(&[0.0, 1.0, -1.0, 2.0]);
-        let result = g.compile_and_execute(
-            &[&sig, &tan, &exp, &sq, &ab], CpuBackend, &[&a_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(&[&sig, &tan, &exp, &sq, &ab], CpuBackend, &[&a_data])
+            .unwrap();
 
         let sig_out = read_f32(&result[0]);
         let tan_out = read_f32(&result[1]);
@@ -2655,7 +2915,9 @@ mod tests {
         let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let b_data = f32_data(&[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
 
-        let result = g.compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data]).unwrap();
+        let result = g
+            .compile_and_execute(&[&c], CpuBackend, &[&a_data, &b_data])
+            .unwrap();
         let out = read_f32(&result[0]);
 
         // Expected: [[1*7+2*9+3*11, 1*8+2*10+3*12], [4*7+5*9+6*11, 4*8+5*10+6*12]]
@@ -2674,7 +2936,9 @@ mod tests {
         let a_data = f32_data(&[-1.0, 2.0, -3.0]);
         let b_data = f32_data(&[4.0, -5.0, 6.0]);
 
-        let result = g.compile_and_execute(&[&d], CpuBackend, &[&a_data, &b_data]).unwrap();
+        let result = g
+            .compile_and_execute(&[&d], CpuBackend, &[&a_data, &b_data])
+            .unwrap();
         // -1+4=3->relu=3, 2-5=-3->relu=0, -3+6=3->relu=3
         assert_eq!(read_f32(&result[0]), vec![3.0, 0.0, 3.0]);
     }
@@ -2688,9 +2952,9 @@ mod tests {
         let r = g.reshape(&a, &[DimExpr::Known(3), DimExpr::Known(2)]);
 
         let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let result = g.compile_and_execute(
-            &[&t, &f, &r], CpuBackend, &[&a_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(&[&t, &f, &r], CpuBackend, &[&a_data])
+            .unwrap();
 
         // Transpose: (2,3) -> (3,2) = [1,4,2,5,3,6]
         assert_eq!(read_f32(&result[0]), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
@@ -2705,14 +2969,14 @@ mod tests {
     fn test_reduce_sum_mean() {
         let g = GraphBuilder::new();
         let a = g.input(&[2, 3], IrDType::F32);
-        let sum_keep = g.reduce_sum(&a, 1, true);   // keepdim
-        let sum_no = g.reduce_sum(&a, 1, false);    // no keepdim
+        let sum_keep = g.reduce_sum(&a, 1, true); // keepdim
+        let sum_no = g.reduce_sum(&a, 1, false); // no keepdim
         let mean = g.reduce_mean(&a, 1, false);
 
         let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let result = g.compile_and_execute(
-            &[&sum_keep, &sum_no, &mean], CpuBackend, &[&a_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(&[&sum_keep, &sum_no, &mean], CpuBackend, &[&a_data])
+            .unwrap();
 
         // sum over dim 1 (rows): [1+2+3=6, 4+5+6=15]
         assert_eq!(read_f32(&result[0]), vec![6.0, 15.0]);
@@ -2737,7 +3001,9 @@ mod tests {
         let w_data = f32_data(&[1.0, 0.0, 0.0, 1.0, 1.0, 0.0]);
         let b_data = f32_data(&[-50.0, 0.0]); // bias to test relu
 
-        let result = g.compile_and_execute(&[&out], CpuBackend, &[&a_data, &w_data, &b_data]).unwrap();
+        let result = g
+            .compile_and_execute(&[&out], CpuBackend, &[&a_data, &w_data, &b_data])
+            .unwrap();
         let out_f32 = read_f32(&result[0]);
 
         // MM = [[1*1+2*0+3*1=4, 1*0+2*1+3*0=2], [4*1+5*0+6*1=10, 4*0+5*1+6*0=5]]
@@ -2758,9 +3024,9 @@ mod tests {
         let a_data = f32_data(&[3.0, 4.0]);
         let b_data = f32_data(&[7.0, 8.0]);
 
-        let result = g.compile_and_execute(
-            &[&sum, &prod], CpuBackend, &[&a_data, &b_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(&[&sum, &prod], CpuBackend, &[&a_data, &b_data])
+            .unwrap();
 
         assert_eq!(read_f32(&result[0]), vec![10.0, 12.0]); // sum
         assert_eq!(read_f32(&result[1]), vec![21.0, 32.0]); // prod
@@ -2779,7 +3045,9 @@ mod tests {
         let a_data = f32_data(&[-5.0, -2.0, 1.0, 4.0]);
         let b_data = f32_data(&[3.0, -1.0, 2.0, -3.0]);
 
-        let result = g.compile_and_execute(&[&d], CpuBackend, &[&a_data, &b_data]).unwrap();
+        let result = g
+            .compile_and_execute(&[&d], CpuBackend, &[&a_data, &b_data])
+            .unwrap();
         // c = [-2, -3, 3, 1], relu = [0, 0, 3, 1]
         assert_eq!(read_f32(&result[0]), vec![0.0, 0.0, 3.0, 1.0]);
     }
@@ -2797,7 +3065,9 @@ mod tests {
         let a_data = f32_data(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0]);
         let w_data = f32_data(&[1.0, 0.0, 0.0, 1.0, 1.0, 0.0]);
 
-        let result = g.compile_and_execute(&[&out], CpuBackend, &[&a_data, &w_data]).unwrap();
+        let result = g
+            .compile_and_execute(&[&out], CpuBackend, &[&a_data, &w_data])
+            .unwrap();
         let out_f32 = read_f32(&result[0]);
 
         // MM = [[1*1+(-2)*0+3*1=4, 1*0+(-2)*1+3*0=-2], [-4*1+5*0+(-6)*1=-10, -4*0+5*1+(-6)*0=5]]
@@ -2823,28 +3093,34 @@ mod tests {
         // Compile and execute GRADIENT outputs from the combined backward graph.
         // The backward graph contains both forward and backward nodes; requesting
         // gradient outputs ensures the forward pass feeds into the correct accumulators.
-        let grad_result = g.compile_and_execute(
-            &[&grads[0], &grads[1]],
-            CpuBackend,
-            &[&a_data, &b_data],
-        ).unwrap();
+        let grad_result = g
+            .compile_and_execute(&[&grads[0], &grads[1]], CpuBackend, &[&a_data, &b_data])
+            .unwrap();
 
         // d(loss)/da = d(mean(a+b))/da = [1/4, 1/4, 1/4, 1/4]
         let grad_a = read_f32(&grad_result[0]);
         assert_eq!(grad_a.len(), 4, "grad_a len wrong, got {:?}", grad_a);
         for &g_val in &grad_a {
-            assert!((g_val - 0.25).abs() < 1e-5,
+            assert!(
+                (g_val - 0.25).abs() < 1e-5,
                 "grad_a value {} not close to 0.25; grad_result[0]={:?} grad_result[1]={:?}",
-                g_val, &grad_a, &read_f32(&grad_result[1]));
+                g_val,
+                &grad_a,
+                &read_f32(&grad_result[1])
+            );
         }
 
         // d(loss)/db = d(mean(a+b))/db = [1/4, 1/4, 1/4, 1/4]
         let grad_b = read_f32(&grad_result[1]);
         assert_eq!(grad_b.len(), 4, "grad_b len wrong, got {:?}", grad_b);
         for &g_val in &grad_b {
-            assert!((g_val - 0.25).abs() < 1e-5,
+            assert!(
+                (g_val - 0.25).abs() < 1e-5,
                 "grad_b value {} not close to 0.25; grad_result[0]={:?} grad_result[1]={:?}",
-                g_val, &read_f32(&grad_result[0]), &grad_b);
+                g_val,
+                &read_f32(&grad_result[0]),
+                &grad_b
+            );
         }
     }
 
@@ -2864,44 +3140,61 @@ mod tests {
         let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
         let b_data = f32_data(&[0.0, 0.0]);
 
-        let fwd_result = g.compile_and_execute(
-            &[&loss], CpuBackend,
-            &[&x_data, &W_data, &b_data],
-        ).unwrap();
+        let fwd_result = g
+            .compile_and_execute(&[&loss], CpuBackend, &[&x_data, &W_data, &b_data])
+            .unwrap();
         let fwd_loss = read_f32(&fwd_result[0]);
         // x@W = [[5.0, 6.0]], +b = [[5.0, 6.0]], mean=0 → [5.0, 6.0]
-        assert!((fwd_loss[0] - 5.0).abs() < 1e-4, "fwd loss[0] should be 5.0, got {:?}", fwd_loss);
-        assert!((fwd_loss[1] - 6.0).abs() < 1e-4, "fwd loss[1] should be 6.0, got {:?}", fwd_loss);
+        assert!(
+            (fwd_loss[0] - 5.0).abs() < 1e-4,
+            "fwd loss[0] should be 5.0, got {:?}",
+            fwd_loss
+        );
+        assert!(
+            (fwd_loss[1] - 6.0).abs() < 1e-4,
+            "fwd loss[1] should be 6.0, got {:?}",
+            fwd_loss
+        );
 
         // Now test backward pass
         let grads = g.backward(&loss).unwrap();
         assert_eq!(grads.len(), 3, "should return gradients for x, W, and b");
 
         // Just compile & execute the gradient output for W
-        let grad_result = g.compile_and_execute(
-            &[&grads[1]], CpuBackend,  // dW
-            &[&x_data, &W_data, &b_data],
-        ).unwrap();
+        let grad_result = g
+            .compile_and_execute(
+                &[&grads[1]],
+                CpuBackend, // dW
+                &[&x_data, &W_data, &b_data],
+            )
+            .unwrap();
         let dW_vals = read_f32(&grad_result[0]);
         assert_eq!(dW_vals.len(), 8, "dW should have 8 elements");
         // dW = x^T @ dL/dy, where dL/dy = [0.5, 0.5] (mean gradient)
         // But this depends on the exact implementation
-        assert!(dW_vals.iter().any(|&v| v.abs() > 0.0), "dW should have non-zero gradients");
+        assert!(
+            dW_vals.iter().any(|&v| v.abs() > 0.0),
+            "dW should have non-zero gradients"
+        );
 
         // Test optimizer step
         let dW = &grads[1];
         let updated_W = g.apply_sgd(&W, dW, 0.1);
 
-        let opt_result = g.compile_and_execute(
-            &[&updated_W], CpuBackend,
-            &[&x_data, &W_data, &b_data],
-        ).unwrap();
+        let opt_result = g
+            .compile_and_execute(&[&updated_W], CpuBackend, &[&x_data, &W_data, &b_data])
+            .unwrap();
         let updated_W_vals = read_f32(&opt_result[0]);
         assert_eq!(updated_W_vals.len(), 8, "W updated should have 8 elements");
 
         let W_init: Vec<f32> = read_f32(&W_data);
-        assert!(updated_W_vals.iter().zip(W_init.iter()).any(|(n, o)| (n - o).abs() > 1e-6),
-            "W should be updated by SGD");
+        assert!(
+            updated_W_vals
+                .iter()
+                .zip(W_init.iter())
+                .any(|(n, o)| (n - o).abs() > 1e-6),
+            "W should be updated by SGD"
+        );
     }
 
     #[test]
@@ -2917,7 +3210,7 @@ mod tests {
         // Backward
         let grads = g.backward(&loss).unwrap();
         assert_eq!(grads.len(), 2, "should return gradients for x and W");
-        let dW = &grads[1];  // second gradient is for W
+        let dW = &grads[1]; // second gradient is for W
 
         // Adam requires m/v state tensors
         let m = g.parameter(&[4, 2], IrDType::F32);
@@ -2929,23 +3222,36 @@ mod tests {
         let m_data = f32_data(&[0.0; 8]);
         let v_data = f32_data(&[0.0; 8]);
 
-        let result = g.compile_and_execute(
-            &[&loss, &updated_W, &m, &v],
-            CpuBackend,
-            &[&x_data, &W_data, &m_data, &v_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(
+                &[&loss, &updated_W, &m, &v],
+                CpuBackend,
+                &[&x_data, &W_data, &m_data, &v_data],
+            )
+            .unwrap();
 
         let updated_W_vals = read_f32(&result[1]);
         assert_eq!(updated_W_vals.len(), 8, "W updated should have 8 elements");
         let W_init: Vec<f32> = read_f32(&W_data);
-        assert!(updated_W_vals.iter().zip(W_init.iter()).any(|(n, o)| (n - o).abs() > 1e-6),
-            "W should be updated by Adam");
+        assert!(
+            updated_W_vals
+                .iter()
+                .zip(W_init.iter())
+                .any(|(n, o)| (n - o).abs() > 1e-6),
+            "W should be updated by Adam"
+        );
 
         // m and v should also have been updated (non-zero now)
         let updated_m = read_f32(&result[2]);
         let updated_v = read_f32(&result[3]);
-        assert!(updated_m.iter().any(|&x| x > 0.0), "Adam m should be non-zero after update");
-        assert!(updated_v.iter().any(|&x| x > 0.0), "Adam v should be non-zero after update");
+        assert!(
+            updated_m.iter().any(|&x| x > 0.0),
+            "Adam m should be non-zero after update"
+        );
+        assert!(
+            updated_v.iter().any(|&x| x > 0.0),
+            "Adam v should be non-zero after update"
+        );
     }
 
     #[test]
@@ -2973,34 +3279,57 @@ mod tests {
         let m_data: Vec<u8> = vec![0u8; 8 * 2]; // 8 elements * 2 bytes = 16 bytes
         let v_data: Vec<u8> = vec![0u8; 8 * 2];
 
-        let result = g.compile_and_execute(
-            &[&loss, &updated_W, &m, &v],
-            CpuBackend,
-            &[&x_data, &W_data, &m_data, &v_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(
+                &[&loss, &updated_W, &m, &v],
+                CpuBackend,
+                &[&x_data, &W_data, &m_data, &v_data],
+            )
+            .unwrap();
 
         // W should be updated by Adam
         let updated_W_vals = read_f32(&result[1]);
         assert_eq!(updated_W_vals.len(), 8);
         let W_init: Vec<f32> = read_f32(&W_data);
-        assert!(updated_W_vals.iter().zip(W_init.iter()).any(|(n, o)| (n - o).abs() > 1e-6),
-            "W should be updated by Adam with F16 state");
+        assert!(
+            updated_W_vals
+                .iter()
+                .zip(W_init.iter())
+                .any(|(n, o)| (n - o).abs() > 1e-6),
+            "W should be updated by Adam with F16 state"
+        );
 
         // m and v should be non-zero after update (read as F16)
         let updated_m_raw = &result[2];
         let updated_v_raw = &result[3];
-        assert_eq!(updated_m_raw.len(), 16, "m should be 16 bytes (8 F16 values)");
-        assert_eq!(updated_v_raw.len(), 16, "v should be 16 bytes (8 F16 values)");
+        assert_eq!(
+            updated_m_raw.len(),
+            16,
+            "m should be 16 bytes (8 F16 values)"
+        );
+        assert_eq!(
+            updated_v_raw.len(),
+            16,
+            "v should be 16 bytes (8 F16 values)"
+        );
 
         // Convert F16 back to f32 for verification
-        let updated_m_f32: Vec<f32> = updated_m_raw.chunks_exact(2)
+        let updated_m_f32: Vec<f32> = updated_m_raw
+            .chunks_exact(2)
             .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
             .collect();
-        let updated_v_f32: Vec<f32> = updated_v_raw.chunks_exact(2)
+        let updated_v_f32: Vec<f32> = updated_v_raw
+            .chunks_exact(2)
             .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
             .collect();
-        assert!(updated_m_f32.iter().any(|&x| x > 0.0), "Adam F16 m should be non-zero");
-        assert!(updated_v_f32.iter().any(|&x| x > 0.0), "Adam F16 v should be non-zero");
+        assert!(
+            updated_m_f32.iter().any(|&x| x > 0.0),
+            "Adam F16 m should be non-zero"
+        );
+        assert!(
+            updated_v_f32.iter().any(|&x| x > 0.0),
+            "Adam F16 v should be non-zero"
+        );
     }
 
     #[test]
@@ -3025,23 +3354,34 @@ mod tests {
         let m_data: Vec<u8> = vec![0u8; 16];
         let v_data: Vec<u8> = vec![0u8; 16];
 
-        let result = g.compile_and_execute(
-            &[&loss, &updated_W, &m, &v],
-            CpuBackend,
-            &[&x_data, &W_data, &m_data, &v_data],
-        ).unwrap();
+        let result = g
+            .compile_and_execute(
+                &[&loss, &updated_W, &m, &v],
+                CpuBackend,
+                &[&x_data, &W_data, &m_data, &v_data],
+            )
+            .unwrap();
 
         let updated_W_vals = read_f32(&result[1]);
         let W_init: Vec<f32> = read_f32(&W_data);
-        assert!(updated_W_vals.iter().zip(W_init.iter()).any(|(n, o)| (n - o).abs() > 1e-6),
-            "W should be updated by AdamW with F16 state");
+        assert!(
+            updated_W_vals
+                .iter()
+                .zip(W_init.iter())
+                .any(|(n, o)| (n - o).abs() > 1e-6),
+            "W should be updated by AdamW with F16 state"
+        );
 
         // Verify F16 state was updated
         let updated_m_raw = &result[2];
-        let updated_m_f32: Vec<f32> = updated_m_raw.chunks_exact(2)
+        let updated_m_f32: Vec<f32> = updated_m_raw
+            .chunks_exact(2)
             .map(|c| half::f16::from_bits(u16::from_le_bytes([c[0], c[1]])).to_f32())
             .collect();
-        assert!(updated_m_f32.iter().any(|&x| x > 0.0), "AdamW F16 m should be non-zero");
+        assert!(
+            updated_m_f32.iter().any(|&x| x > 0.0),
+            "AdamW F16 m should be non-zero"
+        );
     }
 
     /// Test gradient scaling via loss scaling pattern:
@@ -3084,22 +3424,26 @@ mod tests {
         let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
 
         // With scaling
-        let result_scaled = g.compile_and_execute(
-            &[&loss, &updated_W], CpuBackend,
-            &[&x_data, &W_data],
-        ).unwrap();
+        let result_scaled = g
+            .compile_and_execute(&[&loss, &updated_W], CpuBackend, &[&x_data, &W_data])
+            .unwrap();
         // Without scaling (reference)
-        let result_ref = g2.compile_and_execute(
-            &[&loss2, &updated_W2], CpuBackend,
-            &[&x_data, &W_data],
-        ).unwrap();
+        let result_ref = g2
+            .compile_and_execute(&[&loss2, &updated_W2], CpuBackend, &[&x_data, &W_data])
+            .unwrap();
 
         // Scaled-then-unscaled should produce the same weight update as no scaling
         let w_scaled = read_f32(&result_scaled[1]);
         let w_ref = read_f32(&result_ref[1]);
         for (i, (s, r)) in w_scaled.iter().zip(w_ref.iter()).enumerate() {
-            assert!((s - r).abs() < 1e-5,
-                "Scaled+unscaled weight[{}] = {}, ref = {}, diff = {}", i, s, r, (s - r).abs());
+            assert!(
+                (s - r).abs() < 1e-5,
+                "Scaled+unscaled weight[{}] = {}, ref = {}, diff = {}",
+                i,
+                s,
+                r,
+                (s - r).abs()
+            );
         }
     }
 }

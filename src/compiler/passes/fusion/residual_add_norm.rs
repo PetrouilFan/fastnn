@@ -1,11 +1,13 @@
-use crate::ir::node::{ComputeGraph, Opcode, NodeId};
-use std::collections::HashMap;
 use super::FusionPass;
+use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use std::collections::HashMap;
 
 pub struct FusedResidualAddNorm;
 
 impl FusionPass for FusedResidualAddNorm {
-    fn name() -> &'static str { "FusedResidualAddNorm" }
+    fn name() -> &'static str {
+        "FusedResidualAddNorm"
+    }
 
     fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
         apply_fused_residual_add_norm(graph)
@@ -13,7 +15,9 @@ impl FusionPass for FusedResidualAddNorm {
 }
 
 fn apply_fused_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, String> {
-    let norm_ids: Vec<NodeId> = graph.nodes.iter()
+    let norm_ids: Vec<NodeId> = graph
+        .nodes
+        .iter()
         .filter(|n| matches!(n.opcode, Opcode::LayerNorm | Opcode::RMSNorm))
         .map(|n| n.id)
         .collect();
@@ -58,7 +62,9 @@ fn apply_fused_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, Strin
         let add_consumers: Vec<NodeId> = graph.consumers(add_id);
         let can_remove_add = add_consumers.len() == 1 && add_consumers[0] == norm_id;
 
-        let eps = norm_node.attrs.get("eps")
+        let eps = norm_node
+            .attrs
+            .get("eps")
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(1e-5);
 

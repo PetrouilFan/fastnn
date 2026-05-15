@@ -43,8 +43,12 @@ fn expected_input_dtype(opcode: &Opcode, input_index: usize) -> Option<IrDType> 
         Opcode::Cast => None, // already has the right input
 
         // Optimizer ops accept F32 gradients.
-        Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate
-        | Opcode::MuonUpdate | Opcode::LionUpdate | Opcode::RmspropUpdate => {
+        Opcode::SgdUpdate
+        | Opcode::AdamUpdate
+        | Opcode::AdamWUpdate
+        | Opcode::MuonUpdate
+        | Opcode::LionUpdate
+        | Opcode::RmspropUpdate => {
             if input_index == 0 {
                 Some(IrDType::F32) // weight
             } else {
@@ -147,7 +151,13 @@ fn dtypes_match(a: &IrDType, b: &IrDType) -> bool {
     use IrDType::*;
     match (a, b) {
         // Same concrete type
-        (F32, F32) | (F16, F16) | (BF16, BF16) | (I32, I32) | (I64, I64) | (Bool, Bool) | (I8, I8) => true,
+        (F32, F32)
+        | (F16, F16)
+        | (BF16, BF16)
+        | (I32, I32)
+        | (I64, I64)
+        | (Bool, Bool)
+        | (I8, I8) => true,
         // U4/U8 match regardless of scales/zps (those are metadata)
         (U4 { .. }, U4 { .. }) | (U8 { .. }, U8 { .. }) => true,
         _ => false,
@@ -185,22 +195,26 @@ mod tests {
     fn test_type_inference_inserts_dequantize() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         // Add another consumer of the weight that expects F32:
         // This could be a constant that feeds both MatMul and an Add
         // (but for simplicity we just add another MatMul).
         let mm2_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
 
@@ -221,7 +235,8 @@ mod tests {
     fn test_type_inference_inserts_quantize() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
@@ -230,7 +245,8 @@ mod tests {
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
         let mm_id = graph.add_node(
-            Opcode::MatMul, vec![input_id, weight_id],
+            Opcode::MatMul,
+            vec![input_id, weight_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
 
@@ -252,12 +268,14 @@ mod tests {
     fn test_type_inference_inserts_quantize_activations() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         // DequantizeActivations expects I8 input, so F32 is a mismatch
         let dq_id = graph.add_node(
-            Opcode::DequantizeActivations, vec![input_id],
+            Opcode::DequantizeActivations,
+            vec![input_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id]);
@@ -282,12 +300,14 @@ mod tests {
     fn test_type_inference_inserts_dequantize_activations() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::I8),
         );
         // QuantizeActivations expects F32 input, so I8 is a mismatch
         let qa_id = graph.add_node(
-            Opcode::QuantizeActivations, vec![input_id],
+            Opcode::QuantizeActivations,
+            vec![input_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::I8),
         );
         graph.set_inputs(vec![input_id]);
@@ -312,12 +332,14 @@ mod tests {
     fn test_type_inference_inserts_to_f16() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F16),
         );
         // ToF16 expects F32 input, so F16 input is a mismatch
         let to_f16_id = graph.add_node(
-            Opcode::ToF16, vec![input_id],
+            Opcode::ToF16,
+            vec![input_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F16),
         );
         graph.set_inputs(vec![input_id]);
@@ -341,11 +363,13 @@ mod tests {
     fn test_type_inference_idempotent() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         let dq_id = graph.add_node(
-            Opcode::DequantizeActivations, vec![input_id],
+            Opcode::DequantizeActivations,
+            vec![input_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id]);
@@ -365,13 +389,21 @@ mod tests {
     fn test_type_inference_quantize_with_non_f32_input() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::I8),
         );
         // Quantize expects F32 input, so I8 is a mismatch
         let q_id = graph.add_node(
-            Opcode::Quantize, vec![input_id],
-            TensorType::new(vec![DimExpr::Known(4)], IrDType::U4 { scales: vec![], zero_points: vec![] }),
+            Opcode::Quantize,
+            vec![input_id],
+            TensorType::new(
+                vec![DimExpr::Known(4)],
+                IrDType::U4 {
+                    scales: vec![],
+                    zero_points: vec![],
+                },
+            ),
         );
         graph.set_inputs(vec![input_id]);
         graph.set_outputs(vec![q_id]);
@@ -394,11 +426,13 @@ mod tests {
             TensorType::new(vec![], IrDType::F32),
         );
         let input_id = graph.add_node(
-            Opcode::Input, vec![],
+            Opcode::Input,
+            vec![],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         let add_id = graph.add_node(
-            Opcode::Add, vec![input_id, const_id],
+            Opcode::Add,
+            vec![input_id, const_id],
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         graph.set_inputs(vec![input_id]);

@@ -21,13 +21,14 @@ impl Tensor {
                 let shape = self.shape();
                 let dim_size = shape[dim_normalized] as usize;
                 let num_rows = shape[0] as usize;
-                let output = crate::backend::cpu::reductions_fast::sum_last_dim_contiguous(self, dim_size, num_rows);
+                let output = crate::backend::cpu::reductions_fast::sum_last_dim_contiguous(
+                    self, dim_size, num_rows,
+                );
                 if autograd::is_grad_enabled() && self.requires_grad() {
                     let mut output = output;
                     let edges = autograd::make_edge(self);
                     let inputs = vec![self.clone()];
-                    let backward =
-                        autograd::SumBackward::new(edges, inputs);
+                    let backward = autograd::SumBackward::new(edges, inputs);
                     let mut meta = autograd::AutogradMeta::new_non_leaf(true);
                     meta.grad_fn = Some(std::sync::Arc::new(backward));
                     Arc::make_mut(&mut output.inner).autograd_meta =

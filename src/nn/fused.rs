@@ -190,14 +190,7 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
                     self.groups as usize,
                 );
                 let biased = g.bias_add(&conv, &ins[2]);
-                let bn = g.batch_norm(
-                    &biased,
-                    &ins[3],
-                    &ins[4],
-                    &ins[5],
-                    &ins[6],
-                    self.eps,
-                );
+                let bn = g.batch_norm(&biased, &ins[3], &ins[4], &ins[5], &ins[6], self.eps);
                 let result = match A::DISPATCH_NAME {
                     "fused_conv_bn_relu" => g.relu(&bn),
                     "fused_conv_bn_gelu" => g.gelu(&bn),

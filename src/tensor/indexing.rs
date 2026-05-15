@@ -74,11 +74,13 @@ impl Tensor {
 
     pub fn gt_scalar(&self, threshold: f32) -> Tensor {
         let scalar = Tensor::from_scalar(threshold);
-        Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.gt_scalar(&ins[0], &ins[1])])
-            .expect("Tensor::gt_scalar: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap()
+        Tensor::exec_aot(&[self, &scalar], |g, ins| {
+            vec![g.gt_scalar(&ins[0], &ins[1])]
+        })
+        .expect("Tensor::gt_scalar: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     pub fn sign(&self) -> Tensor {
@@ -110,8 +112,11 @@ impl Tensor {
         Tensor::exec_aot(&[self, other], |g, ins| {
             let lt = g.lt_scalar(&ins[0], &ins[1]);
             vec![g.logical_not(&lt)]
-        }).expect("Tensor::ge_tensor: AOT execution failed")
-        .into_iter().next().unwrap()
+        })
+        .expect("Tensor::ge_tensor: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     pub fn le_tensor(&self, other: &Tensor) -> Tensor {
@@ -119,26 +124,33 @@ impl Tensor {
         Tensor::exec_aot(&[self, other], |g, ins| {
             let gt = g.gt_scalar(&ins[0], &ins[1]);
             vec![g.logical_not(&gt)]
-        }).expect("Tensor::le_tensor: AOT execution failed")
-        .into_iter().next().unwrap()
+        })
+        .expect("Tensor::le_tensor: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     pub fn lt_scalar(&self, threshold: f32) -> Tensor {
         let scalar = Tensor::from_scalar(threshold);
-        Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.lt_scalar(&ins[0], &ins[1])])
-            .expect("Tensor::lt_scalar: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap()
+        Tensor::exec_aot(&[self, &scalar], |g, ins| {
+            vec![g.lt_scalar(&ins[0], &ins[1])]
+        })
+        .expect("Tensor::lt_scalar: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     pub fn eq_scalar(&self, threshold: f32) -> Tensor {
         let scalar = Tensor::from_scalar(threshold);
-        Tensor::exec_aot(&[self, &scalar], |g, ins| vec![g.eq_scalar(&ins[0], &ins[1])])
-            .expect("Tensor::eq_scalar: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap()
+        Tensor::exec_aot(&[self, &scalar], |g, ins| {
+            vec![g.eq_scalar(&ins[0], &ins[1])]
+        })
+        .expect("Tensor::eq_scalar: AOT execution failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     pub fn add_scalar(&self, scalar: f32) -> Tensor {

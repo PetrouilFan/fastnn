@@ -106,19 +106,23 @@ fn detect_qlinear_patterns(
 
         // Extract scales/zero_points from the packed weight's dtype.
         let (weight_scales, weight_zero_points) = match &packed_node.output_type.dtype {
-            IrDType::U4 { scales, zero_points } => {
-                (scales.clone(), zero_points.clone())
-            }
-            IrDType::U8 { scales, zero_points } => {
-                (scales.clone(), zero_points.clone())
-            }
+            IrDType::U4 {
+                scales,
+                zero_points,
+            } => (scales.clone(), zero_points.clone()),
+            IrDType::U8 {
+                scales,
+                zero_points,
+            } => (scales.clone(), zero_points.clone()),
             _ => continue,
         };
 
         // Check if output is consumed by a Quantize node.
         let consumers: Vec<NodeId> = graph.consumers(node_id);
         let q_output_id = match consumers.iter().find(|&&cid| {
-            graph.get_node(cid).map_or(false, |c| matches!(c.opcode, Opcode::Quantize))
+            graph
+                .get_node(cid)
+                .map_or(false, |c| matches!(c.opcode, Opcode::Quantize))
         }) {
             Some(&id) => id,
             None => continue,
@@ -132,7 +136,10 @@ fn detect_qlinear_patterns(
                     act_node.inputs.first().and_then(|&qa_id| {
                         graph.get_node(qa_id).and_then(|qa_node| {
                             if matches!(qa_node.opcode, Opcode::QuantizeActivations) {
-                                qa_node.attrs.get("scale").and_then(|s| s.parse::<f32>().ok())
+                                qa_node
+                                    .attrs
+                                    .get("scale")
+                                    .and_then(|s| s.parse::<f32>().ok())
                             } else {
                                 None
                             }
@@ -146,7 +153,7 @@ fn detect_qlinear_patterns(
         };
 
         skip_nodes.insert(weight_input); // Dequantize
-        skip_nodes.insert(q_output_id);  // Quantize
+        skip_nodes.insert(q_output_id); // Quantize
 
         patterns.insert(
             node_id,
@@ -199,7 +206,10 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         None => return (1.0, 0),
     };
     match &q_node.output_type.dtype {
-        IrDType::U4 { scales, zero_points } => {
+        IrDType::U4 {
+            scales,
+            zero_points,
+        } => {
             let s = scales.first().copied().unwrap_or(1.0);
             let zp = zero_points.first().copied().unwrap_or(0.0) as i32;
             // If scales is empty, try computing from bit_width
@@ -210,7 +220,10 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
                 (s, zp)
             }
         }
-        IrDType::U8 { scales, zero_points } => {
+        IrDType::U8 {
+            scales,
+            zero_points,
+        } => {
             let s = scales.first().copied().unwrap_or(1.0);
             let zp = zero_points.first().copied().unwrap_or(0.0) as i32;
             if scales.is_empty() {
@@ -250,9 +263,9 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
     let mut scale_zp_scalars: HashMap<NodeId, [f32; 6]> = HashMap::new(); // pattern_id → [a_s, a_zp, b_s, b_zp, y_s, y_zp]
 
     for &node_id in &order {
-        let node = graph.get_node(node_id).ok_or_else(|| {
-            format!("export: node {} not found", node_id)
-        })?;
+        let node = graph
+            .get_node(node_id)
+            .ok_or_else(|| format!("export: node {} not found", node_id))?;
 
         // Skip nodes that are part of quantized patterns (Dequantize, Quantize).
         if skip_nodes.contains(&node_id) {
@@ -263,7 +276,12 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
         let input_names: Vec<String> = node
             .inputs
             .iter()
-            .map(|id| node_output_names.get(id).cloned().unwrap_or_else(|| format!("t_{}", id)))
+            .map(|id| {
+                node_output_names
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("t_{}", id))
+            })
             .collect();
 
         // Check if this node is a pattern main node (MatMul or Conv2d that matched).
@@ -283,19 +301,29 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
                 scale_zp_param_names(node_id);
 
             // Store scalar values for later insertion into params
-            scale_zp_scalars.insert(node_id, [a_scale, a_zp as f32, b_scale, b_zp as f32, y_scale, y_zp as f32]);
+            scale_zp_scalars.insert(
+                node_id,
+                [
+                    a_scale,
+                    a_zp as f32,
+                    b_scale,
+                    b_zp as f32,
+                    y_scale,
+                    y_zp as f32,
+                ],
+            );
 
             // Build the 8-input string (format expected by the converter)
             let q_inputs = vec![
-                a_src,           // A (quantized activations) — may be a_scale placeholder
+                a_src, // A (quantized activations) — may be a_scale placeholder
                 node_output_names[&node.inputs[0]].clone(), // A (real activation)
-                a_s_name,        // A_scale
-                a_z_name,        // A_zp
-                b_src,           // B (weight input of Dequantize → the packed constant)
-                b_s_name,        // B_scale
-                b_z_name,        // B_zp
-                y_s_name,        // Y_scale
-                y_z_name,        // Y_zp
+                a_s_name, // A_scale
+                a_z_name, // A_zp
+                b_src, // B (weight input of Dequantize → the packed constant)
+                b_s_name, // B_scale
+                b_z_name, // B_zp
+                y_s_name, // Y_scale
+                y_z_name, // Y_zp
             ];
 
             let mut attrs = HashMap::new();
@@ -338,12 +366,20 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
 
         // Handle fused residual add norm: decompose into Add + LayerNorm/RMSNorm
         if node.opcode == Opcode::FusedResidualAddNorm {
-            let norm_type = node.attrs.get("norm_type").map(|s| s.as_str()).unwrap_or("layer_norm");
+            let norm_type = node
+                .attrs
+                .get("norm_type")
+                .map(|s| s.as_str())
+                .unwrap_or("layer_norm");
             let norm_op = match norm_type {
                 "rms_norm" => "RMSNorm",
                 _ => "LayerNormalization",
             };
-            let eps = node.attrs.get("eps").cloned().unwrap_or_else(|| "1e-5".to_string());
+            let eps = node
+                .attrs
+                .get("eps")
+                .cloned()
+                .unwrap_or_else(|| "1e-5".to_string());
             let intermediate = format!("t_fused_add_{}", node_id);
             onnx_nodes.push(OnnxExportNode {
                 op_type: "Add".to_string(),
@@ -369,10 +405,8 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
                 // Constant nodes become weight params, not ONNX ops
                 match val {
                     TensorValue::Data { bytes, tensor_type } => {
-                        let is_packed = matches!(
-                            &tensor_type.dtype,
-                            IrDType::U4 { .. } | IrDType::U8 { .. }
-                        );
+                        let is_packed =
+                            matches!(&tensor_type.dtype, IrDType::U4 { .. } | IrDType::U8 { .. });
                         if is_packed {
                             // Export quantized packed weights as raw byte params.
                             let shape: Vec<u64> = tensor_type
@@ -591,13 +625,27 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
                 // Strip the "Opcode::" prefix
                 let onnx_name = name.strip_prefix("Opcode::").unwrap_or(&name);
                 // Skip unsupported ops (training-only ops like SgdUpdate, GradientScale)
-                if matches!(other, Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate
-                    | Opcode::MuonUpdate | Opcode::LionUpdate | Opcode::RmspropUpdate
-                    | Opcode::GradientScale | Opcode::Quantize | Opcode::Dequantize
-                    | Opcode::QuantizeActivations | Opcode::DequantizeActivations
-                    | Opcode::ToF16 | Opcode::ToF32 | Opcode::MulScalar | Opcode::AddScalar
-                    | Opcode::DivScalar | Opcode::Input | Opcode::Constant(_))
-                {
+                if matches!(
+                    other,
+                    Opcode::SgdUpdate
+                        | Opcode::AdamUpdate
+                        | Opcode::AdamWUpdate
+                        | Opcode::MuonUpdate
+                        | Opcode::LionUpdate
+                        | Opcode::RmspropUpdate
+                        | Opcode::GradientScale
+                        | Opcode::Quantize
+                        | Opcode::Dequantize
+                        | Opcode::QuantizeActivations
+                        | Opcode::DequantizeActivations
+                        | Opcode::ToF16
+                        | Opcode::ToF32
+                        | Opcode::MulScalar
+                        | Opcode::AddScalar
+                        | Opcode::DivScalar
+                        | Opcode::Input
+                        | Opcode::Constant(_)
+                ) {
                     continue;
                 }
                 (onnx_name.to_string(), HashMap::new())
@@ -622,13 +670,14 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
         let [a_s_name, a_z_name, b_s_name, b_z_name, y_s_name, y_z_name] =
             scale_zp_param_names(pattern_id);
 
-        let insert_scalar = |params: &mut HashMap<String, OnnxExportParam>, name: String, val: f32| {
-            params.entry(name).or_insert_with(|| OnnxExportParam {
-                data: serde_json::json!(vec![val]),
-                shape: vec![],
-                dtype: "f32".to_string(),
-            });
-        };
+        let insert_scalar =
+            |params: &mut HashMap<String, OnnxExportParam>, name: String, val: f32| {
+                params.entry(name).or_insert_with(|| OnnxExportParam {
+                    data: serde_json::json!(vec![val]),
+                    shape: vec![],
+                    dtype: "f32".to_string(),
+                });
+            };
 
         insert_scalar(&mut params, a_s_name, a_s);
         insert_scalar(&mut params, a_z_name, a_zp);
@@ -642,13 +691,23 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
     let input_names: Vec<String> = graph
         .inputs
         .iter()
-        .map(|id| node_output_names.get(id).cloned().unwrap_or_else(|| format!("t_{}", id)))
+        .map(|id| {
+            node_output_names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| format!("t_{}", id))
+        })
         .collect();
 
     let output_names: Vec<String> = graph
         .outputs
         .iter()
-        .map(|id| node_output_names.get(id).cloned().unwrap_or_else(|| format!("t_{}", id)))
+        .map(|id| {
+            node_output_names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| format!("t_{}", id))
+        })
         .collect();
 
     let export_obj = serde_json::json!({

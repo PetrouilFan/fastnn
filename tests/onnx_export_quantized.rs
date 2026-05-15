@@ -43,17 +43,16 @@ fn build_qmatmul_graph() -> ComputeGraph {
 fn test_export_qlinear_matmul_detected() {
     let graph = build_qmatmul_graph();
     let json = export_to_onnx_json(&graph).expect("export should succeed");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&json).expect("JSON should parse");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse");
 
     let nodes = parsed["nodes"]
         .as_array()
         .expect("nodes should be an array");
 
     // QLinearMatMul should appear instead of separate Quantize/Dequantize/MatMul
-    let has_qlinear = nodes.iter().any(|n| {
-        n["op_type"].as_str() == Some("QLinearMatMul")
-    });
+    let has_qlinear = nodes
+        .iter()
+        .any(|n| n["op_type"].as_str() == Some("QLinearMatMul"));
     assert!(
         has_qlinear,
         "QLinearMatMul should appear in exported nodes, got: {:?}",
@@ -93,8 +92,7 @@ fn test_export_qlinear_matmul_detected() {
 fn test_export_qlinear_matmul_attrs() {
     let graph = build_qmatmul_graph();
     let json = export_to_onnx_json(&graph).expect("export should succeed");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&json).expect("JSON should parse");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse");
 
     let nodes = parsed["nodes"]
         .as_array()
@@ -147,8 +145,7 @@ fn test_export_non_quantized_matmul_unchanged() {
     let graph = gb.to_graph();
 
     let json = export_to_onnx_json(&graph).expect("export should succeed");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&json).expect("JSON should parse");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse");
 
     let nodes = parsed["nodes"]
         .as_array()
@@ -160,7 +157,10 @@ fn test_export_non_quantized_matmul_unchanged() {
     let has_qlinear = nodes
         .iter()
         .any(|n| n["op_type"].as_str() == Some("QLinearMatMul"));
-    assert!(!has_qlinear, "QLinearMatMul should NOT appear for non-quantized graph");
+    assert!(
+        !has_qlinear,
+        "QLinearMatMul should NOT appear for non-quantized graph"
+    );
 }
 
 #[test]
@@ -200,16 +200,15 @@ fn test_export_qlinear_conv_detected() {
     let graph = gb.to_graph();
 
     let json = export_to_onnx_json(&graph).expect("export should succeed");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&json).expect("JSON should parse");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse");
 
     let nodes = parsed["nodes"]
         .as_array()
         .expect("nodes should be an array");
 
-    let has_qlinear_conv = nodes.iter().any(|n| {
-        n["op_type"].as_str() == Some("QLinearConv")
-    });
+    let has_qlinear_conv = nodes
+        .iter()
+        .any(|n| n["op_type"].as_str() == Some("QLinearConv"));
     assert!(
         has_qlinear_conv,
         "QLinearConv should appear in exported nodes, got: {:?}",

@@ -15,17 +15,30 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             .collect();
 
         let inferred = match node.opcode {
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div
-            | Opcode::Maximum | Opcode::Minimum => {
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Div
+            | Opcode::Maximum
+            | Opcode::Minimum => {
                 if inputs.len() >= 2 {
-                    Some(broadcast_shapes(
-                        &inputs[0].output_type.shape,
-                        &inputs[1].output_type.shape,
-                    ).map_err(|e| format!("node {} ({:?} '{}') shapes {:?} vs {:?}: {}", 
-                        node_id, node.opcode, node.name,
-                        inputs[0].output_type.shape, 
-                        inputs[1].output_type.shape, 
-                        e))?)
+                    Some(
+                        broadcast_shapes(
+                            &inputs[0].output_type.shape,
+                            &inputs[1].output_type.shape,
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "node {} ({:?} '{}') shapes {:?} vs {:?}: {}",
+                                node_id,
+                                node.opcode,
+                                node.name,
+                                inputs[0].output_type.shape,
+                                inputs[1].output_type.shape,
+                                e
+                            )
+                        })?,
+                    )
                 } else if inputs.len() == 1 {
                     Some(inputs[0].output_type.shape.clone())
                 } else {
@@ -53,14 +66,22 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             | Opcode::Mish => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::MatMul => {
                 if inputs.len() >= 2 {
-                    Some(matmul_output_shape(
-                        &inputs[0].output_type.shape,
-                        &inputs[1].output_type.shape,
-                    ).map_err(|e| format!("node {} (MatMul '{}') shapes {:?} vs {:?}: {}",
-                        node_id, node.name,
-                        inputs[0].output_type.shape,
-                        inputs[1].output_type.shape,
-                        e))?)
+                    Some(
+                        matmul_output_shape(
+                            &inputs[0].output_type.shape,
+                            &inputs[1].output_type.shape,
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "node {} (MatMul '{}') shapes {:?} vs {:?}: {}",
+                                node_id,
+                                node.name,
+                                inputs[0].output_type.shape,
+                                inputs[1].output_type.shape,
+                                e
+                            )
+                        })?,
+                    )
                 } else {
                     None
                 }
@@ -80,11 +101,14 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             Opcode::Transpose => inputs.first().map(|i| {
                 if let Some(perm_str) = node.attrs.get("perm") {
                     // Use explicit permutation if available
-                    let perm: Vec<usize> = perm_str.split(',')
+                    let perm: Vec<usize> = perm_str
+                        .split(',')
                         .filter_map(|v| v.trim().parse().ok())
                         .collect();
                     if perm.len() == i.output_type.shape.len() {
-                        perm.iter().map(|&p| i.output_type.shape[p].clone()).collect()
+                        perm.iter()
+                            .map(|&p| i.output_type.shape[p].clone())
+                            .collect()
                     } else {
                         // Fallback: if perm length doesn't match, reverse
                         let mut s = i.output_type.shape.clone();
@@ -105,7 +129,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     if let Some(first) = shape.first() {
                         dims.push(first.clone());
                     }
-                    let product: DimExpr = shape[1..].iter()
+                    let product: DimExpr = shape[1..]
+                        .iter()
                         .cloned()
                         .reduce(|a, b| a.mul(&b))
                         .unwrap_or(DimExpr::Known(1));
@@ -115,27 +140,31 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     shape.clone()
                 }
             }),
-            Opcode::TopK => inputs.first().map(|i| {
-                i.output_type.shape.clone()
-            }),
-            Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => inputs.first().map(|i| {
-                let mut s = i.output_type.shape.clone();
-                if let Some(axis_str) = node.attrs.get("axis") {
-                    if let Ok(axis_i64) = axis_str.parse::<i64>() {
-                        let rank = s.len();
-                        let axis = if axis_i64 < 0 {
-                            let r = rank as i64;
-                            if r > 0 { ((r + axis_i64 % r) % r) as usize } else { 0 }
-                        } else {
-                            axis_i64 as usize
-                        };
-                        if axis < s.len() {
-                            s.remove(axis);
+            Opcode::TopK => inputs.first().map(|i| i.output_type.shape.clone()),
+            Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => {
+                inputs.first().map(|i| {
+                    let mut s = i.output_type.shape.clone();
+                    if let Some(axis_str) = node.attrs.get("axis") {
+                        if let Ok(axis_i64) = axis_str.parse::<i64>() {
+                            let rank = s.len();
+                            let axis = if axis_i64 < 0 {
+                                let r = rank as i64;
+                                if r > 0 {
+                                    ((r + axis_i64 % r) % r) as usize
+                                } else {
+                                    0
+                                }
+                            } else {
+                                axis_i64 as usize
+                            };
+                            if axis < s.len() {
+                                s.remove(axis);
+                            }
                         }
                     }
-                }
-                s
-            }),
+                    s
+                })
+            }
             Opcode::Concat => {
                 if !inputs.is_empty() {
                     let axis_i64: i64 = node
@@ -146,7 +175,11 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     let rank = inputs[0].output_type.shape.len();
                     let axis = if axis_i64 < 0 {
                         let r = rank as i64;
-                        if r > 0 { ((r + axis_i64 % r) % r) as usize } else { 0 }
+                        if r > 0 {
+                            ((r + axis_i64 % r) % r) as usize
+                        } else {
+                            0
+                        }
                     } else {
                         axis_i64 as usize
                     };
@@ -185,7 +218,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     // If absent, assume 0 (valid padding).
                     // The builder stores symmetric `padding` as a single int; fall back
                     // to the ONNX `pads` CSV format when `padding` is absent.
-                    let symmetric_pad: i64 = node.attrs
+                    let symmetric_pad: i64 = node
+                        .attrs
                         .get("padding")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0);
@@ -198,10 +232,10 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                             .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
                             .unwrap_or_default()
                     };
-                    let pad_h = pads.first().copied().unwrap_or(0)
-                        + pads.get(2).copied().unwrap_or(0);
-                    let pad_w = pads.get(1).copied().unwrap_or(0)
-                        + pads.get(3).copied().unwrap_or(0);
+                    let pad_h =
+                        pads.first().copied().unwrap_or(0) + pads.get(2).copied().unwrap_or(0);
+                    let pad_w =
+                        pads.get(1).copied().unwrap_or(0) + pads.get(3).copied().unwrap_or(0);
                     Some(
                         input_shape
                             .iter()
@@ -211,7 +245,11 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                                     match dim {
                                         DimExpr::Known(w) => {
                                             let total_pad = if i == 2 { pad_h } else { pad_w };
-                                            DimExpr::Known(((*w as i64 + total_pad - kernel) / stride + 1).max(1) as u64)
+                                            DimExpr::Known(
+                                                ((*w as i64 + total_pad - kernel) / stride + 1)
+                                                    .max(1)
+                                                    as u64,
+                                            )
                                         }
                                         other => other.clone(),
                                     }
@@ -299,7 +337,9 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             Opcode::Gather => {
                 // ONNX Gather output shape: data_shape[:axis] + indices_shape + data_shape[axis+1:]
                 if inputs.len() >= 2 {
-                    let axis: usize = node.attrs.get("axis")
+                    let axis: usize = node
+                        .attrs
+                        .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
                     let data_shape = &inputs[0].output_type.shape;
@@ -312,9 +352,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                     inputs.first().map(|i| i.output_type.shape.clone())
                 }
             }
-            Opcode::ScatterNd => {
-                inputs.first().map(|i| i.output_type.shape.clone())
-            }
+            Opcode::ScatterNd => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::Conv1d => {
                 if inputs.len() >= 2 {
                     Some(conv1d_output_shape(
@@ -460,16 +498,26 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             Opcode::Range => {
                 // Range(start, limit, step) — always produces a 1D F32 tensor.
                 // The length is dynamic (set by the builder as Symbol("N")).
-                inputs.first().map(|_| {
-                    vec![DimExpr::Symbol("N".to_string())]
-                })
+                inputs
+                    .first()
+                    .map(|_| vec![DimExpr::Symbol("N".to_string())])
             }
-            Opcode::Constant(_) | Opcode::Input
-            | Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d
-            | Opcode::AdaptiveAvgPool2d | Opcode::Repeat
-            | Opcode::CumSum | Opcode::Erf | Opcode::Flip | Opcode::Where
-            | Opcode::SgdUpdate | Opcode::AdamUpdate | Opcode::AdamWUpdate
-            | Opcode::MuonUpdate | Opcode::LionUpdate | Opcode::RmspropUpdate
+            Opcode::Constant(_)
+            | Opcode::Input
+            | Opcode::UpsampleNearest2d
+            | Opcode::UpsampleBilinear2d
+            | Opcode::AdaptiveAvgPool2d
+            | Opcode::Repeat
+            | Opcode::CumSum
+            | Opcode::Erf
+            | Opcode::Flip
+            | Opcode::Where
+            | Opcode::SgdUpdate
+            | Opcode::AdamUpdate
+            | Opcode::AdamWUpdate
+            | Opcode::MuonUpdate
+            | Opcode::LionUpdate
+            | Opcode::RmspropUpdate
             | Opcode::GradientScale => None,
         };
 
@@ -504,10 +552,7 @@ fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, String
             (other, DimExpr::Known(1)) => other.clone(),
             (DimExpr::Known(va), DimExpr::Known(vb)) if va == vb => DimExpr::Known(*va),
             (DimExpr::Known(va), DimExpr::Known(vb)) => {
-                return Err(format!(
-                    "Cannot broadcast dimensions: {} vs {}",
-                    va, vb
-                ));
+                return Err(format!("Cannot broadcast dimensions: {} vs {}", va, vb));
             }
             _ => {
                 let va = da.evaluate();
@@ -517,10 +562,7 @@ fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, String
                     (_, Some(1)) => da.clone(),
                     _ if da == db => da.clone(),
                     _ => {
-                        return Err(format!(
-                            "Cannot broadcast dimensions: {} vs {}",
-                            da, db
-                        ));
+                        return Err(format!("Cannot broadcast dimensions: {} vs {}", da, db));
                     }
                 }
             }

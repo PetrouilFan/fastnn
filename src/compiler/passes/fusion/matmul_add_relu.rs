@@ -1,11 +1,13 @@
-use crate::ir::node::{ComputeGraph, Opcode, IRNode, NodeId};
-use std::collections::HashMap;
 use super::FusionPass;
+use crate::ir::node::{ComputeGraph, IRNode, NodeId, Opcode};
+use std::collections::HashMap;
 
 pub struct MatMulAddRelu;
 
 impl FusionPass for MatMulAddRelu {
-    fn name() -> &'static str { "MatMulAddRelu" }
+    fn name() -> &'static str {
+        "MatMulAddRelu"
+    }
 
     fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
         let mut fused = false;
@@ -53,7 +55,9 @@ impl FusionPass for MatMulAddRelu {
                 _ => continue,
             };
 
-            let bias_input: Vec<NodeId> = add.inputs.iter()
+            let bias_input: Vec<NodeId> = add
+                .inputs
+                .iter()
                 .filter(|&&i| i != matmul_id)
                 .copied()
                 .collect();

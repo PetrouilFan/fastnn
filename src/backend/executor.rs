@@ -17,7 +17,7 @@
 
 use crate::autograd::build_backward_graph;
 use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan};
-use crate::compiler::passes::training::{TrainConfig, inject_optimizer};
+use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
 use crate::compiler::passes::{memory_planning, operator_fusion, quantization, shape_inference};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::sync::atomic::Ordering;
@@ -133,19 +133,19 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
         // Build runtime shape env from input sizes, validate shapes.
-        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs).map_err(|e| {
-            BackendError::Dispatch(format!("shape env: {e}"))
-        })?;
-        validate_shapes(graph, &shape_env).map_err(|e| {
-            BackendError::Dispatch(format!("shape validation: {e}"))
-        })?;
+        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
+            .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
+        validate_shapes(graph, &shape_env)
+            .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
         // Tighten memory plan using runtime-resolved shapes, then rebuild
         // the ExecutablePlan instructions to use the tightened BufferSlices.
         // This shrinks the arena from SYMBOL_DIM_MAX worst-case to actual
         // sizes — saving up to 90%+ arena memory for dynamic shapes.
         let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
-        let tightened_plan = self.backend.compile(graph, &tightened_memory_plan)
+        let tightened_plan = self
+            .backend
+            .compile(graph, &tightened_memory_plan)
             .map_err(|e| BackendError::Dispatch(format!("retighten compile: {e}")))?;
 
         // Safety check: every node's resolved output must fit in its slot.
@@ -179,21 +179,20 @@ impl<B: Backend> GraphExecutor<B> {
         // Write input data into the arena at tightened input slots
         for (i, &input_node_id) in graph.inputs.iter().enumerate() {
             let input_bytes = inputs.get(i).ok_or_else(|| {
-                BackendError::Dispatch(format!(
-                    "missing input {} for node {}",
-                    i, input_node_id
-                ))
+                BackendError::Dispatch(format!("missing input {} for node {}", i, input_node_id))
             })?;
 
-            let slot = tightened_memory_plan.slots.get(&input_node_id).ok_or_else(|| {
-                BackendError::Dispatch(format!(
-                    "no memory slot for input node {}",
-                    input_node_id
-                ))
-            })?;
+            let slot = tightened_memory_plan
+                .slots
+                .get(&input_node_id)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "no memory slot for input node {}",
+                        input_node_id
+                    ))
+                })?;
 
-            self.backend
-                .write_arena(&arena, slot.offset, input_bytes);
+            self.backend.write_arena(&arena, slot.offset, input_bytes);
         }
 
         // Dispatch the tightened plan
@@ -201,26 +200,67 @@ impl<B: Backend> GraphExecutor<B> {
 
         // Dump ALL slots sorted by offset
         {
-            let mut all: Vec<_> = tightened_memory_plan.slots.iter()
-                .map(|(&nid, s)| (s.offset, s.size, nid, false, graph.get_node(nid).map(|n| format!("{:?}", n.opcode)).unwrap_or_default()))
+            let mut all: Vec<_> = tightened_memory_plan
+                .slots
+                .iter()
+                .map(|(&nid, s)| {
+                    (
+                        s.offset,
+                        s.size,
+                        nid,
+                        false,
+                        graph
+                            .get_node(nid)
+                            .map(|n| format!("{:?}", n.opcode))
+                            .unwrap_or_default(),
+                    )
+                })
                 .collect();
             for (&(nid, _), s) in &tightened_memory_plan.secondary_slots {
-                all.push((s.offset, s.size, nid, true, graph.get_node(nid).map(|n| format!("{:?}", n.opcode)).unwrap_or_default()));
+                all.push((
+                    s.offset,
+                    s.size,
+                    nid,
+                    true,
+                    graph
+                        .get_node(nid)
+                        .map(|n| format!("{:?}", n.opcode))
+                        .unwrap_or_default(),
+                ));
             }
             all.sort_by_key(|(off, _, _, _, _)| *off);
             // Only show slots near MaxPool regions
-            let maxpool_off: Vec<usize> = tightened_memory_plan.slots.iter()
-                .filter(|(&nid, _)| graph.get_node(nid).map(|n| matches!(n.opcode, Opcode::MaxPool)).unwrap_or(false))
+            let maxpool_off: Vec<usize> = tightened_memory_plan
+                .slots
+                .iter()
+                .filter(|(&nid, _)| {
+                    graph
+                        .get_node(nid)
+                        .map(|n| matches!(n.opcode, Opcode::MaxPool))
+                        .unwrap_or(false)
+                })
                 .map(|(_, s)| s.offset)
                 .collect();
             for &(off, sz, nid, is_sec, ref op) in &all {
                 let near = maxpool_off.iter().any(|&mp_off| {
-                    let dist = if off >= mp_off { off - mp_off } else { mp_off - off };
-                    dist < 2000000  // within 2MB
+                    let dist = if off >= mp_off {
+                        off - mp_off
+                    } else {
+                        mp_off - off
+                    };
+                    dist < 2000000 // within 2MB
                 });
-                if near || matches!(op.as_str(), "MaxPool" | "Concat" | "BiasAdd" | "Mul" if op == "Mul" && sz > 100000) {
-                    eprintln!("[FNN_DBG_SLOT] nid={} {:10} {}off={} sz={}",
-                        nid, op, if is_sec { "SEC " } else { "    " }, off, sz);
+                if near
+                    || matches!(op.as_str(), "MaxPool" | "Concat" | "BiasAdd" | "Mul" if op == "Mul" && sz > 100000)
+                {
+                    eprintln!(
+                        "[FNN_DBG_SLOT] nid={} {:10} {}off={} sz={}",
+                        nid,
+                        op,
+                        if is_sec { "SEC " } else { "    " },
+                        off,
+                        sz
+                    );
                 }
             }
         }
@@ -232,23 +272,38 @@ impl<B: Backend> GraphExecutor<B> {
             all_slots.push((slot.offset, slot.size, nid, true));
         }
         all_slots.sort_by_key(|(off, _, _, _)| *off);
-        
+
         // Find if any slot overlaps with MaxPool primary slots
-        let maxpool_primary: Vec<(usize, usize, NodeId)> = tightened_memory_plan.slots.iter()
-            .filter(|(&nid, _)| graph.get_node(nid).map(|n| matches!(n.opcode, Opcode::MaxPool)).unwrap_or(false))
+        let maxpool_primary: Vec<(usize, usize, NodeId)> = tightened_memory_plan
+            .slots
+            .iter()
+            .filter(|(&nid, _)| {
+                graph
+                    .get_node(nid)
+                    .map(|n| matches!(n.opcode, Opcode::MaxPool))
+                    .unwrap_or(false)
+            })
             .map(|(&nid, slot)| (slot.offset, slot.size, nid))
             .collect();
-        
+
         for &(mp_off, mp_sz, mp_nid) in &maxpool_primary {
             let mp_end = mp_off + mp_sz;
             for &(slot_off, slot_sz, slot_nid, is_sec) in &all_slots {
                 let slot_end = slot_off + slot_sz;
                 // Check if this slot overlaps with the MaxPool primary (excluding the MaxPool's own secondary)
-                if slot_nid == mp_nid { continue; }
+                if slot_nid == mp_nid {
+                    continue;
+                }
                 let overlap = slot_off < mp_end && mp_off < slot_end;
                 if overlap {
-                    let op = graph.get_node(slot_nid).map(|n| format!("{:?}", n.opcode)).unwrap_or_default();
-                    let mp_op = graph.get_node(mp_nid).map(|n| format!("{:?}", n.opcode)).unwrap_or_default();
+                    let op = graph
+                        .get_node(slot_nid)
+                        .map(|n| format!("{:?}", n.opcode))
+                        .unwrap_or_default();
+                    let mp_op = graph
+                        .get_node(mp_nid)
+                        .map(|n| format!("{:?}", n.opcode))
+                        .unwrap_or_default();
                     eprintln!("[FNN_DBG_OVERLAP] MaxPool {} nid={} [{}, {}) overlaps with {} nid={}{} [{}, {})",
                         mp_op, mp_nid, mp_off, mp_end,
                         op, slot_nid, if is_sec { " SECONDARY" } else { "" }, slot_off, slot_end);
@@ -259,18 +314,21 @@ impl<B: Backend> GraphExecutor<B> {
         // Read output data — compute actual sizes via shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
         for (out_idx, &output_node_id) in graph.outputs.iter().enumerate() {
-            let slot = tightened_memory_plan.slots.get(&output_node_id).ok_or_else(|| {
-                BackendError::Dispatch(format!(
-                    "no memory slot for output node {}",
-                    output_node_id
-                ))
-            })?;
+            let slot = tightened_memory_plan
+                .slots
+                .get(&output_node_id)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "no memory slot for output node {}",
+                        output_node_id
+                    ))
+                })?;
 
             let (actual_size, resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
-                let resolved_shape = resolve_shape(&node.output_type.shape, &shape_env)
-                    .map_err(|e| BackendError::Dispatch(format!(
-                        "output node {}: {e}", output_node_id
-                    )))?;
+                let resolved_shape =
+                    resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
+                        BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
+                    })?;
                 let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
                 let computed = match &node.output_type.dtype {
                     IrDType::U4 { .. } | IrDType::U8 { .. } => {
@@ -288,11 +346,20 @@ impl<B: Backend> GraphExecutor<B> {
             if actual_size >= 4 {
                 let first_bytes: [u8; 4] = data[..4].try_into().unwrap_or([0; 4]);
                 let first = f32::from_le_bytes(first_bytes);
-                let opcode_str = graph.get_node(output_node_id)
+                let opcode_str = graph
+                    .get_node(output_node_id)
                     .map(|n| format!("{:?}", n.opcode))
                     .unwrap_or_else(|| "?".to_string());
-                eprintln!("[FNN_DBG_EXEC] out[{}] nid={} op={:?} off={} sz={} shape={:?} first_f32={}",
-                    out_idx, output_node_id, opcode_str, slot.offset, actual_size, resolved_shape, first);
+                eprintln!(
+                    "[FNN_DBG_EXEC] out[{}] nid={} op={:?} off={} sz={} shape={:?} first_f32={}",
+                    out_idx,
+                    output_node_id,
+                    opcode_str,
+                    slot.offset,
+                    actual_size,
+                    resolved_shape,
+                    first
+                );
             }
             outputs.push(data);
         }
@@ -396,7 +463,9 @@ impl<B: Backend> GraphExecutor<B> {
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
         let (plan, memory_plan) = if let Some(shape_env) = batch_shape_env {
             let tightened_mp = memory_plan.tighten(&final_graph, shape_env);
-            let tightened_plan = self.backend.compile(&final_graph, &tightened_mp)
+            let tightened_plan = self
+                .backend
+                .compile(&final_graph, &tightened_mp)
                 .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
             (tightened_plan, tightened_mp)
         } else {
@@ -407,10 +476,7 @@ impl<B: Backend> GraphExecutor<B> {
         let mut input_slot_offsets = Vec::new();
         for &input_id in batch_inputs {
             let slot = memory_plan.slots.get(&input_id).ok_or_else(|| {
-                BackendError::Compilation(format!(
-                    "no memory slot for batch input {}",
-                    input_id
-                ))
+                BackendError::Compilation(format!("no memory slot for batch input {}", input_id))
             })?;
             input_slot_offsets.push((slot.offset, slot.size));
         }
@@ -438,10 +504,7 @@ impl<B: Backend> GraphExecutor<B> {
         for state_nodes in &injection.state_input_nodes {
             for &state_id in state_nodes {
                 let slot = memory_plan.slots.get(&state_id).ok_or_else(|| {
-                    BackendError::Compilation(format!(
-                        "state node {} slot not found",
-                        state_id
-                    ))
+                    BackendError::Compilation(format!("state node {} slot not found", state_id))
                 })?;
                 let zeros = vec![0u8; slot.size];
                 self.backend.write_arena(&arena, slot.offset, &zeros);
@@ -518,12 +581,12 @@ impl<B: Backend> CompiledTrainingModel<B> {
             .map_err(|e| BackendError::Dispatch(format!("train_step dispatch: {e}")))?;
 
         // 4. Read loss immediately (before any post-dispatch writes)
-        let loss_raw = self.backend.read_arena(&self.arena, self.loss_slot_offset, 4);
+        let loss_raw = self
+            .backend
+            .read_arena(&self.arena, self.loss_slot_offset, 4);
         let loss_arr: [u8; 4] = loss_raw
             .get(..4)
-            .ok_or_else(|| {
-                BackendError::Dispatch("train_step: loss buffer too small".into())
-            })?
+            .ok_or_else(|| BackendError::Dispatch("train_step: loss buffer too small".into()))?
             .try_into()
             .map_err(|_| BackendError::Dispatch("train_step: invalid loss bytes".into()))?;
         let loss = f32::from_le_bytes(loss_arr);
@@ -611,10 +674,12 @@ fn resolve_shape_lenient(shape: &[DimExpr], env: &ShapeEnv) -> Vec<u64> {
 
 /// Parse an axis attribute, supporting negative values (ONNX-style).
 /// Returns a 0-based positive axis, or an error if out of range.
-fn resolve_axis(attrs: &std::collections::HashMap<String, String>, key: &str, rank: usize) -> Result<usize, String> {
-    let raw: i64 = attrs.get(key)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+fn resolve_axis(
+    attrs: &std::collections::HashMap<String, String>,
+    key: &str,
+    rank: usize,
+) -> Result<usize, String> {
+    let raw: i64 = attrs.get(key).and_then(|s| s.parse().ok()).unwrap_or(0);
     let axis = if raw < 0 {
         let r = rank as i64;
         if raw < -r {
@@ -698,14 +763,18 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     .map_err(|e| format!("Concat node {}: {e}", node_id))?;
                 // Skip dim compatibility checks if any input contains
                 // unresolved Symbol dims (resolved to SYMBOL_DIM_MAX).
-                let symbol_max = crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+                let symbol_max =
+                    crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
                 let has_unresolved = input_shapes.iter().any(|s| s.contains(&symbol_max));
                 if !has_unresolved {
                     for (i, s) in input_shapes.iter().enumerate().skip(1) {
                         if s.len() != rank {
                             return Err(format!(
                                 "Concat node {}: rank mismatch input 0 ({}) vs input {} ({})",
-                                node_id, rank, i, s.len()
+                                node_id,
+                                rank,
+                                i,
+                                s.len()
                             ));
                         }
                         for j in 0..rank {
@@ -723,7 +792,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 if input_shapes.len() < 2 {
                     return Err(format!(
                         "Elementwise node {}: expected at least 2 inputs, got {}",
-                        node_id, input_shapes.len()
+                        node_id,
+                        input_shapes.len()
                     ));
                 }
                 let a = &input_shapes[0];
@@ -744,17 +814,29 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             }
             Opcode::Conv2d => {
                 if input_shapes.len() < 2 {
-                    return Err(format!("Conv2d node {}: expected 2 inputs, got {}", node_id, input_shapes.len()));
+                    return Err(format!(
+                        "Conv2d node {}: expected 2 inputs, got {}",
+                        node_id,
+                        input_shapes.len()
+                    ));
                 }
                 let inp = &input_shapes[0];
                 let weight = &input_shapes[1];
                 if inp.len() < 4 {
-                    return Err(format!("Conv2d node {}: input must have 4 dims [N,C,H,W], got {:?}", node_id, inp));
+                    return Err(format!(
+                        "Conv2d node {}: input must have 4 dims [N,C,H,W], got {:?}",
+                        node_id, inp
+                    ));
                 }
                 if weight.len() < 4 {
-                    return Err(format!("Conv2d node {}: weight must have 4 dims [F,C,KH,KW], got {:?}", node_id, weight));
+                    return Err(format!(
+                        "Conv2d node {}: weight must have 4 dims [F,C,KH,KW], got {:?}",
+                        node_id, weight
+                    ));
                 }
-                let groups: u64 = node.attrs.get("groups")
+                let groups: u64 = node
+                    .attrs
+                    .get("groups")
                     .and_then(|g| g.parse().ok())
                     .unwrap_or(1);
                 if inp[1] != weight[1] * groups {
@@ -766,18 +848,25 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             }
             Opcode::Transpose => {
                 if input_shapes.is_empty() || input_shapes[0].len() < 2 {
-                    return Err(format!("Transpose node {}: input must have at least 2 dims, got {:?}", node_id, input_shapes.first()));
+                    return Err(format!(
+                        "Transpose node {}: input must have at least 2 dims, got {:?}",
+                        node_id,
+                        input_shapes.first()
+                    ));
                 }
                 // Validate optional permutation attribute
                 if let Some(perm_str) = node.attrs.get("perm") {
-                    let perm: Vec<usize> = perm_str.trim_matches(|c| c == '[' || c == ']')
+                    let perm: Vec<usize> = perm_str
+                        .trim_matches(|c| c == '[' || c == ']')
                         .split(',')
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
                     if perm.len() != input_shapes[0].len() {
                         return Err(format!(
                             "Transpose node {}: permutation length {} != rank {}",
-                            node_id, perm.len(), input_shapes[0].len()
+                            node_id,
+                            perm.len(),
+                            input_shapes[0].len()
                         ));
                     }
                     let mut seen = vec![false; perm.len()];
@@ -785,7 +874,9 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                         if p >= perm.len() {
                             return Err(format!(
                                 "Transpose node {}: permutation axis {} out of bounds for rank {}",
-                                node_id, p, perm.len()
+                                node_id,
+                                p,
+                                perm.len()
                             ));
                         }
                         if seen[p] {
@@ -799,22 +890,23 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 }
             }
             Opcode::Reshape | Opcode::Flatten => {
-                if input_shapes.is_empty() { continue; }
+                if input_shapes.is_empty() {
+                    continue;
+                }
                 let in_numel: u64 = input_shapes[0].iter().product();
                 // For reshape, compute expected numel from attrs or output shape
                 if let Some(out_shape) = node.attrs.get("shape") {
                     // Split the shape attr into tokens. Each token is either a
                     // concrete u64 dim ("42") or a symbolic dim ("N", "-1", etc.)
                     // that will be resolved at runtime.
-                    let tokens: Vec<&str> = out_shape.trim_matches(|c| c == '[' || c == ']')
+                    let tokens: Vec<&str> = out_shape
+                        .trim_matches(|c| c == '[' || c == ']')
                         .split(',')
                         .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
                         .collect();
                     // Collect only the concrete (u64-parseable) dims.
-                    let concrete: Vec<u64> = tokens.iter()
-                        .filter_map(|s| s.parse().ok())
-                        .collect();
+                    let concrete: Vec<u64> = tokens.iter().filter_map(|s| s.parse().ok()).collect();
                     let symbol_count = tokens.len() - concrete.len();
                     if symbol_count == 0 {
                         // All dims are concrete: the total element count must
@@ -847,7 +939,10 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             }
             Opcode::BatchNorm | Opcode::LayerNorm => {
                 if input_shapes.len() < 2 {
-                    return Err(format!("Norm node {}: expected at least 2 inputs (data + weight)", node_id));
+                    return Err(format!(
+                        "Norm node {}: expected at least 2 inputs (data + weight)",
+                        node_id
+                    ));
                 }
                 // Channel dim must match between data and weight for 1D/2D norm
                 let data = &input_shapes[0];
@@ -860,13 +955,30 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 }
             }
             Opcode::Slice => {
-                if input_shapes.is_empty() { continue; }
-                let dim: usize = node.attrs.get("dim").and_then(|a| a.parse().ok()).unwrap_or(0);
-                let start: i64 = node.attrs.get("start").and_then(|a| a.parse().ok()).unwrap_or(0);
-                let end: i64 = node.attrs.get("end").and_then(|a| a.parse().ok()).unwrap_or(-1);
+                if input_shapes.is_empty() {
+                    continue;
+                }
+                let dim: usize = node
+                    .attrs
+                    .get("dim")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
+                let start: i64 = node
+                    .attrs
+                    .get("start")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
+                let end: i64 = node
+                    .attrs
+                    .get("end")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(-1);
                 let rank = input_shapes[0].len();
                 if dim >= rank {
-                    return Err(format!("Slice node {}: dim {} out of bounds for rank {}", node_id, dim, rank));
+                    return Err(format!(
+                        "Slice node {}: dim {} out of bounds for rank {}",
+                        node_id, dim, rank
+                    ));
                 }
                 let dim_size = input_shapes[0][dim] as i64;
                 let adjusted_end = if end < 0 { dim_size + end + 1 } else { end };
@@ -878,66 +990,121 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 }
             }
             Opcode::MaxPool | Opcode::AvgPool => {
-                if input_shapes.is_empty() { continue; }
-                if input_shapes[0].len() < 4 {
-                    return Err(format!("Pool node {}: input must have 4 dims [N,C,H,W], got {:?}", node_id, input_shapes[0]));
+                if input_shapes.is_empty() {
+                    continue;
                 }
-                let k: u64 = node.attrs.get("kernel_size").and_then(|a| a.parse().ok()).unwrap_or(2);
-                let s: u64 = node.attrs.get("stride").and_then(|a| a.parse().ok()).unwrap_or(2);
+                if input_shapes[0].len() < 4 {
+                    return Err(format!(
+                        "Pool node {}: input must have 4 dims [N,C,H,W], got {:?}",
+                        node_id, input_shapes[0]
+                    ));
+                }
+                let k: u64 = node
+                    .attrs
+                    .get("kernel_size")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(2);
+                let s: u64 = node
+                    .attrs
+                    .get("stride")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(2);
                 if k == 0 || s == 0 {
-                    return Err(format!("Pool node {}: kernel_size={} and stride={} must be >0", node_id, k, s));
+                    return Err(format!(
+                        "Pool node {}: kernel_size={} and stride={} must be >0",
+                        node_id, k, s
+                    ));
                 }
             }
             Opcode::Squeeze => {
-                if input_shapes.is_empty() { continue; }
-                let dim: usize = node.attrs.get("dim").and_then(|a| a.parse().ok()).unwrap_or(0);
+                if input_shapes.is_empty() {
+                    continue;
+                }
+                let dim: usize = node
+                    .attrs
+                    .get("dim")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
                 if dim >= input_shapes[0].len() {
-                    return Err(format!("Squeeze node {}: dim {} out of bounds for rank {}", node_id, dim, input_shapes[0].len()));
+                    return Err(format!(
+                        "Squeeze node {}: dim {} out of bounds for rank {}",
+                        node_id,
+                        dim,
+                        input_shapes[0].len()
+                    ));
                 }
                 if input_shapes[0][dim] != 1 {
-                    return Err(format!("Squeeze node {}: dim {} has size {} (must be 1 to squeeze)", node_id, dim, input_shapes[0][dim]));
+                    return Err(format!(
+                        "Squeeze node {}: dim {} has size {} (must be 1 to squeeze)",
+                        node_id, dim, input_shapes[0][dim]
+                    ));
                 }
             }
             Opcode::Unsqueeze => {
                 // Unsqueeze attrs store the output dim; just check it's reasonable
-                let dim: usize = node.attrs.get("dim").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let dim: usize = node
+                    .attrs
+                    .get("dim")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
                 let max_rank = input_shapes.first().map(|s| s.len() + 1).unwrap_or(1);
                 if dim > max_rank {
-                    return Err(format!("Unsqueeze node {}: dim {} out of bounds for rank {}", node_id, dim, max_rank));
+                    return Err(format!(
+                        "Unsqueeze node {}: dim {} out of bounds for rank {}",
+                        node_id, dim, max_rank
+                    ));
                 }
             }
             Opcode::Gather => {
                 if input_shapes.len() < 2 {
-                    return Err(format!("Gather node {}: expected at least 2 inputs (data + indices), got {}", node_id, input_shapes.len()));
+                    return Err(format!(
+                        "Gather node {}: expected at least 2 inputs (data + indices), got {}",
+                        node_id,
+                        input_shapes.len()
+                    ));
                 }
                 let rank = input_shapes[0].len();
                 let _axis = resolve_axis(&node.attrs, "axis", rank)
                     .map_err(|e| format!("Gather node {}: {e}", node_id))?;
             }
             Opcode::Pad => {
-                if input_shapes.is_empty() { continue; }
+                if input_shapes.is_empty() {
+                    continue;
+                }
                 let rank = input_shapes[0].len();
                 if let Some(pads) = node.attrs.get("pads") {
-                    let parsed: Vec<i64> = pads.trim_matches(|c| c == '[' || c == ']')
+                    let parsed: Vec<i64> = pads
+                        .trim_matches(|c| c == '[' || c == ']')
                         .split(',')
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
                     if parsed.len() != 2 * rank {
                         return Err(format!(
                             "Pad node {}: pads length {} != 2*rank {}",
-                            node_id, parsed.len(), 2 * rank
+                            node_id,
+                            parsed.len(),
+                            2 * rank
                         ));
                     }
                 }
             }
-            Opcode::Neg | Opcode::Abs | Opcode::Exp | Opcode::Log
-            | Opcode::Sqrt | Opcode::Relu | Opcode::Gelu | Opcode::Silu
-            | Opcode::Sigmoid | Opcode::Tanh
+            Opcode::Neg
+            | Opcode::Abs
+            | Opcode::Exp
+            | Opcode::Log
+            | Opcode::Sqrt
+            | Opcode::Relu
+            | Opcode::Gelu
+            | Opcode::Silu
+            | Opcode::Sigmoid
+            | Opcode::Tanh
                 if input_shapes.len() != 1 =>
             {
                 return Err(format!(
                     "Unary op {:?} node {}: expected 1 input, got {}",
-                    node.opcode, node_id, input_shapes.len()
+                    node.opcode,
+                    node_id,
+                    input_shapes.len()
                 ));
             }
             _ => {}

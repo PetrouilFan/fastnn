@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 use crate::ir::builder::{GraphBuilder, GraphTensor};
 use crate::ir::node::*;
-use crate::tensor::Tensor;
 use crate::storage::DType;
+use crate::tensor::Tensor;
 
 /// Parsed ONNX node.
 #[derive(Debug, Clone)]
@@ -115,7 +115,11 @@ impl<'a> OnnxConverter<'a> {
         for (name, tensor) in self.params.iter() {
             if !self.name_to_id.contains_key(name) {
                 let tensor_type = TensorType::new(
-                    tensor.shape().iter().map(|d| DimExpr::Known(*d as u64)).collect(),
+                    tensor
+                        .shape()
+                        .iter()
+                        .map(|d| DimExpr::Known(*d as u64))
+                        .collect(),
                     ir_dtype_from_dtype(tensor.dtype()),
                 );
                 let data = tensor.as_bytes();
@@ -127,7 +131,8 @@ impl<'a> OnnxConverter<'a> {
         // Phase 3: Process all nodes in order.
         for node in self.nodes {
             if let Err(e) = self.process_node(node) {
-                self.errors.push(format!("node '{}' ({}): {}", node.name, node.op_type, e));
+                self.errors
+                    .push(format!("node '{}' ({}): {}", node.name, node.op_type, e));
             }
         }
 
@@ -164,20 +169,20 @@ impl<'a> OnnxConverter<'a> {
 
         match node.op_type.as_str() {
             // ── Element-wise unary ──────────────────────────────────
-            "Relu"       => self.out(node, self.graph.relu(&ins[0])),
-            "Gelu"       => self.out(node, self.graph.gelu(&ins[0])),
+            "Relu" => self.out(node, self.graph.relu(&ins[0])),
+            "Gelu" => self.out(node, self.graph.gelu(&ins[0])),
             "Silu" | "Swish" => self.out(node, self.graph.silu(&ins[0])),
-            "Sigmoid"    => self.out(node, self.graph.sigmoid(&ins[0])),
-            "Tanh"       => self.out(node, self.graph.tanh(&ins[0])),
-            "Exp"        => self.out(node, self.graph.exp(&ins[0])),
-            "Sqrt"       => self.out(node, self.graph.sqrt(&ins[0])),
-            "Neg"        => self.out(node, self.graph.neg(&ins[0])),
-            "Abs"        => self.out(node, self.graph.abs(&ins[0])),
-            "Log"        => self.out(node, self.graph.log(&ins[0])),
-            "Sign"       => self.out(node, self.graph.sign(&ins[0])),
-            "Not"        => self.out(node, self.graph.logical_not(&ins[0])),
+            "Sigmoid" => self.out(node, self.graph.sigmoid(&ins[0])),
+            "Tanh" => self.out(node, self.graph.tanh(&ins[0])),
+            "Exp" => self.out(node, self.graph.exp(&ins[0])),
+            "Sqrt" => self.out(node, self.graph.sqrt(&ins[0])),
+            "Neg" => self.out(node, self.graph.neg(&ins[0])),
+            "Abs" => self.out(node, self.graph.abs(&ins[0])),
+            "Log" => self.out(node, self.graph.log(&ins[0])),
+            "Sign" => self.out(node, self.graph.sign(&ins[0])),
+            "Not" => self.out(node, self.graph.logical_not(&ins[0])),
             "HardSwish" | "Hardswish" => self.out(node, self.graph.hardswish(&ins[0])),
-            "Mish"       => self.out(node, self.graph.mish(&ins[0])),
+            "Mish" => self.out(node, self.graph.mish(&ins[0])),
             "Identity" | "Dropout" => self.out(node, ins[0].clone()),
 
             // ── Element-wise binary ─────────────────────────────────
@@ -190,30 +195,54 @@ impl<'a> OnnxConverter<'a> {
             "Min" => self.out(node, self.graph.minimum(&ins[0], &ins[1])),
 
             "Greater" => self.out(node, self.graph.gt_scalar(&ins[0], &ins[1])),
-            "Less"    => self.out(node, self.graph.lt_scalar(&ins[0], &ins[1])),
-            "Equal"   => self.out(node, self.graph.eq_scalar(&ins[0], &ins[1])),
+            "Less" => self.out(node, self.graph.lt_scalar(&ins[0], &ins[1])),
+            "Equal" => self.out(node, self.graph.eq_scalar(&ins[0], &ins[1])),
 
             // ── Parametric activations ──────────────────────────────
             "LeakyRelu" => {
-                let alpha: f32 = node.attrs.get("alpha").and_then(|a| a.parse().ok()).unwrap_or(0.01);
+                let alpha: f32 = node
+                    .attrs
+                    .get("alpha")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0.01);
                 self.out(node, self.graph.leaky_relu(&ins[0], alpha));
             }
             "Elu" => {
-                let alpha: f32 = node.attrs.get("alpha").and_then(|a| a.parse().ok()).unwrap_or(1.0);
+                let alpha: f32 = node
+                    .attrs
+                    .get("alpha")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(1.0);
                 self.out(node, self.graph.elu(&ins[0], alpha));
             }
             "Softplus" => self.out(node, self.graph.softplus(&ins[0])),
             "HardSigmoid" => {
-                let alpha: f32 = node.attrs.get("alpha").and_then(|a| a.parse().ok()).unwrap_or(0.16666667);
-                let beta: f32 = node.attrs.get("beta").and_then(|b| b.parse().ok()).unwrap_or(0.5);
+                let alpha: f32 = node
+                    .attrs
+                    .get("alpha")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0.16666667);
+                let beta: f32 = node
+                    .attrs
+                    .get("beta")
+                    .and_then(|b| b.parse().ok())
+                    .unwrap_or(0.5);
                 // HardSigmoid = clamp(x*alpha + beta, 0, 1)
                 let xa = self.graph.mul(&ins[0], &self.scalar(alpha));
                 let xab = self.graph.add(&xa, &self.scalar(beta));
                 self.out(node, self.graph.clamp(&xab, 0.0, 1.0));
             }
             "Selu" => {
-                let alpha: f32 = node.attrs.get("alpha").and_then(|a| a.parse().ok()).unwrap_or(1.67326);
-                let gamma: f32 = node.attrs.get("gamma").and_then(|g| g.parse().ok()).unwrap_or(1.0507);
+                let alpha: f32 = node
+                    .attrs
+                    .get("alpha")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(1.67326);
+                let gamma: f32 = node
+                    .attrs
+                    .get("gamma")
+                    .and_then(|g| g.parse().ok())
+                    .unwrap_or(1.0507);
                 let e = self.graph.exp(&ins[0]);
                 let e_1 = self.graph.sub(&e, &self.scalar(1.0));
                 let ae = self.graph.mul(&e_1, &self.scalar(alpha));
@@ -222,18 +251,34 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, self.graph.mul(&s, &self.scalar(gamma)));
             }
             "Clip" => {
-                let min: f32 = node.attrs.get("min").and_then(|m| m.parse().ok()).unwrap_or(f32::NEG_INFINITY);
-                let max: f32 = node.attrs.get("max").and_then(|m| m.parse().ok()).unwrap_or(f32::INFINITY);
+                let min: f32 = node
+                    .attrs
+                    .get("min")
+                    .and_then(|m| m.parse().ok())
+                    .unwrap_or(f32::NEG_INFINITY);
+                let max: f32 = node
+                    .attrs
+                    .get("max")
+                    .and_then(|m| m.parse().ok())
+                    .unwrap_or(f32::INFINITY);
                 self.out(node, self.graph.clamp(&ins[0], min, max));
             }
 
             // ── Softmax / LogSoftmax ────────────────────────────────
             "Softmax" => {
-                let axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(1);
+                let axis: i64 = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(1);
                 self.out(node, self.graph.softmax(&ins[0], axis));
             }
             "LogSoftmax" => {
-                let axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(1);
+                let axis: i64 = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(1);
                 let sm = self.graph.softmax(&ins[0], axis);
                 self.out(node, self.graph.log(&sm));
             }
@@ -241,12 +286,23 @@ impl<'a> OnnxConverter<'a> {
             // ── MatMul / Gemm ───────────────────────────────────────
             "MatMul" => self.out(node, self.graph.matmul(&ins[0], &ins[1])),
             "Gemm" => {
-                let trans_b: bool = node.attrs.get("transB")
+                let trans_b: bool = node
+                    .attrs
+                    .get("transB")
                     .or_else(|| node.attrs.get("trans_b"))
-                    .and_then(|a| a.parse().ok()).unwrap_or(false);
-                let alpha: f32 = node.attrs.get("alpha").and_then(|a| a.parse().ok()).unwrap_or(1.0);
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(false);
+                let alpha: f32 = node
+                    .attrs
+                    .get("alpha")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(1.0);
 
-                let b = if trans_b { self.graph.transpose(&ins[1]) } else { ins[1].clone() };
+                let b = if trans_b {
+                    self.graph.transpose(&ins[1])
+                } else {
+                    ins[1].clone()
+                };
                 let mut mat = self.graph.matmul(&ins[0], &b);
 
                 if (alpha - 1.0).abs() > f32::EPSILON {
@@ -267,23 +323,35 @@ impl<'a> OnnxConverter<'a> {
                 // "pads" → "padding", "dilations" → "dilation", and takes
                 // the first element for symmetric padding.
                 // Try both the Python-renamed name and the ONNX name.
-                let stride: usize = node.attrs.get("stride")
+                let stride: usize = node
+                    .attrs
+                    .get("stride")
                     .or_else(|| node.attrs.get("strides"))
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1);
-                let padding: usize = node.attrs.get("padding")
+                let padding: usize = node
+                    .attrs
+                    .get("padding")
                     .or_else(|| node.attrs.get("pads"))
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
-                let dilation: usize = node.attrs.get("dilation")
+                let dilation: usize = node
+                    .attrs
+                    .get("dilation")
                     .or_else(|| node.attrs.get("dilations"))
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1);
-                let group: usize = node.attrs.get("group").and_then(|g| g.parse().ok()).unwrap_or(1);
+                let group: usize = node
+                    .attrs
+                    .get("group")
+                    .and_then(|g| g.parse().ok())
+                    .unwrap_or(1);
 
                 // All YOLO convs are 2D; use conv2d_with_params.
                 // (1D/3D would need separate dispatch from ONNX attrs.)
-                let r = self.graph.conv2d_with_params(&ins[0], &ins[1], stride, padding, dilation, group);
+                let r = self
+                    .graph
+                    .conv2d_with_params(&ins[0], &ins[1], stride, padding, dilation, group);
                 // Bias addition: ONNX Conv bias is 1D [C] which broadcasts
                 // channel-wise over [N, C, H, W]. Use bias_add, NOT add,
                 // because numpy-style broadcasting would fail (C vs H).
@@ -295,30 +363,48 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, r);
             }
             "ConvTranspose" => {
-                let stride: usize = node.attrs.get("strides")
+                let stride: usize = node
+                    .attrs
+                    .get("strides")
                     .and_then(|s| s.split(',').next().and_then(|v| v.trim().parse().ok()))
                     .unwrap_or(1);
-                let padding: usize = node.attrs.get("pads")
+                let padding: usize = node
+                    .attrs
+                    .get("pads")
                     .and_then(|s| s.split(',').next().and_then(|v| v.trim().parse().ok()))
                     .unwrap_or(0);
-                let _groups: usize = node.attrs.get("group").and_then(|g| g.parse().ok()).unwrap_or(1);
+                let _groups: usize = node
+                    .attrs
+                    .get("group")
+                    .and_then(|g| g.parse().ok())
+                    .unwrap_or(1);
                 // Note: groups > 1 not yet implemented for ConvTranspose
-                self.out(node, self.graph.conv_transpose2d(&ins[0], &ins[1], stride, padding));
+                self.out(
+                    node,
+                    self.graph
+                        .conv_transpose2d(&ins[0], &ins[1], stride, padding),
+                );
             }
 
             // ── Pooling ─────────────────────────────────────────────
             // Note: Python _extract_attrs renames "kernel_shape" → "kernel_size",
             // "strides" → "stride" for pooling ops. Try both.
             "MaxPool" => {
-                let k: usize = node.attrs.get("kernel_size")
+                let k: usize = node
+                    .attrs
+                    .get("kernel_size")
                     .or_else(|| node.attrs.get("kernel_shape"))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2);
-                let s: usize = node.attrs.get("stride")
+                let s: usize = node
+                    .attrs
+                    .get("stride")
                     .or_else(|| node.attrs.get("strides"))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(k);
-                let p: usize = node.attrs.get("padding")
+                let p: usize = node
+                    .attrs
+                    .get("padding")
                     .or_else(|| node.attrs.get("pads"))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
@@ -329,15 +415,21 @@ impl<'a> OnnxConverter<'a> {
                 }
             }
             "AveragePool" => {
-                let k: usize = node.attrs.get("kernel_size")
+                let k: usize = node
+                    .attrs
+                    .get("kernel_size")
                     .or_else(|| node.attrs.get("kernel_shape"))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2);
-                let s: usize = node.attrs.get("stride")
+                let s: usize = node
+                    .attrs
+                    .get("stride")
                     .or_else(|| node.attrs.get("strides"))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(k);
-                let p: usize = node.attrs.get("padding")
+                let p: usize = node
+                    .attrs
+                    .get("padding")
                     .or_else(|| node.attrs.get("pads"))
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
@@ -351,21 +443,36 @@ impl<'a> OnnxConverter<'a> {
 
             // ── Normalization ───────────────────────────────────────
             "BatchNormalization" => {
-                let eps: f64 = node.attrs.get("epsilon").and_then(|e| e.parse().ok()).unwrap_or(1e-5);
+                let eps: f64 = node
+                    .attrs
+                    .get("epsilon")
+                    .and_then(|e| e.parse().ok())
+                    .unwrap_or(1e-5);
                 let scale = ins.get(1).ok_or("BN needs scale param")?;
                 let bias = ins.get(2).ok_or("BN needs bias param")?;
                 let mean = ins.get(3).ok_or("BN needs mean param")?;
                 let var = ins.get(4).ok_or("BN needs var param")?;
-                self.out(node, self.graph.batch_norm(&ins[0], scale, bias, mean, var, eps));
+                self.out(
+                    node,
+                    self.graph.batch_norm(&ins[0], scale, bias, mean, var, eps),
+                );
             }
             "LayerNormalization" => {
-                let eps: f64 = node.attrs.get("epsilon").and_then(|e| e.parse().ok()).unwrap_or(1e-5);
+                let eps: f64 = node
+                    .attrs
+                    .get("epsilon")
+                    .and_then(|e| e.parse().ok())
+                    .unwrap_or(1e-5);
                 let weight = ins.get(1).ok_or("LN needs weight param")?;
                 let bias = ins.get(2).ok_or("LN needs bias param")?;
                 self.out(node, self.graph.layer_norm(&ins[0], weight, bias, eps));
             }
             "RMSNormalization" | "RmsNorm" => {
-                let eps: f64 = node.attrs.get("epsilon").and_then(|e| e.parse().ok()).unwrap_or(1e-5);
+                let eps: f64 = node
+                    .attrs
+                    .get("epsilon")
+                    .and_then(|e| e.parse().ok())
+                    .unwrap_or(1e-5);
                 let weight = ins.get(1).ok_or("RMSNorm needs weight param")?;
                 self.out(node, self.graph.rms_norm(&ins[0], weight, eps));
             }
@@ -374,10 +481,16 @@ impl<'a> OnnxConverter<'a> {
             "Reshape" => {
                 let shape: Vec<i64> = parse_ints_i64(&node.attrs, "shape", &[]);
                 if !shape.is_empty() {
-                    let dims: Vec<DimExpr> = shape.iter().map(|&d| {
-                        if d == -1 { DimExpr::Symbol("N".to_string()) }
-                        else { DimExpr::Known(d as u64) }
-                    }).collect();
+                    let dims: Vec<DimExpr> = shape
+                        .iter()
+                        .map(|&d| {
+                            if d == -1 {
+                                DimExpr::Symbol("N".to_string())
+                            } else {
+                                DimExpr::Known(d as u64)
+                            }
+                        })
+                        .collect();
                     self.out(node, self.graph.reshape(&ins[0], &dims));
                 } else if ins.len() >= 2 {
                     // Opset 11+: shape comes from a tensor input (ins[1]).
@@ -385,11 +498,17 @@ impl<'a> OnnxConverter<'a> {
                     let shape_name = &node.inputs[1];
                     if let Some(shape_tensor) = self.params.get(shape_name) {
                         let shape_data: Vec<f32> = shape_tensor.to_numpy();
-                        let dims: Vec<DimExpr> = shape_data.iter().map(|&v| {
-                            let d = v as i64;
-                            if d == -1 { DimExpr::Symbol("N".to_string()) }
-                            else { DimExpr::Known(d as u64) }
-                        }).collect();
+                        let dims: Vec<DimExpr> = shape_data
+                            .iter()
+                            .map(|&v| {
+                                let d = v as i64;
+                                if d == -1 {
+                                    DimExpr::Symbol("N".to_string())
+                                } else {
+                                    DimExpr::Known(d as u64)
+                                }
+                            })
+                            .collect();
                         self.out(node, self.graph.reshape(&ins[0], &dims));
                     } else {
                         // Shape is dynamic; keep as pass-through for now.
@@ -416,7 +535,11 @@ impl<'a> OnnxConverter<'a> {
             "Concat" => {
                 // Parse axis as i64 (ONNX allows negative values like -1) and
                 // normalize to a positive index using the input tensor rank.
-                let raw_axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let raw_axis: i64 = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
                 let rank = ins.first().map(|t| t.shape().len()).unwrap_or(1);
                 let axis = if raw_axis < 0 {
                     let r = rank as i64;
@@ -436,11 +559,19 @@ impl<'a> OnnxConverter<'a> {
                 // Split input tensor into N outputs along the given axis.
                 // split attribute: optional list of output lengths.
                 // If absent: equal split across all outputs.
-                let raw_axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let raw_axis: i64 = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
                 let rank = ins.first().map(|t| t.shape().len()).unwrap_or(1);
                 let axis = if raw_axis < 0 {
                     let r = rank as i64;
-                    if raw_axis < -r { 0usize } else { (r + raw_axis) as usize }
+                    if raw_axis < -r {
+                        0usize
+                    } else {
+                        (r + raw_axis) as usize
+                    }
                 } else {
                     raw_axis as usize
                 };
@@ -474,7 +605,7 @@ impl<'a> OnnxConverter<'a> {
                             let mut start = 0usize;
                             for (i, out_name) in node.outputs.iter().enumerate() {
                                 let end = if i == n_outputs - 1 {
-                                    dim_size as usize  // last output gets remainder
+                                    dim_size as usize // last output gets remainder
                                 } else {
                                     start + part
                                 };
@@ -512,13 +643,17 @@ impl<'a> OnnxConverter<'a> {
             "Squeeze" => {
                 let axes: Vec<usize> = parse_ints(&node.attrs, "axes", &[0]);
                 let mut r = ins[0].clone();
-                for &a in axes.iter().rev() { r = self.graph.squeeze(&r, a); }
+                for &a in axes.iter().rev() {
+                    r = self.graph.squeeze(&r, a);
+                }
                 self.out(node, r);
             }
             "Unsqueeze" => {
                 let axes: Vec<usize> = parse_ints(&node.attrs, "axes", &[0]);
                 let mut r = ins[0].clone();
-                for &a in &axes { r = self.graph.unsqueeze(&r, a); }
+                for &a in &axes {
+                    r = self.graph.unsqueeze(&r, a);
+                }
                 self.out(node, r);
             }
             "Pad" => {
@@ -537,15 +672,27 @@ impl<'a> OnnxConverter<'a> {
 
             // ── Data ops ────────────────────────────────────────────
             "Gather" => {
-                let axis: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
+                let axis: usize = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
                 self.out(node, self.graph.gather(&ins[0], &ins[1], axis));
             }
             "ScatterND" => {
                 self.out(node, self.graph.scatter_nd(&ins[0], &ins[1], &ins[2]));
             }
             "ArgMax" => {
-                let axis: i64 = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(-1);
-                let a = if axis >= 0 { Some(DimExpr::Known(axis as u64)) } else { None };
+                let axis: i64 = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(-1);
+                let a = if axis >= 0 {
+                    Some(DimExpr::Known(axis as u64))
+                } else {
+                    None
+                };
                 self.out(node, self.graph.argmax(&ins[0], a));
             }
             "Constant" => {
@@ -562,36 +709,46 @@ impl<'a> OnnxConverter<'a> {
                 if let Some(shape_tensor) = self.params.get(&node.inputs[0]) {
                     let shape_data: Vec<f32> = shape_tensor.to_numpy();
                     let output_shape: Vec<u64> = shape_data.iter().map(|&v| v as u64).collect();
-                    let fill_value: f32 = node.attrs.get("value")
-                        .and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    let fill_value: f32 = node
+                        .attrs
+                        .get("value")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0.0);
                     let data = fill_value.to_le_bytes().to_vec();
                     let numel: usize = output_shape.iter().map(|&d| d as usize).product();
                     let mut full_data = Vec::with_capacity(numel * 4);
                     for _ in 0..numel {
                         full_data.extend_from_slice(&data);
                     }
-                    let dims: Vec<DimExpr> = output_shape.iter().map(|&d| DimExpr::Known(d)).collect();
+                    let dims: Vec<DimExpr> =
+                        output_shape.iter().map(|&d| DimExpr::Known(d)).collect();
                     let tt = TensorType::new(dims, IrDType::F32);
                     let gt = self.graph.constant(&full_data, tt);
                     self.out(node, gt);
                 } else {
                     // Dynamic shape: can't evaluate at converter time
-                    return Err("ConstantOfShape with runtime shape is not yet supported".to_string());
+                    return Err(
+                        "ConstantOfShape with runtime shape is not yet supported".to_string()
+                    );
                 }
             }
             "Range" => {
                 // Range(start, limit, step) — produces a 1D F32 tensor.
                 // All 3 inputs are 0D scalars in the ONNX model.
                 if ins.len() >= 3 {
-                    eprintln!("[converter] Range node '{}': ins shapes={:?} {:?} {:?}",
+                    eprintln!(
+                        "[converter] Range node '{}': ins shapes={:?} {:?} {:?}",
                         node.name,
                         ins[0].shape(),
                         ins[1].shape(),
                         ins[2].shape(),
                     );
                     let gt = self.graph.range_op(&ins[0], &ins[1], &ins[2]);
-                    eprintln!("[converter] Range node '{}': output shape={:?}",
-                        node.name, gt.shape());
+                    eprintln!(
+                        "[converter] Range node '{}': output shape={:?}",
+                        node.name,
+                        gt.shape()
+                    );
                     self.out(node, gt);
                 } else {
                     return Err("Range needs 3 inputs (start, limit, step)".to_string());
@@ -605,11 +762,13 @@ impl<'a> OnnxConverter<'a> {
             "Cast" => {
                 // Cast to target type. ONNX "to" attr is an int enum:
                 //   1=FLOAT, 7=INT64, 10=INT32, 11=BOOL, etc.
-                let to: i64 = node.attrs.get("to")
+                let to: i64 = node
+                    .attrs
+                    .get("to")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1); // default FLOAT
                 let target_dtype = match to {
-                    1 | 6 => IrDType::F32,   // FLOAT
+                    1 | 6 => IrDType::F32, // FLOAT
                     7 => IrDType::I64,
                     10 => IrDType::I32,
                     11 => IrDType::Bool,
@@ -655,19 +814,25 @@ impl<'a> OnnxConverter<'a> {
 
             // ── Reduce ops ──────────────────────────────────────────
             "ReduceSum" => {
-                let axis: usize = node.attrs.get("axes")
+                let axis: usize = node
+                    .attrs
+                    .get("axes")
                     .and_then(|a| a.split(',').next().and_then(|v| v.trim().parse().ok()))
                     .unwrap_or(0);
                 self.out(node, self.graph.reduce_sum(&ins[0], axis, false));
             }
             "ReduceMean" => {
-                let axis: usize = node.attrs.get("axes")
+                let axis: usize = node
+                    .attrs
+                    .get("axes")
                     .and_then(|a| a.split(',').next().and_then(|v| v.trim().parse().ok()))
                     .unwrap_or(0);
                 self.out(node, self.graph.reduce_mean(&ins[0], axis, false));
             }
             "ReduceMax" => {
-                let axis: usize = node.attrs.get("axes")
+                let axis: usize = node
+                    .attrs
+                    .get("axes")
                     .and_then(|a| a.split(',').next().and_then(|v| v.trim().parse().ok()))
                     .unwrap_or(0);
                 self.out(node, self.graph.reduce_max(&ins[0], axis, false));
@@ -675,7 +840,11 @@ impl<'a> OnnxConverter<'a> {
 
             // ── InstanceNorm (decomposed) ───────────────────────────
             "InstanceNormalization" => {
-                let eps: f64 = node.attrs.get("epsilon").and_then(|e| e.parse().ok()).unwrap_or(1e-5);
+                let eps: f64 = node
+                    .attrs
+                    .get("epsilon")
+                    .and_then(|e| e.parse().ok())
+                    .unwrap_or(1e-5);
                 let scale = ins.get(1).ok_or("IN needs scale")?;
                 let bias = ins.get(2).ok_or("IN needs bias")?;
                 let m1 = self.graph.reduce_mean(&ins[0], 2, true);
@@ -684,7 +853,9 @@ impl<'a> OnnxConverter<'a> {
                 let sq = self.graph.pow(&centered, &self.scalar(2.0));
                 let v1 = self.graph.reduce_mean(&sq, 2, true);
                 let var = self.graph.reduce_mean(&v1, 2, true);
-                let std = self.graph.sqrt(&self.graph.add(&var, &self.scalar(eps as f32)));
+                let std = self
+                    .graph
+                    .sqrt(&self.graph.add(&var, &self.scalar(eps as f32)));
                 let norm = self.graph.div(&centered, &std);
                 let scaled = self.graph.mul(&norm, scale);
                 self.out(node, self.graph.add(&scaled, bias));
@@ -699,11 +870,31 @@ impl<'a> OnnxConverter<'a> {
                 let bb = ins.get(4).ok_or("fused needs bn_bias")?;
                 let bm = ins.get(5).ok_or("fused needs bn_mean")?;
                 let bv = ins.get(6).ok_or("fused needs bn_var")?;
-                let eps: f64 = node.attrs.get("epsilon").and_then(|e| e.parse().ok()).unwrap_or(1e-5);
-                let stride: usize = node.attrs.get("stride").and_then(|s| s.parse().ok()).unwrap_or(1);
-                let pad: usize = node.attrs.get("padding").and_then(|p| p.parse().ok()).unwrap_or(0);
-                let dil: usize = node.attrs.get("dilation").and_then(|d| d.parse().ok()).unwrap_or(1);
-                let grp: usize = node.attrs.get("groups").and_then(|g| g.parse().ok()).unwrap_or(1);
+                let eps: f64 = node
+                    .attrs
+                    .get("epsilon")
+                    .and_then(|e| e.parse().ok())
+                    .unwrap_or(1e-5);
+                let stride: usize = node
+                    .attrs
+                    .get("stride")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                let pad: usize = node
+                    .attrs
+                    .get("padding")
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(0);
+                let dil: usize = node
+                    .attrs
+                    .get("dilation")
+                    .and_then(|d| d.parse().ok())
+                    .unwrap_or(1);
+                let grp: usize = node
+                    .attrs
+                    .get("groups")
+                    .and_then(|g| g.parse().ok())
+                    .unwrap_or(1);
 
                 let conv = self.graph.conv2d_with_params(x, cw, stride, pad, dil, grp);
                 let conv = if let Some(cb) = cb {
@@ -733,13 +924,29 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, self.graph.where_tensor(&ins[0], &ins[1], &ins[2]));
             }
             "CumSum" => {
-                let dim: usize = node.attrs.get("axis").and_then(|a| a.parse().ok()).unwrap_or(0);
-                let exclusive: bool = node.attrs.get("exclusive").and_then(|e| e.parse().ok()).unwrap_or(false);
-                let reverse: bool = node.attrs.get("reverse").and_then(|r| r.parse().ok()).unwrap_or(false);
+                let dim: usize = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0);
+                let exclusive: bool = node
+                    .attrs
+                    .get("exclusive")
+                    .and_then(|e| e.parse().ok())
+                    .unwrap_or(false);
+                let reverse: bool = node
+                    .attrs
+                    .get("reverse")
+                    .and_then(|r| r.parse().ok())
+                    .unwrap_or(false);
                 self.out(node, self.graph.cumsum(&ins[0], dim, exclusive, reverse));
             }
             "Resize" => {
-                let mode = node.attrs.get("mode").map(|s| s.as_str()).unwrap_or("nearest");
+                let mode = node
+                    .attrs
+                    .get("mode")
+                    .map(|s| s.as_str())
+                    .unwrap_or("nearest");
                 // Resize in ONNX takes scales or sizes as tensor inputs (indices 2 and 3).
                 // Try to extract scales from the constant scales input.
                 let (scale_h, scale_w) = if node.inputs.len() > 2 {
@@ -764,9 +971,20 @@ impl<'a> OnnxConverter<'a> {
                     (2, 2)
                 };
                 match mode {
-                    "nearest" => self.out(node, self.graph.upsample_nearest2d(&ins[0], scale_h, scale_w)),
-                    "linear" | "bilinear" => self.out(node, self.graph.upsample_bilinear2d(&ins[0], scale_h, scale_w)),
-                    other => return Err(format!("Resize mode '{}' not supported (only nearest/linear)", other)),
+                    "nearest" => self.out(
+                        node,
+                        self.graph.upsample_nearest2d(&ins[0], scale_h, scale_w),
+                    ),
+                    "linear" | "bilinear" => self.out(
+                        node,
+                        self.graph.upsample_bilinear2d(&ins[0], scale_h, scale_w),
+                    ),
+                    other => {
+                        return Err(format!(
+                            "Resize mode '{}' not supported (only nearest/linear)",
+                            other
+                        ))
+                    }
                 }
             }
 
@@ -775,7 +993,9 @@ impl<'a> OnnxConverter<'a> {
                 // y = saturate(round(x / y_scale) + y_zero_point, 0, 255)
                 // Decompose: div + add + clamp (without round — acceptable approximation)
                 if ins.len() < 3 {
-                    return Err("QuantizeLinear needs 3 inputs: x, y_scale, y_zero_point".to_string());
+                    return Err(
+                        "QuantizeLinear needs 3 inputs: x, y_scale, y_zero_point".to_string()
+                    );
                 }
                 let x_div = self.graph.div(&ins[0], &ins[1]);
                 let x_biased = self.graph.add(&x_div, &ins[2]);
@@ -785,7 +1005,9 @@ impl<'a> OnnxConverter<'a> {
             "DequantizeLinear" => {
                 // y = (x - x_zero_point) * x_scale
                 if ins.len() < 3 {
-                    return Err("DequantizeLinear needs 3 inputs: x, x_scale, x_zero_point".to_string());
+                    return Err(
+                        "DequantizeLinear needs 3 inputs: x, x_scale, x_zero_point".to_string()
+                    );
                 }
                 let x_minus_zp = self.graph.sub(&ins[0], &ins[2]);
                 let y = self.graph.mul(&x_minus_zp, &ins[1]);
@@ -825,12 +1047,18 @@ impl<'a> OnnxConverter<'a> {
                 let strides: Vec<usize> = parse_ints(&node.attrs, "strides", &[1, 1]);
                 let pads: Vec<usize> = parse_ints(&node.attrs, "pads", &[0, 0]);
                 let dilations: Vec<usize> = parse_ints(&node.attrs, "dilations", &[1, 1]);
-                let group: usize = node.attrs.get("group").and_then(|g| g.parse().ok()).unwrap_or(1);
+                let group: usize = node
+                    .attrs
+                    .get("group")
+                    .and_then(|g| g.parse().ok())
+                    .unwrap_or(1);
                 let stride = *strides.first().unwrap_or(&1);
                 let padding = *pads.first().unwrap_or(&0);
                 let dilation = *dilations.first().unwrap_or(&1);
                 // f32 conv
-                let c = self.graph.conv2d_with_params(&x_deq, &w_deq, stride, padding, dilation, group);
+                let c = self
+                    .graph
+                    .conv2d_with_params(&x_deq, &w_deq, stride, padding, dilation, group);
                 // Optional bias (9th input)
                 let c = if ins.len() > 8 {
                     self.graph.add(&c, &ins[8])
@@ -846,8 +1074,16 @@ impl<'a> OnnxConverter<'a> {
 
             // ── TopK ─────────────────────────────────────────────────
             "TopK" => {
-                let k: usize = node.attrs.get("k").and_then(|s| s.parse().ok()).unwrap_or(1);
-                let axis: i64 = node.attrs.get("axis").and_then(|s| s.parse().ok()).unwrap_or(-1);
+                let k: usize = node
+                    .attrs
+                    .get("k")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                let axis: i64 = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(-1);
                 let (values, indices) = self.graph.topk(&ins[0], k, axis);
                 if !node.name.is_empty() {
                     self.graph.set_node_name(values.node_id(), &node.name);
@@ -862,10 +1098,16 @@ impl<'a> OnnxConverter<'a> {
 
             // ── LSTM (decomposed into primitives) ────────────────────
             "LSTM" => {
-                let hidden_size: usize = node.attrs.get("hidden_size")
+                let hidden_size: usize = node
+                    .attrs
+                    .get("hidden_size")
                     .and_then(|s| s.parse().ok())
                     .ok_or("LSTM needs hidden_size attribute")?;
-                let _direction = node.attrs.get("direction").map(|s| s.as_str()).unwrap_or("forward");
+                let _direction = node
+                    .attrs
+                    .get("direction")
+                    .map(|s| s.as_str())
+                    .unwrap_or("forward");
 
                 // ins[0] = X [seq_len, batch, input_size]
                 // ins[1] = W [num_dir, 4*hidden, input_size]
@@ -879,19 +1121,19 @@ impl<'a> OnnxConverter<'a> {
                 let r = &ins[2];
 
                 // Squeeze num_directions dim from W and R
-                let w_sq = self.graph.squeeze(w, 0);  // [4*hidden, input_size]
-                let r_sq = self.graph.squeeze(r, 0);  // [4*hidden, hidden_size]
+                let w_sq = self.graph.squeeze(w, 0); // [4*hidden, input_size]
+                let r_sq = self.graph.squeeze(r, 0); // [4*hidden, hidden_size]
 
                 let chunk = hidden_size;
                 // ONNX gate layout: [i, o, f, c]
                 let w_i = self.graph.slice(&w_sq, 0, 0, chunk);
-                let w_o = self.graph.slice(&w_sq, 0, chunk, 2*chunk);
-                let w_f = self.graph.slice(&w_sq, 0, 2*chunk, 3*chunk);
-                let w_c = self.graph.slice(&w_sq, 0, 3*chunk, 4*chunk);
+                let w_o = self.graph.slice(&w_sq, 0, chunk, 2 * chunk);
+                let w_f = self.graph.slice(&w_sq, 0, 2 * chunk, 3 * chunk);
+                let w_c = self.graph.slice(&w_sq, 0, 3 * chunk, 4 * chunk);
                 let r_i = self.graph.slice(&r_sq, 0, 0, chunk);
-                let r_o = self.graph.slice(&r_sq, 0, chunk, 2*chunk);
-                let r_f = self.graph.slice(&r_sq, 0, 2*chunk, 3*chunk);
-                let r_c = self.graph.slice(&r_sq, 0, 3*chunk, 4*chunk);
+                let r_o = self.graph.slice(&r_sq, 0, chunk, 2 * chunk);
+                let r_f = self.graph.slice(&r_sq, 0, 2 * chunk, 3 * chunk);
+                let r_c = self.graph.slice(&r_sq, 0, 3 * chunk, 4 * chunk);
 
                 // Transpose weights for x @ W^T
                 let w_i_t = self.graph.transpose(&w_i);
@@ -909,7 +1151,8 @@ impl<'a> OnnxConverter<'a> {
 
                 // Create zero initial states if not provided
                 let zero_tt = TensorType::new(h_c_shape.clone(), IrDType::F32);
-                let zero_numel: usize = h_c_shape.iter()
+                let zero_numel: usize = h_c_shape
+                    .iter()
                     .filter_map(|d| d.evaluate())
                     .product::<u64>() as usize;
                 let zero_bytes = vec![0u8; zero_numel * 4];
@@ -929,7 +1172,12 @@ impl<'a> OnnxConverter<'a> {
                     if ins.len() > 3 {
                         let b_sq = conv.graph.squeeze(&ins[3], 0);
                         let wb = conv.graph.slice(&b_sq, 0, gate_offset, gate_offset + chunk);
-                        let rb = conv.graph.slice(&b_sq, 0, gate_offset + 4*chunk, gate_offset + 4*chunk + chunk);
+                        let rb = conv.graph.slice(
+                            &b_sq,
+                            0,
+                            gate_offset + 4 * chunk,
+                            gate_offset + 4 * chunk + chunk,
+                        );
                         conv.graph.add(&wb, &rb)
                     } else {
                         conv.scalar(0.0)
@@ -937,8 +1185,8 @@ impl<'a> OnnxConverter<'a> {
                 };
                 let bias_i = extract_bias(self, 0);
                 let bias_o = extract_bias(self, chunk);
-                let bias_f = extract_bias(self, 2*chunk);
-                let bias_c = extract_bias(self, 3*chunk);
+                let bias_f = extract_bias(self, 2 * chunk);
+                let bias_c = extract_bias(self, 3 * chunk);
 
                 // Get seq_len from X shape
                 let seq_len = x.shape().first().and_then(|d| d.evaluate()).unwrap_or(1) as usize;
@@ -1001,12 +1249,21 @@ impl<'a> OnnxConverter<'a> {
 
             // ── GRU (decomposed into primitives) ─────────────────────
             "GRU" => {
-                let hidden_size: usize = node.attrs.get("hidden_size")
+                let hidden_size: usize = node
+                    .attrs
+                    .get("hidden_size")
                     .and_then(|s| s.parse().ok())
                     .ok_or("GRU needs hidden_size attribute")?;
-                let _direction = node.attrs.get("direction").map(|s| s.as_str()).unwrap_or("forward");
-                let _linear_before_reset: usize = node.attrs.get("linear_before_reset")
-                    .and_then(|s| s.parse().ok()).unwrap_or(0);
+                let _direction = node
+                    .attrs
+                    .get("direction")
+                    .map(|s| s.as_str())
+                    .unwrap_or("forward");
+                let _linear_before_reset: usize = node
+                    .attrs
+                    .get("linear_before_reset")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
 
                 // ins[0] = X [seq_len, batch, input_size]
                 // ins[1] = W [num_dir, 3*hidden, input_size]
@@ -1019,17 +1276,17 @@ impl<'a> OnnxConverter<'a> {
                 let r = &ins[2];
 
                 // Squeeze num_directions dim from W and R
-                let w_sq = self.graph.squeeze(w, 0);  // [3*hidden, input_size]
-                let r_sq = self.graph.squeeze(r, 0);  // [3*hidden, hidden_size]
+                let w_sq = self.graph.squeeze(w, 0); // [3*hidden, input_size]
+                let r_sq = self.graph.squeeze(r, 0); // [3*hidden, hidden_size]
 
                 let chunk = hidden_size;
                 // ONNX GRU gate layout: [z, r, h]
                 let w_z = self.graph.slice(&w_sq, 0, 0, chunk);
-                let w_r = self.graph.slice(&w_sq, 0, chunk, 2*chunk);
-                let w_h = self.graph.slice(&w_sq, 0, 2*chunk, 3*chunk);
+                let w_r = self.graph.slice(&w_sq, 0, chunk, 2 * chunk);
+                let w_h = self.graph.slice(&w_sq, 0, 2 * chunk, 3 * chunk);
                 let r_z = self.graph.slice(&r_sq, 0, 0, chunk);
-                let r_r = self.graph.slice(&r_sq, 0, chunk, 2*chunk);
-                let r_h = self.graph.slice(&r_sq, 0, 2*chunk, 3*chunk);
+                let r_r = self.graph.slice(&r_sq, 0, chunk, 2 * chunk);
+                let r_h = self.graph.slice(&r_sq, 0, 2 * chunk, 3 * chunk);
 
                 // Transpose weights
                 let w_z_t = self.graph.transpose(&w_z);
@@ -1043,9 +1300,8 @@ impl<'a> OnnxConverter<'a> {
                 let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
                 let h_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
                 let zero_tt = TensorType::new(h_shape.clone(), IrDType::F32);
-                let zero_numel: usize = h_shape.iter()
-                    .filter_map(|d| d.evaluate())
-                    .product::<u64>() as usize;
+                let zero_numel: usize =
+                    h_shape.iter().filter_map(|d| d.evaluate()).product::<u64>() as usize;
                 let zero_bytes = vec![0u8; zero_numel * 4];
                 let h_prev = if ins.len() > 5 {
                     self.graph.squeeze(&ins[5], 0)
@@ -1054,19 +1310,25 @@ impl<'a> OnnxConverter<'a> {
                 };
 
                 // Extract biases outside the loop
-                let extract_gru_bias = |conv: &OnnxConverter, gate_offset: usize| -> (GraphTensor, GraphTensor) {
-                    if ins.len() > 3 {
-                        let b_sq = conv.graph.squeeze(&ins[3], 0);
-                        let wb = conv.graph.slice(&b_sq, 0, gate_offset, gate_offset + chunk);
-                        let rb = conv.graph.slice(&b_sq, 0, gate_offset + 3*chunk, gate_offset + 3*chunk + chunk);
-                        (wb, rb)
-                    } else {
-                        (conv.scalar(0.0), conv.scalar(0.0))
-                    }
-                };
+                let extract_gru_bias =
+                    |conv: &OnnxConverter, gate_offset: usize| -> (GraphTensor, GraphTensor) {
+                        if ins.len() > 3 {
+                            let b_sq = conv.graph.squeeze(&ins[3], 0);
+                            let wb = conv.graph.slice(&b_sq, 0, gate_offset, gate_offset + chunk);
+                            let rb = conv.graph.slice(
+                                &b_sq,
+                                0,
+                                gate_offset + 3 * chunk,
+                                gate_offset + 3 * chunk + chunk,
+                            );
+                            (wb, rb)
+                        } else {
+                            (conv.scalar(0.0), conv.scalar(0.0))
+                        }
+                    };
                 let (bias_z_w, bias_z_r) = extract_gru_bias(self, 0);
                 let (bias_r_w, bias_r_r) = extract_gru_bias(self, chunk);
-                let (bias_h_w, bias_h_r) = extract_gru_bias(self, 2*chunk);
+                let (bias_h_w, bias_h_r) = extract_gru_bias(self, 2 * chunk);
 
                 // Get seq_len from X shape
                 let seq_len = x.shape().first().and_then(|d| d.evaluate()).unwrap_or(1) as usize;
@@ -1081,13 +1343,19 @@ impl<'a> OnnxConverter<'a> {
                     // z = sigmoid(x @ W_z^T + h @ R_z^T + b_z)
                     let x_w_z = self.graph.matmul(&x_t, &w_z_t);
                     let h_r_z = self.graph.matmul(&h_prev, &r_z_t);
-                    let gate_z = self.graph.add(&self.graph.add(&x_w_z, &h_r_z), &self.graph.add(&bias_z_w, &bias_z_r));
+                    let gate_z = self.graph.add(
+                        &self.graph.add(&x_w_z, &h_r_z),
+                        &self.graph.add(&bias_z_w, &bias_z_r),
+                    );
                     let z_t = self.graph.sigmoid(&gate_z);
 
                     // r = sigmoid(x @ W_r^T + h @ R_r^T + b_r)
                     let x_w_r = self.graph.matmul(&x_t, &w_r_t);
                     let h_r_r = self.graph.matmul(&h_prev, &r_r_t);
-                    let gate_r = self.graph.add(&self.graph.add(&x_w_r, &h_r_r), &self.graph.add(&bias_r_w, &bias_r_r));
+                    let gate_r = self.graph.add(
+                        &self.graph.add(&x_w_r, &h_r_r),
+                        &self.graph.add(&bias_r_w, &bias_r_r),
+                    );
                     let r_t = self.graph.sigmoid(&gate_r);
 
                     // n = tanh(x @ W_h^T + r * (h @ R_h^T + R_bh) + W_bh)
@@ -1148,11 +1416,15 @@ impl<'a> OnnxConverter<'a> {
 
     /// Resolve ONNX tensor names to GraphTensors.
     fn resolve_inputs(&self, names: &[String]) -> Result<Vec<GraphTensor>, String> {
-        names.iter().map(|name| {
-            self.name_to_id.get(name.as_str())
-                .cloned()
-                .ok_or_else(|| format!("input tensor '{}' not found", name))
-        }).collect()
+        names
+            .iter()
+            .map(|name| {
+                self.name_to_id
+                    .get(name.as_str())
+                    .cloned()
+                    .ok_or_else(|| format!("input tensor '{}' not found", name))
+            })
+            .collect()
     }
 
     /// Create a constant scalar GraphTensor.
@@ -1166,15 +1438,25 @@ impl<'a> OnnxConverter<'a> {
 // ── Free helpers ──────────────────────────────────────────────────────
 
 fn parse_ints(attrs: &HashMap<String, String>, key: &str, default: &[usize]) -> Vec<usize> {
-    attrs.get(key)
-        .map(|s| s.split(',').filter_map(|v| v.trim().parse::<usize>().ok()).collect())
+    attrs
+        .get(key)
+        .map(|s| {
+            s.split(',')
+                .filter_map(|v| v.trim().parse::<usize>().ok())
+                .collect()
+        })
         .filter(|v: &Vec<usize>| !v.is_empty())
         .unwrap_or_else(|| default.to_vec())
 }
 
 fn parse_ints_i64(attrs: &HashMap<String, String>, key: &str, default: &[i64]) -> Vec<i64> {
-    attrs.get(key)
-        .map(|s| s.split(',').filter_map(|v| v.trim().parse::<i64>().ok()).collect())
+    attrs
+        .get(key)
+        .map(|s| {
+            s.split(',')
+                .filter_map(|v| v.trim().parse::<i64>().ok())
+                .collect()
+        })
         .filter(|v: &Vec<i64>| !v.is_empty())
         .unwrap_or_else(|| default.to_vec())
 }
@@ -1191,7 +1473,13 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
         // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
         // not in the Tensor-level DType. Use default values here; the actual
         // scales are filled in by the quantization compiler pass.
-        DType::U4 => IrDType::U4 { scales: vec![1.0], zero_points: vec![0.0] },
-        DType::U8 => IrDType::U8 { scales: vec![1.0], zero_points: vec![0.0] },
+        DType::U4 => IrDType::U4 {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
+        DType::U8 => IrDType::U8 {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
     }
 }

@@ -129,7 +129,10 @@ fn test_wgpu_matmul_u4_cpu_comparison() {
         assert!(
             diff < tolerance,
             "GPU vs CPU mismatch at [{}]: GPU={} CPU={} diff={}",
-            i, g, c, diff
+            i,
+            g,
+            c,
+            diff
         );
     }
 }
@@ -150,7 +153,10 @@ fn test_wgpu_matmul_u8_cpu_comparison() {
         assert!(
             diff < tolerance,
             "GPU vs CPU mismatch at [{}]: GPU={} CPU={} diff={}",
-            i, g, c, diff
+            i,
+            g,
+            c,
+            diff
         );
     }
 }
@@ -164,11 +170,30 @@ fn test_wgpu_conv2d_u4() {
     let input: Vec<f32> = vec![0.5; 25];
 
     let output_u4 = run_conv2d(
-        1, 1, 2, 5, 5, 3, 1, 0, &weight, &input, Some(4), WgpuBackend,
+        1,
+        1,
+        2,
+        5,
+        5,
+        3,
+        1,
+        0,
+        &weight,
+        &input,
+        Some(4),
+        WgpuBackend,
     );
-    assert_eq!(output_u4.len(), 18, "U4 conv2d output should have 18 elements");
+    assert_eq!(
+        output_u4.len(),
+        18,
+        "U4 conv2d output should have 18 elements"
+    );
     for &v in &output_u4 {
-        assert!(v.is_finite(), "U4 conv2d output should be finite, got {}", v);
+        assert!(
+            v.is_finite(),
+            "U4 conv2d output should be finite, got {}",
+            v
+        );
     }
 }
 
@@ -179,11 +204,30 @@ fn test_wgpu_conv2d_u8() {
     let input: Vec<f32> = vec![0.5; 25];
 
     let output_u8 = run_conv2d(
-        1, 1, 2, 5, 5, 3, 1, 0, &weight, &input, Some(8), WgpuBackend,
+        1,
+        1,
+        2,
+        5,
+        5,
+        3,
+        1,
+        0,
+        &weight,
+        &input,
+        Some(8),
+        WgpuBackend,
     );
-    assert_eq!(output_u8.len(), 18, "U8 conv2d output should have 18 elements");
+    assert_eq!(
+        output_u8.len(),
+        18,
+        "U8 conv2d output should have 18 elements"
+    );
     for &v in &output_u8 {
-        assert!(v.is_finite(), "U8 conv2d output should be finite, got {}", v);
+        assert!(
+            v.is_finite(),
+            "U8 conv2d output should be finite, got {}",
+            v
+        );
     }
 }
 
@@ -193,11 +237,20 @@ fn test_wgpu_conv2d_u4_cpu_comparison() {
     let weight: Vec<f32> = (0..18).map(|i| (i as f32) * 0.1).collect();
     let input: Vec<f32> = vec![0.5; 25];
 
-    let cpu_result = run_conv2d(
-        1, 1, 2, 5, 5, 3, 1, 0, &weight, &input, Some(4), CpuBackend,
-    );
+    let cpu_result = run_conv2d(1, 1, 2, 5, 5, 3, 1, 0, &weight, &input, Some(4), CpuBackend);
     let gpu_result = run_conv2d(
-        1, 1, 2, 5, 5, 3, 1, 0, &weight, &input, Some(4), WgpuBackend,
+        1,
+        1,
+        2,
+        5,
+        5,
+        3,
+        1,
+        0,
+        &weight,
+        &input,
+        Some(4),
+        WgpuBackend,
     );
 
     assert_eq!(cpu_result.len(), gpu_result.len());
@@ -207,7 +260,10 @@ fn test_wgpu_conv2d_u4_cpu_comparison() {
         assert!(
             diff < tolerance,
             "GPU vs CPU mismatch at [{}]: GPU={} CPU={} diff={}",
-            i, g, c, diff
+            i,
+            g,
+            c,
+            diff
         );
     }
 }

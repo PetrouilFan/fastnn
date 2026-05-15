@@ -232,7 +232,8 @@ impl Tensor {
                 let f32_data = src_ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
                 let byte_data = bytemuck::cast_slice(&f32_data);
 
-                let Some(dst_ctx) = crate::backend::wgpu::context::try_get_wgpu_context(device_id) else {
+                let Some(dst_ctx) = crate::backend::wgpu::context::try_get_wgpu_context(device_id)
+                else {
                     let cpu_data: Vec<f32> = bytemuck::cast_slice(&f32_data).to_vec();
                     return Tensor::from_vec(cpu_data, self.shape().to_vec());
                 };
@@ -249,7 +250,8 @@ impl Tensor {
             }
             _ => {
                 let cpu_data = self.as_f32_slice().to_vec();
-                let Some(ctx) = crate::backend::wgpu::context::try_get_wgpu_context(device_id) else {
+                let Some(ctx) = crate::backend::wgpu::context::try_get_wgpu_context(device_id)
+                else {
                     return self.clone();
                 };
                 let buffer = ctx.create_gpu_buffer_from_data(&cpu_data, "to_gpu");

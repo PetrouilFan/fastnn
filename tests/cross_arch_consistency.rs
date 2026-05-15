@@ -63,7 +63,13 @@ fn test_relu_consistency() {
 
     let expected = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 2.0, 3.0];
     for (i, (&got, &exp)) in data.iter().zip(expected.iter()).enumerate() {
-        assert!((got - exp).abs() < 1e-6, "relu mismatch at {}: {} vs {}", i, got, exp);
+        assert!(
+            (got - exp).abs() < 1e-6,
+            "relu mismatch at {}: {} vs {}",
+            i,
+            got,
+            exp
+        );
     }
 }
 

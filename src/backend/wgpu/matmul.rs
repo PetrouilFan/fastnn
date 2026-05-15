@@ -1,5 +1,5 @@
-use crate::backend::BackendError;
 use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::BackendError;
 
 pub(super) fn dispatch_matmul_gpu(
     arena: &super::WgpuBuffer,
@@ -62,10 +62,22 @@ pub(super) fn dispatch_matmul_gpu(
             label: Some("mm_bg"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: buf_params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf_b.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf_params.as_entire_binding(),
+                },
             ],
         });
 

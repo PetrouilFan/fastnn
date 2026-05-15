@@ -483,9 +483,8 @@ impl Tensor {
     }
 
     pub fn flip(&self, dims: &[usize]) -> Tensor {
-        let result = Tensor::exec_aot(&[self], |g, ins| {
-            vec![g.flip(&ins[0], dims)]
-        }).expect("Tensor::flip: AOT execution failed");
+        let result = Tensor::exec_aot(&[self], |g, ins| vec![g.flip(&ins[0], dims)])
+            .expect("Tensor::flip: AOT execution failed");
         result.into_iter().next().unwrap()
     }
 

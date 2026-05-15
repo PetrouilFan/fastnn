@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 #![allow(clippy::missing_safety_doc)]
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use crate::dtypes::{F16x2, U4x8, U8x4};
 use crate::dtypes::{F32x1, PackedWord};
 use crate::packed_tensor::PackedTensor;
@@ -309,7 +309,7 @@ pub fn gemv_packed_simd<T: PackedWord>(
 // U8x4: AVX2 int8→f32 widening + FMA
 // ============================================================
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[allow(unused_variables)]
 fn gemv_u8x4_dispatch(weights: &PackedTensor<U8x4>, activation: &[f32], output: &mut [f32]) {
     let shape = weights.shape();
@@ -516,7 +516,7 @@ unsafe fn gemv_row_u8x4_avx512(
 // U4x8: AVX2 nibble extraction → int32 → f32 → FMA
 // ============================================================
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[allow(unused_variables)]
 fn gemv_u4x8_dispatch(weights: &PackedTensor<U4x8>, activation: &[f32], output: &mut [f32]) {
     let shape = weights.shape();
@@ -694,7 +694,7 @@ unsafe fn gemv_row_u4x8_avx512(
 // F16x2: F16C hardware half→float conversion + FMA
 // ============================================================
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[allow(unused_variables)]
 fn gemv_f16x2_dispatch(weights: &PackedTensor<F16x2>, activation: &[f32], output: &mut [f32]) {
     let shape = weights.shape();
