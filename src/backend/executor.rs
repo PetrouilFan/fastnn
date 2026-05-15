@@ -153,12 +153,7 @@ impl<B: Backend> GraphExecutor<B> {
         // This avoids a full backend re-compilation while still shrinking
         // the arena from SYMBOL_DIM_MAX worst-case to actual sizes.
         let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
-        let tightened_plan = tighten_slices(
-            plan,
-            memory_plan,
-            &tightened_memory_plan,
-            graph,
-        )?;
+        let tightened_plan = tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
 
         // Safety check: every node's resolved output must fit in its slot.
         for (&node_id, slot) in &tightened_memory_plan.slots {
@@ -211,7 +206,7 @@ impl<B: Backend> GraphExecutor<B> {
 
         // Read output data — compute actual sizes via shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
-        for (_out_idx, &output_node_id) in graph.outputs.iter().enumerate() {
+        for &output_node_id in graph.outputs.iter() {
             let slot = tightened_memory_plan
                 .slots
                 .get(&output_node_id)
@@ -222,7 +217,8 @@ impl<B: Backend> GraphExecutor<B> {
                     ))
                 })?;
 
-            let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
+            let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id)
+            {
                 let resolved_shape =
                     resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
                         BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
@@ -343,13 +339,8 @@ impl<B: Backend> GraphExecutor<B> {
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
         let (plan, memory_plan) = if let Some(shape_env) = batch_shape_env {
             let tightened_mp = memory_plan.tighten(&final_graph, shape_env);
-            let tightened_plan = tighten_slices(
-                &plan,
-                &memory_plan,
-                &tightened_mp,
-                &final_graph,
-            )
-            .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
+            let tightened_plan = tighten_slices(&plan, &memory_plan, &tightened_mp, &final_graph)
+                .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
             (tightened_plan, tightened_mp)
         } else {
             (plan, memory_plan)
@@ -564,8 +555,7 @@ pub fn tighten_slices(
                     }
                     // ── Update secondary_output_slice ──
                     if let Some(sec_slice) = secondary_output_slice.as_mut() {
-                        if let Some(slot) = tightened_memory_plan.secondary_slots.get(&(*nid, 1))
-                        {
+                        if let Some(slot) = tightened_memory_plan.secondary_slots.get(&(*nid, 1)) {
                             sec_slice.offset = slot.offset;
                             sec_slice.size = slot.size;
                         }
@@ -582,8 +572,7 @@ pub fn tighten_slices(
                         }
                     }
                     // ── Update kernel params from tightened memory plan ──
-                    if let Some(tightened_params) =
-                        tightened_memory_plan.tightened_params.get(nid)
+                    if let Some(tightened_params) = tightened_memory_plan.tightened_params.get(nid)
                     {
                         *params = tightened_params.clone();
                     }
@@ -750,13 +739,18 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 if !has_unresolved {
                     for (i, s) in input_shapes.iter().enumerate().skip(1) {
                         if s.len() != rank {
+                            // Debug: collect input shapes as string
+                            let shapes_str: Vec<String> =
+                                input_shapes.iter().map(|s| format!("{:?}", s)).collect();
                             return Err(format!(
-                                "Concat node {} ({}): rank mismatch input 0 ({}) vs input {} ({})",
+                                "Concat node {} name='{}' op='{:?}': rank mismatch input 0 ({}) vs input {} ({}). Input shapes: {:?}",
                                 node_id,
                                 node.name,
+                                node.opcode,
                                 rank,
                                 i,
-                                s.len()
+                                s.len(),
+                                shapes_str,
                             ));
                         }
                         for j in 0..rank {

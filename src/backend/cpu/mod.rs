@@ -296,7 +296,7 @@ impl Backend for CpuBackend {
                         None
                     };
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
@@ -353,7 +353,7 @@ impl Backend for CpuBackend {
                         _ => {}
                     }
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
@@ -428,7 +428,7 @@ impl Backend for CpuBackend {
                         extra_params.push(max.to_bits() as usize);
                     }
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
@@ -544,7 +544,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(3).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name,
                         input_slices,
                         output_slice,
@@ -570,7 +570,7 @@ impl Backend for CpuBackend {
                         0
                     };
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "norm_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -620,7 +620,7 @@ impl Backend for CpuBackend {
                         .unwrap_or(1);
 
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "softmax".to_string(),
                         input_slices,
                         output_slice,
@@ -639,7 +639,7 @@ impl Backend for CpuBackend {
                         .map(|s| s.iter().skip(2).product::<u64>())
                         .unwrap_or(1) as usize;
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "biasadd".to_string(),
                         input_slices,
                         output_slice,
@@ -671,7 +671,7 @@ impl Backend for CpuBackend {
                             .collect::<Vec<_>>()
                     );
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "concat".to_string(),
                         input_slices,
                         output_slice,
@@ -729,7 +729,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(3).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "pool_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -756,7 +756,7 @@ impl Backend for CpuBackend {
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "pad_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -773,7 +773,7 @@ impl Backend for CpuBackend {
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "gather".to_string(),
                         input_slices,
                         output_slice,
@@ -807,7 +807,7 @@ impl Backend for CpuBackend {
                         .map(|s| s[dim + 1..].iter().product::<u64>() as usize)
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "slice_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -819,7 +819,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::ScatterNd => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "scatter_nd".to_string(),
                         input_slices,
                         output_slice,
@@ -854,7 +854,7 @@ impl Backend for CpuBackend {
                         crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
                     }) as usize;
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "reduce_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -886,7 +886,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(1).cloned())
                         .unwrap_or(DimExpr::Known(n as u64));
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "transpose_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -920,7 +920,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(2).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "conv1d".to_string(),
                         input_slices,
                         output_slice,
@@ -970,7 +970,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(4).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "conv3d".to_string(),
                         input_slices,
                         output_slice,
@@ -1015,7 +1015,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.get(3).copied())
                         .unwrap_or(0) as usize;
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "conv_transpose2d".to_string(),
                         input_slices,
                         output_slice,
@@ -1029,7 +1029,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Prelu => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "prelu".to_string(),
                         input_slices,
                         output_slice,
@@ -1046,7 +1046,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse::<f32>().ok())
                         .unwrap_or(1e-5);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "rms_norm".to_string(),
                         input_slices,
                         output_slice,
@@ -1058,7 +1058,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Embedding => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "embedding".to_string(),
                         input_slices,
                         output_slice,
@@ -1070,7 +1070,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Pow => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "pow_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1082,7 +1082,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::GtScalar => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "gt_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1094,7 +1094,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::LtScalar => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "lt_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1106,7 +1106,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::EqScalar => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "eq_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1118,7 +1118,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::AddScalar => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "add_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1130,7 +1130,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::MulScalar => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "mul_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1142,7 +1142,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::DivScalar => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "div_scalar_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1164,7 +1164,7 @@ impl Backend for CpuBackend {
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(-1);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "argmax".to_string(),
                         input_slices,
                         output_slice,
@@ -1200,7 +1200,7 @@ impl Backend for CpuBackend {
                         _ => "upsample_bilinear2d",
                     };
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
@@ -1222,7 +1222,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "adaptive_avg_pool2d".to_string(),
                         input_slices,
                         output_slice,
@@ -1239,7 +1239,7 @@ impl Backend for CpuBackend {
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "repeat".to_string(),
                         input_slices,
                         output_slice,
@@ -1266,7 +1266,7 @@ impl Backend for CpuBackend {
                         .and_then(|r| r.parse().ok())
                         .unwrap_or(0);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "cumsum".to_string(),
                         input_slices,
                         output_slice,
@@ -1278,7 +1278,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Erf => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "erf_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1299,7 +1299,7 @@ impl Backend for CpuBackend {
                     params.extend_from_slice(&dims);
                     params.extend(input_shape.iter().map(|&s| s as usize));
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "flip".to_string(),
                         input_slices,
                         output_slice,
@@ -1311,7 +1311,7 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Where => {
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "where_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1333,7 +1333,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(-1);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "topk_fused".to_string(),
                         input_slices,
                         output_slice,
@@ -1351,7 +1351,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.01);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "sgd_update_f32".to_string(),
                         input_slices, // [weight, grad] — weight must be same slot as output
                         output_slice,
@@ -1403,7 +1403,7 @@ impl Backend for CpuBackend {
                         "adam_update_f32"
                     };
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices, // [weight, grad, m, v]
                         output_slice,
@@ -1465,7 +1465,7 @@ impl Backend for CpuBackend {
                         "adamw_update_f32"
                     };
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices, // [weight, grad, m, v]
                         output_slice,
@@ -1499,7 +1499,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.0);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "muon_update_f32".to_string(),
                         input_slices, // [weight, grad, m]
                         output_slice,
@@ -1530,7 +1530,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.999);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "lion_update_f32".to_string(),
                         input_slices, // [weight, grad, m]
                         output_slice,
@@ -1561,7 +1561,7 @@ impl Backend for CpuBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(1e-8);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "rmsprop_update_f32".to_string(),
                         input_slices, // [weight, grad, v]
                         output_slice,
@@ -1620,7 +1620,7 @@ impl Backend for CpuBackend {
                             .map(|s| vec![BufferSlice::new(s.offset, s.size)])
                             .unwrap_or_default();
                         instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                            node_id: Some(node_id),
                             kernel_name: "cast".to_string(),
                             input_slices,
                             output_slice,
@@ -1661,7 +1661,7 @@ impl Backend for CpuBackend {
                         numel
                     };
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
@@ -1709,7 +1709,7 @@ impl Backend for CpuBackend {
                         params.push(zp.to_bits() as usize);
                     }
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "dequantize_kernel".to_string(),
                         input_slices,
                         output_slice,
@@ -1725,7 +1725,7 @@ impl Backend for CpuBackend {
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "to_f16".to_string(),
                         input_slices,
                         output_slice,
@@ -1741,7 +1741,7 @@ impl Backend for CpuBackend {
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "to_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1758,7 +1758,7 @@ impl Backend for CpuBackend {
                         .unwrap_or(1);
                     // Output buffer: [scale(f32)][zp(f32)][i8_data(numel bytes)]
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "quantize_activations".to_string(),
                         input_slices,
                         output_slice,
@@ -1774,7 +1774,7 @@ impl Backend for CpuBackend {
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "dequantize_activations".to_string(),
                         input_slices,
                         output_slice,
@@ -1797,7 +1797,7 @@ impl Backend for CpuBackend {
                         .unwrap_or("layer_norm");
                     let kernel_name = format!("fused_residual_add_{}", norm_type);
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name,
                         input_slices, // [residual, main_output, weight, optional_bias]
                         output_slice,
@@ -1819,7 +1819,7 @@ impl Backend for CpuBackend {
                         .unwrap_or(1);
                     if !input_slices.is_empty() {
                         instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                            node_id: Some(node_id),
                             kernel_name: "gradient_scale".to_string(),
                             input_slices,
                             output_slice,
@@ -1862,7 +1862,7 @@ impl Backend for CpuBackend {
                     }
 
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "expand_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -1893,7 +1893,7 @@ impl Backend for CpuBackend {
                         .map(|slot| BufferSlice::new(slot.offset, slot.size))
                         .collect();
                     instructions.push(Instruction::CallKernel {
-            node_id: Some(node_id),
+                        node_id: Some(node_id),
                         kernel_name: "range_f32".to_string(),
                         input_slices,
                         output_slice,
@@ -2909,7 +2909,9 @@ impl Backend for CpuBackend {
                                 // Use matrixmultiply::sgemm for the matmul, then add bias + relu
                                 matmul_blas_into(&a, &b, out_f32, m, _k, n);
                                 for i in 0..out_f32.len() {
-                                    out_f32[i] = (out_f32[i] + if i % n < bias.len() { bias[i % n] } else { 0.0 }).max(0.0);
+                                    out_f32[i] = (out_f32[i]
+                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 })
+                                    .max(0.0);
                                 }
                             }
                         }
@@ -2944,7 +2946,8 @@ impl Backend for CpuBackend {
                                 };
                                 matmul_blas_into(&a, &b, out_f32, m, _k, n);
                                 for i in 0..out_f32.len() {
-                                    let x = out_f32[i] + if i % n < bias.len() { bias[i % n] } else { 0.0 };
+                                    let x = out_f32[i]
+                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 };
                                     let x3 = x * x * x;
                                     let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                     let t = tanh_arg.tanh();
@@ -2983,7 +2986,8 @@ impl Backend for CpuBackend {
                                 };
                                 matmul_blas_into(&a, &b, out_f32, m, _k, n);
                                 for i in 0..out_f32.len() {
-                                    let x = out_f32[i] + if i % n < bias.len() { bias[i % n] } else { 0.0 };
+                                    let x = out_f32[i]
+                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 };
                                     out_f32[i] = x / (1.0 + (-x).exp());
                                 }
                             }
@@ -3145,9 +3149,9 @@ impl Backend for CpuBackend {
                                     &pt,
                                     &activations,
                                     out_f32,
-                                    m,  // num_pixels
-                                    k,  // col_w
-                                    n,  // oc
+                                    m, // num_pixels
+                                    k, // col_w
+                                    n, // oc
                                 );
                             }
                         }
@@ -3207,9 +3211,9 @@ impl Backend for CpuBackend {
                                     &pt,
                                     &activations,
                                     out_f32,
-                                    m,  // num_pixels = batch rows
-                                    k,  // col_w = input features per row
-                                    n,  // oc = output features per row
+                                    m, // num_pixels = batch rows
+                                    k, // col_w = input features per row
+                                    n, // oc = output features per row
                                 );
                             }
                         }
@@ -4153,9 +4157,16 @@ impl Backend for CpuBackend {
                                     &weight_data,
                                     &bias_data,
                                     out_f32,
-                                    n, c, h, w, f,
-                                    kh, kw,
-                                    stride, padding, dilation,
+                                    n,
+                                    c,
+                                    h,
+                                    w,
+                                    f,
+                                    kh,
+                                    kw,
+                                    stride,
+                                    padding,
+                                    dilation,
                                     groups,
                                 );
                             }
@@ -5990,14 +6001,22 @@ impl Backend for CpuBackend {
                                 #[cfg(not(feature = "parallel"))]
                                 {
                                     for i in 0..w_new.len() {
-                                        w_new[i] -= lr * g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        w_new[i] -= lr
+                                            * g_slice
+                                                .get(i % g_slice.len())
+                                                .copied()
+                                                .unwrap_or(0.0);
                                     }
                                 }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
                                     w_new.par_iter_mut().enumerate().for_each(|(i, w)| {
-                                        *w -= lr * g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        *w -= lr
+                                            * g_slice
+                                                .get(i % g_slice.len())
+                                                .copied()
+                                                .unwrap_or(0.0);
                                     });
                                 }
                                 w_new
@@ -6077,7 +6096,8 @@ impl Backend for CpuBackend {
                                 #[cfg(not(feature = "parallel"))]
                                 {
                                     for i in 0.._len {
-                                        let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        let g =
+                                            g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
                                         m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                         v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                         let m_hat = m_new[i] / bias_corr1;
@@ -6094,7 +6114,10 @@ impl Backend for CpuBackend {
                                         .zip(v_new.par_iter_mut())
                                         .enumerate()
                                         .for_each(|(i, ((w, m), v))| {
-                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            let g = g_slice
+                                                .get(i % g_slice.len())
+                                                .copied()
+                                                .unwrap_or(0.0);
                                             *m = beta1 * m_init[i] + (1.0 - beta1) * g;
                                             *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                             let m_hat = *m / bias_corr1;
@@ -6178,7 +6201,10 @@ impl Backend for CpuBackend {
                                         .enumerate()
                                         .for_each(|(i, ((w, m), v))| {
                                             *w -= lr * wd * w_init[i];
-                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            let g = g_slice
+                                                .get(i % g_slice.len())
+                                                .copied()
+                                                .unwrap_or(0.0);
                                             *m = beta1 * m_init[i] + (1.0 - beta1) * g;
                                             *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                             let m_hat = *m / bias_corr1;
@@ -6227,7 +6253,8 @@ impl Backend for CpuBackend {
                                 #[cfg(not(feature = "parallel"))]
                                 {
                                     for i in 0..w_init.len() {
-                                        let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        let g =
+                                            g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
                                         m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                         w_new[i] = w_init[i] - lr * (m_new[i] + wd * w_init[i]);
                                     }
@@ -6238,7 +6265,10 @@ impl Backend for CpuBackend {
                                     (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
                                         .enumerate()
                                         .for_each(|(i, (w, m))| {
-                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            let g = g_slice
+                                                .get(i % g_slice.len())
+                                                .copied()
+                                                .unwrap_or(0.0);
                                             *m = beta1 * m_init[i] + (1.0 - beta1) * g;
                                             *w = w_init[i] - lr * (*m + wd * w_init[i]);
                                         });
@@ -6283,7 +6313,8 @@ impl Backend for CpuBackend {
                                 #[cfg(not(feature = "parallel"))]
                                 {
                                     for i in 0..w_init.len() {
-                                        let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        let g =
+                                            g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
                                         m_new[i] = beta2 * m_init[i] + (1.0 - beta2) * g;
                                         let update = beta1 * m_new[i] + (1.0 - beta1) * g;
                                         w_new[i] -= lr * update.signum();
@@ -6295,7 +6326,10 @@ impl Backend for CpuBackend {
                                     (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
                                         .enumerate()
                                         .for_each(|(i, (w, m))| {
-                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            let g = g_slice
+                                                .get(i % g_slice.len())
+                                                .copied()
+                                                .unwrap_or(0.0);
                                             *m = beta2 * m_init[i] + (1.0 - beta2) * g;
                                             let update = beta1 * *m + (1.0 - beta1) * g;
                                             *w -= lr * update.signum();
@@ -6341,7 +6375,8 @@ impl Backend for CpuBackend {
                                 #[cfg(not(feature = "parallel"))]
                                 {
                                     for i in 0..w_init.len() {
-                                        let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                        let g =
+                                            g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
                                         v_new[i] = beta * v_init[i] + (1.0 - beta) * g * g;
                                         w_new[i] -= lr * g / (v_new[i].sqrt() + eps);
                                     }
@@ -6352,7 +6387,10 @@ impl Backend for CpuBackend {
                                     (w_new.par_iter_mut().zip(v_new.par_iter_mut()))
                                         .enumerate()
                                         .for_each(|(i, (w, v))| {
-                                            let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
+                                            let g = g_slice
+                                                .get(i % g_slice.len())
+                                                .copied()
+                                                .unwrap_or(0.0);
                                             *v = beta * v_init[i] + (1.0 - beta) * g * g;
                                             *w -= lr * g / (v.sqrt() + eps);
                                         });
