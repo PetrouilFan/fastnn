@@ -145,7 +145,8 @@ impl Clone for Storage {
             Storage::Cpu(cpu) => Storage::Cpu(CpuStorage {
                 data: cpu.data.clone(),
                 nbytes: cpu.nbytes,
-                gpu_buffer_cache: RwLock::new(HashMap::new()),
+                // Share GPU buffer cache via Arc so cloned tensors don't discard cached mappings
+                gpu_buffer_cache: RwLock::new(cpu.gpu_buffer_cache.read().clone()),
             }),
             Storage::Wgpu(gpu) => Storage::Wgpu(GpuStorage {
                 buffer: gpu.buffer.clone(),

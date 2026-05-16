@@ -8,7 +8,7 @@ pub(super) fn dispatch_softmax_gpu(
     pending_reads: &mut Vec<PendingRead>,
     input: &[f32],
     numel: usize,
-    _axis: usize,
+    row_size: usize,
     cpu_offset: usize,
 ) -> Result<(), BackendError> {
     let shader = build_softmax_shader();
@@ -30,7 +30,7 @@ pub(super) fn dispatch_softmax_gpu(
         numel: u32,
         row_size: u32,
     }
-    let row_size = input.len().checked_div(numel).unwrap_or(1);
+    let row_size = if row_size > 0 { row_size } else { 1 };
     let params = SfParams {
         numel: numel as u32,
         row_size: row_size as u32,
