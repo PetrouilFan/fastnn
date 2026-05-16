@@ -23,6 +23,63 @@ pub mod im2col;
 pub mod microkernels;
 pub mod reductions_fast;
 
+// ============================================================
+// Arena slice extraction macro
+// ============================================================
+
+/// Extract input and output `f32` slices from the arena in one shot.
+///
+/// **Unary** (one input, one output):
+/// ```ignore
+/// get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [output]);
+/// // → `input: Vec<f32>` + `output: &mut [f32]`
+/// ```
+///
+/// **Binary** (two inputs, one output):
+/// ```ignore
+/// get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [output]);
+/// // → `a: Vec<f32>`, `b: Vec<f32>` + `output: &mut [f32]`
+/// ```
+macro_rules! get_in_out_slices {
+    // Unary
+    ($arena:expr, $input_slices:expr => [$input:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
+        let $input = if let Some(slice) = $input_slices.first() {
+            let d = $arena.data_mut();
+            bytemuck::cast_slice::<_, f32>(
+                &d[slice.offset..slice.offset + slice.size],
+            )
+            .to_vec()
+        } else {
+            Vec::new()
+        };
+        let $output = {
+            let d = $arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[$out_start..$out_end])
+        };
+    };
+    // Binary
+    ($arena:expr, $input_slices:expr => [$a:ident, $b:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
+        let ($a, $b) = if let [a_slice, b_slice] = &$input_slices[..] {
+            let d = $arena.data_mut();
+            let a_f32 = bytemuck::cast_slice::<_, f32>(
+                &d[a_slice.offset..a_slice.offset + a_slice.size],
+            )
+            .to_vec();
+            let b_f32 = bytemuck::cast_slice::<_, f32>(
+                &d[b_slice.offset..b_slice.offset + b_slice.size],
+            )
+            .to_vec();
+            (a_f32, b_f32)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let $output = {
+            let d = $arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[$out_start..$out_end])
+        };
+    };
+}
+
 /// Minimum number of elements for a parallel dispatch loop to be beneficial.
 /// Below this threshold, sequential execution avoids rayon's task-spawning
 /// overhead without measurable throughput loss.
@@ -2001,883 +2058,107 @@ impl Backend for CpuBackend {
 
                     match kernel_name.as_str() {
                         "add_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = a[i % a_len] + b[i % b_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i % a_len] + b[i % b_len]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            add_f32(&a, &b, out_f32);
                         }
                         "sub_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = a[i % a_len] - b[i % b_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i % a_len] - b[i % b_len]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            sub_f32(&a, &b, out_f32);
                         }
                         "mul_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = a[i % a_len] * b[i % b_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i % a_len] * b[i % b_len]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            mul_f32(&a, &b, out_f32);
                         }
                         "div_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = a[i % a_len] / b[i % b_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i % a_len] / b[i % b_len]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            div_f32(&a, &b, out_f32);
                         }
                         "relu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].max(0.0));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            relu_f32(&input, out_f32);
                         }
                         "gelu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        let x = input[i];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            let x = input[i];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            gelu_f32(&input, out_f32);
                         }
                         "silu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        let x = input[i];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            let x = input[i];
-                                            *o = x / (1.0 + (-x).exp());
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            silu_f32(&input, out_f32);
                         }
                         "exp_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].exp();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].exp());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            exp_f32(&input, out_f32);
                         }
                         "log_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].ln();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].ln());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            log_f32(&input, out_f32);
                         }
                         "sqrt_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].sqrt();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].sqrt());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            sqrt_f32(&input, out_f32);
                         }
                         "neg_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = -input[i];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = -input[i]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            neg_f32(&input, out_f32);
                         }
                         "abs_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].abs();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].abs());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            abs_f32(&input, out_f32);
                         }
                         "sigmoid_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = 1.0 / (1.0 + (-input[i]).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = 1.0 / (1.0 + (-input[i]).exp()));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            sigmoid_f32(&input, out_f32);
                         }
                         "tanh_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].tanh();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].tanh());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            tanh_f32(&input, out_f32);
                         }
                         "leaky_relu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let slope = if !params.is_empty() {
-                                    f32::from_bits(params[0] as u32)
-                                } else {
-                                    0.01
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = if input[i] > 0.0 {
-                                            input[i]
-                                        } else {
-                                            input[i] * slope
-                                        };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if input[i] > 0.0 {
-                                                input[i]
-                                            } else {
-                                                input[i] * slope
-                                            }
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            let slope = if !params.is_empty() { f32::from_bits(params[0] as u32) } else { 0.01 };
+                            leaky_relu_f32(&input, out_f32, slope);
                         }
                         "elu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = if input[i] > 0.0 {
-                                            input[i]
-                                        } else {
-                                            input[i].exp() - 1.0
-                                        };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if input[i] > 0.0 {
-                                                input[i]
-                                            } else {
-                                                input[i].exp() - 1.0
-                                            }
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            elu_f32(&input, out_f32);
                         }
                         "softplus_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = (1.0 + input[i].exp()).ln();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = (1.0 + input[i].exp()).ln());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            softplus_f32(&input, out_f32);
                         }
                         "hardswish_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        let v = input[i];
-                                        out_f32[i] = v * (v + 3.0).clamp(0.0, 6.0) / 6.0;
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            let v = input[i];
-                                            *o = v * (v + 3.0).clamp(0.0, 6.0) / 6.0;
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            hardswish_f32(&input, out_f32);
                         }
                         "clamp_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let min_val = if !params.is_empty() {
-                                    f32::from_bits(params[0] as u32)
-                                } else {
-                                    0.0
-                                };
-                                let max_val = if params.len() > 1 {
-                                    f32::from_bits(params[1] as u32)
-                                } else {
-                                    1.0
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].max(min_val).min(max_val);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].max(min_val).min(max_val));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            let min_val = if !params.is_empty() { f32::from_bits(params[0] as u32) } else { 0.0 };
+                            let max_val = if params.len() > 1 { f32::from_bits(params[1] as u32) } else { 1.0 };
+                            clamp_f32(&input, out_f32, min_val, max_val);
                         }
                         "sign_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].signum();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].signum());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            sign_f32(&input, out_f32);
                         }
                         "logical_not_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = if input[i] == 0.0 { 1.0 } else { 0.0 };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if input[i] == 0.0 { 1.0 } else { 0.0 }
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            logical_not_f32(&input, out_f32);
                         }
                         "log_softmax_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                if !input.is_empty() {
-                                    let max_val =
-                                        input.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                                    let mut sum = 0.0f32;
-                                    for i in 0..input.len() {
-                                        sum += (input[i] - max_val).exp();
-                                    }
-                                    let log_sum = sum.ln();
-                                    let len = out_f32.len().min(input.len());
-                                    #[cfg(not(feature = "parallel"))]
-                                    {
-                                        for i in 0..len {
-                                            out_f32[i] = (input[i] - max_val) - log_sum;
-                                        }
-                                    }
-                                    #[cfg(feature = "parallel")]
-                                    {
-                                        use rayon::prelude::*;
-                                        out_f32[..len]
-                                            .par_iter_mut()
-                                            .enumerate()
-                                            .for_each(|(i, o)| *o = (input[i] - max_val) - log_sum);
-                                    }
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            log_softmax_f32(&input, out_f32);
                         }
                         "mish_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        let x = input[i];
-                                        let sp = (1.0 + x.exp()).ln();
-                                        out_f32[i] = x * sp.tanh();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            let x = input[i];
-                                            let sp = (1.0 + x.exp()).ln();
-                                            *o = x * sp.tanh();
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            mish_f32(&input, out_f32);
                         }
                         "max_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(a.len()).min(b.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = a[i].max(b[i]);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i].max(b[i]));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            max_f32(&a, &b, out_f32);
                         }
                         "min_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(a.len()).min(b.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = a[i].min(b[i]);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i].min(b[i]));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            min_f32(&a, &b, out_f32);
                         }
                         "matmul" => {
                             if let [a_slice, b_slice] = &input_slices[..] {
@@ -7375,4 +6656,220 @@ impl Backend for CpuBackend {
         let end = (offset + size).min(buf.len());
         buf[offset..end].to_vec()
     }
+}
+
+// ============================================================
+// SIMD-aware elementwise dispatch wrappers
+// ============================================================
+// Each wrapper checks `simd_avx2_available()` at runtime and
+// delegates to the AVX2 microkernel when possible, falling back
+// to a scalar loop.  The scalar fallback is the same code that
+// was previously inlined in the big `dispatch()` match arms —
+// flattened to reduce duplication.
+
+#[inline]
+fn relu_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::relu_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::relu_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn gelu_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::gelu_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::gelu_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn silu_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::silu_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::silu_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn sigmoid_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::sigmoid_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::sigmoid_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn tanh_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::tanh_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::tanh_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn exp_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::exp_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::exp_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn log_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::log_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::log_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn sqrt_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::sqrt_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::sqrt_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn neg_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::neg_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::neg_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn abs_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::abs_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::abs_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn leaky_relu_f32(input: &[f32], output: &mut [f32], slope: f32) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::leaky_relu_f32_avx2(input, output, slope) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::leaky_relu_f32_scalar(input[i], slope); }
+}
+
+#[inline]
+fn elu_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::elu_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::elu_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn softplus_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::softplus_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::softplus_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn hardswish_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::hardswish_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::hardswish_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn clamp_f32(input: &[f32], output: &mut [f32], min_val: f32, max_val: f32) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::clamp_f32_avx2(input, output, min_val, max_val) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::clamp_f32_scalar(input[i], min_val, max_val); }
+}
+
+#[inline]
+fn sign_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::sign_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::sign_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn logical_not_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::logical_not_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::logical_not_f32_scalar(input[i]); }
+}
+
+#[inline]
+fn log_softmax_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::log_softmax_f32_avx2(input, output) }; }
+    microkernels::log_softmax_f32_scalar_all(input, output);
+}
+
+#[inline]
+fn mish_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() { return unsafe { microkernels::mish_f32_avx2(input, output) }; }
+    let len = output.len().min(input.len());
+    for i in 0..len { output[i] = microkernels::mish_f32_scalar(input[i]); }
+}
+
+// ── Binary ops ──────────────────────────────────────────────
+
+#[inline]
+fn add_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
+        return unsafe { microkernels::add_f32_avx2_broadcast(a, b, output) };
+    }
+    microkernels::add_f32_scalar_broadcast(a, b, output);
+}
+
+#[inline]
+fn sub_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
+        return unsafe { microkernels::sub_f32_avx2_broadcast(a, b, output) };
+    }
+    microkernels::sub_f32_scalar_broadcast(a, b, output);
+}
+
+#[inline]
+fn mul_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
+        return unsafe { microkernels::mul_f32_avx2_broadcast(a, b, output) };
+    }
+    microkernels::mul_f32_scalar_broadcast(a, b, output);
+}
+
+#[inline]
+fn div_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
+        return unsafe { microkernels::div_f32_avx2_broadcast(a, b, output) };
+    }
+    microkernels::div_f32_scalar_broadcast(a, b, output);
+}
+
+#[inline]
+fn max_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
+        return unsafe { microkernels::max_f32_avx2_broadcast(a, b, output) };
+    }
+    microkernels::max_f32_scalar_broadcast(a, b, output);
+}
+
+#[inline]
+fn min_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
+        return unsafe { microkernels::min_f32_avx2_broadcast(a, b, output) };
+    }
+    microkernels::min_f32_scalar_broadcast(a, b, output);
 }
