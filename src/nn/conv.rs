@@ -1,4 +1,4 @@
-use crate::autograd::{self, AutogradMeta, Conv2dBackward};
+use crate::autograd::{self, AutogradMeta};
 use crate::tensor::Tensor;
 use crate::{
     impl_nn_named_params, impl_nn_params, impl_training_state, impl_zero_grad,
@@ -150,15 +150,9 @@ impl Module for Conv2d {
         };
 
         if x.requires_grad() || self.weight.requires_grad() {
-            let edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges
-            };
             let inputs = vec![x.clone(), self.weight.clone()];
-            let backward = Conv2dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(autograd::make_node_info("Conv2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
                 Some(Arc::new(std::sync::Mutex::new(meta)));
             output
@@ -269,18 +263,12 @@ impl Module for ConvTranspose2d {
 
         // Set up autograd for ConvTranspose2d
         if x.requires_grad() || self.weight.requires_grad() {
-            let mut edges = autograd::make_edge(x);
-            edges.extend(autograd::make_edge(&self.weight));
             let mut inputs = vec![x.clone(), self.weight.clone()];
             if let Some(ref b) = self.bias {
-                if b.requires_grad() {
-                    edges.extend(autograd::make_edge(b));
-                }
                 inputs.push(b.clone());
             }
-            let backward = autograd::ConvTranspose2dBackward::new(edges, inputs);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(autograd::make_node_info("ConvTranspose2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
                 Some(Arc::new(std::sync::Mutex::new(meta)));
         }

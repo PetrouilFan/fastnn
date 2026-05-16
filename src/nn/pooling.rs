@@ -1,4 +1,4 @@
-use crate::autograd::{AutogradMeta, AvgPool2dBackward, MaxPool2dBackward};
+use crate::autograd::AutogradMeta;
 use crate::nn::Module;
 use crate::tensor::Tensor;
 use std::sync::Arc;
@@ -54,12 +54,9 @@ impl Module for MaxPool2d {
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() {
-            // Backward stub — AOT backward with argmax not yet implemented
-            let edges = crate::autograd::make_edge(x);
             let inputs = vec![x.clone()];
-            let backward = MaxPool2dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(crate::autograd::make_node_info("MaxPool2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
                 Some(Arc::new(std::sync::Mutex::new(meta)));
         }
@@ -251,11 +248,9 @@ impl Module for AvgPool2d {
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() {
-            let edges = crate::autograd::make_edge(x);
             let inputs = vec![x.clone()];
-            let backward = AvgPool2dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(crate::autograd::make_node_info("AvgPool2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
                 Some(Arc::new(std::sync::Mutex::new(meta)));
         }
