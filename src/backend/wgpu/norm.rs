@@ -1,9 +1,13 @@
-use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use super::PendingRead;
 
 const NORM_WORKGROUP_SIZE: u32 = 256;
 
 pub(super) fn dispatch_norm_gpu(
+    ctx: &mut WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<PendingRead>,
     arena: &super::WgpuBuffer,
     kernel_name: &str,
     input_slices: &[crate::backend::BufferSlice],
@@ -56,96 +60,83 @@ pub(super) fn dispatch_norm_gpu(
 
     let is_rms: u32 = if kernel_name == "rms_norm" { 1 } else { 0 };
 
-    with_wgpu_context(|ctx| -> Result<(), BackendError> {
-        let shader = build_norm_shader();
-        let pipeline_key = format!("wgpu_backend_{}", kernel_name);
-        ensure_norm_pipeline(ctx, &pipeline_key, &shader).map_err(BackendError::Dispatch)?;
+    let shader = build_norm_shader();
+    let pipeline_key = format!("wgpu_backend_{}", kernel_name);
+    ensure_norm_pipeline(ctx, &pipeline_key, &shader).map_err(BackendError::Dispatch)?;
 
-        let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "norm_input");
-        let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "norm_weight");
-        let buf_bias = ctx.create_buffer(bytemuck::cast_slice(&bias_data), "norm_bias");
+    let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "norm_input");
+    let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "norm_weight");
+    let buf_bias = ctx.create_buffer(bytemuck::cast_slice(&bias_data), "norm_bias");
 
-        let output_size = (output_slice.size) as u64;
-        let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("norm_output"),
-            size: output_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+    let output_size = (output_slice.size) as u64;
+    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("norm_output"),
+        size: output_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct NormParams {
+        num_rows: u32,
+        hidden_dim: u32,
+        eps: u32,
+        is_rms: u32,
+    }
+    let params = NormParams {
+        num_rows: num_rows as u32,
+        hidden_dim: hidden_dim as u32,
+        eps: eps_bits as u32,
+        is_rms,
+    };
+    let buf_params = ctx.create_uniform_buffer(&params, "norm_params");
+
+    let pipeline = &ctx.pipelines[&pipeline_key];
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("norm_bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_input.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_weight.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buf_bias.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: buf_out.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: buf_params.as_entire_binding(),
+            },
+        ],
+    });
+
+    let wgc = (num_rows as u32).div_ceil(1);
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("norm_pass"),
+            timestamp_writes: None,
         });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(wgc, 1, 1);
+    }
 
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        struct NormParams {
-            num_rows: u32,
-            hidden_dim: u32,
-            eps: u32,
-            is_rms: u32,
-        }
-        let params = NormParams {
-            num_rows: num_rows as u32,
-            hidden_dim: hidden_dim as u32,
-            eps: eps_bits as u32,
-            is_rms,
-        };
-        let buf_params = ctx.create_uniform_buffer(&params, "norm_params");
-
-        let pipeline = &ctx.pipelines[&pipeline_key];
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("norm_bg"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf_input.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf_weight.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf_bias.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buf_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: buf_params.as_entire_binding(),
-                },
-            ],
-        });
-
-        let wgc = (num_rows as u32).div_ceil(1);
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("norm_encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("norm_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(wgc, 1, 1);
-        }
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-
-        let raw = ctx.read_buffer(&buf_out, output_size as usize);
-        let result: &[f32] = bytemuck::cast_slice(&raw);
-
-        let out = arena.data_mut();
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
-            &mut out[output_slice.offset..output_slice.offset + output_slice.size],
-        );
-        let len = out_f32.len().min(result.len());
-        out_f32[..len].copy_from_slice(&result[..len]);
-
-        Ok(())
-    })
+    pending_reads.push(PendingRead {
+        buffer: buf_out,
+        cpu_offset: output_slice.offset,
+        size: output_size as usize,
+    });
+    Ok(())
 }
 
 fn ensure_norm_pipeline(

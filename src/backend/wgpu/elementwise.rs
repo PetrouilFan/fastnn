@@ -1,5 +1,6 @@
-use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use super::PendingRead;
 
 pub(super) fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
     match kernel_name {
@@ -53,96 +54,90 @@ pub(super) fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
 }
 
 pub(super) fn dispatch_elementwise_gpu(
+    ctx: &mut WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<PendingRead>,
     input0: &[f32],
     input1: &[f32],
     numel: usize,
     opcode: u32,
     extra0: u32,
     extra1: u32,
-) -> Result<Vec<f32>, BackendError> {
-    with_wgpu_context(|ctx| -> Result<Vec<f32>, BackendError> {
-        let shader_src = build_elementwise_shader();
-        super::pipeline::ensure_compute_pipeline(
-            ctx,
-            &format!("element_wise_{}", opcode),
-            &shader_src,
-        )
+    cpu_offset: usize,
+) -> Result<(), BackendError> {
+    let shader_src = build_elementwise_shader();
+    super::pipeline::ensure_compute_pipeline(ctx, "element_wise", &shader_src)
         .map_err(BackendError::Dispatch)?;
 
-        let buf0 = ctx.create_buffer(bytemuck::cast_slice(input0), "ew_input0");
-        let buf1 = ctx.create_buffer(bytemuck::cast_slice(input1), "ew_input1");
+    let buf0 = ctx.create_buffer(bytemuck::cast_slice(input0), "ew_input0");
+    let buf1 = ctx.create_buffer(bytemuck::cast_slice(input1), "ew_input1");
 
-        let output_size = (numel * 4) as u64;
-        let output_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ew_output"),
-            size: output_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+    let output_size = (numel * 4) as u64;
+    let output_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ew_output"),
+        size: output_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct EwParams {
+        numel: u32,
+        opcode: u32,
+        extra0: u32,
+        extra1: u32,
+    }
+    let params = EwParams {
+        numel: numel as u32,
+        opcode,
+        extra0,
+        extra1,
+    };
+    let params_buf = ctx.create_uniform_buffer(&params, "ew_params");
+
+    let pipeline = &ctx.pipelines["wgpu_backend_element_wise"];
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("ew_bind_group"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf0.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf1.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let wg_count = (numel as u32).div_ceil(256);
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ew_pass"),
+            timestamp_writes: None,
         });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(wg_count, 1, 1);
+    }
 
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        struct EwParams {
-            numel: u32,
-            opcode: u32,
-            extra0: u32,
-            extra1: u32,
-        }
-        let params = EwParams {
-            numel: numel as u32,
-            opcode,
-            extra0,
-            extra1,
-        };
-        let params_buf = ctx.create_uniform_buffer(&params, "ew_params");
-
-        let pipeline_key = format!("wgpu_backend_element_wise_{}", opcode);
-        let pipeline = &ctx.pipelines[&pipeline_key];
-
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ew_bind_group"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf0.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf1.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: output_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let wg_count = (numel as u32).div_ceil(256);
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ew_encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ew_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(wg_count, 1, 1);
-        }
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-
-        let raw = ctx.read_buffer(&output_buf, output_size as usize);
-        let result: &[f32] = bytemuck::cast_slice(&raw);
-        Ok(result.to_vec())
-    })
+    pending_reads.push(PendingRead {
+        buffer: output_buf,
+        cpu_offset,
+        size: output_size as usize,
+    });
+    Ok(())
 }
 
 fn build_elementwise_shader() -> String {

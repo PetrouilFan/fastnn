@@ -11,8 +11,9 @@
 //! The conv2d path performs im2col on the CPU and then reuses the same
 //! quantized-matmul GPU pipeline.
 
-use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use super::PendingRead;
 
 // ─============================================================================
 // Quantized matmul dispatch (GPU)
@@ -24,6 +25,9 @@ use crate::backend::BackendError;
 /// `input_slices[0]` — f32 activations, shape `[M, K]`
 /// `input_slices[1]` — packed u4/u8 weights, shape `[N, K]` (packed row-major)
 pub(super) fn dispatch_quantized_matmul_gpu(
+    ctx: &mut WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<PendingRead>,
     arena: &super::WgpuBuffer,
     input_slices: &[crate::backend::BufferSlice],
     output_slice: crate::backend::BufferSlice,
@@ -73,7 +77,9 @@ pub(super) fn dispatch_quantized_matmul_gpu(
         ));
     };
 
-    let result = dispatch_quantized_gemm_gpu(
+    let output_size = m * n * 4;
+    dispatch_quantized_gemm_gpu(
+        ctx, encoder, pending_reads,
         &act_padded,
         &packed_bytes,
         m,
@@ -83,16 +89,9 @@ pub(super) fn dispatch_quantized_matmul_gpu(
         bit_width,
         scales,
         zero_points,
-    )?;
-
-    let out = arena.data_mut();
-    let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
-        &mut out[output_slice.offset..output_slice.offset + output_slice.size],
-    );
-    let len = out_f32.len().min(result.len());
-    out_f32[..len].copy_from_slice(&result[..len]);
-
-    Ok(())
+        output_slice.offset,
+        output_size,
+    )
 }
 
 // ─============================================================================
@@ -105,6 +104,9 @@ pub(super) fn dispatch_quantized_matmul_gpu(
 /// `input_slices[0]` — f32 activations, shape `[N, C, H, W]`
 /// `input_slices[1]` — packed u4/u8 weights, shape `[OC, C*KH*KW]` (packed row-major)
 pub(super) fn dispatch_quantized_conv_gpu(
+    ctx: &mut WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<PendingRead>,
     arena: &super::WgpuBuffer,
     input_slices: &[crate::backend::BufferSlice],
     output_slice: crate::backend::BufferSlice,
@@ -223,7 +225,9 @@ pub(super) fn dispatch_quantized_conv_gpu(
     }
 
     let padded_k = col_w.div_ceil(items) * items;
-    let result = dispatch_quantized_gemm_gpu(
+    let output_size = col_h * f * 4;
+    dispatch_quantized_gemm_gpu(
+        ctx, encoder, pending_reads,
         &col_matrix,
         &packed_bytes,
         col_h,
@@ -233,16 +237,9 @@ pub(super) fn dispatch_quantized_conv_gpu(
         bit_width,
         scales,
         zero_points,
-    )?;
-
-    let out = arena.data_mut();
-    let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
-        &mut out[output_slice.offset..output_slice.offset + output_slice.size],
-    );
-    let len = out_f32.len().min(result.len());
-    out_f32[..len].copy_from_slice(&result[..len]);
-
-    Ok(())
+        output_slice.offset,
+        output_size,
+    )
 }
 
 // ─============================================================================
@@ -252,9 +249,12 @@ pub(super) fn dispatch_quantized_conv_gpu(
 /// Internal GPU dispatch for quantized GEMM.
 ///
 /// Uploads the given data to the GPU, runs the quantized matmul shader,
-/// and returns the f32 output as a `Vec<f32>`.
+/// and pushes a deferred readback into `pending_reads`.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_quantized_gemm_gpu(
+    ctx: &mut WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<PendingRead>,
     activations: &[f32],   // [M, K_padded]
     packed_weights: &[u8], // packed weight bytes [N * K_packed * 4]
     m: usize,
@@ -264,9 +264,10 @@ fn dispatch_quantized_gemm_gpu(
     bit_width: usize,
     scales: &[f32],
     zero_points: &[f32],
-) -> Result<Vec<f32>, BackendError> {
+    cpu_offset: usize,
+    output_bytes: usize,
+) -> Result<(), BackendError> {
     let k_packed = k_padded / items;
-    let output_bytes = m * n * 4;
 
     let scale_data: Vec<f32> = if scales.is_empty() {
         vec![1.0f32; n]
@@ -286,96 +287,91 @@ fn dispatch_quantized_gemm_gpu(
         zd
     };
 
-    with_wgpu_context(|ctx| -> Result<Vec<f32>, BackendError> {
-        let shader_src = build_quantized_matmul_shader(items);
-        let short_key = format!("quantized_matmul_u{}", bit_width);
-        super::pipeline::ensure_quantized_compute_pipeline(ctx, &short_key, &shader_src)
-            .map_err(BackendError::Dispatch)?;
-        let pipeline_key = format!("wgpu_backend_quantized_{}", short_key);
-        let pipeline = &ctx.pipelines[&pipeline_key];
+    let shader_src = build_quantized_matmul_shader(items);
+    let short_key = format!("quantized_matmul_u{}", bit_width);
+    super::pipeline::ensure_quantized_compute_pipeline(ctx, &short_key, &shader_src)
+        .map_err(BackendError::Dispatch)?;
+    let pipeline_key = format!("wgpu_backend_quantized_{}", short_key);
+    let pipeline = &ctx.pipelines[&pipeline_key];
 
-        let buf_act = ctx.create_buffer(bytemuck::cast_slice(activations), "qgemm_act");
-        let buf_weight = ctx.create_buffer(packed_weights, "qgemm_weight");
-        let buf_scale = ctx.create_buffer(bytemuck::cast_slice(&scale_data), "qgemm_scale");
-        let buf_zp = ctx.create_buffer(bytemuck::cast_slice(&zp_data), "qgemm_zp");
+    let buf_act = ctx.create_buffer(bytemuck::cast_slice(activations), "qgemm_act");
+    let buf_weight = ctx.create_buffer(packed_weights, "qgemm_weight");
+    let buf_scale = ctx.create_buffer(bytemuck::cast_slice(&scale_data), "qgemm_scale");
+    let buf_zp = ctx.create_buffer(bytemuck::cast_slice(&zp_data), "qgemm_zp");
 
-        let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("qgemm_output"),
-            size: output_bytes as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("qgemm_output"),
+        size: output_bytes as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    #[allow(non_snake_case)]
+    struct QuantParams {
+        M: u32,
+        K: u32,
+        N: u32,
+        K_packed: u32,
+    }
+    let qparams = QuantParams {
+        M: m as u32,
+        K: k_padded as u32,
+        N: n as u32,
+        K_packed: k_packed as u32,
+    };
+    let buf_params = ctx.create_uniform_buffer(&qparams, "qgemm_params");
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("qgemm_bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_weight.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_act.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buf_scale.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: buf_zp.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: buf_out.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: buf_params.as_entire_binding(),
+            },
+        ],
+    });
+
+    let wgc_x = (m as u32).div_ceil(16);
+    let wgc_y = (n as u32).div_ceil(16);
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("qgemm_pass"),
+            timestamp_writes: None,
         });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(wgc_x.max(1), wgc_y.max(1), 1);
+    }
 
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        #[allow(non_snake_case)]
-        struct QuantParams {
-            M: u32,
-            K: u32,
-            N: u32,
-            K_packed: u32,
-        }
-        let qparams = QuantParams {
-            M: m as u32,
-            K: k_padded as u32,
-            N: n as u32,
-            K_packed: k_packed as u32,
-        };
-        let buf_params = ctx.create_uniform_buffer(&qparams, "qgemm_params");
-
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("qgemm_bg"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf_weight.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf_act.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf_scale.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buf_zp.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: buf_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: buf_params.as_entire_binding(),
-                },
-            ],
-        });
-
-        let wgc_x = (m as u32).div_ceil(16);
-        let wgc_y = (n as u32).div_ceil(16);
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("qgemm_encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("qgemm_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(wgc_x.max(1), wgc_y.max(1), 1);
-        }
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-
-        let raw = ctx.read_buffer(&buf_out, output_bytes);
-        let result: &[f32] = bytemuck::cast_slice(&raw);
-        Ok(result.to_vec())
-    })
+    pending_reads.push(PendingRead {
+        buffer: buf_out,
+        cpu_offset,
+        size: output_bytes,
+    });
+    Ok(())
 }
 
 // ─============================================================================
