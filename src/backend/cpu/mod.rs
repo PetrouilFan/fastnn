@@ -712,20 +712,40 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
+                    // Compute inner_stride (product of dims after axis) and
+                    // outer_count (product of dims before axis) from output shape.
+                    let output_shape: Vec<u64> = node
+                        .output_type
+                        .shape
+                        .iter()
+                        .map(|d| d.evaluate().unwrap_or(symbol_max))
+                        .collect();
+                    let rank = output_shape.len();
+                    let inner_stride: u64 = if axis + 1 < rank {
+                        output_shape[axis + 1..].iter().product()
+                    } else {
+                        1
+                    };
+                    let outer_count: u64 = if axis > 0 {
+                        output_shape[..axis].iter().product()
+                    } else {
+                        1
+                    };
                     let input_ids_str = node
                         .inputs
                         .iter()
                         .map(|id| id.to_string())
                         .collect::<Vec<_>>()
                         .join(",");
+                    #[cfg(debug_assertions)]
                     eprintln!(
-                        "[FNN_DBG_CONCAT_COMPILE] nid={} op=Concat inputs=[{}] input_slices={:?}",
+                        "[FNN_DBG_CONCAT_COMPILE] nid={} op=Concat inputs=[{}] axis={} inner_stride={} outer_count={} output_shape={:?}",
                         node_id,
                         input_ids_str,
-                        input_slices
-                            .iter()
-                            .map(|s| (s.offset, s.size))
-                            .collect::<Vec<_>>()
+                        axis,
+                        inner_stride,
+                        outer_count,
+                        output_shape,
                     );
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -733,7 +753,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![axis],
+                        params: vec![axis, inner_stride as usize, outer_count as usize],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -900,23 +920,24 @@ impl Backend for CpuBackend {
                         .first()
                         .and_then(|s| s.get(axis).cloned())
                         .unwrap_or(DimExpr::Known(1));
-                    let is_mean = if matches!(node.opcode, Opcode::ReduceMean) {
-                        1
-                    } else {
-                        0
+                    let (is_mean, is_max) = match node.opcode {
+                        Opcode::ReduceMean => (1, 0),
+                        Opcode::ReduceMax => (0, 1),
+                        _ => (0, 0), // ReduceSum
                     };
                     let group_size = group_size_dim.evaluate().unwrap_or_else(|| {
                         // Symbolic dim — use SYMBOL_DIM_MAX as compile-time
                         // estimate; runtime resolves via param_dims.
                         crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
                     }) as usize;
+
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "reduce_f32".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![group_size, is_mean],
+                        params: vec![group_size, is_mean, is_max],
                         // Pass the group_size as a symbolic DimExpr so dispatch
                         // can re-evaluate it when shape_env is available (e.g.
                         // reduce over symbolic batch dim N).
@@ -2019,6 +2040,7 @@ impl Backend for CpuBackend {
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
         // ── Debug: collect MaxPool primary output ranges ──────────────
+        #[cfg(debug_assertions)]
         let maxpool_ranges: Vec<(usize, usize)> = {
             let mut v = Vec::new();
             for instr in &plan.instructions {
@@ -2038,7 +2060,9 @@ impl Backend for CpuBackend {
         };
         // Track: after each MaxPool kernel, snapshot its first f32 value;
         // after every other instruction, check if any snapshot changed.
+        #[cfg(debug_assertions)]
         let mut maxpool_snapshot: Vec<Option<f32>> = vec![None; maxpool_ranges.len()];
+        #[cfg(debug_assertions)]
         let mut maxpool_seen: Vec<bool> = vec![false; maxpool_ranges.len()];
 
         for (instr_idx, instr) in plan.instructions.iter().enumerate() {
@@ -2196,16 +2220,40 @@ impl Backend for CpuBackend {
                                 // or shared across all batches (2D weight matrix). Detect by comparing
                                 // total B elements against a single batch's K*N slice.
                                 let b_batched = b.len() > b_stride;
-                                for batch in 0..batch_count {
-                                    let a_s = batch * a_stride;
-                                    let b_s = if b_batched { batch * b_stride } else { 0 };
-                                    let out_s = batch * out_stride;
-                                    matmul_blas_into(
-                                        &a[a_s..a_s + a_stride],
-                                        &b[b_s..b_s + b_stride],
-                                        &mut out_f32[out_s..out_s + out_stride],
-                                        m, _k, n,
-                                    );
+                                // Skip BLAS for tiny matrices — dispatch overhead dominates.
+                                let use_blas = m * _k * n >= blas::MIN_BLAS_SIZE * 64;
+                                if use_blas {
+                                    for batch in 0..batch_count {
+                                        let a_s = batch * a_stride;
+                                        let b_s = if b_batched { batch * b_stride } else { 0 };
+                                        let out_s = batch * out_stride;
+                                        matmul_blas_into(
+                                            &a[a_s..a_s + a_stride],
+                                            &b[b_s..b_s + b_stride],
+                                            &mut out_f32[out_s..out_s + out_stride],
+                                            m, _k, n,
+                                        );
+                                    }
+                                } else {
+                                    for batch in 0..batch_count {
+                                        let a_s = batch * a_stride;
+                                        let b_s = if b_batched { batch * b_stride } else { 0 };
+                                        let out_s = batch * out_stride;
+                                        let (a_slice, b_slice, out_slice) = (
+                                            &a[a_s..a_s + a_stride],
+                                            &b[b_s..b_s + b_stride],
+                                            &mut out_f32[out_s..out_s + out_stride],
+                                        );
+                                        for i in 0..m {
+                                            for j in 0..n {
+                                                let mut sum = 0.0f32;
+                                                for kk in 0.._k {
+                                                    sum += a_slice[i * _k + kk] * b_slice[kk * n + j];
+                                                }
+                                                out_slice[i * n + j] = sum;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2550,64 +2598,53 @@ impl Backend for CpuBackend {
                             }
                         }
                         "reduce_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let &[group_size, is_mean] = &params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "reduce_f32: expected params [group_size, is_mean]".into(),
-                                    ));
-                                };
-                                let effective_group_size = match param_dims {
-                                    Some(dims) if !dims.is_empty() => {
-                                        dims[0].evaluate_with_env(shape_env).map_err(|e| {
-                                            BackendError::Dispatch(format!("reduce_f32: {e}"))
-                                        })? as usize
-                                    }
-                                    _ => group_size,
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let _num_groups = out_f32.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for g in 0.._num_groups {
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            let &[group_size, is_mean, is_max] = &params[..3] else {
+                                return Err(BackendError::Dispatch(
+                                    "reduce_f32: expected params [group_size, is_mean, is_max]".into(),
+                                ));
+                            };
+                            let effective_group_size = match param_dims {
+                                Some(dims) if !dims.is_empty() => {
+                                    dims[0].evaluate_with_env(shape_env).map_err(|e| {
+                                        BackendError::Dispatch(format!("reduce_f32: {e}"))
+                                    })? as usize
+                                }
+                                _ => group_size,
+                            };
+                            let _num_groups = out_f32.len();
+                            #[cfg(not(feature = "parallel"))]
+                            {
+                                for g in 0.._num_groups {
+                                    let start = g * effective_group_size;
+                                    let end = (start + effective_group_size).min(input.len());
+                                    if is_max == 1 {
+                                        let mut val = f32::NEG_INFINITY;
+                                        for i in start..end { if input[i] > val { val = input[i]; } }
+                                        out_f32[g] = val;
+                                    } else {
                                         let mut sum = 0.0f32;
-                                        let start = g * effective_group_size;
-                                        let end = (start + effective_group_size).min(input.len());
-                                        for i in start..end {
-                                            sum += input[i];
-                                        }
-                                        if is_mean == 1 {
-                                            sum /= effective_group_size as f32;
-                                        }
-                                        out_f32[g] = sum;
+                                        for i in start..end { sum += input[i]; }
+                                        out_f32[g] = if is_mean == 1 { sum / effective_group_size as f32 } else { sum };
                                     }
                                 }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32.par_iter_mut().enumerate().for_each(|(g, out)| {
+                            }
+                            #[cfg(feature = "parallel")]
+                            {
+                                use rayon::prelude::*;
+                                out_f32.par_iter_mut().enumerate().for_each(|(g, out)| {
+                                    let start = g * effective_group_size;
+                                    let end = (start + effective_group_size).min(input.len());
+                                    if is_max == 1 {
+                                        let mut val = f32::NEG_INFINITY;
+                                        for i in start..end { if input[i] > val { val = input[i]; } }
+                                        *out = val;
+                                    } else {
                                         let mut sum = 0.0f32;
-                                        let start = g * effective_group_size;
-                                        let end = (start + effective_group_size).min(input.len());
-                                        for i in start..end {
-                                            sum += input[i];
-                                        }
-                                        if is_mean == 1 {
-                                            sum /= effective_group_size as f32;
-                                        }
-                                        *out = sum;
-                                    });
-                                }
+                                        for i in start..end { sum += input[i]; }
+                                        *out = if is_mean == 1 { sum / effective_group_size as f32 } else { sum };
+                                    }
+                                });
                             }
                         }
                         "transpose_f32" => {
@@ -3712,7 +3749,49 @@ impl Backend for CpuBackend {
                             }
                         }
                         "concat" => {
-                            if !input_slices.is_empty() {
+                            if !input_slices.is_empty() && params.len() >= 3 {
+                                let _axis = params[0];
+                                let _inner_stride = params[1];
+                                let outer_count = params[2];
+                                // For each input, compute block_size = elements per outer position.
+                                let num_inputs = input_slices.len();
+                                let mut block_sizes: Vec<usize> = Vec::with_capacity(num_inputs);
+                                for slice in input_slices {
+                                    let elems = slice.size / core::mem::size_of::<f32>();
+                                    block_sizes.push(elems / outer_count.max(1));
+                                }
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(
+                                        &mut d[out_start..out_end],
+                                    )
+                                };
+                                let mut output_offset = 0;
+                                for outer_pos in 0..outer_count {
+                                    for (si, slice) in input_slices.iter().enumerate() {
+                                        let input_data = {
+                                            let d = arena.data_mut();
+                                            bytemuck::cast_slice::<_, f32>(
+                                                &d[slice.offset..slice.offset + slice.size],
+                                            )
+                                        };
+                                        let bs = block_sizes[si];
+                                        let src_start = outer_pos * bs;
+                                        let src_end = (src_start + bs).min(input_data.len());
+                                        let copy_len = src_end - src_start;
+                                        let dst_end = (output_offset + copy_len).min(out_f32.len());
+                                        out_f32[output_offset..dst_end]
+                                            .copy_from_slice(&input_data[src_start..src_start + (dst_end - output_offset)]);
+                                        #[cfg(debug_assertions)]
+                                        eprintln!(
+                                            "[FNN_DBG_CONCAT] out=[{},{}) outer={} input[{}]: off={} sz={} block={} copy={}",
+                                            out_start, out_end, outer_pos, si, slice.offset, slice.size, bs, copy_len
+                                        );
+                                        output_offset += copy_len;
+                                    }
+                                }
+                            } else if !input_slices.is_empty() {
+                                // Fallback: flat concat (legacy, no axis info)
                                 let mut output_offset = 0;
                                 for (si, slice) in input_slices.iter().enumerate() {
                                     let input_data = {
@@ -3722,8 +3801,6 @@ impl Backend for CpuBackend {
                                         )
                                         .to_vec()
                                     };
-                                    let input_first = input_data.first().copied().unwrap_or(0.0);
-                                    let input_numel = input_data.len();
                                     let out_f32 = {
                                         let d = arena.data_mut();
                                         bytemuck::cast_slice_mut::<_, f32>(
@@ -3733,9 +3810,10 @@ impl Backend for CpuBackend {
                                     let end = (output_offset + input_data.len()).min(out_f32.len());
                                     out_f32[output_offset..end]
                                         .copy_from_slice(&input_data[..end - output_offset]);
+                                    #[cfg(debug_assertions)]
                                     eprintln!(
-                                        "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} first_f32={}",
-                                        out_start, out_end, si, slice.offset, slice.size, input_numel, input_first
+                                        "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} (flat fallback)",
+                                        out_start, out_end, si, slice.offset, slice.size, input_data.len()
                                     );
                                     output_offset += input_data.len();
                                 }
@@ -3830,6 +3908,7 @@ impl Backend for CpuBackend {
                                                     out_f32[out_idx] = val;
                                                 }
                                                 // Debug: log first MaxPool write value
+                                                #[cfg(debug_assertions)]
                                                 if nn == 0 && cc == 0 && hh == 0 && ww == 0 {
                                                     eprintln!("[FNN_DBG_POOL] MaxPool out_start={} wrote={}",
                                                         out_start, val);
@@ -6537,6 +6616,7 @@ impl Backend for CpuBackend {
                 }
             }
 
+            #[cfg(debug_assertions)]
             // ── Debug: per-instruction MaxPool canary check ──────────
             // After the current instruction has executed, check whether
             // any MaxPool primary slot has been overwritten.
