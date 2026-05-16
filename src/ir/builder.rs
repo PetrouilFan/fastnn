@@ -25,14 +25,69 @@
 //! ```
 
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use crate::backend::executor::GraphExecutor;
 use crate::backend::{Backend, BackendError, ExecutablePlan};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::ir::node::*;
+
+// ============================================================
+// Plan cache — avoids recompilation when the same graph is
+// executed with the same input shapes.
+// ============================================================
+
+/// Key: hash of (graph topological structure + input byte lengths).
+/// Value: cached (ExecutablePlan, MemoryPlan, compiled_graph).
+static PLAN_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, (ExecutablePlan, MemoryPlan, ComputeGraph)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
+
+/// Compute a ~unique hash for a graph + its input shapes.
+fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]]) -> u64 {
+    use std::hash::Hash;
+    let mut hasher = DefaultHasher::new();
+    let order = graph.topological_sort();
+    for &nid in &order {
+        if let Some(node) = graph.get_node(nid) {
+            // Hash the opcode discriminant (ignoring data in e.g. Constant)
+            let op_discriminant = std::mem::discriminant(&node.opcode);
+            op_discriminant.hash(&mut hasher);
+            // Hash the number and order of input edges
+            node.inputs.len().hash(&mut hasher);
+            for &inp in &node.inputs {
+                inp.hash(&mut hasher);
+            }
+            // Hash shape attributes that affect compilation
+            for dim in &node.output_type.shape {
+                if let DimExpr::Known(v) = dim {
+                    v.hash(&mut hasher);
+                }
+            }
+        }
+    }
+    // Hash input data sizes (shapes affect memory planning)
+    for bytes in inputs {
+        bytes.len().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Insert a plan into the cache.
+fn cache_plan(key: u64, plan: ExecutablePlan, mp: MemoryPlan, graph: ComputeGraph) {
+    if let Ok(mut cache) = PLAN_CACHE.lock() {
+        cache.insert(key, (plan, mp, graph));
+    }
+}
+
+/// Look up a plan in the cache.
+fn lookup_plan(key: u64) -> Option<(ExecutablePlan, MemoryPlan, ComputeGraph)> {
+    PLAN_CACHE.lock().ok().and_then(|mut cache| cache.remove(&key))
+}
 
 // =============================================================================
 // GraphBuilder — inner state (shared via Rc<RefCell<>>)
@@ -2304,9 +2359,20 @@ impl GraphBuilder {
         graph.inputs = recorded_inputs;
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
+        // ── Plan cache: skip compilation when graph+shapes match ──
+        let cache_key = plan_cache_key(&graph, inputs);
+        if let Some((mut plan, memory_plan, compiled_graph)) = lookup_plan(cache_key) {
+            return GraphExecutor::new(backend)
+                .execute(&compiled_graph, &mut plan, &memory_plan, inputs);
+        }
+
         let mut executor = GraphExecutor::new(backend);
         let (mut plan, memory_plan, compiled_graph) =
             executor.compile_with_plan_and_quantize(&graph, quantize)?;
+
+        // Cache the compiled plan (clone only what's needed for reuse)
+        cache_plan(cache_key, plan.clone(), memory_plan.clone(), compiled_graph.clone());
+
         executor.execute(&compiled_graph, &mut plan, &memory_plan, inputs)
     }
 
