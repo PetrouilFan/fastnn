@@ -90,11 +90,11 @@ impl PyTensor {
     }
 
     fn item(&self) -> f32 {
+        #[cfg(feature = "gpu")]
         if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            self.inner.to_cpu().item()
-        } else {
-            self.inner.item()
+            return self.inner.to_cpu().item();
         }
+        self.inner.item()
     }
 
     fn numpy(&self) -> Vec<f32> {
@@ -141,8 +141,8 @@ impl PyTensor {
     fn __dlpack_device__(&self) -> (i32, i32) {
         match self.inner.device() {
             crate::storage::Device::Cpu => (1, 0),
+            #[cfg(feature = "gpu")]
             crate::storage::Device::Wgpu(device_id) => (2, device_id as i32),
-
         }
     }
 
@@ -367,6 +367,7 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.to_cpu())
     }
 
+    #[cfg(feature = "gpu")]
     fn to_gpu(&self, device_id: usize) -> PyTensor {
         PyTensor::from_tensor(self.inner.to_gpu(device_id))
     }

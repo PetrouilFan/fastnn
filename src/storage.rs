@@ -1,6 +1,9 @@
-use parking_lot::RwLock;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+#[cfg(feature = "gpu")]
+use parking_lot::RwLock;
+#[cfg(feature = "gpu")]
+use std::collections::HashMap;
 use std::sync::Arc;
 
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
@@ -84,6 +87,7 @@ impl DType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
     Cpu,
+    #[cfg(feature = "gpu")]
     Wgpu(usize),
 }
 
@@ -91,11 +95,14 @@ impl Device {
     pub fn from_str_label(s: &str) -> Option<Self> {
         match s {
             "cpu" | "CPU" => Some(Device::Cpu),
+            #[cfg(feature = "gpu")]
             "gpu" | "GPU" | "wgpu" | "Wgpu" => Some(Device::Wgpu(0)),
+            #[cfg(feature = "gpu")]
             s if s.starts_with("gpu:") => {
                 let idx: usize = s[4..].parse().ok()?;
                 Some(Device::Wgpu(idx))
             }
+            #[cfg(feature = "gpu")]
             s if s.starts_with("wgpu:") => {
                 let idx: usize = s[5..].parse().ok()?;
                 Some(Device::Wgpu(idx))
@@ -107,6 +114,7 @@ impl Device {
     pub fn as_str(&self) -> &'static str {
         match self {
             Device::Cpu => "cpu",
+            #[cfg(feature = "gpu")]
             Device::Wgpu(_) => "wgpu",
         }
     }
@@ -119,10 +127,12 @@ pub struct CpuStorage {
     pub nbytes: usize,
     // Lazy GPU buffer cache: maps device_id -> GPU buffer
     // This avoids repeated CPU->GPU transfers for tensors used in multiple GPU ops
+    #[cfg(feature = "gpu")]
     pub gpu_buffer_cache: RwLock<HashMap<usize, Arc<wgpu::Buffer>>>,
 }
 
 // GPU storage variant - keeps data on GPU
+#[cfg(feature = "gpu")]
 #[derive(Debug)]
 pub struct GpuStorage {
     pub buffer: Arc<wgpu::Buffer>,
@@ -136,6 +146,7 @@ pub struct GpuStorage {
 #[derive(Debug)]
 pub enum Storage {
     Cpu(CpuStorage),
+    #[cfg(feature = "gpu")]
     Wgpu(GpuStorage),
 }
 
@@ -146,8 +157,10 @@ impl Clone for Storage {
                 data: cpu.data.clone(),
                 nbytes: cpu.nbytes,
                 // Share GPU buffer cache via Arc so cloned tensors don't discard cached mappings
+                #[cfg(feature = "gpu")]
                 gpu_buffer_cache: RwLock::new(cpu.gpu_buffer_cache.read().clone()),
             }),
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(gpu) => Storage::Wgpu(GpuStorage {
                 buffer: gpu.buffer.clone(),
                 nbytes: gpu.nbytes,
@@ -174,11 +187,13 @@ impl Storage {
         Storage::Cpu(CpuStorage {
             data,
             nbytes,
+            #[cfg(feature = "gpu")]
             gpu_buffer_cache: RwLock::new(HashMap::new()),
         })
     }
 
     // Create GPU storage (buffer must be created separately)
+    #[cfg(feature = "gpu")]
     pub fn new_gpu(buffer: Arc<wgpu::Buffer>, nbytes: usize, device_id: usize) -> Self {
         if let Some(stats) = ALLOC_STATS.get() {
             stats.add_alloc(nbytes);
@@ -195,23 +210,20 @@ impl Storage {
     pub fn from_vec_owned<T: bytemuck::Pod>(
         mut data: Vec<T>,
         _dtype: DType,
-        device: Device,
+        _device: Device,
     ) -> Self {
         let nbytes = std::mem::size_of::<T>() * data.len();
-        match device {
-            Device::Cpu | Device::Wgpu(_) => {
-                let ptr = data.as_mut_ptr() as *mut u8;
-                let len = nbytes;
-                let cap = data.capacity() * std::mem::size_of::<T>();
-                std::mem::forget(data);
-                let byte_vec = unsafe { Vec::from_raw_parts(ptr, len, cap) };
-                Storage::Cpu(CpuStorage {
-                    data: Arc::new(byte_vec),
-                    nbytes,
-                    gpu_buffer_cache: Default::default(),
-                })
-            }
-        }
+        let ptr = data.as_mut_ptr() as *mut u8;
+        let len = nbytes;
+        let cap = data.capacity() * std::mem::size_of::<T>();
+        std::mem::forget(data);
+        let byte_vec = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+        Storage::Cpu(CpuStorage {
+            data: Arc::new(byte_vec),
+            nbytes,
+            #[cfg(feature = "gpu")]
+            gpu_buffer_cache: Default::default(),
+        })
     }
 
     pub fn from_vec<T: bytemuck::Pod>(data: Vec<T>, dtype: DType, device: Device) -> Self {
@@ -221,6 +233,7 @@ impl Storage {
     pub fn as_ptr<T>(&self) -> *const T {
         match self {
             Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr() as *const T,
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use to_cpu() first.")
             }
@@ -233,6 +246,7 @@ impl Storage {
                 let data = Arc::make_mut(&mut cpu.data);
                 data.as_mut_ptr() as *mut T
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use to_cpu() first.")
             }
@@ -242,6 +256,7 @@ impl Storage {
     pub fn nbytes(&self) -> usize {
         match self {
             Storage::Cpu(cpu) => cpu.nbytes,
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(gpu) => gpu.nbytes,
         }
     }
@@ -249,12 +264,14 @@ impl Storage {
     pub fn device(&self) -> Device {
         match self {
             Storage::Cpu(_) => Device::Cpu,
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(gpu) => Device::Wgpu(gpu.device_id),
         }
     }
 
     /// Get or create a cached GPU buffer for this CPU storage
     /// This enables lazy GPU buffer creation - only transfer to GPU when needed
+    #[cfg(feature = "gpu")]
     pub fn get_or_create_gpu_buffer(&self, device_id: usize) -> Option<Arc<wgpu::Buffer>> {
         match self {
             Storage::Cpu(cpu) => {
@@ -269,6 +286,7 @@ impl Storage {
     }
 
     /// Cache a GPU buffer for this CPU storage
+    #[cfg(feature = "gpu")]
     pub fn cache_gpu_buffer(&self, device_id: usize, buffer: Arc<wgpu::Buffer>) {
         if let Storage::Cpu(cpu) = self {
             let mut cache = cpu.gpu_buffer_cache.write();
@@ -281,6 +299,7 @@ impl Drop for Storage {
     fn drop(&mut self) {
         let is_last = match self {
             Storage::Cpu(cpu) => Arc::strong_count(&cpu.data) == 1,
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(gpu) => Arc::strong_count(&gpu.buffer) == 1,
         };
         if is_last {

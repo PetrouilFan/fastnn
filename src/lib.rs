@@ -34,6 +34,7 @@ pub mod io;
 pub mod nn;
 pub mod onnx;
 pub mod optim;
+#[cfg(feature = "python")]
 pub mod python;
 pub mod residual;
 pub mod storage;

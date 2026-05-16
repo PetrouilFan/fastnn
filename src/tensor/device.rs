@@ -1,7 +1,12 @@
-use crate::storage::{CpuStorage, DType, Device, GpuStorage, Storage};
-use parking_lot::RwLock;
-use std::collections::HashMap;
+use crate::storage::{CpuStorage, DType, Device, Storage};
 use std::sync::Arc;
+
+#[cfg(feature = "gpu")]
+use crate::storage::GpuStorage;
+#[cfg(feature = "gpu")]
+use parking_lot::RwLock;
+#[cfg(feature = "gpu")]
+use std::collections::HashMap;
 
 use super::{Tensor, TensorImpl};
 
@@ -46,16 +51,12 @@ impl TensorImpl {
                     DType::F16 => {
                         let src = data.as_ptr() as *const half::f16;
                         let offset = self.storage_offset as usize;
-                        // SAFETY: The pointer `src` is derived from the CPU storage's backing
-                        // `Vec<u8>`, and `offset + numel` is within the bounds of the allocation.
                         let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
                         slice.iter().map(|&v| f32::from(v)).collect()
                     }
                     DType::BF16 => {
                         let src = data.as_ptr() as *const half::bf16;
                         let offset = self.storage_offset as usize;
-                        // SAFETY: The pointer `src` is derived from the CPU storage's backing
-                        // `Vec<u8>`, and `offset + numel` is within the bounds of the allocation.
                         let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
                         slice.iter().map(|&v| f32::from(v)).collect()
                     }
@@ -99,8 +100,6 @@ impl TensorImpl {
                     DType::F16 => {
                         let dst = new_bytes.as_mut_ptr() as *mut half::f16;
                         for (i, &v) in f32_data.iter().enumerate() {
-                            // SAFETY: `dst` points to a valid `new_bytes` allocation of sufficient
-                            // size, and `i` is within bounds (0..numel).
                             unsafe {
                                 *dst.add(i) = half::f16::from_f32(v);
                             }
@@ -109,8 +108,6 @@ impl TensorImpl {
                     DType::BF16 => {
                         let dst = new_bytes.as_mut_ptr() as *mut half::bf16;
                         for (i, &v) in f32_data.iter().enumerate() {
-                            // SAFETY: `dst` points to a valid `new_bytes` allocation of sufficient
-                            // size, and `i` is within bounds (0..numel).
                             unsafe {
                                 *dst.add(i) = half::bf16::from_f32(v);
                             }
@@ -129,11 +126,13 @@ impl TensorImpl {
                 let new_storage = Arc::new(Storage::Cpu(CpuStorage {
                     data: Arc::new(new_bytes),
                     nbytes,
+                    #[cfg(feature = "gpu")]
                     gpu_buffer_cache: RwLock::new(HashMap::new()),
                 }));
 
                 TensorImpl::new(new_storage, self.sizes.clone(), dtype).into()
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("to_dtype for GPU tensors not yet supported. Use .cpu() first.");
             }
@@ -147,18 +146,24 @@ impl TensorImpl {
         let tensor: Tensor = self.clone().into();
         match device {
             Device::Cpu => tensor.to_cpu(),
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => tensor.to_gpu(device_id),
         }
     }
 
     pub fn is_gpu(&self) -> bool {
-        matches!(self.device, Device::Wgpu(_))
+        #[cfg(feature = "gpu")]
+        if matches!(self.device, Device::Wgpu(_)) {
+            return true;
+        }
+        false
     }
 
     pub fn is_cpu(&self) -> bool {
         matches!(self.device, Device::Cpu)
     }
 
+    #[cfg(feature = "gpu")]
     pub fn gpu_buffer(&self) -> Option<Arc<wgpu::Buffer>> {
         match self.storage.as_ref() {
             Storage::Wgpu(gpu) => Some(gpu.buffer.clone()),
@@ -169,6 +174,7 @@ impl TensorImpl {
         }
     }
 
+    #[cfg(feature = "gpu")]
     pub fn get_or_create_gpu_buffer(&self, device_id: usize) -> Option<Arc<wgpu::Buffer>> {
         match self.storage.as_ref() {
             Storage::Wgpu(gpu) if gpu.device_id == device_id => Some(gpu.buffer.clone()),
@@ -182,6 +188,7 @@ impl TensorImpl {
         }
     }
 
+    #[cfg(feature = "gpu")]
     pub fn cache_gpu_buffer(&self, device_id: usize, buffer: Arc<wgpu::Buffer>) {
         self.storage.cache_gpu_buffer(device_id, buffer);
     }
@@ -209,6 +216,7 @@ impl Tensor {
                 self.inner
                     .new_on_device(self.inner.storage.clone(), Device::Cpu),
             ),
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(gpu) => {
                 use crate::backend::wgpu::context::get_wgpu_context;
                 let ctx = get_wgpu_context(gpu.device_id);
@@ -216,6 +224,7 @@ impl Tensor {
                 let storage = Arc::new(Storage::Cpu(CpuStorage {
                     data: Arc::new(bytemuck::cast_slice(&data).to_vec()),
                     nbytes: gpu.nbytes,
+                    #[cfg(feature = "gpu")]
                     gpu_buffer_cache: RwLock::new(HashMap::new()),
                 }));
                 Tensor::new(self.inner.new_on_device(storage, Device::Cpu))
@@ -223,6 +232,7 @@ impl Tensor {
         }
     }
 
+    #[cfg(feature = "gpu")]
     pub fn to_gpu(&self, device_id: usize) -> Tensor {
         match self.inner.storage.as_ref() {
             Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),

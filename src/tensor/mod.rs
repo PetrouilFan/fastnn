@@ -235,6 +235,7 @@ impl TensorImpl {
                 // SAFETY: storage_offset * elem_size is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
                 panic!(
@@ -257,6 +258,7 @@ impl TensorImpl {
                 // and `storage_offset` has been validated to be within bounds of the allocation.
                 unsafe { f32_ptr.add(self.storage_offset as usize) }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
                 panic!(
@@ -280,6 +282,7 @@ impl TensorImpl {
                 // and `storage_offset` is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize) }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
             }
@@ -297,6 +300,7 @@ impl TensorImpl {
                 // and `storage_offset * elem_size` is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
             }
@@ -326,6 +330,7 @@ impl TensorImpl {
                 );
                 std::slice::from_raw_parts(ptr, numel)
             },
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot slice GPU storage. Use .to_cpu() first.");
             }
@@ -460,6 +465,7 @@ impl Tensor {
 
         let ptr = match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot call item() on GPU tensor. Use .cpu() first.");
             }
@@ -662,6 +668,7 @@ impl Tensor {
                     _ => panic!("Unsupported dtype for to_numpy"),
                 }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot convert GPU tensor to numpy directly. Use .cpu() first.");
             }
@@ -695,6 +702,7 @@ impl Tensor {
                 let elem_size = inner.dtype.size();
                 unsafe { ptr.add(inner.storage_offset as usize * elem_size) }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
             }
@@ -739,6 +747,7 @@ impl Tensor {
                 }
                 Some(&data[start..][..byte_len])
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => None,
         }
     }
@@ -1168,20 +1177,21 @@ impl Tensor {
         let graph_outputs = build_graph(&g, &graph_inputs);
 
         let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
-        let use_gpu = inputs.iter().any(|t| matches!(t.device(), Device::Wgpu(_)));
-        let result_bytes = if use_gpu {
-            g.compile_and_execute::<crate::backend::wgpu::WgpuBackend>(
-                &graph_outputs.iter().collect::<Vec<_>>(),
-                crate::backend::wgpu::WgpuBackend,
-                &input_bytes,
-            )?
-        } else {
+        let result_bytes = (|| -> Result<Vec<Vec<u8>>, BackendError> {
+            #[cfg(feature = "gpu")]
+            if inputs.iter().any(|t| matches!(t.device(), Device::Wgpu(_))) {
+                return g.compile_and_execute::<crate::backend::wgpu::WgpuBackend>(
+                    &graph_outputs.iter().collect::<Vec<_>>(),
+                    crate::backend::wgpu::WgpuBackend,
+                    &input_bytes,
+                );
+            }
             g.compile_and_execute::<CpuBackend>(
                 &graph_outputs.iter().collect::<Vec<_>>(),
                 CpuBackend,
                 &input_bytes,
-            )?
-        };
+            )
+        })()?;
 
         Ok(graph_outputs
             .into_iter()
@@ -1220,6 +1230,7 @@ impl Tensor {
                 let storage = Storage::Cpu(crate::storage::CpuStorage {
                     data: Arc::new(data),
                     nbytes: num_bytes,
+                    #[cfg(feature = "gpu")]
                     gpu_buffer_cache: parking_lot::RwLock::new(std::collections::HashMap::new()),
                 });
                 Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))

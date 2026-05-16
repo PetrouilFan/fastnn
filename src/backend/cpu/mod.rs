@@ -2693,6 +2693,7 @@ impl Backend for CpuBackend {
                                 let _total = out_f32.len();
                                 #[cfg(not(feature = "parallel"))]
                                 {
+                                    let total = _total;
                                     for out_idx in 0..total {
                                         let mut in_idx = 0usize;
                                         let mut remaining = out_idx;
