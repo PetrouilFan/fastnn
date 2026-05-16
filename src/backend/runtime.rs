@@ -31,6 +31,7 @@ pub struct Runtime<B: Backend> {
     plan: ExecutablePlan,
     memory_plan: MemoryPlan,
     slots_sorted: Vec<(NodeId, AllocSlot)>,
+    cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
 }
 
 impl<B: Backend> Runtime<B> {
@@ -52,6 +53,7 @@ impl<B: Backend> Runtime<B> {
             plan,
             memory_plan,
             slots_sorted,
+            cached_arena: None,
         }
     }
 
@@ -77,6 +79,7 @@ impl<B: Backend> Runtime<B> {
             plan,
             memory_plan,
             slots_sorted,
+            cached_arena: None,
         })
     }
 
@@ -107,9 +110,19 @@ impl<B: Backend> Runtime<B> {
     /// are the first nodes in topological order.
     ///
     /// Returns the output data for each graph output.
-    pub fn run(&self, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>, BackendError> {
-        let arena = self.backend.allocate_arena(self.plan.arena_size);
-        let arena_ref = &arena;
+    pub fn run(&mut self, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>, BackendError> {
+        let arena_size = self.plan.arena_size;
+        let enough_capacity = self
+            .cached_arena
+            .as_ref()
+            .map_or(false, |(cap, _)| *cap >= arena_size);
+        if !enough_capacity {
+            self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
+        }
+        let arena_ref = &self.cached_arena.as_ref().unwrap().1;
+        if enough_capacity {
+            self.backend.write_arena(arena_ref, 0, &vec![0u8; arena_size]);
+        }
 
         // Write inputs into earliest slots (ordering cached at construction).
         for (i, input_bytes) in inputs.iter().enumerate() {
