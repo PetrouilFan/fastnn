@@ -45,12 +45,14 @@ macro_rules! get_in_out_slices {
     ($arena:expr, $input_slices:expr => [$input:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
         let $input = if let Some(slice) = $input_slices.first() {
             let d = $arena.data_mut();
-            bytemuck::cast_slice::<_, f32>(
+            let src = bytemuck::cast_slice::<_, f32>(
                 &d[slice.offset..slice.offset + slice.size],
-            )
-            .to_vec()
+            );
+            let mut buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(src.len());
+            buf.copy_from_slice(src);
+            buf  // ScopedVec — auto-returns to TLS pool on drop
         } else {
-            Vec::new()
+            crate::backend::cpu::microkernels::TlsVecPool::alloc(0)
         };
         let $output = {
             let d = $arena.data_mut();
@@ -61,17 +63,20 @@ macro_rules! get_in_out_slices {
     ($arena:expr, $input_slices:expr => [$a:ident, $b:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
         let ($a, $b) = if let [a_slice, b_slice] = &$input_slices[..] {
             let d = $arena.data_mut();
-            let a_f32 = bytemuck::cast_slice::<_, f32>(
+            let a_src = bytemuck::cast_slice::<_, f32>(
                 &d[a_slice.offset..a_slice.offset + a_slice.size],
-            )
-            .to_vec();
-            let b_f32 = bytemuck::cast_slice::<_, f32>(
+            );
+            let b_src = bytemuck::cast_slice::<_, f32>(
                 &d[b_slice.offset..b_slice.offset + b_slice.size],
-            )
-            .to_vec();
-            (a_f32, b_f32)
+            );
+            let mut a_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(a_src.len());
+            a_buf.copy_from_slice(a_src);
+            let mut b_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(b_src.len());
+            b_buf.copy_from_slice(b_src);
+            (a_buf, b_buf)
         } else {
-            (Vec::new(), Vec::new())
+            (crate::backend::cpu::microkernels::TlsVecPool::alloc(0),
+             crate::backend::cpu::microkernels::TlsVecPool::alloc(0))
         };
         let $output = {
             let d = $arena.data_mut();
