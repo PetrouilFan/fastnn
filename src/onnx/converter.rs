@@ -639,18 +639,43 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, self.graph.slice(&ins[0], dim, start, end));
             }
             "Squeeze" => {
-                let axes: Vec<usize> = parse_ints(&node.attrs, "axes", &[0]);
+                let axes: Vec<i64> = parse_ints_i64(&node.attrs, "axes", &[0]);
                 let mut r = ins[0].clone();
-                for &a in axes.iter().rev() {
+                let initial_rank = r.shape().len() as i64;
+                // Convert negative axes to positive based on initial rank,
+                // then sort descending so we squeeze from the end first
+                // (avoids index-shifting issues).
+                let mut pos_axes: Vec<usize> = axes
+                    .iter()
+                    .map(|&a| {
+                        if a < 0 {
+                            (initial_rank + a) as usize
+                        } else {
+                            a as usize
+                        }
+                    })
+                    .collect();
+                pos_axes.sort_by(|a, b| b.cmp(a));
+                pos_axes.dedup();
+                for &a in &pos_axes {
                     r = self.graph.squeeze(&r, a);
                 }
                 self.out(node, r);
             }
             "Unsqueeze" => {
-                let axes: Vec<usize> = parse_ints(&node.attrs, "axes", &[0]);
+                // Per ONNX: axes are indices in the *output* tensor shape.
+                // Negative values count back from the end of the output shape.
+                let axes: Vec<i64> = parse_ints_i64(&node.attrs, "axes", &[0]);
                 let mut r = ins[0].clone();
                 for &a in &axes {
-                    r = self.graph.unsqueeze(&r, a);
+                    let input_rank = r.shape().len() as i64;
+                    let output_rank = input_rank + 1; // after this unsqueeze
+                    let dim = if a < 0 {
+                        (output_rank + a) as usize
+                    } else {
+                        a as usize
+                    };
+                    r = self.graph.unsqueeze(&r, dim);
                 }
                 self.out(node, r);
             }
