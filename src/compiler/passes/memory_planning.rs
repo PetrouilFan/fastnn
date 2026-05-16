@@ -513,12 +513,126 @@ pub fn plan_memory_with_env(
             slots.insert(info.node_id, slot);
         }
 
-        active.push((
-            info.live_range.1,
-            info.node_id,
-            info.size,
-            info.is_secondary,
-        ));
+        if info.size > 0 {
+            active.push((
+                info.live_range.1,
+                info.node_id,
+                info.size,
+                info.is_secondary,
+            ));
+        }
+    }
+
+    // ── In-place buffer reuse for unary elementwise ops ──────────────
+    // When a unary elementwise node's input has no other consumers after
+    // this node, and the output is not a graph output, reuse the input's
+    // buffer instead of allocating a new one.  This reduces arena size.
+    //
+    // We do NOT reuse buffers of Input nodes — the autograd backward pass
+    // reads forward inputs directly, and sharing the input's buffer with
+    // the elementwise output can cause subtle data-race-like issues.
+    let unary_elementwise_ops: &[Opcode] = &[
+        Opcode::Relu,
+        Opcode::Gelu,
+        Opcode::Silu,
+        Opcode::Sigmoid,
+        Opcode::Tanh,
+        Opcode::Exp,
+        Opcode::Log,
+        Opcode::Sqrt,
+        Opcode::Neg,
+        Opcode::Abs,
+        Opcode::LeakyRelu,
+        Opcode::Elu,
+        Opcode::Softplus,
+        Opcode::Hardswish,
+        Opcode::Clamp,
+        Opcode::Sign,
+        Opcode::LogicalNot,
+        Opcode::LogSoftmax,
+        Opcode::Mish,
+        Opcode::Erf,
+        Opcode::ToF16,
+        Opcode::ToF32,
+        Opcode::Cast,
+    ];
+    struct ReuseCandidate {
+        node_id: NodeId,
+        input_id: NodeId,
+        output_last_use: usize,
+        ai_idx: usize,
+    }
+    let mut reuse_candidates: Vec<ReuseCandidate> = Vec::new();
+    for ai_idx in 0..alloc_infos.len() {
+        let info = &alloc_infos[ai_idx];
+        if info.is_secondary {
+            continue;
+        }
+        let node = match graph.get_node(info.node_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !unary_elementwise_ops.contains(&node.opcode) || node.inputs.len() != 1 {
+            continue;
+        }
+        if graph.outputs.contains(&info.node_id) {
+            continue;
+        }
+        let input_id = node.inputs[0];
+        // Skip Input nodes — their buffer is used directly by the executor
+        // and sharing it can interfere with autograd backward reads.
+        if let Some(input_node) = graph.get_node(input_id) {
+            if matches!(input_node.opcode, Opcode::Input) {
+                continue;
+            }
+        }
+        let input_type = match graph.get_node(input_id) {
+            Some(n) => &n.output_type,
+            None => continue,
+        };
+        let input_size = tensor_byte_size(input_type, shape_env);
+        if input_size != info.size || input_size == 0 {
+            continue;
+        }
+        let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
+        let consumers = graph.consumers(input_id);
+        let has_consumer_after = consumers.iter().any(|&cid| {
+            cid != info.node_id && position.get(&cid).copied().unwrap_or(0) > node_pos
+        });
+        if has_consumer_after {
+            continue;
+        }
+        reuse_candidates.push(ReuseCandidate {
+            node_id: info.node_id,
+            input_id,
+            output_last_use: info.live_range.1,
+            ai_idx,
+        });
+    }
+    for cand in &reuse_candidates {
+        if let Some(input_info) = alloc_infos
+            .iter_mut()
+            .find(|ai| ai.node_id == cand.input_id && !ai.is_secondary)
+        {
+            input_info.live_range.1 = input_info.live_range.1.max(cand.output_last_use);
+        }
+    }
+    for cand in &reuse_candidates {
+        if let Some(info) = alloc_infos.get_mut(cand.ai_idx) {
+            info.size = 0;
+        }
+    }
+
+    // ── Post-allocation: set reuse slots to input offsets ──
+    // These were marked with size=0 during the in-place reuse pass above.
+    // We must do this AFTER the active-list loop to avoid double-free.
+    for cand in &reuse_candidates {
+        let input_offset = slots.get(&cand.input_id).map(|s| s.offset);
+        if let Some(off) = input_offset {
+            if let Some(slot) = slots.get_mut(&cand.node_id) {
+                slot.offset = off;
+            }
+        }
     }
 
     Ok(MemoryPlan {

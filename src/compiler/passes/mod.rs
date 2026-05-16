@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 pub mod activation_quantization;
+pub mod arithmetic_simplify;
 pub mod auto_cast;
+pub mod constant_folding;
 pub mod dead_code_elimination;
 pub mod fusion;
 pub mod memory_planning;

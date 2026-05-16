@@ -84,8 +84,8 @@ pub(super) fn dispatch_matmul_gpu(
         ],
     });
 
-    let wgc_x = (m as u32).div_ceil(16);
-    let wgc_y = (n as u32).div_ceil(16);
+    let wgc_x = (m as u32).div_ceil(32);
+    let wgc_y = (n as u32).div_ceil(32);
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("mm_pass"),
@@ -211,8 +211,8 @@ pub(super) fn dispatch_matmul_activation_gpu(
         ],
     });
 
-    let wgc_x = (m as u32).div_ceil(16);
-    let wgc_y = (n as u32).div_ceil(16);
+    let wgc_x = (m as u32).div_ceil(32);
+    let wgc_y = (n as u32).div_ceil(32);
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("mm_activation_pass"),
@@ -244,10 +244,13 @@ struct MatMulParams {
 }
 @group(0) @binding(3) var<uniform> params: MatMulParams;
 
-var<workgroup> tileA: array<array<f32, 16>, 16>;
-var<workgroup> tileB: array<array<f32, 16>, 16>;
+const TILE_DIM: u32 = 32u;
+const TILE_A_STRIDE: u32 = 33u;
 
-@compute @workgroup_size(16, 16)
+var<workgroup> tileA: array<array<f32, TILE_A_STRIDE>, TILE_DIM>;
+var<workgroup> tileB: array<array<f32, TILE_DIM>, TILE_DIM>;
+
+@compute @workgroup_size(8, 8)
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_id)   lid: vec3<u32>,
@@ -255,46 +258,120 @@ fn main(
 ) {
     let bx = wgid.x;
     let by = wgid.y;
-    let lx = lid.x;
-    let ly = lid.y;
+    let tx = lid.x;
+    let ty = lid.y;
 
     let M = params.M;
     let K = params.K;
     let N = params.N;
 
-    var sum: f32 = 0.0;
+    let row_base = bx * TILE_DIM + tx * 4u;
+    let col_base = by * TILE_DIM + ty * 4u;
 
-    let num_tiles = (K + 15u) / 16u;
+    var sum00 = 0.0; var sum01 = 0.0; var sum02 = 0.0; var sum03 = 0.0;
+    var sum10 = 0.0; var sum11 = 0.0; var sum12 = 0.0; var sum13 = 0.0;
+    var sum20 = 0.0; var sum21 = 0.0; var sum22 = 0.0; var sum23 = 0.0;
+    var sum30 = 0.0; var sum31 = 0.0; var sum32 = 0.0; var sum33 = 0.0;
+
+    let num_tiles = (K + TILE_DIM - 1u) / TILE_DIM;
     for (var t: u32 = 0u; t < num_tiles; t = t + 1u) {
-        let a_row = bx * 16u + lx;
-        let a_col = t * 16u + ly;
-        if (a_row < M && a_col < K) {
-            tileA[lx][ly] = a[a_row * K + a_col];
-        } else {
-            tileA[lx][ly] = 0.0;
+        // Load tileA: each thread loads 4 rows x 4 K-cols = 16 elements as 4 vec4 loads
+        let a_k_base = t * TILE_DIM + ty * 4u;
+        for (var r: u32 = 0u; r < 4u; r = r + 1u) {
+            let a_row = row_base + r;
+            if (a_row < M && a_k_base < K) {
+                let a_addr = a_row * K + a_k_base;
+                let loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], a[a_addr + 2u], a[a_addr + 3u]);
+                tileA[tx * 4u + r][ty * 4u] = loaded[0];
+                tileA[tx * 4u + r][ty * 4u + 1u] = loaded[1];
+                tileA[tx * 4u + r][ty * 4u + 2u] = loaded[2];
+                tileA[tx * 4u + r][ty * 4u + 3u] = loaded[3];
+            } else {
+                tileA[tx * 4u + r][ty * 4u] = 0.0;
+                tileA[tx * 4u + r][ty * 4u + 1u] = 0.0;
+                tileA[tx * 4u + r][ty * 4u + 2u] = 0.0;
+                tileA[tx * 4u + r][ty * 4u + 3u] = 0.0;
+            }
         }
 
-        let b_row = t * 16u + lx;
-        let b_col = by * 16u + ly;
-        if (b_row < K && b_col < N) {
-            tileB[lx][ly] = b[b_row * N + b_col];
-        } else {
-            tileB[lx][ly] = 0.0;
+        // Load tileB: each thread loads 4 K-rows x 4 cols = 16 elements as 4 vec4 loads
+        let b_n_base = by * TILE_DIM + ty * 4u;
+        for (var r: u32 = 0u; r < 4u; r = r + 1u) {
+            let b_k_row = t * TILE_DIM + tx * 4u + r;
+            if (b_k_row < K && b_n_base < N) {
+                let b_addr = b_k_row * N + b_n_base;
+                let loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], b[b_addr + 2u], b[b_addr + 3u]);
+                tileB[tx * 4u + r][ty * 4u] = loaded[0];
+                tileB[tx * 4u + r][ty * 4u + 1u] = loaded[1];
+                tileB[tx * 4u + r][ty * 4u + 2u] = loaded[2];
+                tileB[tx * 4u + r][ty * 4u + 3u] = loaded[3];
+            } else {
+                tileB[tx * 4u + r][ty * 4u] = 0.0;
+                tileB[tx * 4u + r][ty * 4u + 1u] = 0.0;
+                tileB[tx * 4u + r][ty * 4u + 2u] = 0.0;
+                tileB[tx * 4u + r][ty * 4u + 3u] = 0.0;
+            }
         }
 
         workgroupBarrier();
 
-        for (var i: u32 = 0u; i < 16u; i = i + 1u) {
-            sum = sum + tileA[lx][i] * tileB[i][ly];
+        for (var i: u32 = 0u; i < TILE_DIM; i = i + 1u) {
+            let a0 = tileA[tx * 4u + 0u][i];
+            let a1 = tileA[tx * 4u + 1u][i];
+            let a2 = tileA[tx * 4u + 2u][i];
+            let a3 = tileA[tx * 4u + 3u][i];
+            let b0 = tileB[i][ty * 4u + 0u];
+            let b1 = tileB[i][ty * 4u + 1u];
+            let b2 = tileB[i][ty * 4u + 2u];
+            let b3 = tileB[i][ty * 4u + 3u];
+            sum00 = sum00 + a0 * b0;
+            sum01 = sum01 + a0 * b1;
+            sum02 = sum02 + a0 * b2;
+            sum03 = sum03 + a0 * b3;
+            sum10 = sum10 + a1 * b0;
+            sum11 = sum11 + a1 * b1;
+            sum12 = sum12 + a1 * b2;
+            sum13 = sum13 + a1 * b3;
+            sum20 = sum20 + a2 * b0;
+            sum21 = sum21 + a2 * b1;
+            sum22 = sum22 + a2 * b2;
+            sum23 = sum23 + a2 * b3;
+            sum30 = sum30 + a3 * b0;
+            sum31 = sum31 + a3 * b1;
+            sum32 = sum32 + a3 * b2;
+            sum33 = sum33 + a3 * b3;
         }
 
         workgroupBarrier();
     }
 
-    let row = gid.x;
-    let col = gid.y;
-    if (row < M && col < N) {
-        output[row * N + col] = sum;
+    for (var r: u32 = 0u; r < 4u; r = r + 1u) {
+        let row = row_base + r;
+        if (row >= M) { break; }
+        for (var c: u32 = 0u; c < 4u; c = c + 1u) {
+            let col = col_base + c;
+            if (col >= N) { break; }
+            let idx = row * N + col;
+            switch r * 4u + c {
+                case 0u: { output[idx] = sum00; }
+                case 1u: { output[idx] = sum01; }
+                case 2u: { output[idx] = sum02; }
+                case 3u: { output[idx] = sum03; }
+                case 4u: { output[idx] = sum10; }
+                case 5u: { output[idx] = sum11; }
+                case 6u: { output[idx] = sum12; }
+                case 7u: { output[idx] = sum13; }
+                case 8u: { output[idx] = sum20; }
+                case 9u: { output[idx] = sum21; }
+                case 10u: { output[idx] = sum22; }
+                case 11u: { output[idx] = sum23; }
+                case 12u: { output[idx] = sum30; }
+                case 13u: { output[idx] = sum31; }
+                case 14u: { output[idx] = sum32; }
+                case 15u: { output[idx] = sum33; }
+                default: { }
+            }
+        }
     }
 }
 "#
@@ -318,8 +395,11 @@ struct MatMulActivationParams {
 
 @group(0) @binding(4) var<storage, read>         bias:   array<f32>;
 
-var<workgroup> tileA: array<array<f32, 16>, 16>;
-var<workgroup> tileB: array<array<f32, 16>, 16>;
+const TILE_DIM: u32 = 32u;
+const TILE_A_STRIDE: u32 = 33u;
+
+var<workgroup> tileA: array<array<f32, TILE_A_STRIDE>, TILE_DIM>;
+var<workgroup> tileB: array<array<f32, TILE_DIM>, TILE_DIM>;
 
 fn gelu_impl(x: f32) -> f32 {
     let x3 = x * x * x;
@@ -341,7 +421,7 @@ fn apply_activation(x: f32, act: u32) -> f32 {
     }
 }
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(8, 8)
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_id)   lid: vec3<u32>,
@@ -349,51 +429,123 @@ fn main(
 ) {
     let bx = wgid.x;
     let by = wgid.y;
-    let lx = lid.x;
-    let ly = lid.y;
+    let tx = lid.x;
+    let ty = lid.y;
 
     let M = params.M;
     let K = params.K;
     let N = params.N;
 
-    var sum: f32 = 0.0;
+    let row_base = bx * TILE_DIM + tx * 4u;
+    let col_base = by * TILE_DIM + ty * 4u;
 
-    let num_tiles = (K + 15u) / 16u;
+    var sum00 = 0.0; var sum01 = 0.0; var sum02 = 0.0; var sum03 = 0.0;
+    var sum10 = 0.0; var sum11 = 0.0; var sum12 = 0.0; var sum13 = 0.0;
+    var sum20 = 0.0; var sum21 = 0.0; var sum22 = 0.0; var sum23 = 0.0;
+    var sum30 = 0.0; var sum31 = 0.0; var sum32 = 0.0; var sum33 = 0.0;
+
+    let num_tiles = (K + TILE_DIM - 1u) / TILE_DIM;
     for (var t: u32 = 0u; t < num_tiles; t = t + 1u) {
-        let a_row = bx * 16u + lx;
-        let a_col = t * 16u + ly;
-        if (a_row < M && a_col < K) {
-            tileA[lx][ly] = a[a_row * K + a_col];
-        } else {
-            tileA[lx][ly] = 0.0;
+        let a_k_base = t * TILE_DIM + ty * 4u;
+        for (var r: u32 = 0u; r < 4u; r = r + 1u) {
+            let a_row = row_base + r;
+            if (a_row < M && a_k_base < K) {
+                let a_addr = a_row * K + a_k_base;
+                let loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], a[a_addr + 2u], a[a_addr + 3u]);
+                tileA[tx * 4u + r][ty * 4u] = loaded[0];
+                tileA[tx * 4u + r][ty * 4u + 1u] = loaded[1];
+                tileA[tx * 4u + r][ty * 4u + 2u] = loaded[2];
+                tileA[tx * 4u + r][ty * 4u + 3u] = loaded[3];
+            } else {
+                tileA[tx * 4u + r][ty * 4u] = 0.0;
+                tileA[tx * 4u + r][ty * 4u + 1u] = 0.0;
+                tileA[tx * 4u + r][ty * 4u + 2u] = 0.0;
+                tileA[tx * 4u + r][ty * 4u + 3u] = 0.0;
+            }
         }
 
-        let b_row = t * 16u + lx;
-        let b_col = by * 16u + ly;
-        if (b_row < K && b_col < N) {
-            tileB[lx][ly] = b[b_row * N + b_col];
-        } else {
-            tileB[lx][ly] = 0.0;
+        let b_n_base = by * TILE_DIM + ty * 4u;
+        for (var r: u32 = 0u; r < 4u; r = r + 1u) {
+            let b_k_row = t * TILE_DIM + tx * 4u + r;
+            if (b_k_row < K && b_n_base < N) {
+                let b_addr = b_k_row * N + b_n_base;
+                let loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], b[b_addr + 2u], b[b_addr + 3u]);
+                tileB[tx * 4u + r][ty * 4u] = loaded[0];
+                tileB[tx * 4u + r][ty * 4u + 1u] = loaded[1];
+                tileB[tx * 4u + r][ty * 4u + 2u] = loaded[2];
+                tileB[tx * 4u + r][ty * 4u + 3u] = loaded[3];
+            } else {
+                tileB[tx * 4u + r][ty * 4u] = 0.0;
+                tileB[tx * 4u + r][ty * 4u + 1u] = 0.0;
+                tileB[tx * 4u + r][ty * 4u + 2u] = 0.0;
+                tileB[tx * 4u + r][ty * 4u + 3u] = 0.0;
+            }
         }
 
         workgroupBarrier();
 
-        for (var i: u32 = 0u; i < 16u; i = i + 1u) {
-            sum = sum + tileA[lx][i] * tileB[i][ly];
+        for (var i: u32 = 0u; i < TILE_DIM; i = i + 1u) {
+            let a0 = tileA[tx * 4u + 0u][i];
+            let a1 = tileA[tx * 4u + 1u][i];
+            let a2 = tileA[tx * 4u + 2u][i];
+            let a3 = tileA[tx * 4u + 3u][i];
+            let b0 = tileB[i][ty * 4u + 0u];
+            let b1 = tileB[i][ty * 4u + 1u];
+            let b2 = tileB[i][ty * 4u + 2u];
+            let b3 = tileB[i][ty * 4u + 3u];
+            sum00 = sum00 + a0 * b0;
+            sum01 = sum01 + a0 * b1;
+            sum02 = sum02 + a0 * b2;
+            sum03 = sum03 + a0 * b3;
+            sum10 = sum10 + a1 * b0;
+            sum11 = sum11 + a1 * b1;
+            sum12 = sum12 + a1 * b2;
+            sum13 = sum13 + a1 * b3;
+            sum20 = sum20 + a2 * b0;
+            sum21 = sum21 + a2 * b1;
+            sum22 = sum22 + a2 * b2;
+            sum23 = sum23 + a2 * b3;
+            sum30 = sum30 + a3 * b0;
+            sum31 = sum31 + a3 * b1;
+            sum32 = sum32 + a3 * b2;
+            sum33 = sum33 + a3 * b3;
         }
 
         workgroupBarrier();
     }
 
-    let row = gid.x;
-    let col = gid.y;
-    if (row < M && col < N) {
-        let idx = row * N + col;
-        var val = sum;
-        if (params.bias_len > 0u) {
-            val = val + bias[idx % params.bias_len];
+    for (var r: u32 = 0u; r < 4u; r = r + 1u) {
+        let row = row_base + r;
+        if (row >= M) { break; }
+        for (var c: u32 = 0u; c < 4u; c = c + 1u) {
+            let col = col_base + c;
+            if (col >= N) { break; }
+            let idx = row * N + col;
+            var val: f32;
+            switch r * 4u + c {
+                case 0u: { val = sum00; }
+                case 1u: { val = sum01; }
+                case 2u: { val = sum02; }
+                case 3u: { val = sum03; }
+                case 4u: { val = sum10; }
+                case 5u: { val = sum11; }
+                case 6u: { val = sum12; }
+                case 7u: { val = sum13; }
+                case 8u: { val = sum20; }
+                case 9u: { val = sum21; }
+                case 10u: { val = sum22; }
+                case 11u: { val = sum23; }
+                case 12u: { val = sum30; }
+                case 13u: { val = sum31; }
+                case 14u: { val = sum32; }
+                case 15u: { val = sum33; }
+                default: { val = 0.0; }
+            }
+            if (params.bias_len > 0u) {
+                val = val + bias[idx % params.bias_len];
+            }
+            output[idx] = apply_activation(val, params.activation);
         }
-        output[idx] = apply_activation(val, params.activation);
     }
 }
 "#
