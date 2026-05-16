@@ -173,12 +173,12 @@ impl MemoryPlan {
                         .first()
                         .and_then(|s| s.get(axis).copied())
                         .unwrap_or(1) as usize;
-                    let is_mean = if matches!(node.opcode, Opcode::ReduceMean) {
-                        1
-                    } else {
-                        0
+                    let (is_mean, is_max) = match node.opcode {
+                        Opcode::ReduceMean => (1, 0),
+                        Opcode::ReduceMax => (0, 1),
+                        _ => (0, 0), // ReduceSum
                     };
-                    vec![group_size, is_mean]
+                    vec![group_size, is_mean, is_max]
                 }
                 _ => continue,
             };
