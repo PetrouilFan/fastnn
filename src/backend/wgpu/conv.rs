@@ -1,7 +1,11 @@
-use crate::backend::wgpu::context::with_wgpu_context;
+use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use super::PendingRead;
 
 pub(super) fn dispatch_conv_gpu(
+    ctx: &mut WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<PendingRead>,
     arena: &super::WgpuBuffer,
     input_slices: &[crate::backend::BufferSlice],
     output_slice: crate::backend::BufferSlice,
@@ -37,113 +41,100 @@ pub(super) fn dispatch_conv_gpu(
     let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
     let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
 
-    with_wgpu_context(|ctx| -> Result<(), BackendError> {
-        let shader = build_conv_shader();
-        super::pipeline::ensure_compute_pipeline(ctx, "conv2d", &shader)
-            .map_err(BackendError::Dispatch)?;
+    let shader = build_conv_shader();
+    super::pipeline::ensure_compute_pipeline(ctx, "conv2d", &shader)
+        .map_err(BackendError::Dispatch)?;
 
-        let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "conv_input");
-        let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "conv_weight");
+    let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "conv_input");
+    let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "conv_weight");
 
-        let output_size = (n * oc * h_out * w_out * 4) as u64;
-        let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("conv_output"),
-            size: output_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+    let output_size = (n * oc * h_out * w_out * 4) as u64;
+    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("conv_output"),
+        size: output_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    #[allow(non_snake_case)]
+    struct ConvParams {
+        N: u32,
+        C: u32,
+        H: u32,
+        W: u32,
+        OC: u32,
+        KH: u32,
+        KW: u32,
+        stride: u32,
+        padding: u32,
+        dilation: u32,
+        groups: u32,
+        H_out: u32,
+        W_out: u32,
+    }
+    let params = ConvParams {
+        N: n as u32,
+        C: c as u32,
+        H: h as u32,
+        W: w as u32,
+        OC: oc as u32,
+        KH: kh as u32,
+        KW: kw as u32,
+        stride: stride as u32,
+        padding: padding as u32,
+        dilation: dilation as u32,
+        groups: groups as u32,
+        H_out: h_out as u32,
+        W_out: w_out as u32,
+    };
+    let buf_params = ctx.create_uniform_buffer(&params, "conv_params");
+
+    let pipeline_key = "wgpu_backend_conv2d";
+    let pipeline = &ctx.pipelines[pipeline_key];
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("conv_bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_input.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_weight.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buf_out.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: buf_params.as_entire_binding(),
+            },
+        ],
+    });
+
+    let wgc_x = h_out.div_ceil(8).max(1);
+    let wgc_y = w_out.div_ceil(8).max(1);
+    let wgc_z = (oc * n).max(1);
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("conv_pass"),
+            timestamp_writes: None,
         });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(wgc_x as u32, wgc_y as u32, wgc_z as u32);
+    }
 
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        #[allow(non_snake_case)]
-        struct ConvParams {
-            N: u32,
-            C: u32,
-            H: u32,
-            W: u32,
-            OC: u32,
-            KH: u32,
-            KW: u32,
-            stride: u32,
-            padding: u32,
-            dilation: u32,
-            groups: u32,
-            H_out: u32,
-            W_out: u32,
-        }
-        let params = ConvParams {
-            N: n as u32,
-            C: c as u32,
-            H: h as u32,
-            W: w as u32,
-            OC: oc as u32,
-            KH: kh as u32,
-            KW: kw as u32,
-            stride: stride as u32,
-            padding: padding as u32,
-            dilation: dilation as u32,
-            groups: groups as u32,
-            H_out: h_out as u32,
-            W_out: w_out as u32,
-        };
-        let buf_params = ctx.create_uniform_buffer(&params, "conv_params");
-
-        let pipeline_key = "wgpu_backend_conv2d";
-        let pipeline = &ctx.pipelines[pipeline_key];
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("conv_bg"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf_input.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf_weight.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buf_params.as_entire_binding(),
-                },
-            ],
-        });
-
-        let wgc_x = h_out.div_ceil(8).max(1);
-        let wgc_y = w_out.div_ceil(8).max(1);
-        let wgc_z = (oc * n).max(1);
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("conv_encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("conv_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(wgc_x as u32, wgc_y as u32, wgc_z as u32);
-        }
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-
-        let raw = ctx.read_buffer(&buf_out, output_size as usize);
-        let result: &[f32] = bytemuck::cast_slice(&raw);
-
-        let out = arena.data_mut();
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
-            &mut out[output_slice.offset..output_slice.offset + output_slice.size],
-        );
-        let len = out_f32.len().min(result.len());
-        out_f32[..len].copy_from_slice(&result[..len]);
-
-        Ok(())
-    })
+    pending_reads.push(PendingRead {
+        buffer: buf_out,
+        cpu_offset: output_slice.offset,
+        size: output_size as usize,
+    });
+    Ok(())
 }
 
 fn infer_conv_dims(
