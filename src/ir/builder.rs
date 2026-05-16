@@ -2304,10 +2304,10 @@ impl GraphBuilder {
         graph.inputs = recorded_inputs;
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
-        let executor = GraphExecutor::new(backend);
-        let (plan, memory_plan, compiled_graph) =
+        let mut executor = GraphExecutor::new(backend);
+        let (mut plan, memory_plan, compiled_graph) =
             executor.compile_with_plan_and_quantize(&graph, quantize)?;
-        executor.execute(&compiled_graph, &plan, &memory_plan, inputs)
+        executor.execute(&compiled_graph, &mut plan, &memory_plan, inputs)
     }
 
     /// Return the current number of nodes in the graph.
@@ -2613,8 +2613,8 @@ mod tests {
         let logits = g.matmul(&x, &w);
 
         // Compile ONCE, execute with multiple batch sizes.
-        let (plan, memory_plan, compiled_graph) = g.compile(&[&logits], CpuBackend).unwrap();
-        let executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = g.compile(&[&logits], CpuBackend).unwrap();
+        let mut executor = GraphExecutor::new(CpuBackend);
 
         // Two different batch sizes — both should work at runtime
         // Batch = 3: input data is 3*64*4 = 768 bytes
@@ -2623,7 +2623,7 @@ mod tests {
 
         // Execute with batch=3
         let result_3 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_3, &w_data])
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_3, &w_data])
             .unwrap();
         let out_3 = read_f32(&result_3[0]);
         // Output should be [3, 10] = 30 elements
@@ -2637,7 +2637,7 @@ mod tests {
         // Batch = 1: input data is 1*64*4 = 256 bytes — same compiled plan
         let x_data_1 = f32_data(&(0..64).map(|i| i as f32).collect::<Vec<_>>());
         let result_1 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data])
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_1, &w_data])
             .unwrap();
         let out_1 = read_f32(&result_1[0]);
         // Output should be [1, 10] = 10 elements
@@ -2662,7 +2662,7 @@ mod tests {
         // Batch = 7 (another shape) — verify the pattern generalizes
         let x_data_7 = f32_data(&(0..448).map(|i| i as f32).collect::<Vec<_>>()); // 7*64 = 448 f32s
         let result_7 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_7, &w_data])
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_7, &w_data])
             .unwrap();
         let out_7 = read_f32(&result_7[0]);
         assert_eq!(
@@ -2795,14 +2795,14 @@ mod tests {
         let out = g.matmul(&x, &w);
 
         // Compile ONCE
-        let (plan, memory_plan, compiled_graph) = g.compile(&[&out], CpuBackend).unwrap();
-        let executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = g.compile(&[&out], CpuBackend).unwrap();
+        let mut executor = GraphExecutor::new(CpuBackend);
 
         // Execute with batch=2
         let x_data_2 = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let w_data = f32_data(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
         let result_2 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_2, &w_data])
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_2, &w_data])
             .unwrap();
         let out_2 = read_f32(&result_2[0]);
         // batch=2, feat=3 → 6 elements
@@ -2815,7 +2815,7 @@ mod tests {
         // Execute SAME plan with batch=1 — no recompilation
         let x_data_1 = f32_data(&[10.0, 20.0, 30.0, 40.0]);
         let result_1 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data])
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_1, &w_data])
             .unwrap();
         let out_1 = read_f32(&result_1[0]);
         // batch=1, feat=3 → 3 elements
