@@ -1,4 +1,6 @@
+#[cfg(feature = "python")]
 use pyo3::exceptions::PyRuntimeError;
+#[cfg(feature = "python")]
 use pyo3::PyErr;
 use thiserror::Error;
 
@@ -118,6 +120,7 @@ impl FastnnError {
 /// Result type alias for fastnn operations
 pub type FastnnResult<T> = Result<T, FastnnError>;
 
+#[cfg(feature = "python")]
 impl From<FastnnError> for PyErr {
     fn from(err: FastnnError) -> Self {
         let msg = err.to_string();

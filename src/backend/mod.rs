@@ -121,6 +121,7 @@ pub mod executor;
 pub mod cpu;
 
 /// Wgpu (GPU) backend implementation (WGSL compute shaders)
+#[cfg(feature = "gpu")]
 pub mod wgpu;
 
 /// Standalone runtime for executing pre-compiled plans

@@ -106,21 +106,21 @@ impl<B: Backend> GraphExecutor<B> {
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         let mut graph = graph.clone();
 
-        #[cfg(debug_assertions)]
+        
         eprintln!("[FNN_DBG_DET] phase=baseline nodes={} hash={:016x}",
             graph.nodes.len(), self._graph_state_hash(&graph));
 
         // ── Phase 1: Shape inference ──────────────────────────────────────
         shape_inference::infer_shapes(&mut graph)
             .map_err(|e| BackendError::Compilation(format!("shape inference: {e}")))?;
-        #[cfg(debug_assertions)]
+        
         eprintln!("[FNN_DBG_DET] phase=shape_inference nodes={} hash={:016x}",
             graph.nodes.len(), self._graph_state_hash(&graph));
  
          // ── Phase 2: Operator fusion ──────────────────────────────────────
          operator_fusion::fuse_operators(&mut graph)
              .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
-         #[cfg(debug_assertions)]
+         
          eprintln!("[FNN_DBG_DET] phase=operator_fusion nodes={} hash={:016x}",
             graph.nodes.len(), self._graph_state_hash(&graph));
 

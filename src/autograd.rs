@@ -74,12 +74,12 @@ where
 /// object allocations per forward pass.
 pub struct NodeInfo {
     pub op_name: &'static str,
-    pub inputs: Vec<Tensor>,
+    pub inputs: SmallVec<[Tensor; 2]>,
 }
 
 impl NodeInfo {
-    pub fn new(op_name: &'static str, inputs: Vec<Tensor>) -> Self {
-        NodeInfo { op_name, inputs }
+    pub fn new(op_name: &'static str, inputs: impl Into<SmallVec<[Tensor; 2]>>) -> Self {
+        NodeInfo { op_name, inputs: inputs.into() }
     }
 
     pub fn edges(&self) -> Vec<Edge> {
@@ -293,7 +293,31 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
         return;
     }
 
-    let (all_nodes, grad_fn_to_tensor) = collect_backward_nodes(root);
+    // Single DFS from root collects backward nodes and produces
+    // forward topological order (predecessors first) simultaneously.
+    fn dfs_collect(
+        tensor: &Tensor,
+        visited: &mut HashSet<usize>,
+        order: &mut Vec<Arc<NodeInfo>>,
+        grad_fn_to_tensor: &mut HashMap<usize, Tensor>,
+    ) {
+        if let Some(node) = tensor.grad_fn() {
+            let node_id = Arc::as_ptr(&node) as usize;
+            if visited.insert(node_id) {
+                grad_fn_to_tensor.insert(node_id, tensor.clone());
+                for input_tensor in &node.inputs {
+                    dfs_collect(input_tensor, visited, order, grad_fn_to_tensor);
+                }
+                order.push(node.clone());
+            }
+        }
+    }
+
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut all_nodes: Vec<Arc<NodeInfo>> = Vec::new();
+    let mut grad_fn_to_tensor: HashMap<usize, Tensor> = HashMap::new();
+    dfs_collect(root, &mut visited, &mut all_nodes, &mut grad_fn_to_tensor);
+
     if all_nodes.is_empty() {
         return;
     }
@@ -345,8 +369,8 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
     }
 
     // Replay ops in forward topological order
-    for node in topological_order(&all_nodes) {
-        let inputs: Vec<Tensor> = node.inputs.clone();
+    for node in &all_nodes {
+        let inputs = node.inputs.clone();
         let input_gts: Vec<GraphTensor> = inputs
             .iter()
             .map(|t| {
@@ -452,14 +476,17 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
     };
 
     // ── Store gradients back on leaf tensors (accumulating if exists) ──
+    let input_positions: HashMap<usize, usize> = all_input_tensors.iter()
+        .enumerate()
+        .map(|(i, t)| (t.id(), i))
+        .collect();
+
     for tensor in leaf_inputs.iter() {
         if !tensor.requires_grad() {
             continue;
         }
 
-        // Find this leaf tensor's position in the all_input_tensors list
-        let pos = all_input_tensors.iter().position(|t| t.id() == tensor.id());
-        let i = match pos {
+        let i = match input_positions.get(&tensor.id()).copied() {
             Some(idx) => idx,
             None => continue,
         };
@@ -807,12 +834,12 @@ pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
 }
 
 /// Helper: create a NodeInfo and wrap in Arc. Used by all forward ops.
-pub fn make_node_info(op_name: &'static str, inputs: Vec<Tensor>) -> Arc<NodeInfo> {
+pub fn make_node_info(op_name: &'static str, inputs: impl Into<SmallVec<[Tensor; 2]>>) -> Arc<NodeInfo> {
     Arc::new(NodeInfo::new(op_name, inputs))
 }
 
 /// Helper: set a NodeInfo on an output tensor (fast-path, inline pattern).
-pub fn attach_node_info(output: &mut Tensor, op_name: &'static str, inputs: Vec<Tensor>) {
+pub fn attach_node_info(output: &mut Tensor, op_name: &'static str, inputs: impl Into<SmallVec<[Tensor; 2]>>) {
     let mut meta = AutogradMeta::new_non_leaf(true);
     meta.grad_fn = Some(make_node_info(op_name, inputs));
     let inner = Arc::make_mut(&mut output.inner);
@@ -969,8 +996,11 @@ pub fn build_backward_graph(
     // Topological sort in REVERSE order (from output to input)
     let forward_order = forward_graph.topological_sort();
 
-    // Walk nodes in reverse order
-    for &node_id in forward_order.iter().rev() {
+    // Walk nodes in reverse order (skip Input/Constant — no backward computation)
+    for &node_id in forward_order.iter().rev().filter(|&&id| {
+        let node = forward_graph.get_node(id).expect("node should exist");
+        !matches!(node.opcode, Opcode::Input | Opcode::Constant(_))
+    }) {
         let node = forward_graph
             .get_node(node_id)
             .ok_or("build_backward_graph: node not found in forward walk")?;

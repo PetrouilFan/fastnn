@@ -112,8 +112,12 @@ impl<'a> OnnxConverter<'a> {
         }
 
         // Phase 2: Register all weight params as Constant nodes.
-        for (name, tensor) in self.params.iter() {
-            if !self.name_to_id.contains_key(name) {
+        // Sort by name to ensure deterministic node ordering regardless
+        // of HashMap iteration order (SipHash seed varies per-process).
+        let mut sorted_params: Vec<_> = self.params.iter().collect();
+        sorted_params.sort_by_key(|(name, _)| (*name).clone());
+        for (name, tensor) in &sorted_params {
+            if !self.name_to_id.contains_key(name.as_str()) {
                 let tensor_type = TensorType::new(
                     tensor
                         .shape()
@@ -124,7 +128,7 @@ impl<'a> OnnxConverter<'a> {
                 );
                 let data = tensor.as_bytes();
                 let gt = self.graph.constant(data, tensor_type);
-                self.name_to_id.insert(name.clone(), gt);
+                self.name_to_id.insert((*name).clone(), gt);
             }
         }
 

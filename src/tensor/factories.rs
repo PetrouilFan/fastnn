@@ -1,8 +1,12 @@
 // Tensor factory/constructor methods
 
+#[cfg(feature = "gpu")]
 use crate::backend::wgpu::context::get_wgpu_context;
-use crate::storage::{DType, Device, GpuStorage, Storage};
+use crate::storage::{DType, Device, Storage};
+#[cfg(feature = "gpu")]
+use crate::storage::GpuStorage;
 use crate::storage_pool::get_storage_pool;
+#[cfg(feature = "gpu")]
 use parking_lot::RwLock;
 use smallvec::smallvec;
 use smallvec::SmallVec;
@@ -115,6 +119,7 @@ impl Tensor {
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let ctx = get_wgpu_context(device_id);
                 let buffer = ctx.create_buffer(nbytes, "zeros");
@@ -148,6 +153,7 @@ impl Tensor {
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let ctx = get_wgpu_context(device_id);
                 let buffer = ctx.create_buffer(nbytes, "empty");
@@ -162,6 +168,7 @@ impl Tensor {
 
         match device {
             Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
+            #[cfg(feature = "gpu")]
             Device::Wgpu(_) => {
                 Tensor::new(TensorImpl::new_with_device(storage, sizes, device, dtype))
             }
@@ -247,6 +254,7 @@ impl Tensor {
                     requires_grad: false,
                 })
             }
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let cpu_ones = Self::ones(shape.clone(), dtype, Device::Cpu);
                 cpu_ones.to_gpu(device_id)
@@ -324,6 +332,7 @@ impl Tensor {
                     requires_grad: false,
                 })
             }
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let sizes: SmallVec<[i64; 8]> = shape.into();
                 let numel: i64 = sizes.iter().product();
