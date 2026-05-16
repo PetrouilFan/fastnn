@@ -479,14 +479,14 @@ pub fn plan_memory_with_env(
             }
         }
 
-        // Round up size to 8 bytes so all allocations start at 8-byte
-        // aligned offsets (satisfies both f32 4-byte and i64 8-byte alignment).
-        let size_aligned = align_up(info.size, 8);
+        // Round up to 64 bytes (cache line alignment) so all allocations
+        // satisfy both SIMD (32-byte) alignment and cache line boundaries.
+        let size_aligned = align_up(info.size, 64);
 
         let offset = match free_list.alloc(size_aligned) {
             Some(off) => off,
             None => {
-                let off = align_up(arena_top, 8);
+                let off = align_up(arena_top, 64);
                 arena_top = off + size_aligned;
                 off
             }

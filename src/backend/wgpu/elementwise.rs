@@ -25,7 +25,8 @@ pub(super) fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
         "clamp_f32" => Some(18),
         "sign_f32" => Some(19),
         "logical_not_f32" => Some(20),
-        "log_softmax_f32" => Some(21),
+        // log_softmax_f32 — not implemented on GPU; falls back to CPU
+        // "log_softmax_f32" => Some(21),
         "max_f32" => Some(22),
         "min_f32" => Some(23),
         "pow_f32" => Some(24),
