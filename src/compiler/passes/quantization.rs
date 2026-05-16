@@ -777,8 +777,8 @@ mod tests {
             .expect("Should have SgdUpdate");
         graph.outputs = vec![sgd_id];
 
-        let executor = GraphExecutor::new(CpuBackend);
-        let (plan, memory_plan, compiled_graph) = executor
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = executor
             .compile_with_plan_and_quantize(&graph, Some(4))
             .expect("compile with quantization should succeed");
         // Debug: print output slot size for quantized weight
@@ -794,7 +794,7 @@ mod tests {
         );
 
         let results = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_bytes, &dW_bytes])
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_bytes, &dW_bytes])
             .expect("quantized training execution should succeed");
 
         // Should have one output (the re-quantized updated weight)
@@ -810,7 +810,7 @@ mod tests {
         let results_zero = executor
             .execute(
                 &compiled_graph,
-                &plan,
+                &mut plan,
                 &memory_plan,
                 &[&x_bytes, &dW_zero_bytes],
             )
@@ -822,7 +822,7 @@ mod tests {
         let results_large = executor
             .execute(
                 &compiled_graph,
-                &plan,
+                &mut plan,
                 &memory_plan,
                 &[&x_bytes, &dW_large_bytes],
             )

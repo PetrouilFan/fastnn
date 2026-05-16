@@ -1,10 +1,9 @@
 /// Helper to wrap loss function output with autograd support
-fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
+fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, _backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
     if autograd::is_grad_enabled() && input.requires_grad() {
-        let _edges = autograd::make_edge(input);
-        let backward = backward_fn();
+        let inputs = vec![input.clone()];
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-        meta.grad_fn = Some(backward);
+        meta.grad_fn = Some(crate::autograd::make_node_info("LossBackward", inputs));
         let mut output = output;
         Arc::make_mut(&mut output.inner).autograd_meta =
             Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
@@ -415,12 +414,7 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
 
     if output_inner.requires_grad() {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-        let edges = autograd::make_edge(&inputs[0].inner);
-        meta.grad_fn = Some(std::sync::Arc::new(checkpoint_impl::CheckpointNode::new(
-            forward_fn,
-            inputs_inner,
-            edges,
-        )));
+        meta.grad_fn = Some(autograd::make_node_info("CheckpointBackward", inputs_inner));
         let mut out = output_inner.clone();
         Arc::make_mut(&mut out.inner).autograd_meta =
             Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
@@ -431,51 +425,6 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
         Ok(result)
     } else {
         Ok(inputs)
-    }
-}
-
-mod checkpoint_impl {
-    use super::{checkpoint_op, Tensor};
-    use crate::autograd::{Edge, Node};
-
-    pub struct CheckpointNode {
-        pub fn_name: String,
-        pub inputs: Vec<Tensor>,
-        pub edges: Vec<Edge>,
-    }
-
-    impl CheckpointNode {
-        pub fn new(fn_name: String, inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
-            CheckpointNode {
-                fn_name,
-                inputs,
-                edges,
-            }
-        }
-    }
-
-    impl Node for CheckpointNode {
-        fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
-            let args: Vec<&Tensor> = self.inputs.iter().collect();
-            let _ = checkpoint_op(&self.fn_name, &args);
-            grad_outputs.into_iter().collect()
-        }
-
-        fn next_edges(&self) -> &[Edge] {
-            &self.edges
-        }
-
-        fn num_inputs(&self) -> usize {
-            self.inputs.len()
-        }
-
-        fn name(&self) -> &str {
-            "CheckpointBackward"
-        }
-
-        fn inputs(&self) -> &[Tensor] {
-            &self.inputs
-        }
     }
 }
 
@@ -730,19 +679,33 @@ fn im2col(
     let out_height = (in_height + 2 * padding_us - kernel_h) / stride_us + 1;
     let out_width = (in_width + 2 * padding_us - kernel_w) / stride_us + 1;
 
-    let col_tensor = unsafe {
-        crate::backend::cpu::im2col::im2col_kernel(
-            x_inner,
-            kernel_h,
-            kernel_w,
-            stride_us,
-            padding_us,
-            dilation_us,
-            out_height,
-            out_width,
-        )
-    };
-
+    let batch = shape[0] as usize;
+    let c = shape[1] as usize;
+    let h = shape[2] as usize;
+    let w = shape[3] as usize;
+    let col_rows = batch * out_height * out_width;
+    let col_cols = c * kernel_h * kernel_w;
+    let mut col_data = vec![0.0f32; col_rows * col_cols];
+    let x_data =
+        unsafe { std::slice::from_raw_parts(x_inner.data_ptr_f32(), batch * c * h * w) };
+    for n in 0..batch {
+        let input_off = n * (c * h * w);
+        let col_off = n * out_height * out_width * col_cols;
+        unsafe {
+            crate::backend::cpu::im2col::im2col_kernel(
+                &x_data[input_off..input_off + c * h * w],
+                c,
+                h,
+                w,
+                kernel_h,
+                stride_us,
+                padding_us,
+                dilation_us,
+                &mut col_data[col_off..col_off + out_height * out_width * col_cols],
+            );
+        }
+    }
+    let col_tensor = Tensor::from_vec(col_data, vec![col_rows as i64, col_cols as i64]);
     Ok(PyTensor::from_tensor(col_tensor))
 }
 
