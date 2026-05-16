@@ -1198,7 +1198,7 @@ impl AotExecutor {
     }
 
     fn forward(
-        &self,
+        &mut self,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
@@ -1210,7 +1210,7 @@ impl AotExecutor {
         }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
         let output_data = self.executor
-            .execute(&self.graph, &self.plan, &self.memory_plan, &input_refs)
+            .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let mut result = std::collections::HashMap::new();

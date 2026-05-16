@@ -142,8 +142,8 @@ mod tests {
         graph.set_outputs(vec![mm_id]);
 
         // Run standard compile without activation quantization
-        let executor = GraphExecutor::new(CpuBackend);
-        let (plan_no_q, mem_no_q, _) = executor
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan_no_q, mem_no_q, _) = executor
             .compile_with_plan_and_quantize(&graph, None)
             .unwrap();
 
@@ -157,7 +157,7 @@ mod tests {
         let result_no_q = executor
             .execute(
                 &graph,
-                &plan_no_q,
+                &mut plan_no_q,
                 &mem_no_q,
                 &[&input_bytes_a, &input_bytes_w],
             )
@@ -173,10 +173,10 @@ mod tests {
         let mem_q = memory_planning::plan_memory(&graph_q).unwrap();
         // Set graph outputs to include the MatMul output (which has been rewired through
         // DequantizeActivations if the pass rewired it, or still MatMul if it's a graph output)
-        let plan_q = CpuBackend.compile(&graph_q, &mem_q).unwrap();
+        let mut plan_q = CpuBackend.compile(&graph_q, &mem_q).unwrap();
 
         let result_q = executor
-            .execute(&graph_q, &plan_q, &mem_q, &[&input_bytes_a, &input_bytes_w])
+            .execute(&graph_q, &mut plan_q, &mem_q, &[&input_bytes_a, &input_bytes_w])
             .unwrap();
         let result_q_f32: Vec<f32> = bytemuck::cast_slice(&result_q[0]).to_vec();
 
