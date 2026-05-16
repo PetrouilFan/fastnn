@@ -100,17 +100,39 @@ impl MemoryPlan {
                     vec![m, k, n]
                 }
                 Opcode::Transpose => {
-                    let m = resolved_input_shapes
+                    let input_shape = resolved_input_shapes
                         .first()
-                        .and_then(|s| s.first())
-                        .copied()
-                        .unwrap_or(1) as usize;
-                    let n = resolved_input_shapes
-                        .first()
-                        .and_then(|s| s.get(1))
-                        .copied()
-                        .unwrap_or(1) as usize;
-                    vec![m, n]
+                        .cloned()
+                        .unwrap_or_default();
+                    let rank = input_shape.len();
+                    if rank == 2 {
+                        // 2D transpose: params = [M, N]
+                        let m = input_shape[0] as usize;
+                        let n = input_shape[1] as usize;
+                        vec![m, n]
+                    } else {
+                        // N-D permute transpose: params = [rank, d0..dN, p0..pN]
+                        // The perm comes from node attrs (e.g. "0,3,1,2")
+                        let perm_str = node.attrs.get("perm").cloned().unwrap_or_default();
+                        let mut params: Vec<usize> = Vec::with_capacity(1 + 2 * rank);
+                        params.push(rank as usize);
+                        params.extend(input_shape.iter().map(|&d| d as usize));
+                        if perm_str.is_empty() {
+                            // Default: reverse
+                            for i in (0..rank).rev() {
+                                params.push(i);
+                            }
+                        } else {
+                            let perm: Vec<usize> = perm_str
+                                .split(',')
+                                .filter_map(|s| s.parse().ok())
+                                .collect();
+                            for i in 0..rank {
+                                params.push(perm.get(i).copied().unwrap_or(i));
+                            }
+                        }
+                        params
+                    }
                 }
                 Opcode::Softmax => {
                     let axis: i64 = node

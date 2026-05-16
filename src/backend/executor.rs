@@ -32,12 +32,16 @@ use std::sync::atomic::Ordering;
 /// Generic over the backend type `B` (e.g. `CpuBackend`).
 pub struct GraphExecutor<B: Backend> {
     backend: B,
+    cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
 }
 
 impl<B: Backend> GraphExecutor<B> {
     /// Create a new executor backed by the given backend.
     pub fn new(backend: B) -> Self {
-        GraphExecutor { backend }
+        GraphExecutor {
+            backend,
+            cached_arena: None,
+        }
     }
 
     /// Return a reference to the backend.
@@ -136,9 +140,9 @@ impl<B: Backend> GraphExecutor<B> {
     /// `inputs` must correspond one-to-one with `graph.inputs` (in order).
     /// Returns output byte slices corresponding to `graph.outputs` (in order).
     pub fn execute(
-        &self,
+        &mut self,
         graph: &ComputeGraph,
-        plan: &ExecutablePlan,
+        plan: &mut ExecutablePlan,
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
@@ -153,7 +157,7 @@ impl<B: Backend> GraphExecutor<B> {
         // This avoids a full backend re-compilation while still shrinking
         // the arena from SYMBOL_DIM_MAX worst-case to actual sizes.
         let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
-        let tightened_plan = tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
+        tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
 
         // Safety check: every node's resolved output must fit in its slot.
         for (&node_id, slot) in &tightened_memory_plan.slots {
@@ -179,8 +183,19 @@ impl<B: Backend> GraphExecutor<B> {
             }
         }
 
-        // Allocate tightened arena
-        let arena = self.backend.allocate_arena(tightened_plan.arena_size);
+        // Arena caching: reuse or replace
+        let arena_size = plan.arena_size;
+        let enough_capacity = self
+            .cached_arena
+            .as_ref()
+            .map_or(false, |(cap, _)| *cap >= arena_size);
+        if !enough_capacity {
+            self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
+        }
+        let arena = &self.cached_arena.as_ref().unwrap().1;
+        if enough_capacity {
+            self.backend.write_arena(arena, 0, &vec![0u8; arena_size]);
+        }
 
         // Write input data into the arena at tightened input slots
         for (i, &input_node_id) in graph.inputs.iter().enumerate() {
@@ -198,11 +213,11 @@ impl<B: Backend> GraphExecutor<B> {
                     ))
                 })?;
 
-            self.backend.write_arena(&arena, slot.offset, input_bytes);
+            self.backend.write_arena(arena, slot.offset, input_bytes);
         }
 
         // Dispatch the tightened plan
-        self.backend.dispatch(&tightened_plan, &arena, &shape_env)?;
+        self.backend.dispatch(plan, arena, &shape_env)?;
 
         // Read output data — compute actual sizes via shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
@@ -235,7 +250,7 @@ impl<B: Backend> GraphExecutor<B> {
                 (slot.size, vec![])
             };
 
-            let data = self.backend.read_arena(&arena, slot.offset, actual_size);
+            let data = self.backend.read_arena(arena, slot.offset, actual_size);
             outputs.push(data);
         }
 
@@ -244,12 +259,12 @@ impl<B: Backend> GraphExecutor<B> {
 
     /// Convenience: compile + execute in a single call.
     pub fn run(
-        &self,
+        &mut self,
         graph: &ComputeGraph,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        let (plan, memory_plan, compiled_graph) = self.compile_with_plan(graph)?;
-        self.execute(&compiled_graph, &plan, &memory_plan, inputs)
+        let (mut plan, memory_plan, compiled_graph) = self.compile_with_plan(graph)?;
+        self.execute(&compiled_graph, &mut plan, &memory_plan, inputs)
     }
 
     /// Compile a training model from a forward graph.
@@ -339,9 +354,10 @@ impl<B: Backend> GraphExecutor<B> {
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
         let (plan, memory_plan) = if let Some(shape_env) = batch_shape_env {
             let tightened_mp = memory_plan.tighten(&final_graph, shape_env);
-            let tightened_plan = tighten_slices(&plan, &memory_plan, &tightened_mp, &final_graph)
+            let mut plan = plan;
+            tighten_slices(&mut plan, &memory_plan, &tightened_mp, &final_graph)
                 .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
-            (tightened_plan, tightened_mp)
+            (plan, tightened_mp)
         } else {
             (plan, memory_plan)
         };
@@ -520,13 +536,11 @@ impl<B: Backend> CompiledTrainingModel<B> {
 /// it avoids re-running fusion checks, quantization detection, and all other
 /// backend lowering logic that is unchanged after tightening.
 pub fn tighten_slices(
-    plan: &ExecutablePlan,
+    plan: &mut ExecutablePlan,
     _original_memory_plan: &MemoryPlan,
     tightened_memory_plan: &MemoryPlan,
     graph: &ComputeGraph,
-) -> Result<ExecutablePlan, BackendError> {
-    let mut tightened = plan.clone();
-
+) -> Result<(), BackendError> {
     // Build an offset → tightened_size map for non-CallKernel instructions
     // (Fill, MemCopy, WriteConst) that don't carry a node_id.
     let mut offset_size: HashMap<usize, usize> = HashMap::new();
@@ -537,7 +551,7 @@ pub fn tighten_slices(
         offset_size.insert(slot.offset, slot.size);
     }
 
-    for instr in &mut tightened.instructions {
+    for instr in &mut plan.instructions {
         match instr {
             Instruction::CallKernel {
                 input_slices,
@@ -599,8 +613,8 @@ pub fn tighten_slices(
         }
     }
 
-    tightened.arena_size = tightened_memory_plan.total_size;
-    Ok(tightened)
+    plan.arena_size = tightened_memory_plan.total_size;
+    Ok(())
 }
 
 /// Compute the byte size of a tensor described by shape dims and element size.
