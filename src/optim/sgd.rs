@@ -86,7 +86,7 @@ impl Optimizer for SGD {
                 } else {
                     // Standard SGD: velocity = momentum * velocity + grad
                     velocity.mul_scalar_(momentum).add_(&grad);
-                    param.sub_(&velocity.clone().mul_scalar(lr));
+                    param.sub_(&velocity.mul_scalar(lr));
                 }
             } else {
                 // No momentum: simple update

@@ -46,6 +46,7 @@ macro_rules! impl_nn_module {
 macro_rules! impl_nn_module_with_gpu {
     ($struct_name:ident { $($methods:tt)* }) => {
         impl_nn_module!($struct_name {
+            #[cfg(feature = "gpu")]
             #[pyo3(signature = (device_id))]
             #[allow(clippy::wrong_self_convention)]
             fn to_gpu(&mut self, device_id: usize) {

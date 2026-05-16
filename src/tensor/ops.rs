@@ -820,6 +820,47 @@ impl Tensor {
     pub fn erf(&self) -> Tensor {
         self.try_erf().expect("Tensor::erf: AOT execution failed")
     }
+
+    /// Fused AdamW weight update — single graph node replaces ~12 intermediate tensors.
+    /// Returns [updated_weight, updated_m, updated_v].
+    pub fn adamw_update(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+        weight_decay: f32,
+    ) -> Vec<Tensor> {
+        Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
+            let updated = g.apply_adamw(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t, weight_decay);
+            vec![updated, ins[2].clone(), ins[3].clone()]
+        })
+        .expect("Tensor::adamw_update: AOT execution failed")
+    }
+
+    /// Fused Adam weight update — single graph node replaces ~12 intermediate tensors.
+    /// Returns [updated_weight, updated_m, updated_v].
+    pub fn adam_update(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+    ) -> Vec<Tensor> {
+        Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
+            let updated = g.apply_adam(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t);
+            vec![updated, ins[2].clone(), ins[3].clone()]
+        })
+        .expect("Tensor::adam_update: AOT execution failed")
+    }
 }
 
 impl Add for &Tensor {

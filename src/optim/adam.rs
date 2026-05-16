@@ -73,44 +73,60 @@ impl Optimizer for Adam {
         let eps = self.eps as f32;
         let weight_decay = self.weight_decay as f32;
 
-        for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = get_grad_or_skip!(param);
+        if self.amsgrad {
+            // AMSGrad not supported by fused kernel — use decomposed path
+            for (i, param) in self.params.iter_mut().enumerate() {
+                let grad = get_grad_or_skip!(param);
 
-            self.step[i] += 1;
-            let bias_correction1 = 1.0 - self.betas.0.powi(self.step[i] as i32);
-            let bias_correction2 = 1.0 - self.betas.1.powi(self.step[i] as i32);
+                self.step[i] += 1;
+                let bias_correction1 = 1.0 - self.betas.0.powi(self.step[i] as i32);
+                let bias_correction2 = 1.0 - self.betas.1.powi(self.step[i] as i32);
 
-            // m = beta1 * m + (1 - beta1) * grad
-            let beta1_c = 1.0 - beta1;
-            let m_update = grad.mul_scalar(beta1_c);
-            self.m[i].mul_scalar_(beta1).add_(&m_update);
+                let beta1_c = 1.0 - beta1;
+                let m_update = grad.mul_scalar(beta1_c);
+                self.m[i].mul_scalar_(beta1).add_(&m_update);
 
-            // v = beta2 * v + (1 - beta2) * grad^2
-            let grad_sq = grad.mul(&grad);
-            let beta2_c = 1.0 - beta2;
-            let v_update = grad_sq.mul_scalar(beta2_c);
-            self.v[i].mul_scalar_(beta2).add_(&v_update);
+                let grad_sq = grad.mul(&grad);
+                let beta2_c = 1.0 - beta2;
+                let v_update = grad_sq.mul_scalar(beta2_c);
+                self.v[i].mul_scalar_(beta2).add_(&v_update);
 
-            // m_hat = m / bias_correction1
-            let mut m_hat = self.m[i].div_scalar(bias_correction1 as f32);
+                let mut m_hat = self.m[i].div_scalar(bias_correction1 as f32);
+                let v_hat = if self.amsgrad {
+                    let max_v = self.v_hat[i].maximum(&self.v[i]);
+                    self.v_hat[i] = max_v.clone();
+                    max_v.div_scalar(bias_correction2 as f32)
+                } else {
+                    self.v[i].clone().div_scalar(bias_correction2 as f32)
+                };
 
-            // v_hat = v / bias_correction2 (with optional amsgrad)
-            let v_hat = if self.amsgrad {
-                let max_v = self.v_hat[i].maximum(&self.v[i]);
-                self.v_hat[i] = max_v.clone();
-                max_v.div_scalar(bias_correction2 as f32)
-            } else {
-                self.v[i].clone().div_scalar(bias_correction2 as f32)
-            };
+                let denom = v_hat.sqrt().add_scalar(eps);
+                let update = m_hat.div_(&denom).mul_scalar(lr);
+                param.sub_(&update);
 
-            // update = m_hat / (sqrt(v_hat) + eps) * lr
-            let denom = v_hat.sqrt().add_scalar(eps);
-            let update = m_hat.div_(&denom).mul_scalar(lr);
-            param.sub_(&update);
+                if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
+                    param.mul_scalar_(1.0 - lr * weight_decay);
+                }
+            }
+        } else {
+            for i in 0..self.params.len() {
+                let grad = get_grad_or_skip!(&self.params[i]);
 
-            // Apply decoupled weight decay consistently
-            if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
-                param.mul_scalar_(1.0 - lr * weight_decay);
+                self.step[i] += 1;
+                let t = self.step[i];
+
+                let mut results = self.params[i].adam_update(
+                    &grad, &self.m[i], &self.v[i],
+                    lr, beta1, beta2, eps, t,
+                );
+                self.v[i] = results.pop().unwrap();
+                self.m[i] = results.pop().unwrap();
+                self.params[i] = results.pop().unwrap();
+
+                if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
+                    self.params[i].mul_scalar_(1.0 - lr * weight_decay);
+                }
+                self.params[i].set_grad(None);
             }
         }
     }

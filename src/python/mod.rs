@@ -73,6 +73,7 @@ static DEFAULT_DEVICE_ID: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn get_default_device() -> Device {
     match DEFAULT_DEVICE_VARIANT.load(Ordering::Relaxed) {
         0 => Device::Cpu,
+        #[cfg(feature = "gpu")]
         1 => Device::Wgpu(DEFAULT_DEVICE_ID.load(Ordering::Relaxed)),
         _ => Device::Cpu,
     }
@@ -81,6 +82,7 @@ pub(crate) fn get_default_device() -> Device {
 pub(crate) fn set_default_device_internal(device: Device) {
     match device {
         Device::Cpu => DEFAULT_DEVICE_VARIANT.store(0, Ordering::Relaxed),
+        #[cfg(feature = "gpu")]
         Device::Wgpu(id) => {
             DEFAULT_DEVICE_VARIANT.store(1, Ordering::Relaxed);
             DEFAULT_DEVICE_ID.store(id, Ordering::Relaxed);
