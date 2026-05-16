@@ -344,9 +344,9 @@ fn try_gpu_dispatch(
 
     match kernel_name {
         "softmax" => {
-            let axis = params.first().copied().unwrap_or(0);
+            let axis_dim = params.first().copied().unwrap_or(1);
             softmax::dispatch_softmax_gpu(
-                ctx, encoder, pending_reads, &input0, numel, axis, out_start,
+                ctx, encoder, pending_reads, &input0, numel, axis_dim, out_start,
             )
         }
         "reduce_f32" => {

@@ -58,8 +58,7 @@ macro_rules! unary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
         fn $name(a: &PyTensor) -> PyTensor {
-            let a_inner = a.inner.clone();
-            PyTensor::from_tensor(a_inner.$method())
+            PyTensor::from_tensor(a.inner.$method())
         }
     };
 }
@@ -69,9 +68,7 @@ macro_rules! binary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
         fn $name(a: &PyTensor, b: &PyTensor) -> PyTensor {
-            let a_inner = a.inner.clone();
-            let b_inner = b.inner.clone();
-            PyTensor::from_tensor(a_inner.$method(&b_inner))
+            PyTensor::from_tensor(a.inner.$method(&b.inner))
         }
     };
 }
@@ -83,20 +80,18 @@ macro_rules! arg_op {
         #[pyo3(signature = (a, dim = None))]
         fn $name(a: &PyTensor, dim: Option<i32>) -> PyTensor {
             let dim = dim.unwrap_or(0) as usize;
-            let a_inner = a.inner.clone();
-            PyTensor::from_tensor(a_inner.$method(Some(dim)))
+            PyTensor::from_tensor(a.inner.$method(Some(dim)))
         }
     };
 }
 
 #[pyfunction]
 fn full_like(tensor: &PyTensor, value: f32) -> PyTensor {
-    let t_inner = tensor.inner.clone();
     PyTensor::from_tensor(Tensor::full(
-        t_inner.shape(),
+        tensor.inner.shape(),
         value,
-        t_inner.dtype(),
-        t_inner.device(),
+        tensor.inner.dtype(),
+        tensor.inner.device(),
     ))
 }
 
@@ -108,19 +103,14 @@ binary_op!(div, div);
 
 #[pyfunction]
 fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = b.inner.clone();
-    PyTensor::from_tensor(a_inner.add(&b_inner).relu())
+    PyTensor::from_tensor(a.inner.add(&b.inner).relu())
 }
 
 #[pyfunction]
 fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    let x_inner = x.inner.clone();
-    let w_inner = w.inner.clone();
-    let b_inner = bias.map(|b| b.inner.clone());
-    let out = x_inner.matmul(&w_inner);
-    let out = match &b_inner {
-        Some(b) => out.add(b),
+    let out = x.inner.matmul(&w.inner);
+    let out = match bias {
+        Some(b) => out.add(&b.inner),
         None => out,
     };
     PyTensor::from_tensor(out.relu())
@@ -128,12 +118,9 @@ fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyT
 
 #[pyfunction]
 fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    let x_inner = x.inner.clone();
-    let w_inner = w.inner.clone();
-    let b_inner = bias.map(|b| b.inner.clone());
-    let out = x_inner.matmul(&w_inner);
-    let out = match &b_inner {
-        Some(b) => out.add(b),
+    let out = x.inner.matmul(&w.inner);
+    let out = match bias {
+        Some(b) => out.add(&b.inner),
         None => out,
     };
     PyTensor::from_tensor(out.gelu())
@@ -187,9 +174,7 @@ fn fused_conv_bn_silu(
 
 #[pyfunction]
 fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = b.inner.clone();
-    PyTensor::from_tensor(a_inner.matmul(&b_inner))
+    PyTensor::from_tensor(a.inner.matmul(&b.inner))
 }
 
 #[pyfunction]
@@ -240,88 +225,74 @@ unary_op!(silu, silu);
 #[pyfunction]
 #[pyo3(signature = (a, negative_slope = 0.01))]
 fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.leaky_relu(negative_slope))
+    PyTensor::from_tensor(a.inner.leaky_relu(negative_slope))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, alpha = 1.0))]
 fn elu(a: &PyTensor, alpha: f32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.elu(alpha))
+    PyTensor::from_tensor(a.inner.elu(alpha))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, beta = 1.0, threshold = 20.0))]
 fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.softplus(beta, threshold))
+    PyTensor::from_tensor(a.inner.softplus(beta, threshold))
 }
 
 #[pyfunction]
 fn hardswish(a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.hardswish())
+    PyTensor::from_tensor(a.inner.hardswish())
 }
 
 #[pyfunction]
 fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.softmax(dim))
+    PyTensor::from_tensor(a.inner.softmax(dim))
 }
 
 #[pyfunction]
 fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.log_softmax(dim))
+    PyTensor::from_tensor(a.inner.log_softmax(dim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a_inner.sum(d, keepdim))
+    PyTensor::from_tensor(a.inner.sum(d, keepdim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a_inner.mean(d, keepdim))
+    PyTensor::from_tensor(a.inner.mean(d, keepdim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a_inner.max(d, keepdim))
+    PyTensor::from_tensor(a.inner.max(d, keepdim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
 fn maximum(a: &PyTensor, other: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = other.inner.clone();
-    PyTensor::from_tensor(a_inner.maximum(&b_inner))
+    PyTensor::from_tensor(a.inner.maximum(&other.inner))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
 fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = other.inner.clone();
-    PyTensor::from_tensor(a_inner.minimum(&b_inner))
+    PyTensor::from_tensor(a.inner.minimum(&other.inner))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let a_inner = a.inner.clone();
     let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a_inner.neg().max(d, keepdim).neg())
+    PyTensor::from_tensor(a.inner.neg().max(d, keepdim).neg())
 }
 
 // Argmax and argmin using macro
@@ -496,8 +467,7 @@ fn clamp(a: &PyTensor, min_val: f32, max_val: f32) -> PyTensor {
 
 #[pyfunction]
 fn pow(a: &PyTensor, exponent: f32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.pow(exponent))
+    PyTensor::from_tensor(a.inner.pow(exponent))
 }
 
 #[pyfunction]
@@ -601,45 +571,36 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTen
 // Tensor manipulation ops
 #[pyfunction]
 fn where_(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyTensor {
-    let x_inner = x.inner.clone();
-    let c_inner = condition.inner.clone();
-    let y_inner = y.inner.clone();
-    PyTensor::from_tensor(x_inner.where_tensor(&c_inner, &y_inner))
+    PyTensor::from_tensor(x.inner.where_tensor(&condition.inner, &y.inner))
 }
 
 #[pyfunction]
 fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.repeat(&repeats))
+    PyTensor::from_tensor(tensor.inner.repeat(&repeats))
 }
 
 #[pyfunction]
 fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.expand(shape))
+    PyTensor::from_tensor(tensor.inner.expand(shape))
 }
 
 #[pyfunction]
 #[pyo3(signature = (tensor, dim, start, end, step = 1))]
 fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.slice(dim, start, end, step))
+    PyTensor::from_tensor(tensor.inner.slice(dim, start, end, step))
 }
 
 #[pyfunction]
 fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> (PyTensor, PyTensor) {
-    let t_inner = tensor.inner.clone();
-    let values = t_inner.max(dim as i32, false);
-    let indices = t_inner.argmax(Some(dim as usize));
+    let values = tensor.inner.max(dim as i32, false);
+    let indices = tensor.inner.argmax(Some(dim as usize));
     (PyTensor::from_tensor(values), PyTensor::from_tensor(indices))
 }
 
 #[pyfunction]
 #[pyo3(signature = (tensor, axis, indices))]
 fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    let i_inner = indices.inner.clone();
-    PyTensor::from_tensor(t_inner.gather(axis, &i_inner))
+    PyTensor::from_tensor(tensor.inner.gather(axis, &indices.inner))
 }
 
 #[pyfunction]
@@ -719,33 +680,27 @@ fn flash_attention(
     scale: Option<f32>,
     causal: Option<bool>,
 ) -> PyTensor {
-    let q_inner = q.inner.clone();
-    let k_inner = k.inner.clone();
-    let v_inner = v.inner.clone();
     PyTensor::from_tensor(
         crate::backend::cpu::flash_attn::flash_attention(
-            &q_inner, &k_inner, &v_inner, scale, causal.unwrap_or(false),
+            &q.inner, &k.inner, &v.inner, scale, causal.unwrap_or(false),
         )
     )
 }
 
 #[pyfunction]
 fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.cumsum(dim, exclusive, reverse))
+    PyTensor::from_tensor(tensor.inner.cumsum(dim, exclusive, reverse))
 }
 
 #[pyfunction]
 fn erf(tensor: &PyTensor) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.erf())
+    PyTensor::from_tensor(tensor.inner.erf())
 }
 
 #[allow(dead_code)]
 #[pyfunction]
 fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
-    let t_inner = tensor.inner.clone();
-    t_inner.nonzero()
+    tensor.inner.nonzero()
 }
 
 #[pyfunction]

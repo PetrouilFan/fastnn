@@ -193,9 +193,10 @@ impl<B: Backend> GraphExecutor<B> {
             self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
         }
         let arena = &self.cached_arena.as_ref().unwrap().1;
-        if enough_capacity {
-            self.backend.write_arena(arena, 0, &vec![0u8; arena_size]);
-        }
+        // No need to zero-fill the arena — every kernel writes its output
+        // slot before it can be read, so stale data from the previous
+        // execution does not affect correctness.  (The memory planner's
+        // live-range analysis guarantees non-overlapping intervals.)
 
         // Write input data into the arena at tightened input slots
         for (i, &input_node_id) in graph.inputs.iter().enumerate() {
