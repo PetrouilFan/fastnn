@@ -207,7 +207,7 @@ impl TensorImpl {
             .unwrap_or(true)
     }
 
-    pub fn grad_fn(&self) -> Option<Arc<dyn autograd::Node>> {
+    pub fn grad_fn(&self) -> Option<Arc<autograd::NodeInfo>> {
         self.autograd_meta.as_ref()?.lock().ok()?.grad_fn.clone()
     }
 
@@ -409,7 +409,7 @@ impl Tensor {
 
     pub(crate) fn attach_grad_fn(
         mut output: Tensor,
-        backward: Arc<dyn autograd::Node + 'static>,
+        backward: Arc<autograd::NodeInfo>,
     ) -> Tensor {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
@@ -445,7 +445,7 @@ impl Tensor {
         self.inner.is_leaf()
     }
 
-    pub fn grad_fn(&self) -> Option<Arc<dyn autograd::Node>> {
+    pub fn grad_fn(&self) -> Option<Arc<autograd::NodeInfo>> {
         self.inner.grad_fn()
     }
 

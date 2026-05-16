@@ -265,12 +265,10 @@ impl TensorImpl {
         let mut tensor = self.new_view_from(sizes, strides, self.storage_offset);
 
         if self.requires_grad() {
-            let edges = autograd::make_edge(&_input_tensor);
             let inputs = vec![_input_tensor.clone()];
-            let backward = Arc::new(autograd::UnsqueezeBackward::new(edges, inputs));
             let meta = AutogradMeta {
                 grad: None,
-                grad_fn: Some(backward.clone()),
+                grad_fn: Some(autograd::make_node_info("UnsqueezeBackward", inputs)),
                 requires_grad: true,
                 is_leaf: false,
             };
@@ -386,10 +384,8 @@ impl Tensor {
         let output: Tensor = self.inner.view(sizes).into();
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ViewBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
         }
@@ -400,10 +396,8 @@ impl Tensor {
         let output = self.inner.reshape(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ViewBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
         }
@@ -414,10 +408,8 @@ impl Tensor {
         let output = reshaped.permute(perm);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ViewBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
         }
@@ -427,10 +419,8 @@ impl Tensor {
         let output = self.inner.transpose(dim0, dim1);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::TransposeBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("TransposeBackward", inputs))
         } else {
             output
         }
@@ -441,10 +431,8 @@ impl Tensor {
         let output = self.inner.permute(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::PermuteBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("PermuteBackward", inputs))
         } else {
             output
         }
@@ -454,10 +442,8 @@ impl Tensor {
         let output = self.inner.squeeze(dim);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ViewBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
         }
@@ -472,10 +458,8 @@ impl Tensor {
         let output = self.inner.expand(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ExpandBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ExpandBackward", inputs))
         } else {
             output
         }
