@@ -30,7 +30,7 @@
 
 pub mod error;
 pub mod io;
-pub mod iterator;
+
 pub mod nn;
 pub mod onnx;
 pub mod optim;
