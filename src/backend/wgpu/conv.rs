@@ -116,7 +116,7 @@ pub(super) fn dispatch_conv_gpu(
         ],
     });
 
-    let wgc_x = h_out.div_ceil(8).max(1);
+    let wgc_x = h_out.div_ceil(16).max(1);
     let wgc_y = w_out.div_ceil(8).max(1);
     let wgc_z = (oc * n).max(1);
     {
@@ -216,8 +216,15 @@ struct ConvParams {
 }
 @group(0) @binding(3) var<uniform> params: ConvParams;
 
-@compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+const MAX_SHARED_WEIGHTS: u32 = 2048u;
+
+var<workgroup> shared_weights: array<f32, MAX_SHARED_WEIGHTS>;
+
+@compute @workgroup_size(16, 8, 1)
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+) {
     let h_out = gid.x;
     let w_out = gid.y;
     let of = gid.z;
@@ -232,24 +239,46 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let g = oc / oc_per_group;
     let c_base = g * C_per_group;
 
+    let kh_kw = params.KH * params.KW;
+    let cc_tile_size: u32 = MAX_SHARED_WEIGHTS / kh_kw;
+    if (cc_tile_size == 0u) { return; }
+
     var sum: f32 = 0.0;
-    for (var cc: u32 = 0u; cc < C_per_group; cc = cc + 1u) {
-        for (var kkh: u32 = 0u; kkh < params.KH; kkh = kkh + 1u) {
-            for (var kkw: u32 = 0u; kkw < params.KW; kkw = kkw + 1u) {
-                let h_in = h_out * params.stride + kkh * params.dilation;
-                let w_in = w_out * params.stride + kkw * params.dilation;
-                if (h_in >= params.padding && w_in >= params.padding) {
-                    let h_in_s = h_in - params.padding;
-                    let w_in_s = w_in - params.padding;
-                    if (h_in_s < params.H && w_in_s < params.W) {
-                        let input_c = c_base + cc;
-                        let input_idx = n * (params.C * params.H * params.W) + input_c * (params.H * params.W) + h_in_s * params.W + w_in_s;
-                        let weight_idx = oc * C_per_group * params.KH * params.KW + cc * params.KH * params.KW + kkh * params.KW + kkw;
-                        sum = sum + input[input_idx] * weight[weight_idx];
+    var cc_start: u32 = 0u;
+    let wg_threads: u32 = 128u;
+    loop {
+        if (cc_start >= C_per_group) { break; }
+        let cc_end = min(cc_start + cc_tile_size, C_per_group);
+        let tile_weights = (cc_end - cc_start) * kh_kw;
+
+        for (var i: u32 = li; i < tile_weights; i = i + wg_threads) {
+            let cc_rel = i / kh_kw;
+            let kk = i % kh_kw;
+            let w_idx = oc * C_per_group * kh_kw + (cc_start + cc_rel) * kh_kw + kk;
+            shared_weights[i] = weight[w_idx];
+        }
+        workgroupBarrier();
+
+        for (var cc = cc_start; cc < cc_end; cc = cc + 1u) {
+            for (var kkh: u32 = 0u; kkh < params.KH; kkh = kkh + 1u) {
+                for (var kkw: u32 = 0u; kkw < params.KW; kkw = kkw + 1u) {
+                    let h_in = h_out * params.stride + kkh * params.dilation;
+                    let w_in = w_out * params.stride + kkw * params.dilation;
+                    if (h_in >= params.padding && w_in >= params.padding) {
+                        let h_in_s = h_in - params.padding;
+                        let w_in_s = w_in - params.padding;
+                        if (h_in_s < params.H && w_in_s < params.W) {
+                            let input_c = c_base + cc;
+                            let input_idx = n * (params.C * params.H * params.W) + input_c * (params.H * params.W) + h_in_s * params.W + w_in_s;
+                            let w_shared_idx = (cc - cc_start) * kh_kw + kkh * params.KW + kkw;
+                            sum = sum + input[input_idx] * shared_weights[w_shared_idx];
+                        }
                     }
                 }
             }
         }
+        workgroupBarrier();
+        cc_start = cc_end;
     }
 
     let out_idx = n * (params.OC * params.H_out * params.W_out) + oc * (params.H_out * params.W_out) + h_out * params.W_out + w_out;
