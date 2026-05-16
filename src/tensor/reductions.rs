@@ -26,11 +26,9 @@ impl Tensor {
                 );
                 if autograd::is_grad_enabled() && self.requires_grad() {
                     let mut output = output;
-                    let edges = autograd::make_edge(self);
                     let inputs = vec![self.clone()];
-                    let backward = autograd::SumBackward::new(edges, inputs);
                     let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-                    meta.grad_fn = Some(std::sync::Arc::new(backward));
+                    meta.grad_fn = Some(autograd::make_node_info("SumBackward", inputs));
                     Arc::make_mut(&mut output.inner).set_autograd_meta(meta);
                     return output;
                 }
@@ -48,10 +46,8 @@ impl Tensor {
         .next()
         .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::SumBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("SumBackward", inputs))
         } else {
             output
         }
@@ -68,10 +64,8 @@ impl Tensor {
         .next()
         .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = std::sync::Arc::new(autograd::MaximumBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("MaximumBackward", inputs))
         } else {
             output
         }
@@ -88,11 +82,8 @@ impl Tensor {
         .next()
         .unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let _dim_size = self.shape()[dim as usize];
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::MeanBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("MeanBackward", inputs))
         } else {
             output
         }
@@ -111,10 +102,8 @@ impl Tensor {
         .expect("Tensor::cumsum: AOT execution failed");
         let output = result.into_iter().next().unwrap();
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = std::sync::Arc::new(autograd::CumSumBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("CumSumBackward", inputs))
         } else {
             output
         }
