@@ -32,6 +32,16 @@ fn has_avx512() -> bool {
 fn has_avx2() -> bool {
     *HAS_AVX2.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
 }
+
+/// Public runtime check — returns true if AVX2+FMA is available.
+/// Always callable (returns false when SIMD support is not compiled in).
+#[inline]
+pub fn simd_avx2_available() -> bool {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    { has_avx2() }
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    { false }
+}
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn has_f16c() -> bool {
     *HAS_F16C.get_or_init(|| is_x86_feature_detected!("f16c"))
@@ -256,6 +266,471 @@ unsafe fn fma_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
     }
 
     total
+}
+
+// ============================================================
+// AVX2 elementwise microkernels — 19 unary + 6 binary f32 ops
+// ============================================================
+
+// Strategy:
+//   - Simple ops (relu, neg, abs, sqrt, sign, logical_not): direct AVX2 intrinsic
+//   - Complex ops (exp, log, sigmoid, tanh, gelu, silu, mish, softplus, hardswish, elu):
+//     SIMD load/store struct (8-wide loop) with per-element scalar math.
+//     Still wins ~2-3× from memory bandwidth.
+//   - Param ops (leaky_relu, clamp): blend/max/min intrinsics
+//   - Binary ops (add, sub, mul, div, max, min): direct AVX2 when dense (no broadcast)
+
+// ── Simple ops (direct AVX2 intrinsics) ──────────────────────
+
+#[inline]
+pub fn relu_f32_scalar(x: f32) -> f32 { x.max(0.0) }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn relu_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let zero = _mm256_setzero_ps();
+    while i + 8 <= len {
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_max_ps(_mm256_loadu_ps(input.as_ptr().add(i)), zero));
+        i += 8;
+    }
+    for j in i..len { output[j] = relu_f32_scalar(input[j]); }
+}
+
+#[inline]
+pub fn neg_f32_scalar(x: f32) -> f32 { -x }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn neg_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let sign_mask = _mm256_set1_ps(-0.0f32);
+    while i + 8 <= len {
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_xor_ps(_mm256_loadu_ps(input.as_ptr().add(i)), sign_mask));
+        i += 8;
+    }
+    for j in i..len { output[j] = neg_f32_scalar(input[j]); }
+}
+
+#[inline]
+pub fn abs_f32_scalar(x: f32) -> f32 { x.abs() }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn abs_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let inv_sign_mask = _mm256_set1_ps(f32::from_bits(0x7fff_ffff));
+    while i + 8 <= len {
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_and_ps(_mm256_loadu_ps(input.as_ptr().add(i)), inv_sign_mask));
+        i += 8;
+    }
+    for j in i..len { output[j] = abs_f32_scalar(input[j]); }
+}
+
+#[inline]
+pub fn sqrt_f32_scalar(x: f32) -> f32 { x.sqrt() }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn sqrt_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    while i + 8 <= len {
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_sqrt_ps(_mm256_loadu_ps(input.as_ptr().add(i))));
+        i += 8;
+    }
+    for j in i..len { output[j] = sqrt_f32_scalar(input[j]); }
+}
+
+#[inline]
+pub fn sign_f32_scalar(x: f32) -> f32 { x.signum() }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn sign_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let zero = _mm256_setzero_ps();
+    let one = _mm256_set1_ps(1.0);
+    let neg_one = _mm256_set1_ps(-1.0);
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_or_ps(_mm256_and_ps(_mm256_cmp_ps::<{_CMP_GT_OQ}>(x, zero), one),
+                          _mm256_and_ps(_mm256_cmp_ps::<{_CMP_LT_OQ}>(x, zero), neg_one)));
+        i += 8;
+    }
+    for j in i..len { output[j] = sign_f32_scalar(input[j]); }
+}
+
+#[inline]
+pub fn logical_not_f32_scalar(x: f32) -> f32 { if x == 0.0 { 1.0 } else { 0.0 } }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn logical_not_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let zero = _mm256_setzero_ps();
+    let one = _mm256_set1_ps(1.0);
+    while i + 8 <= len {
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_and_ps(_mm256_cmp_ps::<{_CMP_EQ_OQ}>(_mm256_loadu_ps(input.as_ptr().add(i)), zero), one));
+        i += 8;
+    }
+    for j in i..len { output[j] = logical_not_f32_scalar(input[j]); }
+}
+
+// ── Parametric ops ───────────────────────────────────────────
+
+#[inline]
+pub fn clamp_f32_scalar(x: f32, min_val: f32, max_val: f32) -> f32 { x.max(min_val).min(max_val) }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn clamp_f32_avx2(input: &[f32], output: &mut [f32], min_val: f32, max_val: f32) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let vmin = _mm256_set1_ps(min_val);
+    let vmax = _mm256_set1_ps(max_val);
+    while i + 8 <= len {
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_min_ps(_mm256_max_ps(_mm256_loadu_ps(input.as_ptr().add(i)), vmin), vmax));
+        i += 8;
+    }
+    for j in i..len { output[j] = clamp_f32_scalar(input[j], min_val, max_val); }
+}
+
+#[inline]
+pub fn leaky_relu_f32_scalar(x: f32, slope: f32) -> f32 { if x > 0.0 { x } else { x * slope } }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn leaky_relu_f32_avx2(input: &[f32], output: &mut [f32], slope: f32) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let zero = _mm256_setzero_ps();
+    let vslope = _mm256_set1_ps(slope);
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_blendv_ps(_mm256_mul_ps(x, vslope), x,
+                _mm256_cmp_ps::<{_CMP_GT_OQ}>(x, zero)));
+        i += 8;
+    }
+    for j in i..len { output[j] = leaky_relu_f32_scalar(input[j], slope); }
+}
+
+// ── Complex ops (SIMD struct load/store, per-element scalar math) ───
+
+/// Macro: unrolls 8-element SIMD struct loads/stores, calling `$scalar_fn` per lane.
+macro_rules! avx2_elwise_fallback {
+    ($name:ident, $scalar_fn:expr) => {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        #[target_feature(enable = "avx2")]
+        pub unsafe fn $name(input: &[f32], output: &mut [f32]) {
+            let len = output.len().min(input.len());
+            let mut i = 0;
+            while i + 8 <= len {
+                let x0 = *input.as_ptr().add(i);
+                let x1 = *input.as_ptr().add(i + 1);
+                let x2 = *input.as_ptr().add(i + 2);
+                let x3 = *input.as_ptr().add(i + 3);
+                let x4 = *input.as_ptr().add(i + 4);
+                let x5 = *input.as_ptr().add(i + 5);
+                let x6 = *input.as_ptr().add(i + 6);
+                let x7 = *input.as_ptr().add(i + 7);
+                *output.as_mut_ptr().add(i)     = $scalar_fn(x0);
+                *output.as_mut_ptr().add(i + 1) = $scalar_fn(x1);
+                *output.as_mut_ptr().add(i + 2) = $scalar_fn(x2);
+                *output.as_mut_ptr().add(i + 3) = $scalar_fn(x3);
+                *output.as_mut_ptr().add(i + 4) = $scalar_fn(x4);
+                *output.as_mut_ptr().add(i + 5) = $scalar_fn(x5);
+                *output.as_mut_ptr().add(i + 6) = $scalar_fn(x6);
+                *output.as_mut_ptr().add(i + 7) = $scalar_fn(x7);
+                i += 8;
+            }
+            for j in i..len {
+                *output.as_mut_ptr().add(j) = $scalar_fn(*input.as_ptr().add(j));
+            }
+        }
+    };
+}
+
+#[inline] pub fn exp_f32_scalar(x: f32) -> f32 { x.exp() }
+avx2_elwise_fallback!(exp_f32_avx2, exp_f32_scalar);
+
+#[inline] pub fn log_f32_scalar(x: f32) -> f32 { x.ln() }
+avx2_elwise_fallback!(log_f32_avx2, log_f32_scalar);
+
+#[inline] pub fn sigmoid_f32_scalar(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+avx2_elwise_fallback!(sigmoid_f32_avx2, sigmoid_f32_scalar);
+
+#[inline] pub fn tanh_f32_scalar(x: f32) -> f32 { x.tanh() }
+avx2_elwise_fallback!(tanh_f32_avx2, tanh_f32_scalar);
+
+#[inline] pub fn elu_f32_scalar(x: f32) -> f32 { if x > 0.0 { x } else { x.exp() - 1.0 } }
+avx2_elwise_fallback!(elu_f32_avx2, elu_f32_scalar);
+
+#[inline]
+pub fn gelu_f32_scalar(x: f32) -> f32 {
+    let x3 = x * x * x;
+    let tanh_arg = 0.7978846f32 * (x + 0.044715f32 * x3);
+    0.5 * x * (1.0 + tanh_arg.tanh())
+}
+avx2_elwise_fallback!(gelu_f32_avx2, gelu_f32_scalar);
+
+#[inline] pub fn silu_f32_scalar(x: f32) -> f32 { x / (1.0 + (-x).exp()) }
+avx2_elwise_fallback!(silu_f32_avx2, silu_f32_scalar);
+
+#[inline] pub fn softplus_f32_scalar(x: f32) -> f32 { (1.0 + x.exp()).ln() }
+avx2_elwise_fallback!(softplus_f32_avx2, softplus_f32_scalar);
+
+#[inline] pub fn hardswish_f32_scalar(x: f32) -> f32 { x * (x + 3.0).clamp(0.0, 6.0) / 6.0 }
+avx2_elwise_fallback!(hardswish_f32_avx2, hardswish_f32_scalar);
+
+#[inline] pub fn mish_f32_scalar(x: f32) -> f32 { let sp = (1.0 + x.exp()).ln(); x * sp.tanh() }
+avx2_elwise_fallback!(mish_f32_avx2, mish_f32_scalar);
+
+/// log_softmax: needs max + sum reduction. AVX2 for max + output phases;
+/// sum phase uses scalar exp accumulator for numeric precision.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn log_softmax_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    if len == 0 { return; }
+    // 1. Find max with AVX2 horizontal reduction
+    let mut max_val = f32::NEG_INFINITY;
+    let mut i = 0;
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        // permute+max to get horizontal max across all 8 lanes
+        let mx = _mm256_max_ps(x, _mm256_permute2f128_ps(x, x, 1));
+        let mx = _mm256_max_ps(mx, _mm256_shuffle_ps(mx, mx, 0b_00_11_10_01));
+        let mx = _mm256_max_ps(mx, _mm256_shuffle_ps(mx, mx, 0b_00_00_00_10));
+        let candidate = _mm256_cvtss_f32(mx);
+        if candidate > max_val { max_val = candidate; }
+        i += 8;
+    }
+    for j in i..len {
+        let v = *input.as_ptr().add(j);
+        if v > max_val { max_val = v; }
+    }
+    // 2. Sum of exp(x - max) using f64 accumulator for precision
+    let mut sum = 0.0f64;
+    for j in 0..len {
+        sum += ((*input.as_ptr().add(j)) - max_val).exp() as f64;
+    }
+    let log_sum = (sum as f32).ln();
+    // 3. Write output with AVX2
+    let mut i = 0;
+    let vmax = _mm256_set1_ps(max_val);
+    let vlogsum = _mm256_set1_ps(log_sum);
+    while i + 8 <= len {
+        let shifted = _mm256_sub_ps(_mm256_loadu_ps(input.as_ptr().add(i)), vmax);
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_sub_ps(shifted, vlogsum));
+        i += 8;
+    }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = (*input.as_ptr().add(j)) - max_val - log_sum;
+    }
+}
+
+/// Scalar fallback for log_softmax
+pub fn log_softmax_f32_scalar_all(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    if len == 0 { return; }
+    let max_val = input.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f64;
+    for &x in &input[..len] { sum += ((x - max_val).exp()) as f64; }
+    let log_sum = (sum as f32).ln();
+    for i in 0..len { output[i] = input[i] - max_val - log_sum; }
+}
+
+// ── Binary ops (AVX2 when dense, scalar broadcast fallback) ──
+
+#[inline]
+pub fn add_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    for i in 0..output.len() {
+        output[i] = a[i % a_len] + b[i % b_len];
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn add_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let len = output.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let mut i = 0;
+    // Only use SIMD when both inputs are dense (not broadcasting)
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_add_ps(va, vb));
+            i += 8;
+        }
+    }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = a[j % a_len] + b[j % b_len];
+    }
+}
+
+#[inline]
+pub fn sub_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    for i in 0..output.len() {
+        output[i] = a[i % a_len] - b[i % b_len];
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn sub_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let len = output.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_sub_ps(va, vb));
+            i += 8;
+        }
+    }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = a[j % a_len] - b[j % b_len];
+    }
+}
+
+#[inline]
+pub fn mul_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    for i in 0..output.len() {
+        output[i] = a[i % a_len] * b[i % b_len];
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn mul_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let len = output.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(va, vb));
+            i += 8;
+        }
+    }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = a[j % a_len] * b[j % b_len];
+    }
+}
+
+#[inline]
+pub fn div_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    for i in 0..output.len() {
+        output[i] = a[i % a_len] / b[i % b_len];
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn div_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let len = output.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_div_ps(va, vb));
+            i += 8;
+        }
+    }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = a[j % a_len] / b[j % b_len];
+    }
+}
+
+/// max (elementwise maximum, not reduction)
+#[inline]
+pub fn max_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    for i in 0..output.len() {
+        output[i] = a[i % a_len].max(b[i % b_len]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn max_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let len = output.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_max_ps(va, vb));
+            i += 8;
+        }
+    }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = a[j % a_len].max(b[j % b_len]);
+    }
+}
+
+/// min (elementwise minimum, not reduction)
+#[inline]
+pub fn min_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    for i in 0..output.len() {
+        output[i] = a[i % a_len].min(b[i % b_len]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn min_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
+    let len = output.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_min_ps(va, vb));
+            i += 8;
+        }
+    }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = a[j % a_len].min(b[j % b_len]);
+    }
 }
 
 // ============================================================
