@@ -65,11 +65,46 @@ where
     f()
 }
 
+// =============================================================================
+// Lightweight tape entry — replaces per-op Arc<dyn Node> stub allocations.
+// =============================================================================
+
+/// A lightweight record of a forward operation, stored in AutogradMeta.
+/// Replaces the per-op `Arc<dyn Node>` stub types, eliminating 50+ trait
+/// object allocations per forward pass.
+pub struct NodeInfo {
+    pub op_name: &'static str,
+    pub inputs: Vec<Tensor>,
+}
+
+impl NodeInfo {
+    pub fn new(op_name: &'static str, inputs: Vec<Tensor>) -> Self {
+        NodeInfo { op_name, inputs }
+    }
+
+    pub fn edges(&self) -> Vec<Edge> {
+        self.inputs
+            .iter()
+            .filter_map(|t| t.grad_fn())
+            .map(|node| Edge(node, 0))
+            .collect()
+    }
+
+    pub fn inputs(&self) -> &[Tensor] {
+        &self.inputs
+    }
+
+    pub fn id(&self) -> usize {
+        let ptr = self as *const Self as *const ();
+        ptr as usize
+    }
+}
+
 /// Stub AutogradMeta (v1.x compat — gradients tracked at graph level now).
 pub struct AutogradMeta {
     pub requires_grad: bool,
     pub grad: Option<Tensor>,
-    pub grad_fn: Option<Arc<dyn Node>>,
+    pub grad_fn: Option<Arc<NodeInfo>>,
     pub is_leaf: bool,
 }
 
@@ -96,9 +131,9 @@ impl AutogradMeta {
 }
 
 /// Stub Edge for v1.x backward compat.
-pub struct Edge(pub Arc<dyn Node>, pub usize);
+pub struct Edge(pub Arc<NodeInfo>, pub usize);
 
-/// Stub Node trait for v1.x backward compat.
+/// Stub Node trait for v1.x backward compat (legacy — no longer used for backward).
 pub trait Node: Send + Sync {
     fn apply(
         &self,
@@ -132,23 +167,23 @@ use std::collections::{HashMap, HashSet};
 /// a grad_fn → forward_tensor map.
 ///
 /// Returns (backward_nodes, grad_fn_id → forward_output_tensor).
-fn collect_backward_nodes(root: &Tensor) -> (Vec<Arc<dyn Node>>, HashMap<usize, Tensor>) {
+fn collect_backward_nodes(root: &Tensor) -> (Vec<Arc<NodeInfo>>, HashMap<usize, Tensor>) {
     let mut visited: HashSet<usize> = HashSet::new();
-    let mut nodes: Vec<Arc<dyn Node>> = Vec::new();
+    let mut nodes: Vec<Arc<NodeInfo>> = Vec::new();
     let mut grad_fn_to_tensor: HashMap<usize, Tensor> = HashMap::new();
     let mut queue: Vec<Tensor> = vec![root.clone()];
 
     while let Some(tensor) = queue.pop() {
-        if let Some(grad_fn) = tensor.grad_fn() {
-            let node_id = grad_fn.id();
+        if let Some(node) = tensor.grad_fn() {
+            let node_id = Arc::as_ptr(&node) as usize;
             if visited.insert(node_id) {
                 grad_fn_to_tensor.insert(node_id, tensor.clone());
-                nodes.push(grad_fn.clone());
+                nodes.push(node.clone());
 
                 // Queue the input tensors of this backward node.
                 // These correspond to the forward op's input tensors;
                 // their own grad_fns continue the chain back toward the leaves.
-                for input_tensor in grad_fn.inputs() {
+                for input_tensor in &node.inputs {
                     queue.push(input_tensor.clone());
                 }
             }
@@ -160,12 +195,12 @@ fn collect_backward_nodes(root: &Tensor) -> (Vec<Arc<dyn Node>>, HashMap<usize, 
 
 /// From a set of backward nodes, find all leaf input tensors —
 /// those that require gradients and have no grad_fn of their own.
-fn collect_leaf_tensors(nodes: &[Arc<dyn Node>]) -> Vec<Tensor> {
+fn collect_leaf_tensors(nodes: &[Arc<NodeInfo>]) -> Vec<Tensor> {
     let mut seen: HashSet<usize> = HashSet::new();
     let mut leaf_tensors: Vec<Tensor> = Vec::new();
 
     for node in nodes {
-        for input in node.inputs() {
+        for input in &node.inputs {
             let tid = input.id();
             if seen.insert(tid) && input.requires_grad() && input.grad_fn().is_none() {
                 leaf_tensors.push(input.clone());
@@ -178,21 +213,22 @@ fn collect_leaf_tensors(nodes: &[Arc<dyn Node>]) -> Vec<Tensor> {
 
 /// Topological sort of backward nodes in **forward execution order** (predecessors first).
 ///
-/// Uses DFS: `next_edges()` point to predecessor backward nodes, so
+/// Uses DFS: edges point to predecessor backward nodes, so
 /// the DFS emits predecessors before their dependents.
-fn topological_order(nodes: &[Arc<dyn Node>]) -> Vec<Arc<dyn Node>> {
-    fn dfs(node: &Arc<dyn Node>, visited: &mut HashSet<usize>, order: &mut Vec<Arc<dyn Node>>) {
-        if !visited.insert(node.id()) {
+fn topological_order(nodes: &[Arc<NodeInfo>]) -> Vec<Arc<NodeInfo>> {
+    fn dfs(node: &Arc<NodeInfo>, visited: &mut HashSet<usize>, order: &mut Vec<Arc<NodeInfo>>) {
+        let ptr = Arc::as_ptr(node) as usize;
+        if !visited.insert(ptr) {
             return;
         }
-        for edge in node.next_edges() {
+        for edge in node.edges() {
             dfs(&edge.0, visited, order);
         }
         order.push(node.clone());
     }
 
     let mut visited: HashSet<usize> = HashSet::new();
-    let mut order: Vec<Arc<dyn Node>> = Vec::new();
+    let mut order: Vec<Arc<NodeInfo>> = Vec::new();
     for node in nodes {
         dfs(node, &mut visited, &mut order);
     }
@@ -310,7 +346,7 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
 
     // Replay ops in forward topological order
     for node in topological_order(&all_nodes) {
-        let inputs: Vec<Tensor> = node.inputs().to_vec();
+        let inputs: Vec<Tensor> = node.inputs.clone();
         let input_gts: Vec<GraphTensor> = inputs
             .iter()
             .map(|t| {
@@ -322,12 +358,13 @@ pub fn backward(root: &Tensor, _grad_output: Option<Tensor>) {
             .collect();
 
         // The forward output tensor that this backward node is attached to
+        let node_ptr = Arc::as_ptr(&node) as usize;
         let forward_tensor = grad_fn_to_tensor
-            .get(&node.id())
+            .get(&node_ptr)
             .cloned()
             .expect("backward: forward tensor not found for backward node");
 
-        let output_gt = match node.name() {
+        let output_gt = match node.op_name {
             // ── Binary arithmetic ─────────────────────────────────────────
             "AddBackward" => builder.add(&input_gts[0], &input_gts[1]),
             "SubBackward" => builder.sub(&input_gts[0], &input_gts[1]),
@@ -767,6 +804,20 @@ pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
         edges.push(Edge(node, 1));
     }
     edges
+}
+
+/// Helper: create a NodeInfo and wrap in Arc. Used by all forward ops.
+pub fn make_node_info(op_name: &'static str, inputs: Vec<Tensor>) -> Arc<NodeInfo> {
+    Arc::new(NodeInfo::new(op_name, inputs))
+}
+
+/// Helper: set a NodeInfo on an output tensor (fast-path, inline pattern).
+pub fn attach_node_info(output: &mut Tensor, op_name: &'static str, inputs: Vec<Tensor>) {
+    let mut meta = AutogradMeta::new_non_leaf(true);
+    meta.grad_fn = Some(make_node_info(op_name, inputs));
+    let inner = Arc::make_mut(&mut output.inner);
+    inner.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+    inner.requires_grad = true;
 }
 
 // =============================================================================
