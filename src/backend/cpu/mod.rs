@@ -868,33 +868,65 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Transpose => {
-                    // Extract M, N from the input shape (assume 2D)
-                    let m = input_shapes
+                    let input_shape: Vec<usize> = input_shapes
                         .first()
-                        .and_then(|s| s.first().copied())
-                        .unwrap_or(1) as usize;
-                    let n = input_shapes
-                        .first()
-                        .and_then(|s| s.get(1).copied())
-                        .unwrap_or(1) as usize;
-                    let m_dim = input_shape_dims
-                        .first()
-                        .and_then(|s| s.first().cloned())
-                        .unwrap_or(DimExpr::Known(m as u64));
-                    let n_dim = input_shape_dims
-                        .first()
-                        .and_then(|s| s.get(1).cloned())
-                        .unwrap_or(DimExpr::Known(n as u64));
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "transpose_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![m, n],
-                        param_dims: Some(vec![m_dim, n_dim]),
-                        weight_meta: None,
-                    });
+                        .map(|s| s.iter().map(|&d| d as usize).collect())
+                        .unwrap_or_default();
+                    let rank = input_shape.len();
+
+                    // Read perm from node attrs (e.g. "0,3,1,2")
+                    let perm_str: String = node
+                        .attrs
+                        .get("perm")
+                        .cloned()
+                        .unwrap_or_default();
+                    let perm: Vec<usize> = if perm_str.is_empty() {
+                        (0..rank).rev().collect()
+                    } else {
+                        perm_str.split(',').filter_map(|s| s.parse().ok()).collect()
+                    };
+
+                    // Simple 2D transpose [1,0] on a rank-2 tensor → use fast kernel
+                    if rank == 2 && perm.len() >= 2 && perm[0] == 1 && perm[1] == 0 {
+                        let m = input_shape[0];
+                        let n = input_shape[1];
+                        let m_dim = input_shape_dims
+                            .first()
+                            .and_then(|s| s.first().cloned())
+                            .unwrap_or(DimExpr::Known(m as u64));
+                        let n_dim = input_shape_dims
+                            .first()
+                            .and_then(|s| s.get(1).cloned())
+                            .unwrap_or(DimExpr::Known(n as u64));
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "transpose_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![m, n],
+                            param_dims: Some(vec![m_dim, n_dim]),
+                            weight_meta: None,
+                        });
+                    } else {
+                        // N-D permute transpose: params = [rank, d0..dN, p0..pN]
+                        let mut nd_params: Vec<usize> = Vec::with_capacity(1 + 2 * rank);
+                        nd_params.push(rank);
+                        nd_params.extend_from_slice(&input_shape);
+                        for i in 0..rank {
+                            nd_params.push(perm.get(i).copied().unwrap_or(i));
+                        }
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "transpose_perm_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: nd_params,
+                            param_dims: None,
+                            weight_meta: None,
+                        });
+                    }
                 }
                 Opcode::Conv1d => {
                     let stride: usize = node
@@ -2872,9 +2904,28 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Use matrixmultiply::sgemm for all sizes — it handles small matrices
-                                // efficiently via its own tiling and is heavily optimized.
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
+                                // *** BATCHED MATMUL ***
+                                // Compute batch count from output buffer size. Each batch element is
+                                // M*K elements in A, K*N in B, and M*N in the output (all contiguous).
+                                let a_stride = m * _k;
+                                let b_stride = _k * n;
+                                let out_stride = m * n;
+                                let batch_count = out_f32.len() / out_stride;
+                                // B may be batched (same batch dims as A, e.g. Q*K^T in attention)
+                                // or shared across all batches (2D weight matrix). Detect by comparing
+                                // total B elements against a single batch's K*N slice.
+                                let b_batched = b.len() > b_stride;
+                                for batch in 0..batch_count {
+                                    let a_s = batch * a_stride;
+                                    let b_s = if b_batched { batch * b_stride } else { 0 };
+                                    let out_s = batch * out_stride;
+                                    matmul_blas_into(
+                                        &a[a_s..a_s + a_stride],
+                                        &b[b_s..b_s + b_stride],
+                                        &mut out_f32[out_s..out_s + out_stride],
+                                        m, _k, n,
+                                    );
+                                }
                             }
                         }
                         "fused_matmul_add_relu" => {
@@ -3314,6 +3365,67 @@ impl Backend for CpuBackend {
                                         for i in 0..m {
                                             col[i] = input[i * n + j];
                                         }
+                                    });
+                                }
+                            }
+                        }
+                        "transpose_perm_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d[input_slice.offset
+                                            ..input_slice.offset + input_slice.size],
+                                    )
+                                    .to_vec()
+                                };
+                                // params: [rank, d0..dN, p0..pN]
+                                let rank = params.first().copied().unwrap_or(2);
+                                let nd_params =
+                                    resolve_params(params, param_dims, shape_env, 1 + 2 * rank)?;
+                                let dims: Vec<usize> = nd_params[1..1 + rank].to_vec();
+                                let perm: Vec<usize> =
+                                    nd_params[1 + rank..1 + 2 * rank].to_vec();
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                // Pre-compute input and output strides
+                                let mut in_strides = vec![1usize; rank];
+                                let mut out_strides = vec![1usize; rank];
+                                for i in (0..rank - 1).rev() {
+                                    in_strides[i] = in_strides[i + 1] * dims[i + 1];
+                                }
+                                for i in (0..rank - 1).rev() {
+                                    out_strides[perm[i]] =
+                                        out_strides[perm[i + 1]] * dims[perm[i + 1]];
+                                }
+                                let _total = out_f32.len();
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    for out_idx in 0..total {
+                                        let mut in_idx = 0usize;
+                                        let mut remaining = out_idx;
+                                        for k in 0..rank {
+                                            let coord = remaining / out_strides[perm[k]];
+                                            remaining %= out_strides[perm[k]];
+                                            in_idx += coord * in_strides[perm[k]];
+                                        }
+                                        out_f32[out_idx] = input[in_idx];
+                                    }
+                                }
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    out_f32.par_iter_mut().enumerate().for_each(|(out_idx, v)| {
+                                        let mut in_idx = 0usize;
+                                        let mut remaining = out_idx;
+                                        for k in 0..rank {
+                                            let coord = remaining / out_strides[perm[k]];
+                                            remaining %= out_strides[perm[k]];
+                                            in_idx += coord * in_strides[perm[k]];
+                                        }
+                                        *v = input[in_idx];
                                     });
                                 }
                             }
@@ -4270,50 +4382,18 @@ impl Backend for CpuBackend {
                                         for nn in 0..n {
                                             let num_pixels = h_out * w_out;
                                             let mut col_matrix = vec![0.0f32; num_pixels * col_w];
-                                            for hh in 0..h_out {
-                                                for ww in 0..w_out {
-                                                    let row = hh * w_out + ww;
-                                                    for g in 0..groups {
-                                                        for cc in 0..c_per_g {
-                                                            for kkh in 0..kernel_size {
-                                                                for kkw in 0..kernel_size {
-                                                                    let h_in = (hh * stride
-                                                                        + kkh * dilation)
-                                                                        as i64
-                                                                        - padding as i64;
-                                                                    let w_in = (ww * stride
-                                                                        + kkw * dilation)
-                                                                        as i64
-                                                                        - padding as i64;
-                                                                    if h_in >= 0
-                                                                        && h_in < h as i64
-                                                                        && w_in >= 0
-                                                                        && w_in < w as i64
-                                                                    {
-                                                                        let src = nn * (c * h * w)
-                                                                            + (g * c_per_g + cc)
-                                                                                * (h * w)
-                                                                            + h_in as usize * w
-                                                                            + w_in as usize;
-                                                                        let dst = row * col_w
-                                                                            + (g * c_per_g + cc)
-                                                                                * (kernel_size
-                                                                                    * kernel_size)
-                                                                            + kkh * kernel_size
-                                                                            + kkw;
-                                                                        if src < input_data.len()
-                                                                            && dst
-                                                                                < col_matrix.len()
-                                                                        {
-                                                                            col_matrix[dst] =
-                                                                                input_data[src];
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                            unsafe {
+                                                crate::backend::cpu::im2col::im2col_kernel(
+                                                    &input_data[nn * (c * h * w)..],
+                                                    c_per_g,
+                                                    h,
+                                                    w,
+                                                    kernel_size,
+                                                    stride,
+                                                    padding,
+                                                    dilation,
+                                                    &mut col_matrix,
+                                                );
                                             }
                                             // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
                                             let mut temp_out = vec![0.0f32; num_pixels * oc];
