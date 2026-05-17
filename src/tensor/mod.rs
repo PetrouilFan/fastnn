@@ -7,7 +7,7 @@ use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
 use smallvec::smallvec;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -33,6 +33,10 @@ pub struct TensorImpl {
     pub version_counter: Arc<AtomicU64>,
     pub autograd_meta: Option<Arc<parking_lot::Mutex<AutogradMeta>>>,
     pub requires_grad: bool,
+    /// Cached contiguity: -1=unknown, 0=false, 1=true.
+    /// Set to 1 when strides are known to be contiguous (new tensors from factories),
+    /// set to -1 when strides may be non-contiguous (views, clones, device transfers).
+    pub contiguous_cache: AtomicI8,
 }
 
 impl TensorImpl {
@@ -66,6 +70,7 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
+            contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
         }
     }
 
@@ -91,6 +96,7 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
+            contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
         }
     }
 
@@ -125,6 +131,7 @@ impl TensorImpl {
             version_counter: Arc::clone(&self.version_counter),
             autograd_meta: self.autograd_meta.clone(),
             requires_grad: self.requires_grad,
+            contiguous_cache: AtomicI8::new(-1), // strides may be non-contiguous
         }
     }
 
@@ -140,6 +147,7 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: self.autograd_meta.clone(),
             requires_grad: self.requires_grad,
+            contiguous_cache: AtomicI8::new(-1), // strides copied from self, may be non-contiguous
         }
     }
 
@@ -370,6 +378,7 @@ impl Clone for TensorImpl {
             version_counter: Arc::clone(&self.version_counter),
             autograd_meta: self.autograd_meta.clone(),
             requires_grad: self.requires_grad,
+            contiguous_cache: AtomicI8::new(self.contiguous_cache.load(Ordering::Relaxed)),
         }
     }
 }

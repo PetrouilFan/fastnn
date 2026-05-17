@@ -8,10 +8,10 @@ use crate::storage::GpuStorage;
 use crate::storage_pool::get_storage_pool;
 #[cfg(feature = "gpu")]
 use parking_lot::RwLock;
-use smallvec::smallvec;
-use smallvec::SmallVec;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI8, AtomicU64};
 use std::sync::Arc;
+use smallvec::SmallVec;
+use smallvec::smallvec;
 
 use super::shape::compute_strides;
 use super::{Tensor, TensorImpl};
@@ -132,18 +132,19 @@ impl Tensor {
             }
         };
 
-        let strides = compute_strides(&sizes);
-        Tensor::new(TensorImpl {
-            storage,
-            sizes,
-            strides,
-            storage_offset: 0,
-            dtype,
-            device,
-            version_counter: Arc::new(AtomicU64::new(0)),
-            autograd_meta: None,
-            requires_grad: false,
-        })
+                let strides = compute_strides(&sizes);
+                Tensor::new(TensorImpl {
+                    storage,
+                    sizes,
+                    strides,
+                    storage_offset: 0,
+                    dtype,
+                    device,
+                    version_counter: Arc::new(AtomicU64::new(0)),
+                    autograd_meta: None,
+                    requires_grad: false,
+                    contiguous_cache: AtomicI8::new(1),
+                })
     }
 
     pub fn empty(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
@@ -252,6 +253,7 @@ impl Tensor {
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
                     requires_grad: false,
+                    contiguous_cache: AtomicI8::new(1),
                 })
             }
             #[cfg(feature = "gpu")]
@@ -330,6 +332,7 @@ impl Tensor {
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
                     requires_grad: false,
+                    contiguous_cache: AtomicI8::new(1),
                 })
             }
             #[cfg(feature = "gpu")]
@@ -356,6 +359,7 @@ impl Tensor {
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
                     requires_grad: false,
+                    contiguous_cache: AtomicI8::new(1),
                 })
             }
         }
