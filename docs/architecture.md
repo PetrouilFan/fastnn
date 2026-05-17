@@ -1,12 +1,12 @@
-# v2.0.0 AOT Compiler Pipeline Architecture
+# AOT Compiler Pipeline Architecture
 
 ## Overview
 
-v2.0.0 replaces the v1.x DAG/layer dispatch with a complete IR-based AOT (ahead-of-time) compiler pipeline. The core components are:
+FastNN's AOT (ahead-of-time) compiler replaces traditional DAG/layer dispatch with a complete IR-based compilation pipeline. The core components are:
 
 - **ComputeGraph IR** — the intermediate representation that all compilation stages operate on
 - **Compiler passes** — transformations that optimize, fuse, and plan the graph
-- **Backend dispatch** — maps IRNodes to concrete backend implementations
+- **Backend dispatch** — maps IR nodes to concrete backend implementations
 - **GraphExecutor** — runtime execution over a pre-planned arena memory layout
 
 The pipeline compiles a model once into an `ExecutablePlan`, then runs it repeatedly with zero overhead from graph traversal or dynamic dispatch.
@@ -17,17 +17,14 @@ The pipeline compiles a model once into an `ExecutablePlan`, then runs it repeat
 
 Raw model definitions are converted into a `ComputeGraph`:
 
-- **ONNX import**: `OnnxConverter` parses ONNX protobuf and emits `ComputeGraph` nodes.
-  Quantized ONNX ops (`QuantizeLinear`, `DequantizeLinear`, `QLinearMatMul`, `QLinearConv`)
-  are decomposed into primitive f32 operations (`sub`, `mul`, `div`, `matmul`, `conv2d`, `clamp`)
-  so the compiler pipeline sees only native f32 IR nodes.
+- **ONNX import**: `OnnxConverter` parses ONNX protobuf and emits `ComputeGraph` nodes (~67 ops supported). Quantized ONNX ops (`QuantizeLinear`, `DequantizeLinear`, `QLinearMatMul`, `QLinearConv`) are decomposed into primitive f32 operations so the compiler pipeline sees only native IR nodes.
 - **Direct API**: `GraphBuilder` provides a programmatic Rust API for constructing graphs without ONNX
 
 The output is a flat list of `IRNode`s with explicit dataflow edges via input references.
 
 ### Stage 1.5 — Shape Inference
 
-Symbolic dimensions are resolved before fusion or memory planning can proceed. `DimExpr::evaluate_with_env` substitutes concrete values from a `ShapeEnv` for every `Symbol(String, ..)` in the graph. This allows the compiler to compute exact tensor shapes and byte sizes at compile time for fixed-shape models, and to defer resolution for dynamically-shaped models via `Bounded` dims.
+Symbolic dimensions are resolved before fusion or memory planning. `DimExpr::evaluate_with_env` substitutes concrete values from a `ShapeEnv` for every `Symbol(String)` in the graph. This allows the compiler to compute exact tensor shapes and byte sizes at compile time for fixed-shape models, and to defer resolution via `Bounded` dims for dynamic shapes.
 
 ### Stage 2 — Operator Fusion
 
@@ -39,13 +36,22 @@ The fusion pass scans the `ComputeGraph` for adjacent ops that can be merged:
 | `Conv2d → Add` | `FusedConv2dAdd` |
 | `FusedMatMulAdd → ReLU` | `FusedMatMulAddRelu` |
 | `FusedConv2dAdd → ReLU` | `FusedConv2dAddRelu` |
-| `Residual → Add → LayerNorm` | `FusedResidualAddNorm` (v2.2) |
+| `Residual → Add → LayerNorm` | `FusedResidualAddNorm` |
+| Backward fusion | Eliminates 3 intermediate allocations per fused backward chain |
 
-Fusion eliminates intermediate tensor materialization and reduces kernel launch overhead.
+Fusion eliminates intermediate tensor materialization and reduces kernel launch overhead. Backward fusion combines `dRelu+Transpose+MatMul` into single fused kernels.
 
 ### Stage 2.5 — Weight Quantization (Optional)
 
-When enabled, `quantize_weights` transforms `F32` weight tensors into `U4` or `U8` per-channel quantized format. This is a compiler pass, not a runtime operation — the weights are packed at compile time and embedded directly into the `ExecutablePlan`.
+When enabled, `quantize_weights` transforms `F32` weight tensors into `U4` or `U8` per-channel quantized format. This is a compiler pass — the weights are packed at compile time and embedded directly into the `ExecutablePlan`.
+
+### Additional Passes
+
+The compiler pipeline also runs:
+- **Auto-cast** — Inserts type conversion nodes for mixed-precision graphs
+- **Type inference** — Propagates dtypes through the graph
+- **Constant folding** — Evaluates constant subexpressions at compile time
+- **Dead code elimination** — Removes unused nodes and no-op operations
 
 ### Stage 3 — Memory Planning
 
@@ -55,8 +61,8 @@ A greedy first-fit arena allocator with live-range analysis assigns each tensor 
 
 Each `IRNode` is mapped to a concrete backend implementation:
 
-- **CpuBackend** — handles all opcodes including quantized `matmul_u4`, `matmul_u8`, `conv2d_u4`, `conv2d_u8`
-- **WgpuBackend** — handles `f32` ops and U4/U8 quantized ops via WGSL compute shaders (since v2.2)
+- **CpuBackend** — handles all opcodes including quantized matmul/conv (U4/U8) with runtime ISA dispatch: AVX-512 → AVX2 → NEON → scalar fallback
+- **WgpuBackend** — handles f32 ops and U4/U8 quantized ops via WGSL compute shaders
 
 Both backends receive an `ExecutablePlan` with pre-planned arena offsets, eliminating runtime allocation.
 
@@ -73,23 +79,26 @@ Key types from `ir/node.rs`:
 The top-level IR container. Holds:
 
 - **`nodes`** — `Vec<IRNode>`, the flat list of operations
-- **`inputs`** — ordered list of graph input names
-- **`outputs`** — ordered list of graph output names
-- **`name_to_node`** — `HashMap<String, NodeIdx>` for O(1) lookup by name
+- **`inputs`** — ordered list of graph input NodeIds
+- **`outputs`** — ordered list of graph output NodeIds
+- **`required_nodes`** — `HashSet<NodeId>` of nodes that must be preserved (used by DCE)
+- **`next_id`** — auto-incrementing NodeId counter
 
 ### IRNode
 
 A single operation in the graph:
 
-- **`opcode`** — the `Opcode` variant
-- **`inputs`** — `Vec<String>` referencing other nodes by name
+- **`opcode`** — the `Opcode` variant (90 variants)
+- **`inputs`** — `Vec<NodeId>` referencing other nodes by ID
 - **`output_type`** — `TensorType` describing shape and dtype
-- **`attrs`** — `HashMap<String, AttrValue>` for per-op constants
-- **`name`** — unique identifier used as input reference target
+- **`attrs`** — `HashMap<String, String>` for per-op constants
+- **`name`** — optional unique identifier
 
 ### Opcode Enum
 
-30+ variants including `MatMul`, `Conv2d`, `Softmax`, `FusedMatMulAdd`, `FusedConv2dAddRelu`, and all fused variants. Each opcode corresponds to exactly one kernel implementation per backend.
+90 variants covering: arithmetic (Add, Sub, Mul, Div, Pow...), neural network (MatMul, Conv1d/2d/3d, ConvTranspose2d, BatchNorm, LayerNorm...), activations (Relu, Gelu, Silu, Sigmoid, Tanh, Mish...), reductions (ReduceSum, ReduceMean, ReduceMax, ArgMax...), shape ops (Reshape, Transpose, Concat, Slice, Gather...), quantization (Quantize, Dequantize, ToF16, ToF32...), and optimizer updates (SgdUpdate, AdamUpdate, AdamWUpdate, MuonUpdate, LionUpdate, RmspropUpdate).
+
+Backend kernel selection (e.g., `matmul_u4`, `matmul_u8`, `conv2d_u4`) happens at runtime based on quantized input dtypes, not via separate opcodes.
 
 ### IrDType
 
@@ -97,21 +106,21 @@ A single operation in the graph:
 |---------|-------------|
 | `F32` | 32-bit float |
 | `F16` | 16-bit float |
+| `BF16` | 16-bit bfloat |
+| `I32` | 32-bit signed integer |
 | `I64` | 64-bit signed integer |
+| `I8` | 8-bit signed integer |
 | `Bool` | Boolean |
-| `U4{scales,zero_points,shape}` | 4-bit quantized with per-channel metadata |
-| `U8{scales,zero_points,shape}` | 8-bit quantized with per-channel metadata |
+| `U4{scales,zero_points}` | 4-bit quantized with per-channel metadata |
+| `U8{scales,zero_points}` | 8-bit quantized with per-channel metadata |
 
 ### DimExpr
 
 Symbolic and concrete dimension expressions:
 
 - `Known(u64)` — fully resolved dimension
-- `Symbol(String, Option<u64>)` — named dimension with optional default
-- `Bounded(min, max)` — dimension known to fall within a range
-- `Product(vals)` — product of sub-expressions
-- `Sum(vals)` — sum of sub-expressions
-- `Div(lhs, rhs)` — integer division of sub-expressions
+- `Symbol(String)` — named dimension, resolved at compile time
+- `Bounded { sym, max }` — dimension bounded by an upper limit
 
 ### TensorType
 
@@ -156,36 +165,25 @@ The packed layout eliminates wasted padding and enables SIMD-friendly access pat
 
 ### SIMD_MARGIN
 
-`packed_byte_size` includes a `SIMD_MARGIN` of 16 extra `u32` words per `PackedTensor`. This padding prevents out-of-bounds reads in vectorized kernels that process data in wider strides than the logical element count.
+`packed_byte_size` includes a `SIMD_MARGIN` of 16 extra `u32` words per `PackedTensor`. This padding prevents out-of-bounds reads in vectorized kernels.
 
 ### Memory Planning Integration
 
-The memory planner uses `packed_byte_size()` — not `unpacked_byte_size()` — when computing arena slot sizes for `U4`/`U8` tensors. This ensures arena offsets are correctly sized for the packed layout, including the SIMD margin.
+The memory planner uses `packed_byte_size()` when computing arena slot sizes for `U4`/`U8` tensors.
 
 ## Backend Dispatch
 
 ### CpuBackend
 
-Handles all opcodes:
-
-- Standard `f32` ops: `MatMul`, `Conv2d`, `Softmax`, `ReLU`, etc.
-- Quantized ops: `matmul_u4`, `matmul_u8`, `conv2d_u4`, `conv2d_u8`
-
-Quantized kernels read from packed arena slots and dequantize on the fly during accumulation.
+Handles all opcodes with runtime ISA dispatch (AVX-512 → AVX2 → NEON → scalar). Quantized kernels read from packed arena slots and dequantize on the fly during accumulation.
 
 ### WgpuBackend
 
-Handles `f32` ops with GPU acceleration. Returns `UnsupportedOp` for quantized opcodes, which triggers transparent CPU fallback. No unpacking or de-quantization occurs on GPU.
+Handles f32 ops and U4/U8 quantized ops via WGSL compute shaders with GPU-only dequantization.
 
 ### ExecutablePlan
 
-Both backends receive an `ExecutablePlan` containing:
-
-- Pre-planned arena offsets for every tensor
-- The ordered list of instructions to execute
-- Slot-to-offset mapping for arena memory
-
-This means the backend never allocates memory — it operates entirely within the pre-planned arena.
+Contains pre-planned arena offsets, the ordered list of instructions, and slot-to-offset mapping. The backend never allocates memory — it operates entirely within the pre-planned arena.
 
 ## Memory Planning
 
@@ -198,16 +196,16 @@ The greedy first-fit arena allocator works as follows:
 
 ### Runtime Shape Resolution
 
-For models with symbolic dimensions, `tightened()` recomputes arena offsets from a concrete `ShapeEnv` at runtime. This allows a single compiled graph to handle multiple batch sizes without recompilation.
+For models with symbolic dimensions, `tighten()` recomputes arena offsets from a concrete `ShapeEnv` at runtime. This allows a single compiled graph to handle multiple batch sizes without recompilation.
 
 ## v1 vs v2 Comparison
 
-| Aspect | v1.x (removed) | v2.0.0 (AOT) |
+| Aspect | v1.x (removed) | v2.x (current) |
 |--------|-----------|---------------|
 | Graph representation | Python DAG + Rust layers | ComputeGraph IR |
-| Quantization | Layer-level (_removed_) | Compiler pass |
+| Quantization | Layer-level | Compiler pass |
 | Memory | Per-tensor allocation | Arena-based memory plan |
-| Fusion | None (sequential ops) | MatMul+Add, Conv2d+Add, +ReLU |
+| Fusion | None (sequential ops) | MatMul+Add, Conv2d+Add, +ReLU, residual+add+norm |
 | Shape inference | Runtime only | Compile-time with DimExpr |
 | Backend dispatch | Dynamic at runtime | Compiled into ExecutablePlan |
-| ONNX import | Python DAG (_removed_) | Rust OnnxConverter → ComputeGraph |
+| ONNX import | Python DAG | Rust OnnxConverter → ComputeGraph |
