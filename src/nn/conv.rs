@@ -154,7 +154,7 @@ impl Module for Conv2d {
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(autograd::make_node_info("Conv2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
             output
         } else {
             output
@@ -270,7 +270,7 @@ impl Module for ConvTranspose2d {
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(autograd::make_node_info("ConvTranspose2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output

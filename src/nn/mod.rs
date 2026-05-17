@@ -39,9 +39,8 @@ pub trait Module: Send + Sync {
 /// Helper to clear gradient from a tensor.
 pub fn clear_grad(tensor: &Tensor) {
     if let Some(meta) = &tensor.inner.autograd_meta {
-        if let Ok(mut lock) = meta.lock() {
-            lock.grad = None;
-        }
+        let mut lock = meta.lock();
+        lock.grad = None;
     }
 }
 
