@@ -1,21 +1,15 @@
-"""fastnn — High-Performance Neural Network Inference Library.
+"""fastnn — High-Performance Neural Network Library in Rust with Python bindings.
 
-v2.0.0 introduces a complete AOT compiler pipeline built on a first-class IR
-(ComputeGraph). The pipeline compiles graphs through shape inference, operator
-fusion, optional weight quantization (U4/U8), and memory planning before
-dispatching to a backend.
-
-Key v2.0.0 APIs:
-  - AotExecutor(nodes, params, inputs, outputs, quantize=4|8|None) — compile & run
-  - DAGModel(quantize=) — load models with optional quantization
-  - build_dag_model(quantize=) — build with optional quantization
+AOT-compiled inference and training pipeline with 90+ IR opcodes, operator fusion,
+per-channel weight quantization (U4/U8), and arena-based memory planning.
+See https://github.com/PetrouilFan/fastnn for full documentation.
 """
 
 import numpy as np
 import fastnn._core as _core
 import fastnn.precision as precision
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 # Exception hierarchy - imported from _core (Rust side)
 FastnnError = _core.FastnnError
@@ -92,7 +86,9 @@ __all__ = [
     "set_num_threads",
     "set_default_device",
     "checkpoint",
-    "load_state_dict",
+    "compile_train_model",
+    "fused_linear_relu",
+    "fused_linear_gelu",
     "import_onnx",
     "allocator_stats",
     "list_registered_ops",
@@ -185,9 +181,8 @@ __all__ = [
     "log_softmax",
     "fused_add_relu",
     "fused_conv_bn_silu",
-    # Packed tensor constructors (numpy interop)
-    "packed_tensor",
-    "packed_tensor_from_f32",
+    # Compiled training
+    "compile_train_model",
     # Tensor operations
     "add",
     "sub",
@@ -382,6 +377,8 @@ silu = _core.silu
 softmax = _core.softmax
 log_softmax = _core.log_softmax
 fused_conv_bn_silu = _core.fused_conv_bn_silu
+fused_linear_relu = _core.fused_linear_relu
+fused_linear_gelu = _core.fused_linear_gelu
 FusedConvBn = _core.FusedConvBn
 FusedConvBnRelu = _core.FusedConvBnRelu
 FusedConvBnGelu = _core.FusedConvBnGelu
@@ -493,6 +490,9 @@ AvgPool2d = _core.AvgPool2d
 
 # Phase 1: AOT graph executor (replaces DAGExecutor from v1.x)
 AotExecutor = _core.AotExecutor if hasattr(_core, 'AotExecutor') else None
+
+# Compiled training
+compile_train_model = _core.compile_train_model
 
 # Phase 3: New tensor operation functions
 where = _core.where_
