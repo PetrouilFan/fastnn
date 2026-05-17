@@ -136,16 +136,14 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
         }
 
         // Quantize using PackedTensor and extract raw bytes + metadata.
-        let (packed_bytes, _scales, _zero_points, new_dtype) = if bit_width == 4 {
+        let (packed_bytes, new_dtype) = if bit_width == 4 {
             let pt = PackedTensor::<U4x8>::from_f32_per_channel(&quant_data, &quant_shape);
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
-                pt.scales.clone(),
-                pt.zeros.clone(),
                 IrDType::U4 {
-                    scales: pt.scales.clone(),
-                    zero_points: pt.zeros.clone(),
+                    scales: pt.scales,
+                    zero_points: pt.zeros,
                 },
             )
         } else {
@@ -153,11 +151,9 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
-                pt.scales.clone(),
-                pt.zeros.clone(),
                 IrDType::U8 {
-                    scales: pt.scales.clone(),
-                    zero_points: pt.zeros.clone(),
+                    scales: pt.scales,
+                    zero_points: pt.zeros,
                 },
             )
         };

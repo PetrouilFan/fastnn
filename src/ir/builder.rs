@@ -315,7 +315,8 @@ impl GraphBuilder {
 
     /// Element-wise addition.
     pub fn add(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
+        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
+        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
         let mut inner = self.inner.borrow_mut();
         let node_id =
             inner
@@ -326,7 +327,8 @@ impl GraphBuilder {
 
     /// Element-wise subtraction.
     pub fn sub(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
+        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
+        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
         let mut inner = self.inner.borrow_mut();
         let node_id =
             inner
@@ -337,7 +339,8 @@ impl GraphBuilder {
 
     /// Element-wise multiplication.
     pub fn mul(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
+        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
+        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
         let mut inner = self.inner.borrow_mut();
         let node_id =
             inner
@@ -348,7 +351,8 @@ impl GraphBuilder {
 
     /// Element-wise division.
     pub fn div(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
+        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
+        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
         let mut inner = self.inner.borrow_mut();
         let node_id =
             inner
@@ -703,7 +707,8 @@ impl GraphBuilder {
 
     /// Element-wise maximum.
     pub fn maximum(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone(); // broadcast shapes are validated at compile/runtime
+        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
+        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Maximum,
@@ -715,7 +720,8 @@ impl GraphBuilder {
 
     /// Element-wise minimum.
     pub fn minimum(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
+        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
+        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Minimum,
@@ -731,10 +737,15 @@ impl GraphBuilder {
 
     /// Max reduction along a dimension.
     pub fn reduce_max(&self, input: &GraphTensor, axis: usize, keepdim: bool) -> GraphTensor {
-        let mut output_type = input.tensor_type.clone();
-        if axis < output_type.shape.len() {
-            output_type.shape.remove(axis);
+        let mut output_shape = input.shape().to_vec();
+        if axis < output_shape.len() {
+            if keepdim {
+                output_shape[axis] = DimExpr::Known(1);
+            } else {
+                output_shape.remove(axis);
+            }
         }
+        let output_type = TensorType::new(output_shape, input.dtype());
         let mut inner = self.inner.borrow_mut();
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("axis".to_string(), axis.to_string());
@@ -769,10 +780,14 @@ impl GraphBuilder {
     }
 
     /// Fused Top-K: returns (values, indices) from a single sort.
-    /// Both output tensors have the same shape as the input.
+    /// The axis dimension is reduced to k in the output.
     pub fn topk(&self, input: &GraphTensor, k: usize, axis: i64) -> (GraphTensor, GraphTensor) {
-        let val_type = TensorType::new(input.shape().to_vec(), input.dtype());
-        let idx_type = TensorType::new(input.shape().to_vec(), IrDType::I64);
+        let mut output_shape = input.shape().to_vec();
+        if (axis as usize) < output_shape.len() {
+            output_shape[axis as usize] = DimExpr::Known(k as u64);
+        }
+        let val_type = TensorType::new(output_shape.clone(), input.dtype());
+        let idx_type = TensorType::new(output_shape, IrDType::I64);
         let mut attrs = HashMap::new();
         attrs.insert("k".to_string(), k.to_string());
         attrs.insert("axis".to_string(), axis.to_string());
@@ -1453,12 +1468,29 @@ impl GraphBuilder {
 
     /// Tile (repeat) tensor along each axis.
     pub fn tile_op(&self, input: &GraphTensor, repeats: &GraphTensor) -> GraphTensor {
-        let output_type = TensorType::new(input.shape().to_vec(), input.dtype());
+        let input_shape = input.shape();
+        let attrs = HashMap::new();
+        let repeats_str: String = attrs.get("repeats").cloned().unwrap_or_default();
+        let rep_vals: Vec<i64> = repeats_str.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let output_shape: Vec<DimExpr> = if rep_vals.is_empty() {
+            input_shape.to_vec()
+        } else {
+            input_shape.iter().enumerate().map(|(i, d)| {
+                let r = rep_vals.get(i).copied().unwrap_or(1);
+                let base = match d {
+                    DimExpr::Known(v) => *v as i64,
+                    _ => 1,
+                };
+                DimExpr::Known((base * r) as u64)
+            }).collect()
+        };
+        let output_type = TensorType::new(output_shape, input.dtype());
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
+        let node_id = inner.graph.add_node_with_attrs(
             Opcode::Tile,
             vec![input.node_id, repeats.node_id],
             output_type.clone(),
+            attrs,
         );
         GraphTensor::new(self.clone(), node_id, output_type)
     }
@@ -1682,7 +1714,8 @@ impl GraphBuilder {
 
     /// Element-wise power.
     pub fn pow(&self, input: &GraphTensor, exponent: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
+        let output_shape = broadcast_shape(&input.tensor_type.shape, &exponent.tensor_type.shape);
+        let output_type = TensorType::new(output_shape, input.tensor_type.dtype.clone());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Pow,
@@ -1954,7 +1987,9 @@ impl GraphBuilder {
         y: &GraphTensor,
     ) -> GraphTensor {
         let x_shape = x.shape();
-        let out_tt = TensorType::new(x_shape.to_vec(), x.dtype());
+        let y_shape = y.shape();
+        let output_shape = broadcast_shape(&x_shape, &y_shape);
+        let out_tt = TensorType::new(output_shape, IrDType::F32);
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node(
@@ -2421,6 +2456,32 @@ impl GraphBuilder {
 // =============================================================================
 // DimExpr arithmetic helpers
 // =============================================================================
+
+/// Compute the broadcasted shape of two tensor shapes per numpy broadcasting rules.
+/// Shapes are aligned on the right; dimensions of size 1 broadcast to match.
+fn broadcast_shape(a_shape: &[DimExpr], b_shape: &[DimExpr]) -> Vec<DimExpr> {
+    let max_rank = a_shape.len().max(b_shape.len());
+    let mut result = Vec::with_capacity(max_rank);
+    for i in 0..max_rank {
+        let da = if i < a_shape.len() {
+            &a_shape[a_shape.len() - 1 - i]
+        } else {
+            &DimExpr::Known(1)
+        };
+        let db = if i < b_shape.len() {
+            &b_shape[b_shape.len() - 1 - i]
+        } else {
+            &DimExpr::Known(1)
+        };
+        result.push(match (da, db) {
+            (DimExpr::Known(1), other) => other.clone(),
+            (other, DimExpr::Known(1)) => other.clone(),
+            _ => da.clone(),
+        });
+    }
+    result.reverse();
+    result
+}
 
 /// Multiply two `DimExpr` values symbolically.
 fn dim_mul(a: &DimExpr, b: &DimExpr) -> DimExpr {

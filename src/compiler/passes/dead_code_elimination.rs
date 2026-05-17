@@ -17,6 +17,9 @@ pub fn eliminate_dead_code(graph: &mut ComputeGraph) -> usize {
         return 0;
     }
 
+    // ── Phase 1: Eliminate no-op patterns ──────────────────────────────
+    eliminate_noops(graph);
+
     // ── Phase 2: Standard dead code elimination ────────────────────────
     let mut reachable: HashSet<usize> = HashSet::new();
     let mut stack: Vec<usize> = Vec::new();
@@ -64,7 +67,6 @@ pub fn eliminate_dead_code(graph: &mut ComputeGraph) -> usize {
 /// - Cast(x, same_dtype) → x
 /// - Concat with single input → the input itself
 /// - Slice(0..dim) covering the full tensor → x
-#[allow(dead_code)]
 fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
     let order = graph.topological_sort();
     let mut rewrites: Vec<(NodeId, NodeId)> = Vec::new();

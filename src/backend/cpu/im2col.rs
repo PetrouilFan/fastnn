@@ -45,3 +45,51 @@ pub unsafe fn im2col_kernel(
         }
     }
 }
+
+/// Im2col kernel supporting non-square kernels (kh != kw).
+#[allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
+pub unsafe fn im2col_kernel_rect(
+    data: &[f32],
+    c: usize,
+    h: usize,
+    w: usize,
+    kh: usize,
+    kw: usize,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+    col: &mut [f32],
+) {
+    let dh = (kh - 1) * dilation + 1;
+    let dw = (kw - 1) * dilation + 1;
+    let h_out = if h + 2 * padding >= dh {
+        (h + 2 * padding - dh) / stride + 1
+    } else {
+        0
+    };
+    let w_out = if w + 2 * padding >= dw {
+        (w + 2 * padding - dw) / stride + 1
+    } else {
+        0
+    };
+    let col_w = c * kh * kw;
+
+    for oh in 0..h_out {
+        for ow in 0..w_out {
+            let row = oh * w_out + ow;
+            for ic in 0..c {
+                for kkh in 0..kh {
+                    for kkw in 0..kw {
+                        let ih = oh * stride + kkh * dilation;
+                        let iw = ow * stride + kkw * dilation;
+                        if ih < h + padding && iw < w + padding && ih >= padding && iw >= padding {
+                            let src = (ic * h + (ih - padding)) * w + (iw - padding);
+                            let dst = row * col_w + ic * kh * kw + kkh * kw + kkw;
+                            col[dst] = data[src];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

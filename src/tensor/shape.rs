@@ -16,7 +16,7 @@ pub(crate) fn compute_strides(sizes: &[i64]) -> SmallVec<[i64; 8]> {
     let mut stride = 1i64;
     for i in (0..sizes.len()).rev() {
         strides[i] = stride;
-        stride *= sizes[i];
+        stride = stride.saturating_mul(sizes[i]);
     }
     strides
 }

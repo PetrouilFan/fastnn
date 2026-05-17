@@ -333,6 +333,34 @@ pub fn plan_memory_with_env(
     let position: HashMap<NodeId, usize> =
         order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
 
+    // ── Transitive consumer analysis ─────────────────────────────────
+    // Compute the latest position of any transitive consumer that is a
+    // required node or graph output.  This ensures that a node's lifetime
+    // is extended if its data flows (through any chain of consumers) to a
+    // required node or output.
+    let mut transitive_last_use: HashMap<NodeId, usize> = HashMap::new();
+    // Process nodes in reverse topological order so that consumers are
+    // processed before their producers.
+    for &node_id in order.iter().rev() {
+        let node = match graph.get_node(node_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        let my_pos = position.get(&node_id).copied().unwrap_or(0);
+        let is_terminal = graph.outputs.contains(&node_id)
+            || graph.required_nodes.contains(&node_id);
+        let base = if is_terminal { order.len() - 1 } else { my_pos };
+        // Start with our own position (or end if terminal)
+        let mut last = base;
+        // Propagate through direct consumers
+        for &cid in &graph.consumers(node_id) {
+            if let Some(&consumer_last) = transitive_last_use.get(&cid) {
+                last = last.max(consumer_last);
+            }
+        }
+        transitive_last_use.insert(node_id, last);
+    }
+
     let mut alloc_infos: Vec<AllocInfo> = Vec::new();
 
     for &node_id in &order {
@@ -357,34 +385,13 @@ pub fn plan_memory_with_env(
             } else {
                 position.get(&node_id).copied().unwrap_or(0)
             };
-            let consumers = graph.consumers(node_id);
-            let last_use = if graph.required_nodes.contains(&node_id) {
-                // Required nodes must stay alive until end of execution
-                order.len() - 1
-            } else if consumers.is_empty() {
-                if graph.outputs.contains(&node_id) {
-                    order.len() - 1
-                } else {
-                    first_use
-                }
-            } else {
-                // When a node has consumers AND is also a graph output or
-                // required node, extend its lifetime to the end of execution
-                // so the memory slot is preserved for the final output read.
-                // Without this check the memory planner would free the slot
-                // after the last consumer, and a later node would reuse it —
-                // corrupting the output data before the executor reads it.
-                if graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id) {
-                    order.len() - 1
-                } else {
-                    consumers
-                        .iter()
-                        .filter_map(|cid| position.get(cid))
-                        .copied()
-                        .max()
-                        .unwrap_or(first_use)
-                }
-            };
+            // Use transitive consumer analysis for last_use.  This ensures
+            // that a node's lifetime is extended if its data flows (through
+            // any chain of consumers) to a required node or graph output.
+            let last_use = transitive_last_use
+                .get(&node_id)
+                .copied()
+                .unwrap_or(first_use);
 
             alloc_infos.push(AllocInfo {
                 node_id,
@@ -399,32 +406,11 @@ pub fn plan_memory_with_env(
             let sec_size = tensor_byte_size(sec_type, shape_env);
             if sec_size > 0 {
                 let first_use = position.get(&node_id).copied().unwrap_or(0);
-                let consumers = graph.consumers(node_id);
-                let last_use = if consumers.is_empty() {
-                    if graph.outputs.contains(&node_id) {
-                        order.len() - 1
-                    } else {
-                        first_use
-                    }
-                } else {
-                    let consumer_last = consumers
-                        .iter()
-                        .filter_map(|cid| position.get(cid))
-                        .copied()
-                        .max()
-                        .unwrap_or(first_use);
-                    // If the node is a graph output, the secondary output must
-                    // also live until the end, because the secondary slot's
-                    // allocation is in the same arena and freeing it early
-                    // changes the free-list state — which can cause a later
-                    // allocation to land adjacent to or (in edge cases) overlap
-                    // with the primary slot's data.
-                    if graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id) {
-                        order.len() - 1
-                    } else {
-                        consumer_last
-                    }
-                };
+                // Use transitive consumer analysis for secondary output too
+                let last_use = transitive_last_use
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(first_use);
                 alloc_infos.push(AllocInfo {
                     node_id,
                     size: sec_size,

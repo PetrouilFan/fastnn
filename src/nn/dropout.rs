@@ -30,7 +30,7 @@ impl Module for Dropout {
             let numel = x_data.len();
 
             let mut rng = rand::thread_rng();
-            // Avoid zero-initialization: allocate capacity, set length, then fill.
+            // SAFETY: We immediately fill all numel elements in the branches below.
             let mut mask_data: Vec<f32> = Vec::with_capacity(numel);
             unsafe { mask_data.set_len(numel); }
 
@@ -115,6 +115,7 @@ impl Module for Dropout2d {
             let num_masks = batch * channels;
             // Avoid zero-initialization
             let mut channel_mask_data: Vec<f32> = Vec::with_capacity(num_masks);
+            // SAFETY: We immediately fill all num_masks elements below.
             unsafe { channel_mask_data.set_len(num_masks); }
             let mut rand_vals = vec![0.0f32; num_masks];
             rng.fill(&mut rand_vals[..]);
