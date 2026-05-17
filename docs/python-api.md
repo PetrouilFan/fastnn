@@ -1,4 +1,4 @@
-# Python API Reference (v2.2)
+# Python API Reference
 
 ## Compiled Training API
 
@@ -77,7 +77,7 @@ for epoch in range(100):
 
 ### `flash_attention()`
 
-Memory-efficient attention using tiled online-softmax with SIMD-accelerated tile matmul (AVX2/AVX-512 in v2.2).
+Memory-efficient attention using tiled online-softmax with SIMD-accelerated tile matmul (AVX2/AVX-512).
 
 ```python
 output = fnn.flash_attention(
@@ -89,7 +89,7 @@ output = fnn.flash_attention(
 ) -> Tensor
 ```
 
-**Performance:** 2-4× speedup over the baseline with AVX-512/AVX2 tile matmul (v2.2).
+**Performance:** 2-4× speedup over the baseline with AVX-512/AVX2 tile matmul.
 
 ## WGPU Backend
 
@@ -106,7 +106,7 @@ x_gpu = x_cpu.to_gpu(0)
 x_cpu = x_gpu.to_cpu()
 ```
 
-### Quantized GPU Inference (v2.2)
+### Quantized GPU Inference
 
 WGPU backend supports U4/U8 quantized inference via WGSL compute shaders with per-channel dequantization. Quantized models run entirely on GPU — no CPU copy during dispatch.
 
