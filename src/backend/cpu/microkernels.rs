@@ -588,182 +588,78 @@ pub fn log_softmax_f32_scalar_all(input: &[f32], output: &mut [f32]) {
 
 // ── Binary ops (AVX2 when dense, scalar broadcast fallback) ──
 
-#[inline]
-pub fn add_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let a_len = a.len();
-    let b_len = b.len();
-    for i in 0..output.len() {
-        output[i] = a[i % a_len] + b[i % b_len];
-    }
-}
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-pub unsafe fn add_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let len = output.len();
-    let a_len = a.len();
-    let b_len = b.len();
-    let mut i = 0;
-    // Only use SIMD when both inputs are dense (not broadcasting)
-    if a_len == len && b_len == len {
-        while i + 8 <= len {
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_add_ps(va, vb));
-            i += 8;
+macro_rules! impl_binary_arith_broadcast {
+    ($scalar_fn:ident, $avx2_fn:ident, $op:tt, $avx2_intrin:ident) => {
+        #[inline]
+        pub fn $scalar_fn(a: &[f32], b: &[f32], output: &mut [f32]) {
+            let a_len = a.len();
+            let b_len = b.len();
+            for i in 0..output.len() {
+                output[i] = a[i % a_len] $op b[i % b_len];
+            }
         }
-    }
-    for j in i..len {
-        *output.as_mut_ptr().add(j) = a[j % a_len] + b[j % b_len];
-    }
-}
 
-#[inline]
-pub fn sub_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let a_len = a.len();
-    let b_len = b.len();
-    for i in 0..output.len() {
-        output[i] = a[i % a_len] - b[i % b_len];
-    }
-}
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-pub unsafe fn sub_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let len = output.len();
-    let a_len = a.len();
-    let b_len = b.len();
-    let mut i = 0;
-    if a_len == len && b_len == len {
-        while i + 8 <= len {
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_sub_ps(va, vb));
-            i += 8;
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        #[target_feature(enable = "avx2")]
+        pub unsafe fn $avx2_fn(a: &[f32], b: &[f32], output: &mut [f32]) {
+            let len = output.len();
+            let a_len = a.len();
+            let b_len = b.len();
+            let mut i = 0;
+            if a_len == len && b_len == len {
+                while i + 8 <= len {
+                    let va = _mm256_loadu_ps(a.as_ptr().add(i));
+                    let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+                    _mm256_storeu_ps(output.as_mut_ptr().add(i), $avx2_intrin(va, vb));
+                    i += 8;
+                }
+            }
+            for j in i..len {
+                *output.as_mut_ptr().add(j) = a[j % a_len] $op b[j % b_len];
+            }
         }
-    }
-    for j in i..len {
-        *output.as_mut_ptr().add(j) = a[j % a_len] - b[j % b_len];
-    }
+    };
 }
 
-#[inline]
-pub fn mul_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let a_len = a.len();
-    let b_len = b.len();
-    for i in 0..output.len() {
-        output[i] = a[i % a_len] * b[i % b_len];
-    }
-}
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-pub unsafe fn mul_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let len = output.len();
-    let a_len = a.len();
-    let b_len = b.len();
-    let mut i = 0;
-    if a_len == len && b_len == len {
-        while i + 8 <= len {
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(va, vb));
-            i += 8;
+macro_rules! impl_binary_minmax_broadcast {
+    ($scalar_fn:ident, $avx2_fn:ident, $method:ident, $avx2_intrin:ident) => {
+        #[inline]
+        pub fn $scalar_fn(a: &[f32], b: &[f32], output: &mut [f32]) {
+            let a_len = a.len();
+            let b_len = b.len();
+            for i in 0..output.len() {
+                output[i] = a[i % a_len].$method(b[i % b_len]);
+            }
         }
-    }
-    for j in i..len {
-        *output.as_mut_ptr().add(j) = a[j % a_len] * b[j % b_len];
-    }
-}
 
-#[inline]
-pub fn div_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let a_len = a.len();
-    let b_len = b.len();
-    for i in 0..output.len() {
-        output[i] = a[i % a_len] / b[i % b_len];
-    }
-}
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-pub unsafe fn div_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let len = output.len();
-    let a_len = a.len();
-    let b_len = b.len();
-    let mut i = 0;
-    if a_len == len && b_len == len {
-        while i + 8 <= len {
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_div_ps(va, vb));
-            i += 8;
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        #[target_feature(enable = "avx2")]
+        pub unsafe fn $avx2_fn(a: &[f32], b: &[f32], output: &mut [f32]) {
+            let len = output.len();
+            let a_len = a.len();
+            let b_len = b.len();
+            let mut i = 0;
+            if a_len == len && b_len == len {
+                while i + 8 <= len {
+                    let va = _mm256_loadu_ps(a.as_ptr().add(i));
+                    let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+                    _mm256_storeu_ps(output.as_mut_ptr().add(i), $avx2_intrin(va, vb));
+                    i += 8;
+                }
+            }
+            for j in i..len {
+                *output.as_mut_ptr().add(j) = a[j % a_len].$method(b[j % b_len]);
+            }
         }
-    }
-    for j in i..len {
-        *output.as_mut_ptr().add(j) = a[j % a_len] / b[j % b_len];
-    }
+    };
 }
 
-/// max (elementwise maximum, not reduction)
-#[inline]
-pub fn max_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let a_len = a.len();
-    let b_len = b.len();
-    for i in 0..output.len() {
-        output[i] = a[i % a_len].max(b[i % b_len]);
-    }
-}
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-pub unsafe fn max_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let len = output.len();
-    let a_len = a.len();
-    let b_len = b.len();
-    let mut i = 0;
-    if a_len == len && b_len == len {
-        while i + 8 <= len {
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_max_ps(va, vb));
-            i += 8;
-        }
-    }
-    for j in i..len {
-        *output.as_mut_ptr().add(j) = a[j % a_len].max(b[j % b_len]);
-    }
-}
-
-/// min (elementwise minimum, not reduction)
-#[inline]
-pub fn min_f32_scalar_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let a_len = a.len();
-    let b_len = b.len();
-    for i in 0..output.len() {
-        output[i] = a[i % a_len].min(b[i % b_len]);
-    }
-}
-
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-pub unsafe fn min_f32_avx2_broadcast(a: &[f32], b: &[f32], output: &mut [f32]) {
-    let len = output.len();
-    let a_len = a.len();
-    let b_len = b.len();
-    let mut i = 0;
-    if a_len == len && b_len == len {
-        while i + 8 <= len {
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_min_ps(va, vb));
-            i += 8;
-        }
-    }
-    for j in i..len {
-        *output.as_mut_ptr().add(j) = a[j % a_len].min(b[j % b_len]);
-    }
-}
+impl_binary_arith_broadcast!(add_f32_scalar_broadcast, add_f32_avx2_broadcast, +, _mm256_add_ps);
+impl_binary_arith_broadcast!(sub_f32_scalar_broadcast, sub_f32_avx2_broadcast, -, _mm256_sub_ps);
+impl_binary_arith_broadcast!(mul_f32_scalar_broadcast, mul_f32_avx2_broadcast, *, _mm256_mul_ps);
+impl_binary_arith_broadcast!(div_f32_scalar_broadcast, div_f32_avx2_broadcast, /, _mm256_div_ps);
+impl_binary_minmax_broadcast!(max_f32_scalar_broadcast, max_f32_avx2_broadcast, max, _mm256_max_ps);
+impl_binary_minmax_broadcast!(min_f32_scalar_broadcast, min_f32_avx2_broadcast, min, _mm256_min_ps);
 
 // ============================================================
 // GEMM constants

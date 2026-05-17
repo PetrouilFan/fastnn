@@ -245,6 +245,37 @@ pub struct GraphBuilder {
     inner: Rc<RefCell<BuilderInner>>,
 }
 
+/// Macro to generate a unary activation op method.
+macro_rules! impl_unary_op {
+    ($method:ident, $opcode:ident) => {
+        pub fn $method(&self, input: &GraphTensor) -> GraphTensor {
+            let output_type = input.tensor_type.clone();
+            let mut inner = self.inner.borrow_mut();
+            let node_id = inner
+                .graph
+                .add_node(Opcode::$opcode, vec![input.node_id], output_type.clone());
+            GraphTensor::new(self.clone(), node_id, output_type)
+        }
+    };
+}
+
+/// Macro to generate a binary elementwise op method.
+macro_rules! impl_binary_op {
+    ($method:ident, $opcode:ident) => {
+        pub fn $method(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
+            let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
+            let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
+            let mut inner = self.inner.borrow_mut();
+            let node_id = inner.graph.add_node(
+                Opcode::$opcode,
+                vec![a.node_id, b.node_id],
+                output_type.clone(),
+            );
+            GraphTensor::new(self.clone(), node_id, output_type)
+        }
+    };
+}
+
 impl GraphBuilder {
     /// Create a new empty graph builder.
     pub fn new() -> Self {
@@ -313,53 +344,10 @@ impl GraphBuilder {
 
     // ── Graph construction ops ────────────────────────────────────────────
 
-    /// Element-wise addition.
-    pub fn add(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
-        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Add, vec![a.node_id, b.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Element-wise subtraction.
-    pub fn sub(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
-        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Sub, vec![a.node_id, b.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Element-wise multiplication.
-    pub fn mul(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
-        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Mul, vec![a.node_id, b.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Element-wise division.
-    pub fn div(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
-        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Div, vec![a.node_id, b.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_binary_op!(add, Add);
+    impl_binary_op!(sub, Sub);
+    impl_binary_op!(mul, Mul);
+    impl_binary_op!(div, Div);
 
     /// Matrix multiplication: `a @ b`.
     pub fn matmul(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
@@ -486,106 +474,16 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Activation: ReLU.
-    pub fn relu(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Relu, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Activation: GELU.
-    pub fn gelu(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Gelu, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Activation: SiLU (Swish).
-    pub fn silu(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Silu, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Activation: Sigmoid.
-    pub fn sigmoid(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Sigmoid, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Activation: Tanh.
-    pub fn tanh(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Tanh, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Exponential.
-    pub fn exp(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Exp, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Natural logarithm.
-    pub fn log(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Log, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Square root.
-    pub fn sqrt(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Sqrt, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Negation.
-    pub fn neg(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Neg, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Absolute value.
-    pub fn abs(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Abs, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_unary_op!(relu, Relu);
+    impl_unary_op!(gelu, Gelu);
+    impl_unary_op!(silu, Silu);
+    impl_unary_op!(sigmoid, Sigmoid);
+    impl_unary_op!(tanh, Tanh);
+    impl_unary_op!(exp, Exp);
+    impl_unary_op!(log, Log);
+    impl_unary_op!(sqrt, Sqrt);
+    impl_unary_op!(neg, Neg);
+    impl_unary_op!(abs, Abs);
 
     // =========================================================================
     // Activations added for PPO / control / RL pipelines
@@ -621,27 +519,8 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Softplus activation.
-    pub fn softplus(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Softplus, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Hardswish activation.
-    pub fn hardswish(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Hardswish, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_unary_op!(softplus, Softplus);
+    impl_unary_op!(hardswish, Hardswish);
 
     /// Clamp (clip) tensor values to [min, max].
     pub fn clamp(&self, input: &GraphTensor, min: f32, max: f32) -> GraphTensor {
@@ -659,77 +538,17 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Sign function: -1 for negative, 0 for zero, 1 for positive.
-    pub fn sign(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Sign, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Logical NOT (binary mask inversion).
-    pub fn logical_not(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::LogicalNot, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Log softmax activation.
-    pub fn log_softmax(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::LogSoftmax, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Mish activation: x * tanh(softplus(x)).
-    pub fn mish(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Mish, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_unary_op!(sign, Sign);
+    impl_unary_op!(logical_not, LogicalNot);
+    impl_unary_op!(log_softmax, LogSoftmax);
+    impl_unary_op!(mish, Mish);
 
     // =========================================================================
     // Binary element-wise ops for RL / control
     // =========================================================================
 
-    /// Element-wise maximum.
-    pub fn maximum(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
-        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Maximum,
-            vec![a.node_id, b.node_id],
-            output_type.clone(),
-        );
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Element-wise minimum.
-    pub fn minimum(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
-        let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Minimum,
-            vec![a.node_id, b.node_id],
-            output_type.clone(),
-        );
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_binary_op!(maximum, Maximum);
+    impl_binary_op!(minimum, Minimum);
 
     // =========================================================================
     // Reductions

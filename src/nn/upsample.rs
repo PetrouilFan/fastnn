@@ -50,21 +50,4 @@ impl Module for Upsample {
         result.into_iter().next().unwrap()
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
 }
