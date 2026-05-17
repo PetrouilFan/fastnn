@@ -233,7 +233,7 @@ impl Module for BatchNorm1d {
         if is_training {
             let x_shape = x.shape_ref();
             let batch_size = x_shape[0];
-            let _num_features = x_shape[1];
+            let num_features = x_shape[1];
             let spatial_size: i64 = if x_shape.len() > 2 {
                 x_shape[2..].iter().product()
             } else {
@@ -243,8 +243,10 @@ impl Module for BatchNorm1d {
             let n = (batch_size * spatial_size) as f32;
             let unbiased_var = if n > 1.0 {
                 batch_var.clone().mul_scalar(n / (n - 1.0))
-            } else {
+            } else if n > 0.0 {
                 batch_var.clone()
+            } else {
+                Tensor::zeros(vec![num_features as i64], crate::storage::DType::F32, crate::storage::Device::Cpu)
             };
 
             let mom = self.momentum as f32;
@@ -255,13 +257,13 @@ impl Module for BatchNorm1d {
             let new_mean = running_mean_lock
                 .mul_scalar(inv_mom)
                 .add(&batch_mean.mul_scalar(mom));
-            *running_mean_lock = new_mean;
+            *running_mean_lock = new_mean.detach();
 
             let mut running_var_lock = self.running_var.write();
             let new_var = running_var_lock
                 .mul_scalar(inv_mom)
                 .add(&unbiased_var.mul_scalar(mom));
-            *running_var_lock = new_var;
+            *running_var_lock = new_var.detach();
         }
 
         // Attach autograd

@@ -16,7 +16,7 @@ pub struct Embedding {
 
 impl Embedding {
     pub fn new(num_embeddings: i64, embedding_dim: i64) -> Self {
-        let scale = 0.05;
+        let scale = (1.0 / (embedding_dim as f32).sqrt()).min(0.05);
         let weight_data: Vec<f32> = (0..num_embeddings * embedding_dim)
             .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
             .collect();

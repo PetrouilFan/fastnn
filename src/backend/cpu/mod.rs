@@ -900,13 +900,21 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::ScatterNd => {
+                    let data_shape: Vec<u64> = input_shapes.first().cloned().unwrap_or_default();
+                    let indices_shape: Vec<u64> = input_shapes.get(1).cloned().unwrap_or_default();
+                    let index_depth = match indices_shape.len() {
+                        0 | 1 => 1,
+                        _ => indices_shape[indices_shape.len() - 1] as usize,
+                    };
+                    let mut params: Vec<usize> = vec![index_depth];
+                    params.extend(data_shape.iter().map(|&d| d as usize));
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "scatter_nd".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![],
+                        params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -916,11 +924,17 @@ impl Backend for CpuBackend {
                     // For a single-axis reduce this is just input_shape[axis],
                     // which is typically Known (e.g. reduce over dim 1 of [N,4]
                     // has group_size=Known(4)).
-                    let axis: usize = node
+                    let axis_i64: i64 = node
                         .attrs
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
+                    let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
+                    let axis = if axis_i64 < 0 {
+                        (rank + axis_i64).max(0)
+                    } else {
+                        axis_i64.min((rank - 1).max(0))
+                    } as usize;
                     let group_size_dim = input_shape_dims
                         .first()
                         .and_then(|s| s.get(axis).cloned())
@@ -1278,13 +1292,19 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(-1);
+                    let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
+                    let normalized = if axis < 0 {
+                        (rank + axis).max(0)
+                    } else {
+                        axis.min((rank - 1).max(0))
+                    };
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "argmax".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![axis as usize],
+                        params: vec![normalized as usize],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -1447,13 +1467,19 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(-1);
+                    let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
+                    let normalized = if axis < 0 {
+                        (rank + axis).max(0)
+                    } else {
+                        axis.min((rank - 1).max(0))
+                    };
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "topk_fused".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice,
-                        params: vec![k, axis as usize],
+                        params: vec![k, normalized as usize],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -3422,8 +3448,8 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Delegate to the tiled SIMD-friendly microkernel
-                                crate::backend::cpu::microkernels::conv2d_f32_tiled(
+                                // Delegate to the im2col + GEMM microkernel (falls back to tiled for small tensors)
+                                crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
                                     &input_data,
                                     &weight_data,
                                     &bias_data,
@@ -3958,13 +3984,18 @@ impl Backend for CpuBackend {
                             }
                         }
                         "scatter_nd" => {
-                            if let [data_slice, _indices_slice, updates_slice] = &input_slices[..] {
-                                let (data, updates) = {
+                            if let [data_slice, indices_slice, updates_slice] = &input_slices[..] {
+                                let (data, indices_f32, updates) = {
                                     let d = arena.data_mut();
                                     (
                                         bytemuck::cast_slice::<_, f32>(
                                             &d[data_slice.offset
                                                 ..data_slice.offset + data_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[indices_slice.offset
+                                                ..indices_slice.offset + indices_slice.size],
                                         )
                                         .to_vec(),
                                         bytemuck::cast_slice::<_, f32>(
@@ -3979,8 +4010,41 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 out_f32.copy_from_slice(&data);
-                                let copy_len = out_f32.len().min(updates.len());
-                                out_f32[..copy_len].copy_from_slice(&updates[..copy_len]);
+                                if let Some((&index_depth, data_dims)) = params.split_first() {
+                                    let data_rank = data_dims.len();
+                                    if index_depth > 0
+                                        && index_depth <= data_rank
+                                        && indices_f32.len() >= index_depth
+                                    {
+                                        let num_indices = indices_f32.len() / index_depth;
+                                        let inner_size: usize =
+                                            data_dims[index_depth..].iter().product();
+                                        for i in 0..num_indices {
+                                            let mut linear_offset = 0usize;
+                                            for j in 0..index_depth {
+                                                let idx = indices_f32
+                                                    [i * index_depth + j]
+                                                    as usize;
+                                                let mut stride = 1usize;
+                                                for k in (j + 1)..data_rank {
+                                                    stride *= data_dims[k];
+                                                }
+                                                linear_offset += idx * stride;
+                                            }
+                                            let update_start = i * inner_size;
+                                            let update_end = update_start + inner_size;
+                                            if linear_offset + inner_size <= out_f32.len()
+                                                && update_end <= updates.len()
+                                            {
+                                                out_f32[linear_offset
+                                                    ..linear_offset + inner_size]
+                                                    .copy_from_slice(
+                                                        &updates[update_start..update_end],
+                                                    );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         "conv1d" => {
@@ -4154,8 +4218,8 @@ impl Backend for CpuBackend {
                                 };
                                 let n = input.len() / (c * hin * win).max(1);
                                 let f = weight.len() / (c * kh * kw).max(1);
-                                let h_out = (hin - 1) * stride + kh - 2 * padding;
-                                let w_out = (win - 1) * stride + kw - 2 * padding;
+                                let h_out = ((hin - 1) * stride + kh).saturating_sub(2 * padding);
+                                let w_out = ((win - 1) * stride + kw).saturating_sub(2 * padding);
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -5714,7 +5778,7 @@ impl Backend for CpuBackend {
                                         } else if in_dim == 1 {
                                             0
                                         } else {
-                                            0
+                                            panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
                                         };
                                         in_linear += in_coord * in_stride;
                                         in_stride *= in_dim;
@@ -5746,7 +5810,7 @@ impl Backend for CpuBackend {
                                         } else if in_dim == 1 {
                                             0
                                         } else {
-                                            0
+                                            panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
                                         };
                                         in_linear += in_coord * in_stride;
                                         in_stride *= in_dim;
@@ -5784,7 +5848,13 @@ impl Backend for CpuBackend {
                             } else {
                                 1.0
                             };
-                            let n = ((limit_val - start_val) / step_val).ceil().max(0.0) as usize;
+                            let n = if step_val > 0.0 {
+                                ((limit_val - start_val) / step_val).ceil().max(0.0) as usize
+                            } else if step_val < 0.0 {
+                                ((start_val - limit_val) / (-step_val)).ceil().max(0.0) as usize
+                            } else {
+                                0
+                            };
                             let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
                                 &mut d[out_start..out_start + output_slice.size],
                             );

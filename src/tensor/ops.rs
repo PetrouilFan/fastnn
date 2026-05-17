@@ -43,6 +43,7 @@ macro_rules! impl_inplace_binary_op {
                 *self = result;
                 return self;
             }
+            self.inner.version_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let self_ptr = self.data_ptr_f32_mut();
             let other_ptr = other.data_ptr_f32();
             match dtype {
@@ -631,7 +632,7 @@ impl Tensor {
             .expect("Tensor::leaky_relu: AOT execution failed")
     }
 
-    pub fn try_softplus(&self, _beta: f32, _threshold: f32) -> Result<Tensor, BackendError> {
+    pub fn try_softplus(&self, beta: f32, threshold: f32) -> Result<Tensor, BackendError> {
         let output = exec_single(&[self], |g, ins| vec![g.softplus(&ins[0])])?;
         if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];

@@ -651,8 +651,8 @@ fn conv2d_output_shape(
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
 
-    let h_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
-    let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding)?;
+    let h_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, 1)?;
+    let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, 1)?;
 
     Ok(vec![n, f, h_out, w_out])
 }
@@ -662,10 +662,11 @@ fn spatial_output_dim(
     kernel_dim: &DimExpr,
     stride: i64,
     padding: i64,
+    dilation: i64,
 ) -> Result<DimExpr, String> {
     match (input_dim, kernel_dim) {
         (DimExpr::Known(h), DimExpr::Known(k)) => {
-            let result = (*h as i64 + 2 * padding - *k as i64) / stride + 1;
+            let result = (*h as i64 + 2 * padding - dilation * (*k as i64 - 1) - 1) / stride + 1;
             if result <= 0 {
                 return Err(format!(
                     "Conv2d: output spatial dimension is non-positive ({})",
@@ -679,7 +680,7 @@ fn spatial_output_dim(
             let k_val = kernel_dim.evaluate();
             match (h_val, k_val) {
                 (Some(h), Some(k)) => {
-                    let result = (h as i64 + 2 * padding - k as i64) / stride + 1;
+                    let result = (h as i64 + 2 * padding - dilation * (k as i64 - 1) - 1) / stride + 1;
                     if result <= 0 {
                         return Err(format!(
                             "Conv2d: output spatial dimension is non-positive ({})",
@@ -723,7 +724,7 @@ fn conv1d_output_shape(
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
-    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
+    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, 1)?;
 
     Ok(vec![n, f, w_out])
 }
@@ -757,9 +758,9 @@ fn conv3d_output_shape(
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
-    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
-    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding)?;
-    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding)?;
+    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, 1)?;
+    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, 1)?;
+    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding, 1)?;
 
     Ok(vec![n, f, d_out, h_out, w_out])
 }

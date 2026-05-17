@@ -135,6 +135,38 @@ impl TlsVecPool {
     }
 }
 
+thread_local! {
+    static CONV_COL_BUF: std::cell::RefCell<Vec<f32>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+    static CONV_WEIGHT_T_BUF: std::cell::RefCell<Vec<f32>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+    static CONV_TEMP_OUT_BUF: std::cell::RefCell<Vec<f32>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+macro_rules! get_conv_buf {
+    ($buf:expr, $size:expr) => {{
+        let size: usize = $size;
+        (*$buf).with(|b| {
+            let mut b = b.borrow_mut();
+            if b.len() < size {
+                b.resize(size, 0.0);
+            }
+            // SAFETY: thread-local data lives for the duration of the thread,
+            // so extending the lifetime to 'static is sound.
+            unsafe {
+                std::mem::transmute::<
+                    std::cell::RefMut<'_, Vec<f32>>,
+                    std::cell::RefMut<'static, Vec<f32>>,
+                >(b)
+            }
+        })
+    }};
+}
+
 // ============================================================
 // Shared SIMD utilities
 // ============================================================
@@ -2695,7 +2727,7 @@ pub fn reduce_sum_f32_scalar(input: &[f32], output: &mut [f32], group_size: usiz
         let cnt = (end - start) as f32;
         let mut sum = 0.0f32;
         for i in start..end { sum += input[i]; }
-        output[g] = if is_mean { sum / cnt } else { sum };
+        output[g] = if is_mean { if cnt > 0.0 { sum / cnt } else { 0.0 } } else { sum };
     }
 }
 
@@ -2715,7 +2747,7 @@ pub unsafe fn reduce_sum_f32_avx2(input: &[f32], output: &mut [f32], group_size:
         }
         let mut sum = hsum256_ps(acc);
         for j in i..end { sum += input[j]; }
-        output[g] = if is_mean { sum / cnt } else { sum };
+        output[g] = if is_mean { if cnt > 0.0 { sum / cnt } else { 0.0 } } else { sum };
     }
 }
 
@@ -2807,7 +2839,7 @@ pub fn norm_layernorm_f32_scalar(input: &[f32], output: &mut [f32], row_size: us
         // Pass 1: sum
         let mut sum = 0.0f32;
         for i in start..end { sum += input[i]; }
-        let mean = sum / n;
+        let mean = if n > 0.0 { sum / n } else { 0.0 };
         // Pass 2: sum of squared diffs
         let mut var = 0.0f32;
         for i in start..end { let d = input[i] - mean; var += d * d; }
@@ -2835,7 +2867,7 @@ pub unsafe fn norm_layernorm_f32_avx2(input: &[f32], output: &mut [f32], row_siz
         }
         let mut sum = hsum256_ps(vsum);
         for j in i..end { sum += input[j]; }
-        let mean = sum / n;
+        let mean = if n > 0.0 { sum / n } else { 0.0 };
         let vmean = _mm256_set1_ps(mean);
         // Pass 2: vectorized sum of (x - mean)^2
         i = start;
@@ -2873,7 +2905,8 @@ pub fn rms_norm_f32_scalar(input: &[f32], weight: &[f32], output: &mut [f32], ro
         let end = start + row_size;
         let mut sq_sum = 0.0f32;
         for i in start..end { sq_sum += input[i] * input[i]; }
-        let rms = (sq_sum / row_size as f32 + eps).sqrt();
+        let n = row_size as f32;
+        let rms = if n > 0.0 { (sq_sum / n + eps).sqrt() } else { 1.0 };
         for i in start..end {
             let w = if i - start < weight.len() { weight[i - start] } else { 1.0 };
             output[i] = input[i] / rms * w;
@@ -2898,7 +2931,8 @@ pub unsafe fn rms_norm_f32_avx2(input: &[f32], weight: &[f32], output: &mut [f32
         }
         let mut sq_sum = hsum256_ps(vsq);
         for j in i..end { sq_sum += input[j] * input[j]; }
-        let rms = (sq_sum / row_size as f32 + eps).sqrt();
+        let n = row_size as f32;
+        let rms = if n > 0.0 { (sq_sum / n + eps).sqrt() } else { 1.0 };
         let inv_rms = _mm256_set1_ps(1.0 / rms);
         // Vectorized writeback with weight
         i = start;
@@ -3508,6 +3542,161 @@ pub unsafe fn muon_update_f32_avx2(
         w_new[j] = w[j] - lr * (m_new[j] + wd * w[j]);
     }
     (w_new, m_new)
+}
+
+// ============================================================
+// im2col + GEMM based conv2d
+// ============================================================
+
+/// Optimized conv2d using im2col transformation + sgemm.
+/// Fast path for 1x1 convolutions (no im2col needed).
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d_f32_im2col_gemm(
+    input: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    output: &mut [f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    f: usize,
+    kh: usize,
+    kw: usize,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+    groups: usize,
+) {
+    let c_per_group = c / groups.max(1);
+    let f_per_group = f / groups.max(1);
+    let h_out = (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1) / stride + 1;
+    let w_out = (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1) / stride + 1;
+
+    // Small tensor fallback to avoid im2col overhead
+    if h_out * w_out * f < 64 {
+        conv2d_f32_tiled(
+            input, weight, bias, output, n, c, h, w, f, kh, kw, stride, padding, dilation, groups,
+        );
+        return;
+    }
+
+    // Fast path for 1x1 convolutions (no im2col needed)
+    if kh == 1 && kw == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1 {
+        let num_pixels = n * h * w;
+
+        // Transpose weights: [F, C] -> [C, F]
+        let mut weight_t = get_conv_buf!(&CONV_WEIGHT_T_BUF, c * f);
+        for ff in 0..f {
+            for cc in 0..c {
+                weight_t[cc * f + ff] = weight[ff * c + cc];
+            }
+        }
+
+        // GEMM: input_reshaped [num_pixels, c] x weight_t [c, f] = temp_out [num_pixels, f]
+        let mut temp_out = get_conv_buf!(&CONV_TEMP_OUT_BUF, num_pixels * f);
+        unsafe {
+            matrixmultiply::sgemm(
+                num_pixels,
+                c,
+                f,
+                1.0,
+                input.as_ptr(),
+                c as isize,
+                1isize,
+                weight_t.as_ptr(),
+                f as isize,
+                1isize,
+                0.0,
+                temp_out.as_mut_ptr(),
+                f as isize,
+                1isize,
+            );
+        }
+
+        // Add bias and write output
+        for pixel in 0..num_pixels {
+            let nn = pixel / (h * w);
+            let spatial = pixel % (h * w);
+            for ff in 0..f {
+                let mut val = temp_out[pixel * f + ff];
+                if !bias.is_empty() {
+                    val += bias[ff];
+                }
+                output[nn * (f * h * w) + ff * (h * w) + spatial] = val;
+            }
+        }
+        return;
+    }
+
+    // General case: im2col + GEMM
+    for g in 0..groups {
+        let f_start = g * f_per_group;
+        let input_group_off = g * c_per_group * (h * w);
+
+        let col_w = c_per_group * kh * kw;
+        let num_pixels = n * h_out * w_out;
+        let mut col_matrix = get_conv_buf!(&CONV_COL_BUF, num_pixels * col_w);
+
+        for nn in 0..n {
+            let col_start = nn * (h_out * w_out) * col_w;
+            unsafe {
+                crate::backend::cpu::im2col::im2col_kernel_rect(
+                    &input[nn * (c * h * w) + input_group_off..],
+                    c_per_group,
+                    h,
+                    w,
+                    kh,
+                    kw,
+                    stride,
+                    padding,
+                    dilation,
+                    &mut col_matrix[col_start..],
+                );
+            }
+        }
+
+        let weight_off = f_start * c_per_group * kh * kw;
+        let mut weight_transposed = get_conv_buf!(&CONV_WEIGHT_T_BUF, col_w * f_per_group);
+        for ff in 0..f_per_group {
+            for cc in 0..col_w {
+                weight_transposed[cc * f_per_group + ff] = weight[weight_off + ff * col_w + cc];
+            }
+        }
+
+        let mut temp_out = get_conv_buf!(&CONV_TEMP_OUT_BUF, num_pixels * f_per_group);
+        unsafe {
+            matrixmultiply::sgemm(
+                num_pixels,
+                col_w,
+                f_per_group,
+                1.0,
+                col_matrix.as_ptr(),
+                col_w as isize,
+                1isize,
+                weight_transposed.as_ptr(),
+                f_per_group as isize,
+                1isize,
+                0.0,
+                temp_out.as_mut_ptr(),
+                f_per_group as isize,
+                1isize,
+            );
+        }
+
+        let spatial_size = h_out * w_out;
+        for pixel in 0..num_pixels {
+            let nn = pixel / spatial_size;
+            let spatial = pixel % spatial_size;
+            for ff in 0..f_per_group {
+                let mut val = temp_out[pixel * f_per_group + ff];
+                if !bias.is_empty() {
+                    val += bias[f_start + ff];
+                }
+                output[nn * (f * spatial_size) + (f_start + ff) * spatial_size + spatial] = val;
+            }
+        }
+    }
 }
 
 // ============================================================
