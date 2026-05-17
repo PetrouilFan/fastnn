@@ -65,7 +65,7 @@ impl Module for LayerNorm {
             meta.grad_fn = Some(crate::autograd::make_node_info("LayerNormBackward", inputs));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
             output
         } else {
             output
@@ -286,7 +286,7 @@ impl Module for BatchNorm1d {
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(autograd::make_node_info("BatchNorm1dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
@@ -366,7 +366,7 @@ impl Module for RMSNorm {
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(autograd::make_node_info("RMSNormBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
@@ -382,9 +382,8 @@ impl Module for RMSNorm {
 
     fn zero_grad(&self) {
         if let Some(meta) = &self.weight.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = None;
-            }
+            let mut lock = meta.lock();
+            lock.grad = None;
         }
     }
 
@@ -519,7 +518,7 @@ impl Module for GroupNorm {
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(autograd::make_node_info("GroupNormBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
@@ -539,9 +538,8 @@ impl Module for GroupNorm {
     fn zero_grad(&self) {
         for t in [&self.weight, &self.bias] {
             if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
+                let mut lock = meta.lock();
+                lock.grad = None;
             }
         }
     }
@@ -697,7 +695,7 @@ impl Module for BatchNorm2d {
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(autograd::make_node_info("BatchNorm2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output

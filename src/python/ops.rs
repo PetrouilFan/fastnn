@@ -6,7 +6,7 @@ fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, _backward_fn: impl Fn
         meta.grad_fn = Some(crate::autograd::make_node_info("LossBackward", inputs));
         let mut output = output;
         Arc::make_mut(&mut output.inner).autograd_meta =
-            Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+            Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
         PyTensor::from_tensor(output)
     } else {
         PyTensor::from_tensor(output)
@@ -388,7 +388,7 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
         meta.grad_fn = Some(autograd::make_node_info("CheckpointBackward", inputs_inner));
         let mut out = output_inner.clone();
         Arc::make_mut(&mut out.inner).autograd_meta =
-            Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+            Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
         let mut result = vec![PyTensor::from_tensor(out)];
         for i in 1..num_inputs {
             result.push(inputs[i].clone());

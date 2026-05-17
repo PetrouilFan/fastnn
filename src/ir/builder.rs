@@ -2398,6 +2398,19 @@ impl GraphBuilder {
     pub fn to_graph(&self) -> ComputeGraph {
         self.inner.borrow().graph.clone()
     }
+
+    /// Return the recorded input node IDs in registration order.
+    pub fn recorded_input_ids(&self) -> Vec<NodeId> {
+        self.inner.borrow().recorded_inputs.clone()
+    }
+
+    /// Replace the inner state with a pre-built graph and its recorded input IDs.
+    /// Used by the autograd backward cache to skip forward replay on repeated calls.
+    pub fn replace_graph(&self, graph: ComputeGraph, recorded_inputs: Vec<NodeId>) {
+        let mut inner = self.inner.borrow_mut();
+        inner.graph = graph;
+        inner.recorded_inputs = recorded_inputs;
+    }
 }
 
 // =============================================================================

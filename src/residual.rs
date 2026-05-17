@@ -117,17 +117,15 @@ impl Module for ResidualBlock {
             .chain(self.bn2.parameters().iter())
         {
             if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
+                let mut lock = meta.lock();
+                lock.grad = None;
             }
         }
         if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
             for t in ds_conv.parameters().iter().chain(ds_bn.parameters().iter()) {
                 if let Some(meta) = &t.inner.autograd_meta {
-                    if let Ok(mut lock) = meta.lock() {
+                    let mut lock = meta.lock();
                         lock.grad = None;
-                    }
                 }
             }
         }

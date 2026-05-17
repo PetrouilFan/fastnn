@@ -31,7 +31,7 @@ pub struct TensorImpl {
     pub dtype: DType,
     pub device: Device,
     pub version_counter: Arc<AtomicU64>,
-    pub autograd_meta: Option<Arc<std::sync::Mutex<AutogradMeta>>>,
+    pub autograd_meta: Option<Arc<parking_lot::Mutex<AutogradMeta>>>,
     pub requires_grad: bool,
 }
 
@@ -152,63 +152,59 @@ impl TensorImpl {
     /// cached `requires_grad` field consistent.
     pub fn set_autograd_meta(&mut self, meta: AutogradMeta) {
         let rg = meta.requires_grad;
-        self.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+        self.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(meta)));
         self.requires_grad = rg;
     }
 
     pub fn set_requires_grad(&mut self, requires_grad: bool) {
         self.requires_grad = requires_grad;
         if self.autograd_meta.is_none() {
-            self.autograd_meta = Some(Arc::new(std::sync::Mutex::new(AutogradMeta::new(
+            self.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(AutogradMeta::new(
                 requires_grad,
             ))));
         } else if let Some(meta) = &mut self.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.requires_grad = requires_grad;
-            }
+            let mut lock = meta.lock();
+            lock.requires_grad = requires_grad;
         }
     }
 
     pub fn requires_grad_(mut self, requires_grad: bool) -> Tensor {
         self.requires_grad = requires_grad;
         if let Some(meta) = &mut self.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.requires_grad = requires_grad;
-            }
+            let mut lock = meta.lock();
+            lock.requires_grad = requires_grad;
         }
         self.into()
     }
 
     pub fn grad(&self) -> Option<Tensor> {
-        self.autograd_meta.as_ref()?.lock().ok()?.grad.clone()
+        self.autograd_meta.as_ref()?.lock().grad.clone()
     }
 
     pub fn set_grad(&mut self, grad: Option<Tensor>) {
         if let Some(meta) = &mut self.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = grad;
-            }
+            let mut lock = meta.lock();
+            lock.grad = grad;
         }
     }
 
     pub fn set_grad_for_tensor(tensor: &Tensor, grad: Option<Tensor>) {
         if let Some(meta) = &tensor.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = grad;
-            }
+            let mut lock = meta.lock();
+            lock.grad = grad;
         }
     }
 
     pub fn is_leaf(&self) -> bool {
         self.autograd_meta
             .as_ref()
-            .and_then(|m| m.lock().ok())
+            .map(|m| m.lock())
             .map(|m| m.is_leaf)
             .unwrap_or(true)
     }
 
     pub fn grad_fn(&self) -> Option<Arc<autograd::NodeInfo>> {
-        self.autograd_meta.as_ref()?.lock().ok()?.grad_fn.clone()
+        self.autograd_meta.as_ref()?.lock().grad_fn.clone()
     }
 
     pub fn detach(&self) -> Tensor {
@@ -419,7 +415,7 @@ impl Tensor {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
         let inner = Arc::make_mut(&mut output.inner);
-        inner.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+        inner.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(meta)));
         inner.requires_grad = true;
         output
     }
@@ -440,9 +436,8 @@ impl Tensor {
 
     pub fn set_grad(&self, grad: Option<Tensor>) {
         if let Some(meta) = &self.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = grad;
-            }
+            let mut lock = meta.lock();
+            lock.grad = grad;
         }
     }
 

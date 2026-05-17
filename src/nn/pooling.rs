@@ -58,7 +58,7 @@ impl Module for MaxPool2d {
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(crate::autograd::make_node_info("MaxPool2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
@@ -252,7 +252,7 @@ impl Module for AvgPool2d {
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(crate::autograd::make_node_info("AvgPool2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output

@@ -63,7 +63,7 @@ impl Module for Dropout {
                 let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
                 meta.grad_fn = Some(crate::autograd::make_node_info("DropoutBackward", inputs));
                 std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
-                    Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+                    Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
             }
             out
         } else {
@@ -130,7 +130,7 @@ impl Module for Dropout2d {
                 let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
                 meta.grad_fn = Some(crate::autograd::make_node_info("Dropout2dBackward", inputs));
                 std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
-                    Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+                    Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
             }
             out
         } else {
