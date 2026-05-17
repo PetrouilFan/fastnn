@@ -148,11 +148,12 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
             let shape = &input_node.output_type.shape;
             let dims: Vec<u64> = shape.iter().filter_map(|d| d.evaluate()).collect();
             if dims.len() == shape.len() && !dims.is_empty() {
-                let bytes: Vec<u8> = dims.iter().flat_map(|&d| (d as i64).to_le_bytes()).collect();
                 let rank = dims.len();
+                let shape_data: Vec<f32> = dims.iter().map(|&s| s as f32).collect();
+                let bytes: Vec<u8> = bytemuck::cast_slice(&shape_data).to_vec();
                 Some(TensorValue::Data {
                     bytes,
-                    tensor_type: TensorType::new(vec![DimExpr::Known(rank as u64)], IrDType::I64),
+                    tensor_type: TensorType::new(vec![DimExpr::Known(rank as u64)], IrDType::F32),
                 })
             } else {
                 None
@@ -238,21 +239,26 @@ fn binary_f32_data_op(inputs: &[TensorValue], op: impl Fn(f32, f32) -> f32) -> O
         ) => {
             if a_ty.dtype == IrDType::F32
                 && b_ty.dtype == IrDType::F32
-                && a_bytes.len() == b_bytes.len()
                 && a_bytes.len() >= 4
                 && a_bytes.len() % 4 == 0
+                && b_bytes.len() >= 4
+                && b_bytes.len() % 4 == 0
             {
-                let transformed: Vec<u8> = a_bytes
-                    .chunks_exact(4)
-                    .zip(b_bytes.chunks_exact(4))
-                    .flat_map(|(a_chunk, b_chunk)| {
-                        let a = f32::from_le_bytes(a_chunk.try_into().unwrap());
-                        let b = f32::from_le_bytes(b_chunk.try_into().unwrap());
-                        op(a, b).to_le_bytes()
+                let a_f32: &[f32] = bytemuck::cast_slice(a_bytes);
+                let b_f32: &[f32] = bytemuck::cast_slice(b_bytes);
+                let len = a_f32.len().max(b_f32.len());
+                if a_f32.len() != b_f32.len() && a_f32.len() != 1 && b_f32.len() != 1 {
+                    return None;
+                }
+                let result: Vec<f32> = (0..len)
+                    .map(|i| {
+                        let a = if a_f32.len() == 1 { a_f32[0] } else { a_f32[i] };
+                        let b = if b_f32.len() == 1 { b_f32[0] } else { b_f32[i] };
+                        op(a, b)
                     })
                     .collect();
                 Some(TensorValue::Data {
-                    bytes: transformed,
+                    bytes: bytemuck::cast_slice(&result).to_vec(),
                     tensor_type: a_ty.clone(),
                 })
             } else {

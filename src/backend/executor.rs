@@ -608,12 +608,25 @@ pub fn tighten_slices(
                         }
                     }
                     // ── Update input slices from the graph ──
+                    // IMPORTANT: Must use the same filter_map logic as compilation
+                    // (cpu/mod.rs line 196-205) which skips inputs without memory
+                    // slots.  Using enumerate() with node.inputs directly causes
+                    // index misalignment when some inputs lack slots — e.g. if
+                    // input A has no slot but B and C do, input_slices = [B, C].
+                    // enumerate() would map input_slices[0]→A (skipped) and
+                    // input_slices[1]→B, so C never gets updated and B's offset
+                    // is written to C's slice, causing buffer aliasing.
                     if let Some(node) = graph.get_node(*nid) {
-                        for (i, slice) in input_slices.iter_mut().enumerate() {
-                            if let Some(&input_nid) = node.inputs.get(i) {
-                                if let Some(slot) = tightened_memory_plan.slots.get(&input_nid) {
-                                    slice.offset = slot.offset;
-                                    slice.size = slot.size;
+                        let mut slice_iter = input_slices.iter_mut();
+                        for &input_nid in &node.inputs {
+                            if tightened_memory_plan.slots.contains_key(&input_nid) {
+                                if let Some(slice) = slice_iter.next() {
+                                    if let Some(slot) =
+                                        tightened_memory_plan.slots.get(&input_nid)
+                                    {
+                                        slice.offset = slot.offset;
+                                        slice.size = slot.size;
+                                    }
                                 }
                             }
                         }

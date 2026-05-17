@@ -673,7 +673,7 @@ impl_nn_module!(Upsample {
     #[new]
     fn new(scale_factor: f64, mode: String) -> Self {
         Upsample {
-            inner: core_nn::upsample::Upsample::new(scale_factor, mode),
+            inner: core_nn::upsample::Upsample::new(scale_factor as f32, mode),
         }
     }
 });

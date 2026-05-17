@@ -64,23 +64,6 @@ pub fn inject_optimizer(
 
         match config {
             OptimizerConfig::SGD { lr, weight_decay } => {
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*lr)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*weight_decay)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-
                 let mut attrs = HashMap::new();
                 attrs.insert("lr".to_string(), lr.to_string());
                 attrs.insert("weight_decay".to_string(), weight_decay.to_string());
@@ -125,47 +108,6 @@ pub fn inject_optimizer(
                     node.name = format!("optimizer/v_{}", param_name);
                 }
 
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*lr)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*beta1)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*beta2)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*eps)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*weight_decay)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-
                 let mut attrs = HashMap::new();
                 attrs.insert("lr".to_string(), lr.to_string());
                 attrs.insert("beta1".to_string(), beta1.to_string());
@@ -200,31 +142,6 @@ pub fn inject_optimizer(
                     node.name = format!("optimizer/m_{}", param_name);
                 }
 
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*lr)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*beta1)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*weight_decay)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-
                 let mut attrs = HashMap::new();
                 attrs.insert("lr".to_string(), lr.to_string());
                 attrs.insert("beta1".to_string(), beta1.to_string());
@@ -252,31 +169,6 @@ pub fn inject_optimizer(
                     node.name = format!("optimizer/m_{}", param_name);
                 }
 
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*lr)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*beta1)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*beta2)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-
                 let mut attrs = HashMap::new();
                 attrs.insert("lr".to_string(), lr.to_string());
                 attrs.insert("beta1".to_string(), beta1.to_string());
@@ -303,31 +195,6 @@ pub fn inject_optimizer(
                 if let Some(node) = graph.get_node_mut(v_id) {
                     node.name = format!("optimizer/v_{}", param_name);
                 }
-
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*lr)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*beta)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
-                graph.add_node(
-                    Opcode::Constant(TensorValue::Float(*eps)),
-                    vec![],
-                    TensorType {
-                        shape: vec![DimExpr::Known(1)],
-                        dtype: IrDType::F32,
-                    },
-                );
 
                 let mut attrs = HashMap::new();
                 attrs.insert("lr".to_string(), lr.to_string());

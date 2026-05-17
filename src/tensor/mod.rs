@@ -42,7 +42,9 @@ pub struct TensorImpl {
 impl TensorImpl {
     pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>, dtype: DType) -> Self {
         let device = storage.device(); // Get device from storage
-        let numel: i64 = sizes.iter().product();
+        let numel: i128 = sizes.iter().map(|&s| s as i128).product();
+        if numel > i64::MAX as i128 { panic!("Tensor too large"); }
+        let numel = numel as i64;
         let nbytes = (numel * dtype.size() as i64) as usize;
         // Validate storage is large enough for the declared shape.
         // This catches mismatches between shape inference and actual data size.
@@ -81,7 +83,9 @@ impl TensorImpl {
         device: Device,
         dtype: DType,
     ) -> Self {
-        let numel: i64 = sizes.iter().product();
+        let numel: i128 = sizes.iter().map(|&s| s as i128).product();
+        if numel > i64::MAX as i128 { panic!("Tensor too large"); }
+        let numel = numel as i64;
         let _nbytes = (numel * dtype.size() as i64) as usize;
 
         let strides = compute_strides(&sizes);
@@ -114,13 +118,18 @@ impl TensorImpl {
         ptr as usize
     }
 
-    /// Create a view sharing storage, version_counter, and autograd_meta from self.
+    /// Create a view sharing storage and version_counter from self.
+    /// Creates a fresh autograd_meta for the view to prevent the view from modifying the source's grad_fn.
     pub(crate) fn new_view_from(
         &self,
         sizes: SmallVec<[i64; 8]>,
         strides: SmallVec<[i64; 8]>,
         storage_offset: i64,
     ) -> Self {
+        let autograd_meta = self.autograd_meta.as_ref().map(|meta| {
+            let lock = meta.lock();
+            Arc::new(parking_lot::Mutex::new(AutogradMeta::new(lock.requires_grad)))
+        });
         Self {
             storage: Arc::clone(&self.storage),
             sizes,
@@ -129,7 +138,7 @@ impl TensorImpl {
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: self.autograd_meta.clone(),
+            autograd_meta,
             requires_grad: self.requires_grad,
             contiguous_cache: AtomicI8::new(-1), // strides may be non-contiguous
         }
@@ -554,12 +563,12 @@ impl Tensor {
                             // Increment indices and update linear_idx incrementally
                             for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                linear_idx += strides[dim];
+                                linear_idx = linear_idx.saturating_add(strides[dim]);
                                 if indices[dim] < sizes[dim] {
                                     break;
                                 }
                                 // Wrap: subtract size * stride, reset to 0
-                                linear_idx -= sizes[dim] * strides[dim];
+                                linear_idx = linear_idx.saturating_sub(sizes[dim] * strides[dim]);
                                 indices[dim] = 0;
                             }
                         }
@@ -581,11 +590,11 @@ impl Tensor {
                             }
                             for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                linear_idx += strides[dim];
+                                linear_idx = linear_idx.saturating_add(strides[dim]);
                                 if indices[dim] < sizes[dim] {
                                     break;
                                 }
-                                linear_idx -= sizes[dim] * strides[dim];
+                                linear_idx = linear_idx.saturating_sub(sizes[dim] * strides[dim]);
                                 indices[dim] = 0;
                             }
                         }
@@ -607,11 +616,11 @@ impl Tensor {
                             }
                             for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                linear_idx += strides[dim];
+                                linear_idx = linear_idx.saturating_add(strides[dim]);
                                 if indices[dim] < sizes[dim] {
                                     break;
                                 }
-                                linear_idx -= sizes[dim] * strides[dim];
+                                linear_idx = linear_idx.saturating_sub(sizes[dim] * strides[dim]);
                                 indices[dim] = 0;
                             }
                         }
@@ -1068,7 +1077,7 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
         }
     }
     total_norm = total_norm.sqrt();
-    let clip_coef = max_norm / (total_norm + 1e-6);
+    let clip_coef = max_norm / (total_norm.max(1e-6));
     if clip_coef < 1.0 {
         for t in tensors {
             if let Some(mut g) = t.grad() {

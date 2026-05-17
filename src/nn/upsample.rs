@@ -5,15 +5,21 @@ use crate::tensor::Tensor;
 pub struct Upsample {
     pub scale_h: usize,
     pub scale_w: usize,
+    pub scale_factor: f32,
     pub mode: String,
 }
 
 impl Upsample {
-    pub fn new(scale_factor: f64, mode: String) -> Self {
+    pub fn new(scale_factor: f32, mode: String) -> Self {
+        assert!(
+            scale_factor.fract() == 0.0,
+            "Upsample: non-integer scale factors not yet supported"
+        );
         let s = scale_factor as usize;
         Upsample {
             scale_h: s,
             scale_w: s,
+            scale_factor,
             mode,
         }
     }
@@ -22,6 +28,7 @@ impl Upsample {
         Upsample {
             scale_h,
             scale_w,
+            scale_factor: scale_h as f32,
             mode,
         }
     }

@@ -141,7 +141,9 @@ impl Module for PReLU {
         vec![("weight".to_string(), self.weight.clone())]
     }
 
-    fn zero_grad(&self) {}
+    fn zero_grad(&self) {
+        crate::nn::clear_grad(&self.weight);
+    }
 
     fn train_mode(&self) {}
 

@@ -92,6 +92,12 @@ impl Module for Conv2d {
     fn forward(&self, x: &Tensor) -> Tensor {
         let (input, _pad_scalar) = if self.padding_mode == "same" {
             let x_shape = x.shape_ref();
+            if x_shape.len() < 4 {
+                panic!(
+                    "Conv2d with padding='same' expects input with at least 4 dimensions, got {}",
+                    x_shape.len()
+                );
+            }
             let h_in = x_shape[2];
             let w_in = x_shape[3];
             let h_out = ((h_in as f64) / self.stride as f64).ceil() as i64;

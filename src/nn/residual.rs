@@ -66,7 +66,7 @@ impl Module for ResidualBlock {
         let out = self.conv2.forward(&out);
         let out = self.bn2.forward(&out);
 
-        out.add(&identity).relu()
+        out.add(&identity)
     }
 
     fn parameters(&self) -> Vec<Tensor> {

@@ -2,7 +2,7 @@
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -731,7 +731,7 @@ pub struct ComputeGraph {
     pub nodes: Vec<IRNode>,
     pub inputs: Vec<NodeId>,
     pub outputs: Vec<NodeId>,
-    pub required_nodes: Vec<NodeId>,
+    pub required_nodes: HashSet<NodeId>,
     pub next_id: NodeId,
     #[serde(skip)]
     node_index: FxHashMap<NodeId, usize>,
@@ -772,7 +772,7 @@ impl ComputeGraph {
             nodes: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
-            required_nodes: Vec::new(),
+            required_nodes: HashSet::new(),
             next_id: 1,
             node_index: FxHashMap::default(),
             consumers_map: Mutex::new(FxHashMap::default()),
@@ -932,9 +932,7 @@ impl ComputeGraph {
     }
 
     pub fn add_required_node(&mut self, node_id: NodeId) {
-        if !self.required_nodes.contains(&node_id) {
-            self.required_nodes.push(node_id);
-        }
+        self.required_nodes.insert(node_id);
     }
 
     pub fn topological_sort(&self) -> Vec<NodeId> {
@@ -970,25 +968,25 @@ impl ComputeGraph {
             }
         }
 
-        let mut queue: Vec<NodeId> = {
+        let mut queue: VecDeque<NodeId> = {
             let mut zero_deg: Vec<NodeId> = in_degree
                 .iter()
                 .filter(|(_, &deg)| deg == 0)
                 .map(|(&id, _)| id)
                 .collect();
             zero_deg.sort(); // deterministic order for zero-degree nodes
-            zero_deg
+            VecDeque::from(zero_deg)
         };
 
         let mut sorted = Vec::with_capacity(self.nodes.len());
-        while let Some(node_id) = queue.pop() {
+        while let Some(node_id) = queue.pop_front() {
             sorted.push(node_id);
             if let Some(children) = adjacency.get(&node_id) {
                 for &child_id in children {
                     if let Some(deg) = in_degree.get_mut(&child_id) {
                         *deg -= 1;
                         if *deg == 0 {
-                            queue.push(child_id);
+                            queue.push_back(child_id);
                         }
                     }
                 }
