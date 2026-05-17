@@ -72,16 +72,6 @@ impl Module for Dropout {
         }
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
     impl_training_state!(self, self.training);
 }
 
@@ -139,16 +129,6 @@ impl Module for Dropout2d {
             x.clone()
         }
     }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
 
     impl_training_state!(self, self.training);
 }
