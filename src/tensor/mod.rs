@@ -1071,11 +1071,11 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
     let clip_coef = max_norm / (total_norm + 1e-6);
     if clip_coef < 1.0 {
         for t in tensors {
-            if let Some(g) = t.grad() {
-                let g_data = g.as_f32_slice();
-                let clipped: Vec<f32> = g_data.iter().map(|x| x * clip_coef).collect();
-                let clipped_tensor = Tensor::from_vec(clipped, g.shape());
-                t.set_grad(Some(clipped_tensor));
+            if let Some(mut g) = t.grad() {
+                for x in g.as_f32_slice_mut().iter_mut() {
+                    *x *= clip_coef;
+                }
+                t.set_grad(Some(g));
             }
         }
     }
@@ -1084,14 +1084,11 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
 
 pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
     for t in tensors {
-        if let Some(g) = t.grad() {
-            let g_data = g.as_f32_slice();
-            let clipped: Vec<f32> = g_data
-                .iter()
-                .map(|x| x.max(-clip_value).min(clip_value))
-                .collect();
-            let clipped_tensor = Tensor::from_vec(clipped, g.shape());
-            t.set_grad(Some(clipped_tensor));
+        if let Some(mut g) = t.grad() {
+            for x in g.as_f32_slice_mut().iter_mut() {
+                *x = x.max(-clip_value).min(clip_value);
+            }
+            t.set_grad(Some(g));
         }
     }
 }

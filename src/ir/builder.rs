@@ -1259,11 +1259,16 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Returns the shape of the input tensor as a 1D I64 tensor.
+    /// Returns the shape of the input tensor as a 1D F32 tensor.
+    ///
+    /// The arena stores all tensor data as f32 (4 bytes/element), so Shape
+    /// must produce F32 output for downstream ops (Gather, Cast, Concat, etc.)
+    /// to read correct values.  ONNX specifies I64 output, but the runtime
+    /// is F32-only — any Cast from Shape to I64 will widen via the cast kernel.
     pub fn shape_op(&self, input: &GraphTensor) -> GraphTensor {
         let input_rank = input.shape().len();
         let output_shape = vec![DimExpr::Known(input_rank as u64)];
-        let output_type = TensorType::new(output_shape, IrDType::I64);
+        let output_type = TensorType::new(output_shape, IrDType::F32);
         let mut inner = self.inner.borrow_mut();
         let node_id = inner
             .graph

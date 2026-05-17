@@ -1691,15 +1691,18 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Shape => {
-                    // Write the shape of the input tensor as I64 values.
+                    // Write the shape of the input tensor as F32 values.
+                    // The arena stores all data as f32 (4 bytes/element), so we
+                    // write f32-le bytes.  Downstream ops (Gather, Concat, etc.)
+                    // read from the arena as f32 slices and get correct values.
                     // Resolve input shape at compile time (known dims directly,
                     // symbolic dims use SYMBOL_DIM_MAX — they'll be resolved
                     // at dispatch by param_dims).
                     use std::io::Write;
                     let in_shape = input_shapes.first().cloned().unwrap_or_default();
-                    let mut shape_bytes = Vec::with_capacity(in_shape.len() * 8);
+                    let mut shape_bytes = Vec::with_capacity(in_shape.len() * 4);
                     for &d in &in_shape {
-                        shape_bytes.write_all(&(d as i64).to_le_bytes()).unwrap();
+                        shape_bytes.write_all(&(d as f32).to_le_bytes()).unwrap();
                     }
                     instructions.push(Instruction::WriteConst {
                         dst: output_slice,
@@ -3682,19 +3685,116 @@ impl Backend for CpuBackend {
                                     (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                 let w_out =
                                     (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
-                                let mut indices_out: Option<&mut [i64]> = if is_max == 1 {
-                                    secondary_output_slice.as_ref().map(|sec_slice| {
-                                        let d = arena.data_mut();
-                                        bytemuck::cast_slice_mut::<_, i64>(
-                                            &mut d[sec_slice.offset
-                                                ..sec_slice.offset + sec_slice.size],
-                                        )
-                                    })
-                                } else {
-                                    None
-                                };
-                                for nn in 0..n {
-                                    for cc in 0..c {
+                                let hw_out = h_out * w_out;
+                                // ── Sequential path ──────────────────────
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    let mut indices_out: Option<&mut [i64]> = if is_max == 1 {
+                                        secondary_output_slice.as_ref().map(|sec_slice| {
+                                            let d = arena.data_mut();
+                                            bytemuck::cast_slice_mut::<_, i64>(
+                                                &mut d[sec_slice.offset
+                                                    ..sec_slice.offset + sec_slice.size],
+                                            )
+                                        })
+                                    } else {
+                                        None
+                                    };
+                                    for nn in 0..n {
+                                        for cc in 0..c {
+                                            for hh in 0..h_out {
+                                                for ww in 0..w_out {
+                                                    let mut val = if is_max == 1 {
+                                                        f32::NEG_INFINITY
+                                                    } else {
+                                                        0.0f32
+                                                    };
+                                                    let mut best_kh = 0usize;
+                                                    let mut best_kw = 0usize;
+                                                    let mut count = 0usize;
+                                                    for kh in 0..kernel {
+                                                        for kw in 0..kernel {
+                                                            let h_in = hh * stride_val + kh;
+                                                            let w_in = ww * stride_val + kw;
+                                                            if h_in >= padding_val
+                                                                && w_in >= padding_val
+                                                            {
+                                                                let h_in_s = h_in - padding_val;
+                                                                let w_in_s = w_in - padding_val;
+                                                                if h_in_s < h && w_in_s < w {
+                                                                    let idx = nn * (c * h * w)
+                                                                        + cc * (h * w)
+                                                                        + h_in_s * w
+                                                                        + w_in_s;
+                                                                    if idx < input.len() {
+                                                                        if is_max == 1 {
+                                                                            if input[idx] > val {
+                                                                                val = input[idx];
+                                                                                best_kh = kh;
+                                                                                best_kw = kw;
+                                                                            }
+                                                                        } else {
+                                                                            val += input[idx];
+                                                                        }
+                                                                        count += 1;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if is_max == 0 && count > 0 {
+                                                        val /= count as f32;
+                                                    }
+                                                    let out_idx = nn * (c * hw_out)
+                                                        + cc * hw_out
+                                                        + hh * w_out
+                                                        + ww;
+                                                    if out_idx < out_f32.len() {
+                                                        out_f32[out_idx] = val;
+                                                    }
+                                                    // Debug: log first MaxPool write value
+                                                    #[cfg(debug_assertions)]
+                                                    if nn == 0 && cc == 0 && hh == 0 && ww == 0 {
+                                                        eprintln!("[FNN_DBG_POOL] MaxPool out_start={} wrote={}",
+                                                            out_start, val);
+                                                    }
+                                                    // Write argmax index if this is max pooling
+                                                    if let Some(ref mut idx_out) = indices_out {
+                                                        if out_idx < idx_out.len() {
+                                                            idx_out[out_idx] =
+                                                                (best_kh * kernel + best_kw) as i64;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // ── Parallel path (rayon) ────────────────
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    let nc = n * c;
+                                    let out_ptr_usize = out_f32.as_mut_ptr() as usize;
+                                    let (idx_ptr_usize, has_indices) = if is_max == 1 {
+                                        if let Some(sec_slice) = secondary_output_slice {
+                                            let d = arena.data_mut();
+                                            let idx_end = sec_slice.offset + sec_slice.size;
+                                            let idx_slice = bytemuck::cast_slice_mut::<_, i64>(
+                                                &mut d[sec_slice.offset..idx_end],
+                                            );
+                                            (idx_slice.as_mut_ptr() as usize, true)
+                                        } else {
+                                            (0usize, false)
+                                        }
+                                    } else {
+                                        (0usize, false)
+                                    };
+                                    (0..nc).into_par_iter().for_each(|nc_idx| {
+                                        let out_ptr = out_ptr_usize as *mut f32;
+                                        let idx_ptr = idx_ptr_usize as *mut i64;
+                                        let nn = nc_idx / c;
+                                        let cc = nc_idx % c;
                                         for hh in 0..h_out {
                                             for ww in 0..w_out {
                                                 let mut val = if is_max == 1 {
@@ -3738,29 +3838,17 @@ impl Backend for CpuBackend {
                                                 if is_max == 0 && count > 0 {
                                                     val /= count as f32;
                                                 }
-                                                let out_idx = nn * (c * h_out * w_out)
-                                                    + cc * (h_out * w_out)
-                                                    + hh * w_out
-                                                    + ww;
-                                                if out_idx < out_f32.len() {
-                                                    out_f32[out_idx] = val;
-                                                }
-                                                // Debug: log first MaxPool write value
-                                                #[cfg(debug_assertions)]
-                                                if nn == 0 && cc == 0 && hh == 0 && ww == 0 {
-                                                    eprintln!("[FNN_DBG_POOL] MaxPool out_start={} wrote={}",
-                                                        out_start, val);
-                                                }
-                                                // Write argmax index if this is max pooling
-                                                if let Some(ref mut idx_out) = indices_out {
-                                                    if out_idx < idx_out.len() {
-                                                        idx_out[out_idx] =
+                                                let out_pos = nc_idx * hw_out + hh * w_out + ww;
+                                                unsafe {
+                                                    *out_ptr.add(out_pos) = val;
+                                                    if has_indices {
+                                                        *idx_ptr.add(out_pos) =
                                                             (best_kh * kernel + best_kw) as i64;
                                                     }
                                                 }
                                             }
                                         }
-                                    }
+                                    });
                                 }
                             }
                         }
@@ -4249,86 +4337,15 @@ impl Backend for CpuBackend {
                                 for i in 0..len {
                                     out_f32[i] = main[i] + residual[i % residual.len()];
                                 }
-                                let num_rows = if row_size > 0 { len / row_size } else { 1 };
-                                let out_addr = out_f32.as_mut_ptr() as usize;
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for r in 0..num_rows {
-                                        let start = r * row_size;
-                                        let end = (start + row_size).min(len);
-                                        let n = (end - start) as f32;
-                                        let out_ptr = out_addr as *mut f32;
-                                        let mut sum = 0.0f32;
-                                        for i in start..end {
-                                            unsafe {
-                                                sum += *out_ptr.add(i);
-                                            }
-                                        }
-                                        let mean = sum / n;
-                                        let mut var_sum = 0.0f32;
-                                        for i in start..end {
-                                            unsafe {
-                                                let x = *out_ptr.add(i);
-                                                var_sum += (x - mean).powi(2);
-                                            }
-                                        }
-                                        let var = var_sum / n;
-                                        let inv_std = 1.0 / (var + eps).sqrt();
-                                        for i in start..end {
-                                            unsafe {
-                                                let idx = i - start;
-                                                let w = if idx < weight.len() {
-                                                    weight[idx]
-                                                } else {
-                                                    1.0
-                                                };
-                                                let b =
-                                                    if idx < bias.len() { bias[idx] } else { 0.0 };
-                                                *out_ptr.add(i) =
-                                                    (*out_ptr.add(i) - mean) * inv_std * w + b;
-                                            }
-                                        }
+                                if row_size > 0 {
+                                    let norm_input = out_f32.to_vec();
+                                    norm_layernorm_f32(&norm_input, &mut *out_f32, row_size, eps);
+                                    for i in 0..len {
+                                        let idx = i % row_size;
+                                        let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+                                        let b = if idx < bias.len() { bias[idx] } else { 0.0 };
+                                        out_f32[i] = out_f32[i] * w + b;
                                     }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    (0..num_rows).into_par_iter().for_each(|r| {
-                                        let start = r * row_size;
-                                        let end = start + row_size;
-                                        let n = row_size as f32;
-                                        let out_ptr = out_addr as *mut f32;
-                                        let mut sum = 0.0f32;
-                                        for i in start..end {
-                                            unsafe {
-                                                sum += *out_ptr.add(i);
-                                            }
-                                        }
-                                        let mean = sum / n;
-                                        let mut var_sum = 0.0f32;
-                                        for i in start..end {
-                                            unsafe {
-                                                let x = *out_ptr.add(i);
-                                                var_sum += (x - mean).powi(2);
-                                            }
-                                        }
-                                        let var = var_sum / n;
-                                        let inv_std = 1.0 / (var + eps).sqrt();
-                                        for i in start..end {
-                                            unsafe {
-                                                let idx = i - start;
-                                                let w = if idx < weight.len() {
-                                                    weight[idx]
-                                                } else {
-                                                    1.0
-                                                };
-                                                let b =
-                                                    if idx < bias.len() { bias[idx] } else { 0.0 };
-                                                *out_ptr.add(i) =
-                                                    (*out_ptr.add(i) - mean) * inv_std * w + b;
-                                            }
-                                        }
-                                    });
                                 }
                             }
                         }
@@ -4370,20 +4387,9 @@ impl Backend for CpuBackend {
                                     out_f32[i] = main[i] + residual[i % residual.len()];
                                 }
                                 let row_size = len;
-                                let num_rows = if row_size > 0 { len / row_size } else { 1 };
-                                for r in 0..num_rows {
-                                    let start = r * row_size;
-                                    let end = (start + row_size).min(len);
-                                    let mut sq_sum = 0.0f32;
-                                    for i in start..end {
-                                        sq_sum += out_f32[i] * out_f32[i];
-                                    }
-                                    let rms = (sq_sum / (end - start) as f32 + eps).sqrt();
-                                    for i in start..end {
-                                        let idx = i - start;
-                                        let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-                                        out_f32[i] = out_f32[i] / rms * w;
-                                    }
+                                if row_size > 0 {
+                                    let norm_input = out_f32.to_vec();
+                                    rms_norm_f32(&norm_input, &weight, &mut *out_f32, row_size, eps);
                                 }
                             }
                         }
@@ -5669,13 +5675,14 @@ impl Backend for CpuBackend {
 
                             let d = arena.data_mut();
 
-                            // Read target shape tensor (I64 values giving output dims)
-                            // This is the runtime version of the shape; we use compile-time
-                            // dims from params as the source of truth.
-                            let _shape_data: Vec<i64> = bytemuck::cast_slice::<_, i64>(
-                                &d[shape_slice.offset..shape_slice.offset + shape_slice.size],
-                            )
-                            .to_vec();
+                            // NOTE: We do NOT read the runtime shape tensor here.
+                            // The compile-time broadcast dims from the instruction params
+                            // (in_dims, out_dims) are the source of truth.  The shape
+                            // tensor (input[1]) is stored as F32 (4 bytes/elem) by the
+                            // Shape/Gather/Concat pipeline, but the old code attempted to
+                            // read it as i64 (8 bytes/elem) — a latent bytemuck panic for
+                            // tensors with odd element counts (e.g. 3 dims → 12 bytes,
+                            // not a multiple of 8).
 
                             // Read input data
                             let in_f32: Vec<f32> = bytemuck::cast_slice::<_, f32>(

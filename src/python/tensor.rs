@@ -39,13 +39,20 @@ impl PyTensor {
     #[pyo3(signature = (buf, device = None))]
     fn from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>, device: Option<String>) -> PyResult<Self> {
         use pyo3::buffer::PyBuffer;
-        let buffer = PyBuffer::<f32>::get(buf)?;
+        let buffer = PyBuffer::<f32>::get(buf).map_err(|e| {
+            pyo3::exceptions::PyBufferError::new_err(format!("PyBuffer::get failed: {e}"))
+        })?;
+        // For 0-d (scalar) arrays, buffer.shape() returns an empty slice.
+        // Treat this as a scalar tensor with shape [].
         let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
-        let data_len: usize = shape.iter().product::<i64>() as usize;
+        eprintln!("[FNN_DBG_FROM_BUF] shape={:?}", shape);
+        let data_len: usize = if shape.is_empty() { 1 } else { shape.iter().product::<i64>() as usize };
         let nbytes = data_len * 4;
         let mut storage_bytes = vec![0u8; nbytes];
         let f32_slice = bytemuck::cast_slice_mut(&mut storage_bytes);
-        buffer.copy_to_slice(py, f32_slice)?;
+        buffer.copy_to_slice(py, f32_slice).map_err(|e| {
+            pyo3::exceptions::PyBufferError::new_err(format!("copy_to_slice failed: {e}"))
+        })?;
         let device = device
             .as_ref()
             .and_then(|s| crate::storage::Device::from_str_label(s))
