@@ -30,7 +30,9 @@ impl Module for Dropout {
             let numel = x_data.len();
 
             let mut rng = rand::thread_rng();
-            let mut mask_data = vec![0.0f32; numel];
+            // Avoid zero-initialization: allocate capacity, set length, then fill.
+            let mut mask_data: Vec<f32> = Vec::with_capacity(numel);
+            unsafe { mask_data.set_len(numel); }
 
             if numel > 100_000 {
                 let chunk_size = 4096;
@@ -42,9 +44,8 @@ impl Module for Dropout {
                     rng.fill(&mut rand_vals[..]);
 
                     for i in 0..chunk_len {
-                        if rand_vals[i] < keep_prob as f32 {
-                            mask_data[chunk_start + i] = scale;
-                        }
+                        mask_data[chunk_start + i] =
+                            if rand_vals[i] < keep_prob as f32 { scale } else { 0.0 };
                     }
                 }
             } else {
@@ -112,13 +113,13 @@ impl Module for Dropout2d {
             // Generate mask: [N, C, 1, 1] that will broadcast
             let mut rng = rand::thread_rng();
             let num_masks = batch * channels;
-            let mut channel_mask_data = vec![0.0f32; num_masks];
+            // Avoid zero-initialization
+            let mut channel_mask_data: Vec<f32> = Vec::with_capacity(num_masks);
+            unsafe { channel_mask_data.set_len(num_masks); }
             let mut rand_vals = vec![0.0f32; num_masks];
             rng.fill(&mut rand_vals[..]);
             for i in 0..num_masks {
-                if rand_vals[i] < keep_prob as f32 {
-                    channel_mask_data[i] = scale;
-                }
+                channel_mask_data[i] = if rand_vals[i] < keep_prob as f32 { scale } else { 0.0 };
             }
 
             let channel_mask =
