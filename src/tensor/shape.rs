@@ -82,9 +82,7 @@ impl TensorImpl {
         let sizes = self.sizes.clone();
         let mut new_tensor = Tensor::from_vec(data, sizes.to_vec());
         if let Some(meta) = &self.autograd_meta {
-            let Ok(meta_lock) = meta.lock() else {
-                return new_tensor;
-            };
+            let meta_lock = meta.lock();
             if meta_lock.requires_grad {
                 let new_meta = AutogradMeta::new_non_leaf(true);
                 Arc::make_mut(&mut new_tensor.inner).set_autograd_meta(new_meta);

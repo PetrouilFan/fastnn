@@ -23,9 +23,8 @@ pub trait Optimizer: Send + Sync {
         for param in self.params_mut() {
             let inner = Arc::make_mut(&mut param.inner);
             if let Some(meta) = &mut inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
+                let mut lock = meta.lock();
+                lock.grad = None;
             }
         }
     }
@@ -81,9 +80,8 @@ pub(crate) fn apply_weight_decay(
 pub(crate) fn get_grad(param: &Tensor) -> Option<Tensor> {
     let inner = &param.inner;
     if let Some(meta) = &inner.autograd_meta {
-        if let Ok(lock) = meta.lock() {
-            return lock.grad.clone();
-        }
+        let lock = meta.lock();
+        return lock.grad.clone();
     }
     None
 }
