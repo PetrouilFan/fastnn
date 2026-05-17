@@ -40,6 +40,10 @@ def tensor(data, shape, device=None, dtype=None):
         raise ValueError("dtype not yet supported")
     if isinstance(data, np.ndarray):
         data = _ensure_tensor_ready(data)
+        # PyO3's buffer protocol doesn't support 0-d (scalar) arrays.
+        # Reshape to 1-d [1] so from_buffer can handle it.
+        if data.ndim == 0:
+            data = data.reshape(1)
         shape = shape if shape is not None else list(data.shape)
         return _core.PyTensor.from_buffer(data, device)
     if isinstance(data, Tensor):
