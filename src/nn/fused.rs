@@ -234,11 +234,6 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
         }
     }
 
-    fn train_mode(&self) {}
-    fn eval_mode(&self) {}
-    fn is_training(&self) -> bool {
-        false
-    }
 }
 
 /// Fused Conv2d + BatchNorm2d + SiLU layer (inference only).

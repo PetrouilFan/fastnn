@@ -535,26 +535,43 @@ pub enum IrDType {
     },
 }
 
-impl IrDType {
-    /// Logical byte size per element for arena planning.
-    /// For packed types this is a conservative over-estimate (safe for
-    /// worst-case memory planning).  Use [`packed_byte_size`] for the
-    /// actual storage size needed for a given logical element count.
-    pub fn byte_size(&self) -> usize {
-        match self {
-            IrDType::F32 => 4,
-            IrDType::F16 => 2,
-            IrDType::BF16 => 2,
-            IrDType::I32 => 4,
-            IrDType::I64 => 8,
-            IrDType::Bool => 1,
-            IrDType::I8 => 1,
-            // Conservative logical overestimate (packed data fits in 1 byte/elem).
-            IrDType::U4 { .. } => 1,
-            IrDType::U8 { .. } => 1,
-        }
-    }
+/// Macro that generates simple per-variant constant lookup methods for IrDType.
+macro_rules! impl_ir_dtype_props {
+    ($(($variant:pat, $byte_size:expr, $as_str:expr, $bit_width:expr, $items_per_word:expr)),* $(,)?) => {
+        impl IrDType {
+            /// Logical byte size per element (conservative over-estimate for packed types).
+            pub fn byte_size(&self) -> usize {
+                match self { $( $variant => $byte_size, )* }
+            }
 
+            pub fn as_str(&self) -> &'static str {
+                match self { $( $variant => $as_str, )* }
+            }
+
+            pub fn bit_width(&self) -> usize {
+                match self { $( $variant => $bit_width, )* }
+            }
+
+            pub fn items_per_word(&self) -> usize {
+                match self { $( $variant => $items_per_word, )* }
+            }
+        }
+    };
+}
+
+impl_ir_dtype_props!(
+    (Self::F32,       4, "f32",  32, 1),
+    (Self::F16,       2, "f16",  16, 2),
+    (Self::BF16,      2, "bf16", 16, 2),
+    (Self::I32,       4, "i32",  32, 1),
+    (Self::I64,       8, "i64",  64, 1),
+    (Self::Bool,      1, "bool",  1, 32),
+    (Self::I8,        1, "i8",    8, 4),
+    (Self::U4 { .. }, 1, "u4",    4, 8),
+    (Self::U8 { .. }, 1, "u8",    8, 4),
+);
+
+impl IrDType {
     /// Actual packed storage size in bytes for a given logical element
     /// count.  For F32/F16/etc. this equals `numel * byte_size()`.
     /// For packed types it computes word-level packing plus the SIMD margin
@@ -579,48 +596,6 @@ impl IrDType {
                 let words = numel.div_ceil(4) + 16; // +16 SIMD_MARGIN
                 words * 4
             }
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            IrDType::F32 => "f32",
-            IrDType::F16 => "f16",
-            IrDType::BF16 => "bf16",
-            IrDType::I32 => "i32",
-            IrDType::I64 => "i64",
-            IrDType::Bool => "bool",
-            IrDType::I8 => "i8",
-            IrDType::U4 { .. } => "u4",
-            IrDType::U8 { .. } => "u8",
-        }
-    }
-
-    pub fn bit_width(&self) -> usize {
-        match self {
-            IrDType::F32 => 32,
-            IrDType::F16 => 16,
-            IrDType::BF16 => 16,
-            IrDType::I32 => 32,
-            IrDType::I64 => 64,
-            IrDType::I8 => 8,
-            IrDType::Bool => 1,
-            IrDType::U4 { .. } => 4,
-            IrDType::U8 { .. } => 8,
-        }
-    }
-
-    pub fn items_per_word(&self) -> usize {
-        match self {
-            IrDType::F32 => 1,
-            IrDType::F16 => 2,
-            IrDType::BF16 => 2,
-            IrDType::I32 => 1,
-            IrDType::I64 => 1,
-            IrDType::I8 => 4,
-            IrDType::Bool => 32,
-            IrDType::U4 { .. } => 8,
-            IrDType::U8 { .. } => 4,
         }
     }
 }

@@ -389,13 +389,6 @@ impl Module for RMSNorm {
         }
     }
 
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
 }
 
 #[derive(Clone)]
@@ -546,13 +539,6 @@ impl Module for GroupNorm {
         }
     }
 
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
 }
 
 pub struct BatchNorm2d {

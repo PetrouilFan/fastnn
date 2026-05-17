@@ -64,23 +64,6 @@ impl Module for MaxPool2d {
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
 }
 
 #[derive(Clone)]
@@ -130,18 +113,6 @@ impl Module for AvgPool1d {
         let out_shape = out_4d.shape_ref();
         // Remove dummy H: [N, C, 1, W] -> [N, C, W]
         out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]])
-    }
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-    fn zero_grad(&self) {}
-    fn train_mode(&self) {}
-    fn eval_mode(&self) {}
-    fn is_training(&self) -> bool {
-        false
     }
 }
 
@@ -200,18 +171,6 @@ impl Module for MaxPool1d {
         let out_shape = out_4d.shape_ref();
         out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]])
     }
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-    fn zero_grad(&self) {}
-    fn train_mode(&self) {}
-    fn eval_mode(&self) {}
-    fn is_training(&self) -> bool {
-        false
-    }
 }
 
 #[derive(Clone)]
@@ -258,21 +217,4 @@ impl Module for AvgPool2d {
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
 }

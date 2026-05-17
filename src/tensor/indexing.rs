@@ -8,6 +8,22 @@ use std::arch::x86_64::*;
 
 use super::{Tensor, TensorImpl};
 
+fn cpu_f32_fast_path_setup(t: &Tensor) -> Option<(usize, *const f32, *mut f32, Tensor)> {
+    if t.device() == Device::Cpu && t.inner.dtype == DType::F32 && t.is_contiguous() {
+        let numel = t.inner.numel() as usize;
+        let mut output = Tensor::empty(t.shape(), DType::F32, Device::Cpu);
+        let inner = Arc::make_mut(&mut output.inner);
+        let storage = Arc::make_mut(&mut inner.storage);
+        let Storage::Cpu(cpu_storage) = storage else { unreachable!() };
+        let out_data = Arc::make_mut(&mut cpu_storage.data);
+        let a_ptr = t.data_ptr_f32();
+        let out_ptr = out_data.as_mut_ptr() as *mut f32;
+        Some((numel, a_ptr, out_ptr, output))
+    } else {
+        None
+    }
+}
+
 impl TensorImpl {
     pub fn slice(&self, dim: usize, start: i64, end: i64, step: i64) -> Tensor {
         if dim >= self.ndim() {
@@ -76,50 +92,37 @@ impl Tensor {
     }
 
     pub fn gt_scalar(&self, threshold: f32) -> Tensor {
-        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
-            let numel = self.inner.numel() as usize;
-            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
-                let inner = Arc::make_mut(&mut output.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    unreachable!()
-                };
-                let out_data = Arc::make_mut(&mut cpu_storage.data);
-                let a_ptr = self.data_ptr_f32();
-                let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        unsafe {
-                            let threshold_v = _mm256_set1_ps(threshold);
-                            let one_v = _mm256_set1_ps(1.0);
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let av = _mm256_loadu_ps(a_ptr.add(i));
-                                let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_GT_OQ);
-                                _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *out_ptr.add(j) = if *a_ptr.add(j) > threshold { 1.0 } else { 0.0 };
-                            }
+                if is_x86_feature_detected!("avx2") && numel >= 8 {
+                    unsafe {
+                        let threshold_v = _mm256_set1_ps(threshold);
+                        let one_v = _mm256_set1_ps(1.0);
+                        let mut i = 0;
+                        while i + 8 <= numel {
+                            let av = _mm256_loadu_ps(a_ptr.add(i));
+                            let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_GT_OQ);
+                            _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
+                            i += 8;
                         }
-                    } else {
-                        for i in 0..numel {
-                            unsafe {
-                                *out_ptr.add(i) = if *a_ptr.add(i) > threshold { 1.0 } else { 0.0 };
-                            }
+                        for j in i..numel {
+                            *out_ptr.add(j) = if *a_ptr.add(j) > threshold { 1.0 } else { 0.0 };
                         }
                     }
-                }
-                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                {
+                } else {
                     for i in 0..numel {
                         unsafe {
                             *out_ptr.add(i) = if *a_ptr.add(i) > threshold { 1.0 } else { 0.0 };
                         }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = if *a_ptr.add(i) > threshold { 1.0 } else { 0.0 };
                     }
                 }
             }
@@ -184,50 +187,37 @@ impl Tensor {
     }
 
     pub fn lt_scalar(&self, threshold: f32) -> Tensor {
-        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
-            let numel = self.inner.numel() as usize;
-            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
-                let inner = Arc::make_mut(&mut output.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    unreachable!()
-                };
-                let out_data = Arc::make_mut(&mut cpu_storage.data);
-                let a_ptr = self.data_ptr_f32();
-                let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        unsafe {
-                            let threshold_v = _mm256_set1_ps(threshold);
-                            let one_v = _mm256_set1_ps(1.0);
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let av = _mm256_loadu_ps(a_ptr.add(i));
-                                let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_LT_OQ);
-                                _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *out_ptr.add(j) = if *a_ptr.add(j) < threshold { 1.0 } else { 0.0 };
-                            }
+                if is_x86_feature_detected!("avx2") && numel >= 8 {
+                    unsafe {
+                        let threshold_v = _mm256_set1_ps(threshold);
+                        let one_v = _mm256_set1_ps(1.0);
+                        let mut i = 0;
+                        while i + 8 <= numel {
+                            let av = _mm256_loadu_ps(a_ptr.add(i));
+                            let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_LT_OQ);
+                            _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
+                            i += 8;
                         }
-                    } else {
-                        for i in 0..numel {
-                            unsafe {
-                                *out_ptr.add(i) = if *a_ptr.add(i) < threshold { 1.0 } else { 0.0 };
-                            }
+                        for j in i..numel {
+                            *out_ptr.add(j) = if *a_ptr.add(j) < threshold { 1.0 } else { 0.0 };
                         }
                     }
-                }
-                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                {
+                } else {
                     for i in 0..numel {
                         unsafe {
                             *out_ptr.add(i) = if *a_ptr.add(i) < threshold { 1.0 } else { 0.0 };
                         }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = if *a_ptr.add(i) < threshold { 1.0 } else { 0.0 };
                     }
                 }
             }
@@ -245,52 +235,39 @@ impl Tensor {
     }
 
     pub fn eq_scalar(&self, threshold: f32) -> Tensor {
-        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
-            let numel = self.inner.numel() as usize;
-            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
-                let inner = Arc::make_mut(&mut output.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    unreachable!()
-                };
-                let out_data = Arc::make_mut(&mut cpu_storage.data);
-                let a_ptr = self.data_ptr_f32();
-                let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        unsafe {
-                            let threshold_v = _mm256_set1_ps(threshold);
-                            let one_v = _mm256_set1_ps(1.0);
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let av = _mm256_loadu_ps(a_ptr.add(i));
-                                let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_EQ_OQ);
-                                _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *out_ptr.add(j) =
-                                    if *a_ptr.add(j) == threshold { 1.0 } else { 0.0 };
-                            }
+                if is_x86_feature_detected!("avx2") && numel >= 8 {
+                    unsafe {
+                        let threshold_v = _mm256_set1_ps(threshold);
+                        let one_v = _mm256_set1_ps(1.0);
+                        let mut i = 0;
+                        while i + 8 <= numel {
+                            let av = _mm256_loadu_ps(a_ptr.add(i));
+                            let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_EQ_OQ);
+                            _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
+                            i += 8;
                         }
-                    } else {
-                        for i in 0..numel {
-                            unsafe {
-                                *out_ptr.add(i) =
-                                    if *a_ptr.add(i) == threshold { 1.0 } else { 0.0 };
-                            }
+                        for j in i..numel {
+                            *out_ptr.add(j) =
+                                if *a_ptr.add(j) == threshold { 1.0 } else { 0.0 };
+                        }
+                    }
+                } else {
+                    for i in 0..numel {
+                        unsafe {
+                            *out_ptr.add(i) =
+                                if *a_ptr.add(i) == threshold { 1.0 } else { 0.0 };
                         }
                     }
                 }
-                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                {
-                    for i in 0..numel {
-                        unsafe {
-                            *out_ptr.add(i) = if *a_ptr.add(i) == threshold { 1.0 } else { 0.0 };
-                        }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = if *a_ptr.add(i) == threshold { 1.0 } else { 0.0 };
                     }
                 }
             }
@@ -308,48 +285,35 @@ impl Tensor {
     }
 
     pub fn add_scalar(&self, scalar: f32) -> Tensor {
-        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
-            let numel = self.inner.numel() as usize;
-            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
-                let inner = Arc::make_mut(&mut output.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    unreachable!()
-                };
-                let out_data = Arc::make_mut(&mut cpu_storage.data);
-                let a_ptr = self.data_ptr_f32();
-                let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        unsafe {
-                            let scalar_v = _mm256_set1_ps(scalar);
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let av = _mm256_loadu_ps(a_ptr.add(i));
-                                _mm256_storeu_ps(out_ptr.add(i), _mm256_add_ps(av, scalar_v));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *out_ptr.add(j) = *a_ptr.add(j) + scalar;
-                            }
+                if is_x86_feature_detected!("avx2") && numel >= 8 {
+                    unsafe {
+                        let scalar_v = _mm256_set1_ps(scalar);
+                        let mut i = 0;
+                        while i + 8 <= numel {
+                            let av = _mm256_loadu_ps(a_ptr.add(i));
+                            _mm256_storeu_ps(out_ptr.add(i), _mm256_add_ps(av, scalar_v));
+                            i += 8;
                         }
-                    } else {
-                        for i in 0..numel {
-                            unsafe {
-                                *out_ptr.add(i) = *a_ptr.add(i) + scalar;
-                            }
+                        for j in i..numel {
+                            *out_ptr.add(j) = *a_ptr.add(j) + scalar;
                         }
                     }
-                }
-                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                {
+                } else {
                     for i in 0..numel {
                         unsafe {
                             *out_ptr.add(i) = *a_ptr.add(i) + scalar;
                         }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = *a_ptr.add(i) + scalar;
                     }
                 }
             }
@@ -378,48 +342,35 @@ impl Tensor {
     }
 
     pub fn div_scalar(&self, scalar: f32) -> Tensor {
-        if self.device() == Device::Cpu && self.inner.dtype == DType::F32 && self.is_contiguous() {
-            let numel = self.inner.numel() as usize;
-            let mut output = Tensor::empty(self.shape(), DType::F32, Device::Cpu);
+        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
-                let inner = Arc::make_mut(&mut output.inner);
-                let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
-                    unreachable!()
-                };
-                let out_data = Arc::make_mut(&mut cpu_storage.data);
-                let a_ptr = self.data_ptr_f32();
-                let out_ptr = out_data.as_mut_ptr() as *mut f32;
-
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                {
-                    if is_x86_feature_detected!("avx2") && numel >= 8 {
-                        unsafe {
-                            let scalar_v = _mm256_set1_ps(scalar);
-                            let mut i = 0;
-                            while i + 8 <= numel {
-                                let av = _mm256_loadu_ps(a_ptr.add(i));
-                                _mm256_storeu_ps(out_ptr.add(i), _mm256_div_ps(av, scalar_v));
-                                i += 8;
-                            }
-                            for j in i..numel {
-                                *out_ptr.add(j) = *a_ptr.add(j) / scalar;
-                            }
+                if is_x86_feature_detected!("avx2") && numel >= 8 {
+                    unsafe {
+                        let scalar_v = _mm256_set1_ps(scalar);
+                        let mut i = 0;
+                        while i + 8 <= numel {
+                            let av = _mm256_loadu_ps(a_ptr.add(i));
+                            _mm256_storeu_ps(out_ptr.add(i), _mm256_div_ps(av, scalar_v));
+                            i += 8;
                         }
-                    } else {
-                        for i in 0..numel {
-                            unsafe {
-                                *out_ptr.add(i) = *a_ptr.add(i) / scalar;
-                            }
+                        for j in i..numel {
+                            *out_ptr.add(j) = *a_ptr.add(j) / scalar;
                         }
                     }
-                }
-                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                {
+                } else {
                     for i in 0..numel {
                         unsafe {
                             *out_ptr.add(i) = *a_ptr.add(i) / scalar;
                         }
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                for i in 0..numel {
+                    unsafe {
+                        *out_ptr.add(i) = *a_ptr.add(i) / scalar;
                     }
                 }
             }
