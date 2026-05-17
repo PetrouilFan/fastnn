@@ -447,90 +447,27 @@ pub fn plan_memory_with_env(
             .then_with(|| b.size.cmp(&a.size))
     });
 
-    let mut slots: HashMap<NodeId, AllocSlot> = HashMap::new();
-    let mut secondary_slots: HashMap<(NodeId, usize), AllocSlot> = HashMap::new();
-    let mut active: Vec<(usize, NodeId, usize, bool)> = Vec::new();
-    let mut free_list = SegFreeList::new();
-    let mut arena_top: usize = 0;
-
-    for info in &alloc_infos {
-        let mut i = 0;
-        while i < active.len() {
-            if active[i].0 < info.live_range.0 {
-                let (_expired_end, expired_id, _expired_size, was_secondary) =
-                    active.swap_remove(i);
-                // IMPORTANT: only free the slot that corresponds to this
-                // specific active entry.  When a node has both a primary and
-                // a secondary output (e.g. MaxPool), two separate entries
-                // are pushed to `active` — one for each.  Freeing both slots
-                // on every expiry would double-free the same memory region
-                // into the free list, creating duplicate entries that let
-                // the allocator hand out overlapping addresses for different
-                // live ranges.
-                if was_secondary {
-                    if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
-                        free_list.add(slot.offset, align_up(slot.size, 8));
-                    }
-                } else if let Some(slot) = slots.get(&expired_id) {
-                    free_list.add(slot.offset, align_up(slot.size, 8));
-                }
-            } else {
-                i += 1;
-            }
-        }
-
-        // Round up to 64 bytes (cache line alignment) so all allocations
-        // satisfy both SIMD (32-byte) alignment and cache line boundaries.
-        let size_aligned = align_up(info.size, 64);
-
-        let offset = match free_list.alloc(size_aligned) {
-            Some(off) => off,
-            None => {
-                let off = align_up(arena_top, 64);
-                arena_top = off + size_aligned;
-                off
-            }
-        };
-
-        let slot = AllocSlot {
-            offset,
-            size: info.size,
-            node_id: info.node_id,
-            output_index: 0,
-        };
-
-        if info.is_secondary {
-            // This is a secondary output (e.g. MaxPool indices)
-            let sec_slot = AllocSlot {
-                offset,
-                size: info.size,
-                node_id: info.node_id,
-                output_index: 1,
-            };
-            secondary_slots.insert((info.node_id, 1), sec_slot);
-        } else {
-            // Primary output — use the main slot
-            slots.insert(info.node_id, slot);
-        }
-
-        if info.size > 0 {
-            active.push((
-                info.live_range.1,
-                info.node_id,
-                info.size,
-                info.is_secondary,
-            ));
-        }
-    }
-
     // ── In-place buffer reuse for unary elementwise ops ──────────────
+    // Identify candidates BEFORE the allocation loop so that the allocator
+    // sees the correct (extended) input lifetimes and skips candidate
+    // outputs entirely (size=0 => no active entry => no double-free).
+    //
     // When a unary elementwise node's input has no other consumers after
     // this node, and the output is not a graph output, reuse the input's
     // buffer instead of allocating a new one.  This reduces arena size.
     //
-    // We do NOT reuse buffers of Input nodes — the autograd backward pass
+    // We do NOT reuse buffers of Input nodes -- the autograd backward pass
     // reads forward inputs directly, and sharing the input's buffer with
     // the elementwise output can cause subtle data-race-like issues.
+    //
+    // IMPORTANT: This analysis MUST run before the allocation loop below.
+    // The original code ran it after allocation, which caused a double-free
+    // + buffer-overlap bug: the allocation loop committed separate buffers
+    // for both input and candidate, then the reuse pass changed the
+    // candidate's offset to the input's -- but the candidate's original
+    // buffer may have already been freed and reassigned to a different node
+    // during the loop.  Both the candidate and that other node would then
+    // write to the same arena offset, corrupting each other's data.
     let unary_elementwise_ops: &[Opcode] = &[
         Opcode::Relu,
         Opcode::Gelu,
@@ -579,7 +516,7 @@ pub fn plan_memory_with_env(
             continue;
         }
         let input_id = node.inputs[0];
-        // Skip Input nodes — their buffer is used directly by the executor
+        // Skip Input nodes -- their buffer is used directly by the executor
         // and sharing it can interfere with autograd backward reads.
         if let Some(input_node) = graph.get_node(input_id) {
             if matches!(input_node.opcode, Opcode::Input) {
@@ -609,6 +546,9 @@ pub fn plan_memory_with_env(
             ai_idx,
         });
     }
+    // Extend input lifetimes to cover the candidate's output lifetime.
+    // Because this runs BEFORE the allocation loop, the active-list
+    // entries will use the correct (extended) end positions.
     for cand in &reuse_candidates {
         if let Some(input_info) = alloc_infos
             .iter_mut()
@@ -617,21 +557,113 @@ pub fn plan_memory_with_env(
             input_info.live_range.1 = input_info.live_range.1.max(cand.output_last_use);
         }
     }
+    // Zero candidate sizes so the allocation loop creates NO slots /
+    // active entries for them.  The post-loop pass below creates
+    // candidate slots that point to the input's slot.
     for cand in &reuse_candidates {
         if let Some(info) = alloc_infos.get_mut(cand.ai_idx) {
             info.size = 0;
         }
     }
 
-    // ── Post-allocation: set reuse slots to input offsets ──
-    // These were marked with size=0 during the in-place reuse pass above.
-    // We must do this AFTER the active-list loop to avoid double-free.
-    for cand in &reuse_candidates {
-        let input_offset = slots.get(&cand.input_id).map(|s| s.offset);
-        if let Some(off) = input_offset {
-            if let Some(slot) = slots.get_mut(&cand.node_id) {
-                slot.offset = off;
+    let mut slots: HashMap<NodeId, AllocSlot> = HashMap::new();
+    let mut secondary_slots: HashMap<(NodeId, usize), AllocSlot> = HashMap::new();
+    let mut active: Vec<(usize, NodeId, usize, bool)> = Vec::new();
+    let mut free_list = SegFreeList::new();
+    let mut arena_top: usize = 0;
+
+    for info in &alloc_infos {
+        let mut i = 0;
+        while i < active.len() {
+            if active[i].0 < info.live_range.0 {
+                let (_expired_end, expired_id, _expired_size, was_secondary) =
+                    active.swap_remove(i);
+                // IMPORTANT: only free the slot that corresponds to this
+                // specific active entry.  When a node has both a primary and
+                // a secondary output (e.g. MaxPool), two separate entries
+                // are pushed to `active` -- one for each.  Freeing both slots
+                // on every expiry would double-free the same memory region
+                // into the free list, creating duplicate entries that let
+                // the allocator hand out overlapping addresses for different
+                // live ranges.
+                if was_secondary {
+                    if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
+                        free_list.add(slot.offset, align_up(slot.size, 8));
+                    }
+                } else if let Some(slot) = slots.get(&expired_id) {
+                    free_list.add(slot.offset, align_up(slot.size, 8));
+                }
+            } else {
+                i += 1;
             }
+        }
+
+        // Round up to 64 bytes (cache line alignment) so all allocations
+        // satisfy both SIMD (32-byte) alignment and cache line boundaries.
+        let size_aligned = align_up(info.size, 64);
+
+        let offset = match free_list.alloc(size_aligned) {
+            Some(off) => off,
+            None => {
+                let off = align_up(arena_top, 64);
+                arena_top = off + size_aligned;
+                off
+            }
+        };
+
+        let slot = AllocSlot {
+            offset,
+            size: info.size,
+            node_id: info.node_id,
+            output_index: 0,
+        };
+
+        if info.is_secondary {
+            // This is a secondary output (e.g. MaxPool indices)
+            let sec_slot = AllocSlot {
+                offset,
+                size: info.size,
+                node_id: info.node_id,
+                output_index: 1,
+            };
+            secondary_slots.insert((info.node_id, 1), sec_slot);
+        } else {
+            // Primary output -- use the main slot
+            slots.insert(info.node_id, slot);
+        }
+
+        if info.size > 0 {
+            active.push((
+                info.live_range.1,
+                info.node_id,
+                info.size,
+                info.is_secondary,
+            ));
+        }
+    }
+
+    // ── Post-allocation: create reuse slots pointing to input offsets ──
+    // The pre-loop analysis set candidate sizes to 0, so the allocation
+    // loop skipped them -- no slots or active entries were created.
+    // Here we create a slot for each candidate that points to the input's
+    // buffer (same offset + size).  Because no active entry exists for the
+    // candidate, the slot is never freed by the loop's expiry code, and
+    // the input's extended lifetime (set by the pre-loop analysis) ensures
+    // the shared buffer stays alive until the candidate's last consumer.
+    //
+    // Candidates are sorted by topological position so chain reuse works:
+    // A->B->C, B gets its slot before C looks up B's slot.
+    let mut sorted_candidates: Vec<&ReuseCandidate> = reuse_candidates.iter().collect();
+    sorted_candidates.sort_by_key(|c| position.get(&c.node_id).copied().unwrap_or(0));
+    for cand in &sorted_candidates {
+        if let Some(input_slot) = slots.get(&cand.input_id) {
+            let slot = AllocSlot {
+                offset: input_slot.offset,
+                size: input_slot.size,
+                node_id: cand.node_id,
+                output_index: 0,
+            };
+            slots.insert(cand.node_id, slot);
         }
     }
 
