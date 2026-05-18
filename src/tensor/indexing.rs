@@ -314,8 +314,13 @@ impl Tensor {
     }
 
     pub fn nonzero(&self) -> Vec<i64> {
-        let data = self.as_f32_slice();
-        let shape = self.shape_ref();
+        let cpu_t = if !self.is_contiguous() {
+            self.contiguous()
+        } else {
+            self.clone()
+        };
+        let data = cpu_t.as_f32_slice();
+        let shape = cpu_t.shape_ref();
         let ndim = shape.len();
 
         if ndim == 0 {
