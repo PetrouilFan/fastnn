@@ -1785,17 +1785,12 @@ impl Backend for CpuBackend {
                         .get("eps")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(1e-8);
-                    let t: u64 = node
-                        .attrs
-                        .get("t")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1);
                     let wd: f32 = node
                         .attrs
                         .get("weight_decay")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.01);
-                    let has_f16_state = node.inputs.len() >= 4
+                    let has_f16_state = node.inputs.len() >= 5
                         && graph
                             .get_node(node.inputs[2])
                             .map(|n| n.output_type.dtype == IrDType::F16)
@@ -1812,7 +1807,7 @@ impl Backend for CpuBackend {
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
-                        input_slices, // [weight, grad, m, v]
+                        input_slices, // [weight, grad, m, v, t]
                         output_slice,
                         secondary_output_slice: None,
                         params: vec![
@@ -1820,7 +1815,6 @@ impl Backend for CpuBackend {
                             beta1.to_bits() as usize,
                             beta2.to_bits() as usize,
                             eps.to_bits() as usize,
-                            t as usize,
                             wd.to_bits() as usize,
                         ],
                         param_dims: None,
@@ -4792,8 +4786,13 @@ impl Backend for CpuBackend {
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
-                                let t = params[4] as f32;
-                                let wd = f32::from_bits(params[5] as u32);
+                                let t = u64::from_le_bytes(
+                                    d_ref[input_slices[4].offset
+                                        ..input_slices[4].offset + 8]
+                                        .try_into()
+                                        .unwrap(),
+                                ) as f32;
+                                let wd = f32::from_bits(params[4] as u32);
                                 let bias_corr1 = 1.0 - beta1.powi(t as i32);
                                 let bias_corr2 = 1.0 - beta2.powi(t as i32);
                                 adamw_update_f32(w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd)
@@ -5059,8 +5058,13 @@ impl Backend for CpuBackend {
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
-                                let t = params[4] as f32;
-                                let wd = f32::from_bits(params[5] as u32);
+                                let t = u64::from_le_bytes(
+                                    d_ref[input_slices[4].offset
+                                        ..input_slices[4].offset + 8]
+                                        .try_into()
+                                        .unwrap(),
+                                ) as f32;
+                                let wd = f32::from_bits(params[4] as u32);
                                 (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd)
                             };
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
