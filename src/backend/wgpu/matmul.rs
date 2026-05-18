@@ -279,9 +279,20 @@ fn main(
         let a_k_base = t * TILE_DIM + ty * 4u;
         for (var r: u32 = 0u; r < 4u; r = r + 1u) {
             let a_row = row_base + r;
-            if (a_row < M && a_k_base < K) {
+            if (a_row < M) {
                 let a_addr = a_row * K + a_k_base;
-                let loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], a[a_addr + 2u], a[a_addr + 3u]);
+                let loaded: vec4<f32>;
+                if (a_k_base + 3u < K) {
+                    loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], a[a_addr + 2u], a[a_addr + 3u]);
+                } else if (a_k_base + 2u < K) {
+                    loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], a[a_addr + 2u], 0.0);
+                } else if (a_k_base + 1u < K) {
+                    loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], 0.0, 0.0);
+                } else if (a_k_base < K) {
+                    loaded = vec4<f32>(a[a_addr], 0.0, 0.0, 0.0);
+                } else {
+                    loaded = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+                }
                 tileA[tx * 4u + r][ty * 4u] = loaded[0];
                 tileA[tx * 4u + r][ty * 4u + 1u] = loaded[1];
                 tileA[tx * 4u + r][ty * 4u + 2u] = loaded[2];
@@ -298,9 +309,20 @@ fn main(
         let b_n_base = by * TILE_DIM + ty * 4u;
         for (var r: u32 = 0u; r < 4u; r = r + 1u) {
             let b_k_row = t * TILE_DIM + tx * 4u + r;
-            if (b_k_row < K && b_n_base < N) {
+            if (b_k_row < K) {
                 let b_addr = b_k_row * N + b_n_base;
-                let loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], b[b_addr + 2u], b[b_addr + 3u]);
+                let loaded: vec4<f32>;
+                if (b_n_base + 3u < N) {
+                    loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], b[b_addr + 2u], b[b_addr + 3u]);
+                } else if (b_n_base + 2u < N) {
+                    loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], b[b_addr + 2u], 0.0);
+                } else if (b_n_base + 1u < N) {
+                    loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], 0.0, 0.0);
+                } else if (b_n_base < N) {
+                    loaded = vec4<f32>(b[b_addr], 0.0, 0.0, 0.0);
+                } else {
+                    loaded = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+                }
                 tileB[tx * 4u + r][ty * 4u] = loaded[0];
                 tileB[tx * 4u + r][ty * 4u + 1u] = loaded[1];
                 tileB[tx * 4u + r][ty * 4u + 2u] = loaded[2];
@@ -449,9 +471,20 @@ fn main(
         let a_k_base = t * TILE_DIM + ty * 4u;
         for (var r: u32 = 0u; r < 4u; r = r + 1u) {
             let a_row = row_base + r;
-            if (a_row < M && a_k_base < K) {
+            if (a_row < M) {
                 let a_addr = a_row * K + a_k_base;
-                let loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], a[a_addr + 2u], a[a_addr + 3u]);
+                let loaded: vec4<f32>;
+                if (a_k_base + 3u < K) {
+                    loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], a[a_addr + 2u], a[a_addr + 3u]);
+                } else if (a_k_base + 2u < K) {
+                    loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], a[a_addr + 2u], 0.0);
+                } else if (a_k_base + 1u < K) {
+                    loaded = vec4<f32>(a[a_addr], a[a_addr + 1u], 0.0, 0.0);
+                } else if (a_k_base < K) {
+                    loaded = vec4<f32>(a[a_addr], 0.0, 0.0, 0.0);
+                } else {
+                    loaded = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+                }
                 tileA[tx * 4u + r][ty * 4u] = loaded[0];
                 tileA[tx * 4u + r][ty * 4u + 1u] = loaded[1];
                 tileA[tx * 4u + r][ty * 4u + 2u] = loaded[2];
@@ -467,9 +500,20 @@ fn main(
         let b_n_base = by * TILE_DIM + ty * 4u;
         for (var r: u32 = 0u; r < 4u; r = r + 1u) {
             let b_k_row = t * TILE_DIM + tx * 4u + r;
-            if (b_k_row < K && b_n_base < N) {
+            if (b_k_row < K) {
                 let b_addr = b_k_row * N + b_n_base;
-                let loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], b[b_addr + 2u], b[b_addr + 3u]);
+                let loaded: vec4<f32>;
+                if (b_n_base + 3u < N) {
+                    loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], b[b_addr + 2u], b[b_addr + 3u]);
+                } else if (b_n_base + 2u < N) {
+                    loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], b[b_addr + 2u], 0.0);
+                } else if (b_n_base + 1u < N) {
+                    loaded = vec4<f32>(b[b_addr], b[b_addr + 1u], 0.0, 0.0);
+                } else if (b_n_base < N) {
+                    loaded = vec4<f32>(b[b_addr], 0.0, 0.0, 0.0);
+                } else {
+                    loaded = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+                }
                 tileB[tx * 4u + r][ty * 4u] = loaded[0];
                 tileB[tx * 4u + r][ty * 4u + 1u] = loaded[1];
                 tileB[tx * 4u + r][ty * 4u + 2u] = loaded[2];

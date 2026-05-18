@@ -108,22 +108,33 @@ pub fn inject_optimizer(
                     node.name = format!("optimizer/v_{}", param_name);
                 }
 
+                let t_id = graph.add_node(
+                    Opcode::Input,
+                    vec![],
+                    TensorType {
+                        shape: vec![],
+                        dtype: IrDType::I64,
+                    },
+                );
+                if let Some(node) = graph.get_node_mut(t_id) {
+                    node.name = format!("optimizer/t_{}", param_name);
+                }
+
                 let mut attrs = HashMap::new();
                 attrs.insert("lr".to_string(), lr.to_string());
                 attrs.insert("beta1".to_string(), beta1.to_string());
                 attrs.insert("beta2".to_string(), beta2.to_string());
                 attrs.insert("eps".to_string(), eps.to_string());
-                attrs.insert("t".to_string(), "1".to_string());
                 attrs.insert("weight_decay".to_string(), weight_decay.to_string());
                 let adamw_id = graph.add_node_with_attrs(
                     Opcode::AdamWUpdate,
-                    vec![param_id, grad_id, m_id, v_id],
+                    vec![param_id, grad_id, m_id, v_id, t_id],
                     param_type,
                     attrs,
                 );
 
                 updated_param_nodes.push(adamw_id);
-                state_input_nodes.push(vec![m_id, v_id]);
+                state_input_nodes.push(vec![m_id, v_id, t_id]);
             }
             OptimizerConfig::Muon {
                 lr,

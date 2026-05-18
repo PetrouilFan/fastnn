@@ -8,7 +8,7 @@
 
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::{CompiledTrainingModel, GraphExecutor};
-use fastnn::backend::Instruction;
+use fastnn::backend::Backend;
 use fastnn::compiler::passes::training::{OptimizerConfig, TrainConfig};
 use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::node::{DimExpr, IrDType, ShapeEnv};
@@ -296,26 +296,28 @@ fn test_adamw_step_counter_increments() {
         )
         .expect("compile_train should succeed");
 
-    // Capture the step counter value from AdamWUpdate instruction params[4]
+    // Capture the step counter value from AdamWUpdate input_slices[4] (t)
     let get_step = |model: &CompiledTrainingModel<CpuBackend>| -> u64 {
         for instr in &model.plan.instructions {
             if let fastnn::backend::Instruction::CallKernel {
                 kernel_name,
-                params,
+                input_slices,
                 ..
             } = instr
             {
-                if kernel_name.starts_with("adam") {
-                    return params[4] as u64;
+                if kernel_name.starts_with("adamw") {
+                    let t_slice = &input_slices[4];
+                    let t_bytes = model.backend.read_arena(&model.arena, t_slice.offset, 8);
+                    return u64::from_le_bytes(t_bytes[..8].try_into().unwrap());
                 }
             }
         }
-        panic!("no Adam kernel instruction found in plan");
+        panic!("no AdamW kernel instruction found in plan");
     };
 
     let x_data = f32_bytes(&[1.0, 2.0, 3.0, 4.0]);
 
-    // Step 1: t should start at 1 (from attrs "t": "1")
+    // Step 1: t should start at 1 (initialized to 1 in arena)
     assert_eq!(get_step(&model), 1, "AdamW t should start at 1");
 
     model.train_step(&[&x_data]).expect("step 1 should succeed");

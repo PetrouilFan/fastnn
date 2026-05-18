@@ -18,7 +18,7 @@ dispatch_gpu_compute!(
         let rs = if arg2 > 0 { arg2 } else { 1 };
         SfParams { numel: arg1 as u32, row_size: rs as u32 }
     },
-    (arg1 as u32).div_ceil(256),
+    ((arg1 as u32) / (if arg2 > 0 { arg2 as u32 } else { 1u32 })).div_ceil(256),
 );
 
 fn build_softmax_shader() -> String {

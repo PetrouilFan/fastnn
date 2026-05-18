@@ -26,11 +26,14 @@ pub(super) fn dispatch_norm_gpu(
 
     let input_data = read_slice(0);
     let weight_data = read_slice(1);
-    let bias_data = read_slice(2);
+    let mut bias_data = read_slice(2);
 
     let hidden_dim = weight_data.len();
     if hidden_dim == 0 {
         return Err(BackendError::Dispatch("norm: hidden_dim is zero".into()));
+    }
+    if bias_data.is_empty() {
+        bias_data = vec![0.0f32; hidden_dim];
     }
 
     let num_rows = input_data.len() / hidden_dim;
