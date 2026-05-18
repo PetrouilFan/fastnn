@@ -540,7 +540,19 @@ impl GraphBuilder {
 
     impl_unary_op!(sign, Sign);
     impl_unary_op!(logical_not, LogicalNot);
-    impl_unary_op!(log_softmax, LogSoftmax);
+    pub fn log_softmax(&self, input: &GraphTensor, dim: i64) -> GraphTensor {
+        let output_type = input.tensor_type.clone();
+        let mut attrs = HashMap::new();
+        attrs.insert("axis".to_string(), dim.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::LogSoftmax,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
     impl_unary_op!(mish, Mish);
 
     // =========================================================================

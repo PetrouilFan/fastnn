@@ -574,7 +574,10 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 let dim = (inputs[0].ndim() - 1) as i64;
                 forward_builder.softmax(&input_gts[0], dim)
             }
-            "LogSoftmaxBackward" => forward_builder.log_softmax(&input_gts[0]),
+            "LogSoftmaxBackward" => {
+                let dim = (inputs[0].ndim() - 1) as i64;
+                forward_builder.log_softmax(&input_gts[0], dim)
+            }
             "LeakyReLUBackward" => {
                 // Read negative_slope from the second input if available
                 let slope = if inputs.len() > 1 {
