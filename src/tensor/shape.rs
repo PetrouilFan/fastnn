@@ -1,6 +1,7 @@
 use crate::autograd;
 use crate::autograd::AutogradMeta;
 use crate::error::{FastnnError, FastnnResult};
+use crate::storage::{CpuStorage, Storage};
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -55,29 +56,30 @@ impl TensorImpl {
         }
         let numel = self.numel() as usize;
         let ndim = self.ndim();
-        let mut data = vec![0.0f32; numel];
-        // SAFETY: We verified the storage is `Storage::Cpu`. The pointer is derived
-        // from the backing `Vec<u8>` allocation, which is valid for the duration of
-        // this function. The length `len` is within the bounds of the allocation.
-        let src = unsafe {
-            let crate::storage::Storage::Cpu(cpu) = &self.storage.as_ref() else {
-                panic!("contiguous(): only supported for CPU tensors");
-            };
-            let elem_size = self.dtype.size();
-            let ptr = cpu.data.as_ref().as_ptr() as *const f32;
-            let len = cpu.data.len() / elem_size;
-            std::slice::from_raw_parts(ptr, len)
+        let elem_size = self.dtype.size();
+        let mut data = vec![0u8; numel * elem_size];
+        let src_ptr = match self.storage.as_ref() {
+            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
+            #[cfg(feature = "gpu")]
+            Storage::Wgpu(_) => panic!("contiguous(): only supported for CPU tensors"),
         };
         let strides = &self.strides;
         let sizes = &self.sizes;
         let offset = self.storage_offset;
         let mut indices: SmallVec<[i64; 6]> = smallvec![0i64; ndim];
+        let dst = data.as_mut_ptr();
         for i in 0..numel {
             let mut src_idx = offset;
             for d in 0..ndim {
                 src_idx += indices[d] * strides[d];
             }
-            data[i] = src[src_idx as usize];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src_ptr.add((src_idx as usize) * elem_size),
+                    dst.add(i * elem_size),
+                    elem_size,
+                );
+            }
             for d in (0..ndim).rev() {
                 indices[d] += 1;
                 if indices[d] < sizes[d] {
@@ -87,7 +89,14 @@ impl TensorImpl {
             }
         }
         let sizes = self.sizes.clone();
-        let mut new_tensor = Tensor::from_vec(data, sizes.to_vec());
+        let nbytes = data.len();
+        let storage = Arc::new(Storage::Cpu(CpuStorage {
+            data: Arc::new(data),
+            nbytes,
+            #[cfg(feature = "gpu")]
+            gpu_buffer_cache: Default::default(),
+        }));
+        let mut new_tensor = Tensor::new(TensorImpl::new(storage, sizes, self.dtype));
         if let Some(meta) = &self.autograd_meta {
             let meta_lock = meta.lock();
             if meta_lock.requires_grad {

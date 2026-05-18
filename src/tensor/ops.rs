@@ -281,7 +281,7 @@ impl Tensor {
     /// In-place scalar multiplication: self *= scalar
     /// Avoids allocating a scalar tensor for optimizer hot paths.
     pub fn mul_scalar_(&mut self, scalar: f32) -> &mut Self {
-        if self.inner.is_gpu() {
+        if self.inner.is_gpu() || self.inner.dtype != DType::F32 {
             let scalar_t = Tensor::from_scalar(scalar);
             let result = (self as &Tensor).mul(&scalar_t);
             *self = result;
@@ -329,7 +329,7 @@ impl Tensor {
 
     /// In-place scalar addition: self += scalar
     pub fn add_scalar_(&mut self, scalar: f32) -> &mut Self {
-        if self.inner.is_gpu() {
+        if self.inner.is_gpu() || self.inner.dtype != DType::F32 {
             let scalar_t = Tensor::from_scalar(scalar);
             let result = (self as &Tensor).add(&scalar_t);
             *self = result;
@@ -606,8 +606,23 @@ impl Tensor {
 
     pub fn as_i64_slice(&self) -> Vec<i64> {
         let src = self.to_cpu();
-        let data = src.as_f32_slice();
-        data.iter().map(|&v| v as i64).collect()
+        match src.inner.dtype {
+            DType::I32 => {
+                let data = src.as_byte_slice().expect("contiguous CPU tensor");
+                bytemuck::cast_slice::<_, i32>(data).iter().map(|&v| v as i64).collect()
+            }
+            DType::I64 => {
+                let data = src.as_byte_slice().expect("contiguous CPU tensor");
+                bytemuck::cast_slice::<_, i64>(data).iter().copied().collect()
+            }
+            DType::F32 => {
+                let data = src.as_f32_slice();
+                data.iter().map(|&v| v as i64).collect()
+            }
+            _ => {
+                panic!("as_i64_slice: unsupported dtype {:?}. Use explicit conversion.", src.inner.dtype)
+            }
+        }
     }
 
     impl_unary_op!(try_erf, erf, erf, "ErfBackward");

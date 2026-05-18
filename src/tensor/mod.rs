@@ -708,19 +708,17 @@ impl Tensor {
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
-        // For BF16/F16 types, we need to convert to F32
         match self.inner.dtype {
-            DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                self.inner.as_f32_slice()
+            DType::F32 => self.inner.as_f32_slice(),
+            DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
+                panic!("as_f32_slice: use dtype-specific access methods instead of f32 reinterpretation. \
+                        For I32/I64/F64/Bool tensors, use to_cpu() + iterate via dtype-specific methods.")
             }
             DType::BF16 | DType::F16 => {
-                // For half-precision types, we need to convert to F32
-                // This requires creating a new tensor with F32 dtype
-                // For now, we'll panic as this is not yet fully implemented
                 panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
             }
             DType::U4 | DType::U8 => {
-                panic!("as_f32_slice: packed U4/U8 tensors cannot be viewed as f32. Use the IR pipeline to dequantize first.")
+                panic!("as_f32_slice: packed U4/U8 tensors cannot be viewed as f32.");
             }
         }
     }
@@ -751,14 +749,8 @@ impl Tensor {
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        // For BF16/F16 types, we cannot directly get a mutable f32 slice
-        // The data is stored in half-precision format
-        // For operations that need f32, use the dtype-specific operations
         match self.inner.dtype {
-            DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                // Use Arc::make_mut to ensure exclusive ownership
-                // This will clone the TensorImpl if there are multiple Arc owners,
-                // ensuring we have unique access before getting a mutable slice
+            DType::F32 => {
                 let inner = if Arc::strong_count(&self.inner) == 1 {
                     Arc::get_mut(&mut self.inner).unwrap()
                 } else {
@@ -766,11 +758,15 @@ impl Tensor {
                 };
                 inner.as_f32_slice_mut()
             }
+            DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
+                panic!("as_f32_slice_mut: use dtype-specific access methods instead of f32 reinterpretation. \
+                        For I32/I64/F64/Bool tensors, use to_cpu() + iterate via dtype-specific methods.")
+            }
             DType::BF16 | DType::F16 => {
                 panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
             }
             DType::U4 | DType::U8 => {
-                panic!("as_f32_slice_mut: packed U4/U8 tensors cannot be viewed as f32. Use the IR pipeline to dequantize first.")
+                panic!("as_f32_slice_mut: packed U4/U8 tensors cannot be viewed as f32.");
             }
         }
     }
