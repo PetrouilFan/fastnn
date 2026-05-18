@@ -243,14 +243,22 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                             .enumerate()
                             .map(|(i, dim)| {
                                 if i >= 2 {
+                                    let total_pad = if i == 2 { pad_h } else { pad_w };
                                     match dim {
                                         DimExpr::Known(w) => {
-                                            let total_pad = if i == 2 { pad_h } else { pad_w };
                                             DimExpr::Known(
                                                 ((*w as i64 + total_pad - kernel) / stride + 1)
                                                     .max(1)
                                                     as u64,
                                             )
+                                        }
+                                        DimExpr::Bounded { sym, max } => {
+                                            // Apply spatial reduction to Bounded dims
+                                            let reduced = ((*max as i64 + total_pad - kernel) / stride + 1).max(1) as u64;
+                                            DimExpr::Bounded {
+                                                sym: format!("pool({})", sym),
+                                                max: reduced,
+                                            }
                                         }
                                         other => other.clone(),
                                     }
@@ -640,13 +648,13 @@ fn conv2d_output_shape(
         ));
     }
 
-    let (stride, padding, _dilation) = parse_conv_attrs(attrs);
+    let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
 
-    let h_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, 1)?;
-    let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, 1)?;
+    let h_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
+    let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
 
     Ok(vec![n, f, h_out, w_out])
 }
@@ -669,11 +677,11 @@ fn conv1d_output_shape(
         ));
     }
 
-    let (stride, padding, _dilation) = parse_conv_attrs(attrs);
+    let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
-    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, 1)?;
+    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
 
     Ok(vec![n, f, w_out])
 }
@@ -696,13 +704,13 @@ fn conv3d_output_shape(
         ));
     }
 
-    let (stride, padding, _dilation) = parse_conv_attrs(attrs);
+    let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
-    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, 1)?;
-    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, 1)?;
-    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding, 1)?;
+    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
+    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
+    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding, dilation)?;
 
     Ok(vec![n, f, d_out, h_out, w_out])
 }

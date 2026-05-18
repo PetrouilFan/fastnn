@@ -53,24 +53,30 @@ impl Optimizer for Lion {
                 param.mul_scalar_(1.0 - lr * weight_decay);
             }
 
-            // Update momentum: m = beta1 * m + (1 - beta1) * grad
-            let beta1_c = 1.0 - beta1;
-            let m_update = self.m[i]
-                .clone()
-                .mul_scalar(beta1)
-                .add(&grad.mul_scalar(beta1_c));
-            self.m[i] = m_update;
+            // Lion (EvoLved Sign Momentum):
+            //   update = beta1 * m + (1 - beta1) * grad    (interpolated, beta1 is the "lookahead" coefficient)
+            //   param -= lr * sign(update)
+            //   m = beta2 * m + (1 - beta2) * grad          (momentum update, beta2 is the decay)
+            //
+            // Original paper: https://arxiv.org/abs/2302.06675
+            // Note: in the paper, the default betas are (0.9, 0.99) for (beta1, beta2).
 
-            // Compute sign of (beta2 * m + (1 - beta2) * grad)
-            let beta2_c = 1.0 - beta2;
+            // Compute update term before modifying m: update = beta1 * m + (1 - beta1) * grad
             let update_term = self.m[i]
                 .clone()
-                .mul_scalar(beta2)
-                .add(&grad.mul_scalar(beta2_c));
+                .mul_scalar(beta1)
+                .add(&grad.mul_scalar(1.0 - beta1));
             let signed = update_term.sign();
 
             // param = param - lr * sign(update)
             param.sub_(&signed.mul_scalar(lr));
+
+            // Update momentum: m = beta2 * m + (1 - beta2) * grad
+            let m_update = self.m[i]
+                .clone()
+                .mul_scalar(beta2)
+                .add(&grad.mul_scalar(1.0 - beta2));
+            self.m[i] = m_update;
         }
     }
 

@@ -51,14 +51,14 @@ macro_rules! dispatch_gpu_compute {
             cpu_offset: usize,
         ) -> Result<(), $crate::backend::BackendError> {
             let shader = $shader_builder;
-            $crate::backend::wgpu::pipeline::ensure_compute_pipeline(ctx, $shader_key, &shader)
+            $crate::backend::wgpu::pipeline::ensure_simple_compute_pipeline(ctx, $shader_key, &shader)
                 .map_err($crate::backend::BackendError::Dispatch)?;
 
             let buf_in = ctx.create_buffer(
                 bytemuck::cast_slice(input),
                 concat!($shader_key, "_input"),
             );
-            let output_size: u64 = $output_size;
+            let output_size: u64 = $output_size.max(1); // WGPU requires non-zero buffer size
             let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(concat!($shader_key, "_output")),
                 size: output_size,
@@ -72,7 +72,7 @@ macro_rules! dispatch_gpu_compute {
                 concat!($shader_key, "_params"),
             );
 
-            let pipeline_key = concat!("wgpu_backend_", $shader_key);
+            let pipeline_key = concat!("wgpu_simple_", $shader_key);
             let pipeline = &ctx.pipelines[pipeline_key];
             let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(concat!($shader_key, "_bg")),

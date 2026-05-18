@@ -77,7 +77,9 @@ impl<B: Backend> GraphExecutor<B> {
         self.compile_with_plan_and_quantize(graph, None)
     }
 
-    /// Rolling hash of graph topology for determinism diagnostics.
+    /// Rolling hash of graph topology + attributes + output types for
+    /// determinism diagnostics.  Used to verify that compiler passes change
+    /// the graph as expected, and to detect unintended hash collisions.
     fn _graph_state_hash(&self, graph: &ComputeGraph) -> u64 {
         use std::hash::Hash;
         use std::hash::Hasher;
@@ -88,6 +90,18 @@ impl<B: Backend> GraphExecutor<B> {
             node.inputs.len().hash(&mut hasher);
             for &inp in &node.inputs {
                 inp.hash(&mut hasher);
+            }
+            // Hash node attributes (sorted for determinism)
+            let mut attrs: Vec<(&String, &String)> = node.attrs.iter().collect();
+            attrs.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in &attrs {
+                k.hash(&mut hasher);
+                v.hash(&mut hasher);
+            }
+            // Hash output type debug representation
+            format!("{:?}", node.output_type).hash(&mut hasher);
+            if let Some(ref sec) = node.secondary_output_type {
+                format!("{:?}", sec).hash(&mut hasher);
             }
         }
         graph.inputs.len().hash(&mut hasher);

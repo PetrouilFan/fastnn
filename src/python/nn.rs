@@ -1052,8 +1052,19 @@ impl ModuleList {
         ModuleList { modules }
     }
 
-    fn __getitem__(&self, idx: usize, py: Python<'_>) -> Py<PyAny> {
-        self.modules[idx].clone_ref(py)
+    fn __len__(&self) -> usize {
+        self.modules.len()
+    }
+
+    fn __getitem__(&self, idx: usize, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if idx >= self.modules.len() {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "ModuleList index {} out of range (len={})",
+                idx,
+                self.modules.len()
+            )));
+        }
+        Ok(self.modules[idx].clone_ref(py))
     }
 }
 

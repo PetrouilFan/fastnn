@@ -393,6 +393,92 @@ impl PyTensor {
         }
     }
 
+    /// Basic index assignment: supports t[idx] = value for integer indices
+    /// along dimension 0. The value can be a scalar (f32) or a tensor.
+    /// GPU tensors are automatically copied to CPU before modification.
+    fn __setitem__(&self, idx: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        use pyo3::types::PySlice;
+
+        // Ensure the tensor is on CPU
+        let mut inner = {
+            #[cfg(feature = "gpu")]
+            if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "__setitem__ does not support GPU tensors; call .cpu() first"
+                ));
+            }
+            self.inner.clone()
+        };
+
+        let shape = inner.shape();
+        if shape.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Cannot index into a scalar tensor",
+            ));
+        }
+
+        // Compute row size (number of elements per index)
+        let row_size: usize = shape.iter().skip(1).map(|&d| d as usize).product::<usize>().max(1);
+        let dim0 = shape[0] as isize;
+
+        let (start, stop, step) = if let Ok(slice) = idx.cast::<PySlice>() {
+            let indices = slice.indices(dim0)?;
+            (indices.start as isize, indices.stop as isize, indices.step as isize)
+        } else {
+            let idx_val: isize = idx.extract()?;
+            let idx_val = if idx_val < 0 { dim0 + idx_val } else { idx_val };
+            if idx_val < 0 || idx_val >= dim0 {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "index {idx_val} is out of bounds for dimension 0 of size {dim0}"
+                )));
+            }
+            (idx_val, idx_val + 1, 1)
+        };
+
+        // Convert value to f32 data
+        let val_data: Vec<f32> = if let Ok(scalar) = value.extract::<f32>() {
+            vec![scalar]
+        } else if let Ok(t) = value.extract::<PyTensor>() {
+            let tv = t.inner.to_cpu();
+            tv.to_numpy()
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "Unsupported value type; expected float or Tensor",
+            ));
+        };
+
+        // Get mutable access to the tensor's data
+        let total_elems: usize = shape.iter().map(|&d| d as usize).product();
+        let data_slice = unsafe {
+            let ptr = inner.data_ptr_f32_mut();
+            std::slice::from_raw_parts_mut(ptr, total_elems)
+        };
+
+        let mut i = start;
+        while (step > 0 && i < stop) || (step < 0 && i > stop) {
+            let offset = (i as usize) * row_size;
+            if val_data.len() == 1 {
+                // Scalar: fill the entire row
+                for j in offset..offset + row_size {
+                    data_slice[j] = val_data[0];
+                }
+            } else {
+                // Tensor value: must match row size
+                let end = offset + row_size;
+                if val_data.len() == row_size {
+                    data_slice[offset..end].copy_from_slice(&val_data);
+                } else {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Value size {} does not match slice size {}", val_data.len(), row_size
+                    )));
+                }
+            }
+            i += step;
+        }
+
+        Ok(())
+    }
+
     fn cpu(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.to_cpu())
     }

@@ -124,6 +124,7 @@ impl_conv_type!(Conv2d, false, 2);
 
 impl Module for Conv2d {
     fn forward(&self, x: &Tensor) -> Tensor {
+        let effective_padding = if self.padding_mode == "same" { 0 } else { self.padding as usize };
         let (input, _pad_scalar) = if self.padding_mode == "same" {
             let x_shape = x.shape_ref();
             if x_shape.len() < 4 {
@@ -172,7 +173,7 @@ impl Module for Conv2d {
                     &ins[0],
                     &ins[1],
                     self.stride as usize,
-                    self.padding as usize,
+                    effective_padding,
                     self.dilation as usize,
                     self.groups as usize,
                 )]
@@ -190,7 +191,17 @@ impl Module for Conv2d {
         };
 
         if x.requires_grad() || self.weight.requires_grad() {
-            let inputs = vec![x.clone(), self.weight.clone()];
+            let mut inputs = vec![
+                x.clone(),
+                self.weight.clone(),
+                Tensor::from_scalar(self.stride as f32),
+                Tensor::from_scalar(self.padding as f32),
+                Tensor::from_scalar(self.dilation as f32),
+                Tensor::from_scalar(self.groups as f32),
+            ];
+            if let Some(ref b) = self.bias {
+                inputs.push(b.clone());
+            }
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(autograd::make_node_info("Conv2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
@@ -311,7 +322,7 @@ impl Module for Conv1d {
             .reshape(vec![w_shape[0], w_shape[1], 1, w_shape[2]]);
 
         // Use conv2d with padding=0 (since we pre-padded) and the user's stride/dilation
-        let output = {
+        let mut output = {
             let conv = Tensor::exec_aot(&[&x_4d, &w_4d], |g, ins| {
                 vec![g.conv2d_with_params(
                     &ins[0],
@@ -333,6 +344,25 @@ impl Module for Conv1d {
                 conv
             }
         };
+
+        // Attach autograd before final reshape so the backward chain is complete
+        if x.requires_grad() || self.weight.requires_grad() {
+            let mut inputs = vec![
+                x.clone(),
+                self.weight.clone(),
+                Tensor::from_scalar(self.stride as f32),
+                Tensor::from_scalar(self.padding as f32),
+                Tensor::from_scalar(self.dilation as f32),
+                Tensor::from_scalar(self.groups as f32),
+            ];
+            if let Some(ref b) = self.bias {
+                inputs.push(b.clone());
+            }
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(autograd::make_node_info("Conv1dBackward", inputs));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
+        }
 
         // Reshape back to 3D: [B, C_out, 1, L_out] -> [B, C_out, L_out]
         let out_shape = output.shape_ref();
@@ -358,6 +388,7 @@ impl Module for Conv3d {
                 &ins[1],
                 self.stride as usize,
                 self.padding as usize,
+                self.dilation as usize,
             )]
         })
         .expect("Conv3d::forward: AOT failed")
@@ -370,6 +401,23 @@ impl Module for Conv3d {
             let bias_shape = vec![1, self.out_channels, 1, 1, 1];
             let bias_reshaped = bias.reshape(bias_shape);
             output = output.add(&bias_reshaped);
+        }
+
+        // Attach autograd
+        if x.requires_grad() || self.weight.requires_grad() {
+            let mut inputs = vec![
+                x.clone(),
+                self.weight.clone(),
+                Tensor::from_scalar(self.stride as f32),
+                Tensor::from_scalar(self.padding as f32),
+            ];
+            if let Some(ref b) = self.bias {
+                inputs.push(b.clone());
+            }
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(autograd::make_node_info("Conv3dBackward", inputs));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
