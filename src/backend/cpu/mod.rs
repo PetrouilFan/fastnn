@@ -1790,7 +1790,7 @@ impl Backend for CpuBackend {
                         .get("weight_decay")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.01);
-                    let has_f16_state = node.inputs.len() >= 5
+                    let has_f16_state = node.inputs.len() >= 4
                         && graph
                             .get_node(node.inputs[2])
                             .map(|n| n.output_type.dtype == IrDType::F16)
@@ -1804,19 +1804,33 @@ impl Backend for CpuBackend {
                     } else {
                         "adamw_update_f32"
                     };
+                    let t_attr: u64 = node
+                        .attrs
+                        .get("t")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+                    let has_t_input = node.inputs.len() >= 5;
+                    let mut adamw_params = vec![
+                        lr.to_bits() as usize,
+                        beta1.to_bits() as usize,
+                        beta2.to_bits() as usize,
+                        eps.to_bits() as usize,
+                    ];
+                    if has_t_input {
+                        // New path: t is a runtime tensor (5th input slice)
+                        adamw_params.push(wd.to_bits() as usize);
+                    } else {
+                        // Old path: t is stored in params
+                        adamw_params.push(t_attr as usize);
+                        adamw_params.push(wd.to_bits() as usize);
+                    }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
-                        input_slices, // [weight, grad, m, v, t]
+                        input_slices, // [weight, grad, m, v, t] (t only for training pass path)
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![
-                            lr.to_bits() as usize,
-                            beta1.to_bits() as usize,
-                            beta2.to_bits() as usize,
-                            eps.to_bits() as usize,
-                            wd.to_bits() as usize,
-                        ],
+                        params: adamw_params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -4786,13 +4800,22 @@ impl Backend for CpuBackend {
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
-                                let t = u64::from_le_bytes(
-                                    d_ref[input_slices[4].offset
-                                        ..input_slices[4].offset + 8]
-                                        .try_into()
-                                        .unwrap(),
-                                ) as f32;
-                                let wd = f32::from_bits(params[4] as u32);
+                                let (t, wd) = if input_slices.len() >= 5 {
+                                    // New path: t is a runtime tensor (5th input slice)
+                                    let t = u64::from_le_bytes(
+                                        d_ref[input_slices[4].offset
+                                            ..input_slices[4].offset + 8]
+                                            .try_into()
+                                            .unwrap(),
+                                    ) as f32;
+                                    let wd = f32::from_bits(params[4] as u32);
+                                    (t, wd)
+                                } else {
+                                    // Old path: t is in params[4], wd in params[5]
+                                    let t = params[4] as f32;
+                                    let wd = f32::from_bits(params[5] as u32);
+                                    (t, wd)
+                                };
                                 let bias_corr1 = 1.0 - beta1.powi(t as i32);
                                 let bias_corr2 = 1.0 - beta2.powi(t as i32);
                                 adamw_update_f32(w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd)
@@ -5058,13 +5081,22 @@ impl Backend for CpuBackend {
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
-                                let t = u64::from_le_bytes(
-                                    d_ref[input_slices[4].offset
-                                        ..input_slices[4].offset + 8]
-                                        .try_into()
-                                        .unwrap(),
-                                ) as f32;
-                                let wd = f32::from_bits(params[4] as u32);
+                                let (t, wd) = if input_slices.len() >= 5 {
+                                    // New path: t is a runtime tensor (5th input slice)
+                                    let t = u64::from_le_bytes(
+                                        d_ref[input_slices[4].offset
+                                            ..input_slices[4].offset + 8]
+                                            .try_into()
+                                            .unwrap(),
+                                    ) as f32;
+                                    let wd = f32::from_bits(params[4] as u32);
+                                    (t, wd)
+                                } else {
+                                    // Old path: t is in params[4], wd in params[5]
+                                    let t = params[4] as f32;
+                                    let wd = f32::from_bits(params[5] as u32);
+                                    (t, wd)
+                                };
                                 (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd)
                             };
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
