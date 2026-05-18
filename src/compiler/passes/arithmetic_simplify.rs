@@ -1,28 +1,24 @@
 use crate::ir::node::{ComputeGraph, NodeId, Opcode, TensorValue};
 
 pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
-    let order = graph.topological_sort();
     let mut simplified = 0;
 
     let mut rewrites: Vec<(NodeId, RewriteAction)> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n.clone(),
-            None => continue,
-        };
+    let graph_ref = &*graph;
+    let _ = crate::utils::traverse_graph(graph_ref, |_node_id, node| {
 
         let action = match node.opcode {
             Opcode::Mul => {
                 let is_one = |id: NodeId| -> bool {
-                    graph.get_node(id).is_some_and(|n| match &n.opcode {
+                    graph_ref.get_node(id).is_some_and(|n| match &n.opcode {
                         Opcode::Constant(TensorValue::Float(v)) => *v == 1.0,
                         Opcode::Constant(TensorValue::Int(v)) => *v == 1,
                         _ => false,
                     })
                 };
                 let is_zero = |id: NodeId| -> bool {
-                    graph.get_node(id).is_some_and(|n| match &n.opcode {
+                    graph_ref.get_node(id).is_some_and(|n| match &n.opcode {
                         Opcode::Constant(TensorValue::Float(v)) => *v == 0.0,
                         Opcode::Constant(TensorValue::Int(v)) => *v == 0,
                         _ => false,
@@ -48,7 +44,7 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
 
             Opcode::Add => {
                 let is_zero = |id: NodeId| -> bool {
-                    graph.get_node(id).is_some_and(|n| match &n.opcode {
+                    graph_ref.get_node(id).is_some_and(|n| match &n.opcode {
                         Opcode::Constant(TensorValue::Float(v)) => *v == 0.0,
                         Opcode::Constant(TensorValue::Int(v)) => *v == 0,
                         _ => false,
@@ -70,7 +66,7 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
 
             Opcode::Sub => {
                 let is_zero = |id: NodeId| -> bool {
-                    graph.get_node(id).is_some_and(|n| match &n.opcode {
+                    graph_ref.get_node(id).is_some_and(|n| match &n.opcode {
                         Opcode::Constant(TensorValue::Float(v)) => *v == 0.0,
                         Opcode::Constant(TensorValue::Int(v)) => *v == 0,
                         _ => false,
@@ -86,7 +82,7 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
 
             Opcode::Div => {
                 let is_one = |id: NodeId| -> bool {
-                    graph.get_node(id).is_some_and(|n| match &n.opcode {
+                    graph_ref.get_node(id).is_some_and(|n| match &n.opcode {
                         Opcode::Constant(TensorValue::Float(v)) => *v == 1.0,
                         Opcode::Constant(TensorValue::Int(v)) => *v == 1,
                         _ => false,
@@ -102,9 +98,9 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
 
             Opcode::Neg => {
                 if let Some(&inner_id) = node.inputs.first() {
-                    let is_neg = graph.get_node(inner_id).is_some_and(|n| n.opcode == Opcode::Neg);
+                    let is_neg = graph_ref.get_node(inner_id).is_some_and(|n| n.opcode == Opcode::Neg);
                     if is_neg {
-                        if let Some(&inner_input) = graph.get_node(inner_id).and_then(|n| n.inputs.first()) {
+                        if let Some(&inner_input) = graph_ref.get_node(inner_id).and_then(|n| n.inputs.first()) {
                             Some(RewriteAction::ReplaceWith(inner_input))
                         } else {
                             None
@@ -119,7 +115,7 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
 
             Opcode::Abs => {
                 if let Some(&inner_id) = node.inputs.first() {
-                    let is_abs = graph.get_node(inner_id).is_some_and(|n| n.opcode == Opcode::Abs);
+                    let is_abs = graph_ref.get_node(inner_id).is_some_and(|n| n.opcode == Opcode::Abs);
                     if is_abs {
                         Some(RewriteAction::ReplaceWith(inner_id))
                     } else {
@@ -134,9 +130,10 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
         };
 
         if let Some(action) = action {
-            rewrites.push((node_id, action));
+            rewrites.push((_node_id, action));
         }
-    }
+        Ok(())
+    });
 
     for (node_id, action) in &rewrites {
         match action {

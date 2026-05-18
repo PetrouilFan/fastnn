@@ -28,7 +28,9 @@ def uniform_(tensor: Tensor, a: float = 0.0, b: float = 1.0) -> Tensor:
     with fastnn.no_grad():
         rng = np.random.default_rng()
         data = rng.uniform(a, b, tensor.shape).astype(np.float32)
-        return fastnn.from_numpy(data)
+        new_tensor = fastnn.from_numpy(data)
+        tensor.copy_(new_tensor)
+        return tensor
 
 
 def normal_(tensor: Tensor, mean: float = 0.0, std: float = 1.0) -> Tensor:
@@ -36,14 +38,18 @@ def normal_(tensor: Tensor, mean: float = 0.0, std: float = 1.0) -> Tensor:
     with fastnn.no_grad():
         rng = np.random.default_rng()
         data = rng.normal(mean, std, tensor.shape).astype(np.float32)
-        return fastnn.from_numpy(data)
+        new_tensor = fastnn.from_numpy(data)
+        tensor.copy_(new_tensor)
+        return tensor
 
 
 def constant_(tensor: Tensor, val: float) -> Tensor:
     """Fill tensor with constant value."""
     with fastnn.no_grad():
         data = np.full(tensor.shape, val, dtype=np.float32)
-        return fastnn.from_numpy(data)
+        new_tensor = fastnn.from_numpy(data)
+        tensor.copy_(new_tensor)
+        return tensor
 
 
 def ones_(tensor: Tensor) -> Tensor:
@@ -146,7 +152,9 @@ def orthogonal_(tensor: Tensor, gain: float = 1.0) -> Tensor:
         q, r = np.linalg.qr(rng.normal(0.0, 1.0, flat_shape))
         q *= np.sign(np.diag(r))
         q *= gain
-        return fastnn.from_numpy(q)
+        new_tensor = fastnn.from_numpy(q)
+        tensor.copy_(new_tensor)
+        return tensor
 
 
 def eye_(tensor: Tensor) -> Tensor:
@@ -156,7 +164,9 @@ def eye_(tensor: Tensor) -> Tensor:
         eye_data = [0.0] * (tensor.shape[0] * tensor.shape[1])
         for i in range(n):
             eye_data[i * tensor.shape[1] + i] = 1.0
-        return fastnn.Tensor(eye_data, tensor.shape)
+        new_tensor = fastnn.Tensor(eye_data, tensor.shape)
+        tensor.copy_(new_tensor)
+        return tensor
 
 
 def dirac_(tensor: Tensor) -> Tensor:
@@ -178,4 +188,6 @@ def dirac_(tensor: Tensor) -> Tensor:
                 data[i, i, shape[2] // 2, shape[3] // 2] = 1.0
             elif len(shape) == 5:
                 data[i, i, shape[2] // 2, shape[3] // 2, shape[4] // 2] = 1.0
-        return fastnn.from_numpy(data)
+        new_tensor = fastnn.from_numpy(data)
+        tensor.copy_(new_tensor)
+        return tensor

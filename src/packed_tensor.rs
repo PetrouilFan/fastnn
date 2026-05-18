@@ -92,6 +92,7 @@ impl<T: PackedWord> PackedTensor<T> {
         };
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
+        // Safety margin for SIMD kernels that may read beyond the logical word boundary
         const SIMD_MARGIN: usize = 16;
         let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
@@ -420,6 +421,7 @@ impl<T: PackedWord> PackedTensor<T> {
         // Each row has its own scale and occupies k_packed packed words.
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
+        // Safety margin for SIMD kernels that may read beyond the logical word boundary
         const SIMD_MARGIN: usize = 16;
         let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
@@ -505,6 +507,7 @@ impl<T: PackedWord> PackedTensor<T> {
 
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
+        // Safety margin for SIMD kernels that may read beyond the logical word boundary
         const SIMD_MARGIN: usize = 16;
         let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
@@ -512,7 +515,7 @@ impl<T: PackedWord> PackedTensor<T> {
             let inv_scale = if scales[row] != 0.0 {
                 1.0 / scales[row]
             } else {
-                1.0
+                0.0
             };
             let zp = zeros[row];
             for word in 0..k_packed {

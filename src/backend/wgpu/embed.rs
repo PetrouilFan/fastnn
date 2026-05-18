@@ -130,8 +130,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= params.num_indices) { return; }
     let idx = indices[i];
-    let src_base = u32(idx) * params.embedding_dim;
     let dst_base = i * params.embedding_dim;
+    if (idx < 0 || idx >= i32(params.vocab_size)) {
+        for (var j = 0u; j < params.embedding_dim; j = j + 1u) {
+            output[dst_base + j] = 0.0;
+        }
+        return;
+    }
+    let src_base = u32(idx) * params.embedding_dim;
     for (var j = 0u; j < params.embedding_dim; j = j + 1u) {
         output[dst_base + j] = weight[src_base + j];
     }

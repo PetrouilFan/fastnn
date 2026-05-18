@@ -40,10 +40,10 @@ fn test_memory_plan_basic_reuse() {
     assert!(plan.slots.contains_key(&output_id));
 
     // The total arena size should be reasonable (not sum of all nodes,
-    // since reuse should occur). Each node is 4*f32 = 16 bytes, aligned to 8 = 16.
+    // since reuse should occur). Each node is 4*f32 = 16 bytes, aligned to 64 (cache line).
     // At minimum we need 2 active slots at peak (input+relu_a or relu_a+relu_b+output etc.)
-    let min_possible = 16usize; // at least one slot
-    let max_worst_case = 4 * 16usize; // worst case: no reuse
+    let min_possible = 64usize; // at least one 64-byte aligned slot
+    let max_worst_case = 4 * 64usize; // worst case: no reuse
     assert!(
         plan.total_size >= min_possible,
         "arena size {} should be at least {}",
@@ -189,7 +189,7 @@ fn test_memory_plan_zero_sized_tensor() {
     shape_inference::infer_shapes(&mut graph).unwrap();
     let plan = memory_planning::plan_memory(&graph).unwrap();
     // Zero-sized tensors may be skipped, but the plan should still be valid
-    assert!(plan.total_size >= 0);
+    assert_eq!(plan.total_size, 0);
 }
 
 #[test]

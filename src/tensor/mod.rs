@@ -265,11 +265,8 @@ impl TensorImpl {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 let ptr = cpu.data.as_ref().as_ptr();
-                // storage_offset is in elements, cast to f32 pointer first
-                let f32_ptr = ptr as *const f32;
-                // SAFETY: The storage allocation is valid for the lifetime of `self`,
-                // and `storage_offset` has been validated to be within bounds of the allocation.
-                unsafe { f32_ptr.add(self.storage_offset as usize) }
+                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                unsafe { ptr.add(byte_offset) as *const f32 }
             }
             #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
@@ -286,14 +283,13 @@ impl TensorImpl {
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        match self.storage.as_ref() {
+        let storage = Arc::make_mut(&mut self.storage);
+        match storage {
             Storage::Cpu(cpu) => {
-                // Unsafe: caller must ensure exclusive ownership of storage
-                // This is guaranteed by &mut self if Arc is not shared
-                let ptr = cpu.data.as_ref().as_ptr() as *mut f32;
-                // SAFETY: The caller guarantees exclusive ownership via `&mut self`,
-                // and `storage_offset` is within bounds of the storage allocation.
-                unsafe { ptr.add(self.storage_offset as usize) }
+                let data = Arc::make_mut(&mut cpu.data);
+                let ptr = data.as_mut_ptr();
+                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                unsafe { ptr.add(byte_offset) as *mut f32 }
             }
             #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
@@ -303,14 +299,12 @@ impl TensorImpl {
     }
 
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        match self.storage.as_ref() {
+        let storage = Arc::make_mut(&mut self.storage);
+        match storage {
             Storage::Cpu(cpu) => {
-                // Unsafe: caller must ensure exclusive ownership of storage
-                // This is guaranteed by &mut self if Arc is not shared
-                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                let data = Arc::make_mut(&mut cpu.data);
+                let ptr = data.as_mut_ptr();
                 let elem_size = self.dtype.size();
-                // SAFETY: The caller guarantees exclusive ownership via `&mut self`,
-                // and `storage_offset * elem_size` is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
             #[cfg(feature = "gpu")]
@@ -326,11 +320,13 @@ impl TensorImpl {
             // is derived from the CPU storage's backing `Vec<u8>` and is valid for
             // the lifetime of `self`.
             Storage::Cpu(cpu) => unsafe {
-                let ptr = cpu.data.as_ref().as_ptr() as *const f32;
-                let ptr = ptr.add(self.storage_offset as usize);
+                let ptr = cpu.data.as_ref().as_ptr();
+                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                let ptr = ptr.add(byte_offset) as *const f32;
                 let numel = self.numel() as usize;
                 // Unconditional bounds validation to prevent UB in release builds
-                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
+                let elem_size = self.dtype.size();
+                let storage_len = cpu.data.len() / elem_size;
                 assert!(
                     self.storage_offset as usize + numel <= storage_len,
                     "as_f32_slice: offset + numel exceeds storage bounds. \
@@ -358,7 +354,8 @@ impl TensorImpl {
         unsafe {
             // Unconditional bounds validation to prevent UB in release builds
             if let Storage::Cpu(cpu) = self.storage.as_ref() {
-                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
+                let elem_size = self.dtype.size();
+                let storage_len = cpu.data.len() / elem_size;
                 assert!(
                     self.storage_offset as usize + numel <= storage_len,
                     "as_f32_slice_mut: offset + numel exceeds storage bounds. \
@@ -706,20 +703,8 @@ impl Tensor {
     /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
     /// Note: storage_offset is in elements, so we need to multiply by element size
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        let inner = &self.inner;
-        match inner.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                // Unsafe: caller must ensure exclusive ownership of storage
-                // This is guaranteed by &mut self if Arc is not shared
-                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                let elem_size = inner.dtype.size();
-                unsafe { ptr.add(inner.storage_offset as usize * elem_size) }
-            }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
-        }
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.data_ptr_mut()
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {

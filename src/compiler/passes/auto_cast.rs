@@ -87,7 +87,6 @@ fn quantize_weight_constants(graph: &mut ComputeGraph, bit_width: u8) -> Result<
 /// quantized input) and a loss regularizer (which expects f32), we insert a
 /// Dequantize before the regularizer so it sees f32 data.
 fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, String> {
-    let order = graph.topological_sort();
     let mut inserted = 0usize;
 
     // Collect rewrites first.
@@ -97,12 +96,8 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Stri
     }
     let mut rewrites: Vec<DequantRewrite> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-
+    let graph_ref = &*graph;
+    crate::utils::traverse_graph(graph_ref, |node_id, node| {
         // Ops that can accept quantized inputs natively.
         let accepts_quantized = matches!(
             node.opcode,
@@ -117,7 +112,7 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Stri
         );
 
         for (i, &input_id) in node.inputs.iter().enumerate() {
-            let input_dtype = match graph.get_node(input_id) {
+            let input_dtype = match graph_ref.get_node(input_id) {
                 Some(n) => &n.output_type.dtype,
                 None => continue,
             };
@@ -132,7 +127,8 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Stri
                 });
             }
         }
-    }
+        Ok(())
+    })?;
 
     // Apply rewrites.
     for rw in rewrites {

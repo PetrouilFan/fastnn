@@ -277,7 +277,7 @@ def default_collate(batch: list) -> tuple:
     if isinstance(elem, tuple):
         return tuple(map(default_collate, zip(*batch)))
 
-    if hasattr(elem, "numpy") and all(hasattr(b, "numpy") for b in batch):
+    if hasattr(elem, "numpy") and batch and all(hasattr(b, "numpy") for b in batch):
         return fnn.stack(batch, dim=0)
 
     if hasattr(elem, "numpy") or isinstance(elem, np.ndarray):

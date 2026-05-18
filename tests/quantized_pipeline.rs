@@ -105,7 +105,15 @@ fn test_matmul_u4_end_to_end() {
     for i in 0..8 {
         let f32_val = output_f32[i];
         let u4_val = output_u4[i];
-        if f32_val.abs() > 0.1 {
+        if f32_val.abs() <= 0.1 {
+            assert!(
+                (u4_val - f32_val).abs() < 0.05,
+                "U4 small value mismatch at {}: q={}, f32={}",
+                i,
+                u4_val,
+                f32_val
+            );
+        } else {
             let rel_err = (u4_val - f32_val).abs() / f32_val.abs();
             assert!(
                 rel_err < 0.5,
@@ -134,7 +142,15 @@ fn test_matmul_u8_end_to_end() {
     for i in 0..8 {
         let f32_val = output_f32[i];
         let u8_val = output_u8[i];
-        if f32_val.abs() > 0.1 {
+        if f32_val.abs() <= 0.1 {
+            assert!(
+                (u8_val - f32_val).abs() < 0.05,
+                "U8 small value mismatch at {}: q={}, f32={}",
+                i,
+                u8_val,
+                f32_val
+            );
+        } else {
             let rel_err = (u8_val - f32_val).abs() / f32_val.abs();
             assert!(
                 rel_err < 0.15,
@@ -231,27 +247,35 @@ fn test_conv2d_u4_end_to_end() {
         "U4 conv2d output should have 18 elements"
     );
 
-    // U4 quantized conv2d output should be within reasonable tolerance
-    let mut u4_correct = 0;
+    // U4 quantized conv2d output should be within reasonable tolerance.
+    // Use RMS error across all elements + individual threshold checks.
+    let mut sum_sq = 0.0f64;
+    let mut u4_correct = 0u32;
     for i in 0..18 {
         let f32_val = output_f32[i];
         let u4_val = output_u4[i];
+        let diff = (u4_val - f32_val) as f64;
+        sum_sq += diff * diff;
         if f32_val.abs() > 0.01 {
-            let rel_err = (u4_val - f32_val).abs() / f32_val.abs();
+            let rel_err = (diff / f32_val as f64).abs();
             if rel_err < 0.6 {
                 u4_correct += 1;
             }
         } else {
-            // Very small values — just check both are small
-            if (u4_val - f32_val).abs() < 0.1 {
+            if diff.abs() < 0.1 {
                 u4_correct += 1;
             }
         }
     }
-    // At least half the values should be within tolerance
+    let rms = (sum_sq / 18.0).sqrt();
     assert!(
-        u4_correct >= 9,
-        "At least 9/18 U4 conv2d outputs should be close to f32 (got {}/18)",
+        rms < 0.5,
+        "U4 conv2d RMS error too large: {:.4}",
+        rms
+    );
+    assert!(
+        u4_correct >= 15,
+        "At least 15/18 U4 conv2d outputs should be close to f32 (got {}/18)",
         u4_correct
     );
 }

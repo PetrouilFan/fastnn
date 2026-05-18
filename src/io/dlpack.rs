@@ -129,7 +129,7 @@ fn compute_strides(shape: &[i64]) -> Vec<i64> {
 /// Returns a raw pointer that can be passed to other frameworks.
 /// The tensor's storage is kept alive via Arc until the deleter is called.
 #[allow(dead_code)]
-pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
+pub fn to_dlpack(tensor: &Tensor) -> Option<*mut DLManagedTensor> {
     let shape = tensor.shape();
     let ndim = shape.len() as i32;
 
@@ -137,7 +137,7 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
     let data_ptr = if tensor.inner.is_cpu() {
         tensor.data_ptr() as *mut std::ffi::c_void
     } else {
-        std::ptr::null_mut()
+        return None;
     };
 
     // Allocate shape array
@@ -146,10 +146,10 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
     // Create strides using helper function
     let strides_box = compute_strides(&shape).into_boxed_slice();
 
-    // Get dtype, returning null on error
+    // Get dtype, returning None on error
     let dtype = match dtype_to_dlpack(tensor.dtype()) {
         Ok(d) => d,
-        Err(_) => return std::ptr::null_mut(),
+        Err(_) => return None,
     };
 
     // Create context that holds a strong reference to the tensor's storage
@@ -181,7 +181,7 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
         deleter: Some(dlpack_deleter),
     });
 
-    Box::into_raw(managed)
+    Some(Box::into_raw(managed))
 }
 
 /// Deleter function called by DLPack consumers when done with the tensor.
@@ -259,11 +259,16 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor>
         // requires careful lifetime management
         let data = match dtype {
             DType::F32 => {
-                let src = std::slice::from_raw_parts(
-                    (dl_tensor.data as *const f32).add(dl_tensor.byte_offset as usize),
-                    numel,
+                let byte_ptr = (dl_tensor.data as *const u8)
+                    .add(dl_tensor.byte_offset as usize);
+                let num_bytes = numel * std::mem::size_of::<f32>();
+                let mut data = vec![0.0f32; numel];
+                std::ptr::copy_nonoverlapping(
+                    byte_ptr,
+                    data.as_mut_ptr() as *mut u8,
+                    num_bytes,
                 );
-                src.to_vec()
+                data
             }
             _ => {
                 return Err(FastnnError::Dtype(format!(

@@ -63,8 +63,9 @@ impl TensorImpl {
             let crate::storage::Storage::Cpu(cpu) = &self.storage.as_ref() else {
                 panic!("contiguous(): only supported for CPU tensors");
             };
+            let elem_size = self.dtype.size();
             let ptr = cpu.data.as_ref().as_ptr() as *const f32;
-            let len = cpu.data.len() / 4;
+            let len = cpu.data.len() / elem_size;
             std::slice::from_raw_parts(ptr, len)
         };
         let strides = &self.strides;

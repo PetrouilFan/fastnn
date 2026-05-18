@@ -73,14 +73,14 @@ class DataParallel:
                 replica.to_gpu(d)
             else:
                 device_str = f"cuda:{d}" if isinstance(d, int) else str(d)
-                if hasattr(replica, "_parameters"):
-                    for name, param in replica._parameters.items():
-                        if hasattr(param, "to_device"):
-                            param.to_device(device_str)
-                        elif hasattr(param, "data") and hasattr(param.data, "to_device"):
-                            param.data.to_device(device_str)
-                if hasattr(replica, "_buffers"):
-                    for name, buf in replica._buffers.items():
+                for param in replica.parameters():
+                    if hasattr(param, "to_device"):
+                        param.to_device(device_str)
+                    elif hasattr(param, "data") and hasattr(param.data, "to_device"):
+                        param.data.to_device(device_str)
+                buffers_method = getattr(replica, "buffers", None)
+                if callable(buffers_method):
+                    for buf in buffers_method():
                         if hasattr(buf, "to_device"):
                             buf.to_device(device_str)
 

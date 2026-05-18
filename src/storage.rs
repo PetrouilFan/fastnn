@@ -327,24 +327,24 @@ impl AllocStats {
     }
 
     fn add_alloc(&self, nbytes: usize) {
-        self.total_allocated.fetch_add(nbytes, Ordering::Relaxed);
+        self.total_allocated.fetch_add(nbytes, Ordering::AcqRel);
         self.num_allocs.fetch_add(1, Ordering::Relaxed);
     }
 
     fn add_freed(&self, nbytes: usize) {
-        self.total_freed.fetch_add(nbytes, Ordering::Relaxed);
+        self.total_freed.fetch_add(nbytes, Ordering::AcqRel);
     }
 
     pub fn total_allocated(&self) -> usize {
-        self.total_allocated.load(Ordering::Relaxed)
+        self.total_allocated.load(Ordering::Acquire)
     }
 
     pub fn total_freed(&self) -> usize {
-        self.total_freed.load(Ordering::Relaxed)
+        self.total_freed.load(Ordering::Acquire)
     }
 
     pub fn current_bytes(&self) -> usize {
-        self.total_allocated.load(Ordering::Relaxed) - self.total_freed.load(Ordering::Relaxed)
+        self.total_allocated.load(Ordering::Acquire) - self.total_freed.load(Ordering::Acquire)
     }
 
     pub fn num_allocs(&self) -> u64 {

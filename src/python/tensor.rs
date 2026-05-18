@@ -113,12 +113,14 @@ impl PyTensor {
     fn __dlpack__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use crate::io::dlpack::to_dlpack;
         use pyo3::exceptions::PyValueError;
-        let ptr = to_dlpack(&self.inner);
-        if ptr.is_null() {
-            return Err(PyValueError::new_err(
-                "DLPack conversion failed: unsupported dtype or device"
-            ));
-        }
+        let ptr = match to_dlpack(&self.inner) {
+            Some(p) => p,
+            None => {
+                return Err(PyValueError::new_err(
+                    "DLPack conversion failed: unsupported dtype or device"
+                ));
+            }
+        };
         // Create PyCapsule with the DLPack tensor
         // The capsule name must be "dltensor" per DLPack spec
         // SAFETY: The GIL is held (we have `py: Python<'_>`). `ptr` points to
@@ -220,10 +222,30 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (grad=None))]
-    fn backward(&self, py: Python<'_>, grad: Option<PyTensor>) {
+    fn backward(&self, py: Python<'_>, grad: Option<PyTensor>) -> PyResult<()> {
         let inner = self.inner.clone();
         let grad_tensor = grad.map(|g| g.inner);
-        py.detach(move || crate::autograd::backward(&inner, grad_tensor));
+        let result = py.detach(move || {
+            std::panic::catch_unwind(move || {
+                crate::autograd::backward(&inner, grad_tensor);
+            })
+        });
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(panic_err)) => {
+                let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic during backward".to_string()
+                };
+                Err(pyo3::exceptions::PyRuntimeError::new_err(msg))
+            }
+            Err(panic_err) => {
+                Err(pyo3::exceptions::PyRuntimeError::new_err("Panic during backward"))
+            }
+        }
     }
 
     #[pyo3(signature = (grad))]
@@ -238,14 +260,18 @@ impl PyTensor {
 
     #[pyo3(signature = (dim = None, keepdim = false))]
     fn sum(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        let dim = dim.unwrap_or(0);
-        PyTensor::from_tensor(self.inner.sum(dim, keepdim))
+        match dim {
+            Some(d) => PyTensor::from_tensor(self.inner.sum(d, keepdim)),
+            None => PyTensor::from_tensor(reduce_sum_all(&self.inner)),
+        }
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
     fn mean(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        let dim = dim.unwrap_or(0);
-        PyTensor::from_tensor(self.inner.mean(dim, keepdim))
+        match dim {
+            Some(d) => PyTensor::from_tensor(self.inner.mean(d, keepdim)),
+            None => PyTensor::from_tensor(reduce_mean_all(&self.inner)),
+        }
     }
 
     fn view(&self, shape: Vec<i64>) -> PyTensor {

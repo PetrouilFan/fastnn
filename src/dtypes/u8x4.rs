@@ -20,50 +20,21 @@ impl PackedWord for U8x4 {
     fn unpack_to_f32(self) -> [f32; 4] {
         let bytes = self.0.to_le_bytes();
         [
-            (bytes[0] as i8) as f32,
-            (bytes[1] as i8) as f32,
-            (bytes[2] as i8) as f32,
-            (bytes[3] as i8) as f32,
+            bytes[0] as i8 as f32,
+            bytes[1] as i8 as f32,
+            bytes[2] as i8 as f32,
+            bytes[3] as i8 as f32,
         ]
     }
 
     #[inline]
     fn pack_from_f32(vals: [f32; 4]) -> Self {
-        let bytes = [
-            {
-                let clamped = vals[0].clamp(-128.0, 127.0).round();
-                if clamped.is_nan() {
-                    0u8
-                } else {
-                    clamped as i8 as u8
-                }
-            },
-            {
-                let clamped = vals[1].clamp(-128.0, 127.0).round();
-                if clamped.is_nan() {
-                    0u8
-                } else {
-                    clamped as i8 as u8
-                }
-            },
-            {
-                let clamped = vals[2].clamp(-128.0, 127.0).round();
-                if clamped.is_nan() {
-                    0u8
-                } else {
-                    clamped as i8 as u8
-                }
-            },
-            {
-                let clamped = vals[3].clamp(-128.0, 127.0).round();
-                if clamped.is_nan() {
-                    0u8
-                } else {
-                    clamped as i8 as u8
-                }
-            },
-        ];
-        U8x4(u32::from_le_bytes(bytes))
+        let mut word: u32 = 0;
+        for i in 0..4 {
+            let clamped = vals[i].clamp(-128.0, 127.0).round() as i8;
+            word |= (clamped as u8 as u32) << (i * 8);
+        }
+        U8x4(word)
     }
 
     fn wgsl_unpack_body() -> &'static str {

@@ -489,178 +489,39 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
                 // Input nodes are graph inputs, not ONNX ops
                 continue;
             }
-            Opcode::MatMul => ("MatMul".to_string(), HashMap::new()),
-            Opcode::Conv2d => ("Conv2d".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(s) = node.attrs.get("stride") {
-                    a.insert("stride".to_string(), s.clone());
-                }
-                if let Some(s) = node.attrs.get("padding") {
-                    a.insert("padding".to_string(), s.clone());
-                }
-                if let Some(s) = node.attrs.get("dilation") {
-                    a.insert("dilation".to_string(), s.clone());
-                }
-                if let Some(s) = node.attrs.get("group") {
-                    a.insert("group".to_string(), s.clone());
-                }
-                a
-            }),
-            Opcode::Add => ("Add".to_string(), HashMap::new()),
-            Opcode::Sub => ("Sub".to_string(), HashMap::new()),
-            Opcode::Mul => ("Mul".to_string(), HashMap::new()),
-            Opcode::Div => ("Div".to_string(), HashMap::new()),
-            Opcode::Relu => ("Relu".to_string(), HashMap::new()),
-            Opcode::Sigmoid => ("Sigmoid".to_string(), HashMap::new()),
-            Opcode::Tanh => ("Tanh".to_string(), HashMap::new()),
-            Opcode::Exp => ("Exp".to_string(), HashMap::new()),
-            Opcode::Log => ("Log".to_string(), HashMap::new()),
-            Opcode::Neg => ("Neg".to_string(), HashMap::new()),
-            Opcode::Sqrt => ("Sqrt".to_string(), HashMap::new()),
-            Opcode::Abs => ("Abs".to_string(), HashMap::new()),
-            Opcode::Transpose => ("Transpose".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(perm) = node.attrs.get("perm") {
-                    a.insert("perm".to_string(), perm.clone());
-                }
-                a
-            }),
-            Opcode::Reshape => ("Reshape".to_string(), HashMap::new()),
-            Opcode::Flatten => ("Flatten".to_string(), HashMap::new()),
-            Opcode::Squeeze => ("Squeeze".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axes) = node.attrs.get("axes") {
-                    a.insert("axes".to_string(), axes.clone());
-                }
-                a
-            }),
-            Opcode::Unsqueeze => ("Unsqueeze".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axes) = node.attrs.get("axes") {
-                    a.insert("axes".to_string(), axes.clone());
-                }
-                a
-            }),
-            Opcode::Concat => ("Concat".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axis) = node.attrs.get("axis") {
-                    a.insert("axis".to_string(), axis.clone());
-                }
-                a
-            }),
-            Opcode::ReduceSum => ("ReduceSum".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axis) = node.attrs.get("axis") {
-                    a.insert("axes".to_string(), axis.clone());
-                }
-                a
-            }),
-            Opcode::ReduceMean => ("ReduceMean".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axis) = node.attrs.get("axis") {
-                    a.insert("axes".to_string(), axis.clone());
-                }
-                a
-            }),
-            Opcode::ReduceMax => ("ReduceMax".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axis) = node.attrs.get("axis") {
-                    a.insert("axes".to_string(), axis.clone());
-                }
-                a
-            }),
-            Opcode::BatchNorm => ("BatchNormalization".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(eps) = node.attrs.get("eps") {
-                    a.insert("epsilon".to_string(), eps.clone());
-                }
-                a
-            }),
-            Opcode::Softmax => ("Softmax".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axis) = node.attrs.get("axis") {
-                    a.insert("axis".to_string(), axis.clone());
-                }
-                a
-            }),
-            Opcode::Gelu => ("Gelu".to_string(), HashMap::new()),
-            Opcode::LeakyRelu => ("LeakyRelu".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(slope) = node.attrs.get("negative_slope") {
-                    a.insert("alpha".to_string(), slope.clone());
-                }
-                a
-            }),
-            Opcode::Pad => ("Pad".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(pads) = node.attrs.get("pads") {
-                    a.insert("pads".to_string(), pads.clone());
-                }
-                if let Some(mode) = node.attrs.get("mode") {
-                    a.insert("mode".to_string(), mode.clone());
-                }
-                a
-            }),
-            Opcode::Slice => ("Slice".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axes) = node.attrs.get("axes") {
-                    a.insert("axes".to_string(), axes.clone());
-                }
-                if let Some(starts) = node.attrs.get("starts") {
-                    a.insert("starts".to_string(), starts.clone());
-                }
-                if let Some(ends) = node.attrs.get("ends") {
-                    a.insert("ends".to_string(), ends.clone());
-                }
-                a
-            }),
-            Opcode::Expand => ("Expand".to_string(), HashMap::new()),
-            Opcode::Tile => ("Tile".to_string(), HashMap::new()),
-            Opcode::Where => ("Where".to_string(), HashMap::new()),
-            Opcode::Cast => ("Cast".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(to) = node.attrs.get("to") {
-                    a.insert("to".to_string(), to.clone());
-                }
-                a
-            }),
-            Opcode::Gather => ("Gather".to_string(), {
-                let mut a = HashMap::new();
-                if let Some(axis) = node.attrs.get("axis") {
-                    a.insert("axis".to_string(), axis.clone());
-                }
-                a
-            }),
-            // Fallback: use the opcode name directly
             other => {
-                let name = format!("{:?}", other);
-                // Strip the "Opcode::" prefix
-                let onnx_name = name.strip_prefix("Opcode::").unwrap_or(&name);
-                // Skip unsupported ops (training-only ops like SgdUpdate, GradientScale)
-                if matches!(
-                    other,
-                    Opcode::SgdUpdate
-                        | Opcode::AdamUpdate
-                        | Opcode::AdamWUpdate
-                        | Opcode::MuonUpdate
-                        | Opcode::LionUpdate
-                        | Opcode::RmspropUpdate
-                        | Opcode::GradientScale
-                        | Opcode::Quantize
-                        | Opcode::Dequantize
-                        | Opcode::QuantizeActivations
-                        | Opcode::DequantizeActivations
-                        | Opcode::ToF16
-                        | Opcode::ToF32
-                        | Opcode::MulScalar
-                        | Opcode::AddScalar
-                        | Opcode::DivScalar
-                        | Opcode::Input
-                        | Opcode::Constant(_)
-                ) {
-                    continue;
+                match crate::onnx::opcode_map::opcode_to_onnx(other, &node.attrs) {
+                    Some(result) => result,
+                    None => {
+                        // Fallback: use the opcode name directly
+                        let name = format!("{:?}", other);
+                        let onnx_name = name.strip_prefix("Opcode::").unwrap_or(&name);
+                        if matches!(
+                            other,
+                            Opcode::SgdUpdate
+                                | Opcode::AdamUpdate
+                                | Opcode::AdamWUpdate
+                                | Opcode::MuonUpdate
+                                | Opcode::LionUpdate
+                                | Opcode::RmspropUpdate
+                                | Opcode::GradientScale
+                                | Opcode::Quantize
+                                | Opcode::Dequantize
+                                | Opcode::QuantizeActivations
+                                | Opcode::DequantizeActivations
+                                | Opcode::ToF16
+                                | Opcode::ToF32
+                                | Opcode::MulScalar
+                                | Opcode::AddScalar
+                                | Opcode::DivScalar
+                                | Opcode::Input
+                                | Opcode::Constant(_)
+                        ) {
+                            continue;
+                        }
+                        (onnx_name.to_string(), HashMap::new())
+                    }
                 }
-                (onnx_name.to_string(), HashMap::new())
             }
         };
 
