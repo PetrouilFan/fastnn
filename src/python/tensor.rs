@@ -226,13 +226,13 @@ impl PyTensor {
         let inner = self.inner.clone();
         let grad_tensor = grad.map(|g| g.inner);
         let result = py.detach(move || {
-            std::panic::catch_unwind(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 crate::autograd::backward(&inner, grad_tensor);
-            })
+            }))
         });
         match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(panic_err)) => {
+            Ok(()) => Ok(()),
+            Err(panic_err) => {
                 let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
                     s.to_string()
                 } else if let Some(s) = panic_err.downcast_ref::<String>() {
@@ -241,9 +241,6 @@ impl PyTensor {
                     "Unknown panic during backward".to_string()
                 };
                 Err(pyo3::exceptions::PyRuntimeError::new_err(msg))
-            }
-            Err(panic_err) => {
-                Err(pyo3::exceptions::PyRuntimeError::new_err("Panic during backward"))
             }
         }
     }

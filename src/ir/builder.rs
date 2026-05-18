@@ -1010,6 +1010,10 @@ impl GraphBuilder {
         let output_type = input.tensor_type.clone();
         let mut attrs = HashMap::new();
         attrs.insert("eps".to_string(), eps.to_string());
+        // Store the number of normalized trailing dims so the backward
+        // can compute N (number of normalized elements) correctly.
+        let ndims = weight.tensor_type.shape.len();
+        attrs.insert("normalized_ndims".to_string(), ndims.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::LayerNorm,
@@ -1497,6 +1501,8 @@ impl GraphBuilder {
         let output_type = input.tensor_type.clone();
         let mut attrs = HashMap::new();
         attrs.insert("eps".to_string(), eps.to_string());
+        let ndims = weight.tensor_type.shape.len();
+        attrs.insert("normalized_ndims".to_string(), ndims.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::RMSNorm,
@@ -2118,7 +2124,7 @@ impl GraphBuilder {
         // mapping from forward node IDs to their gradient accumulator node IDs.
         let (grad_graph, grads) = {
             let inner = self.inner.borrow();
-            crate::autograd::build_backward_graph(&inner.graph, loss.node_id)?
+            crate::autograd::build_backward_graph(&inner.graph, loss.node_id, 1.0f32)?
         };
 
         // Update the shared inner state with the combined forward+backward graph
