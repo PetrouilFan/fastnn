@@ -1,4 +1,5 @@
 use crate::ir::node::{ComputeGraph, DimExpr, NodeId, Opcode};
+use crate::utils::parse_shape_attr;
 use std::collections::HashSet;
 
 /// Remove nodes that are not reachable from `graph.inputs`, `graph.outputs`,
@@ -68,21 +69,17 @@ pub fn eliminate_dead_code(graph: &mut ComputeGraph) -> usize {
 /// - Concat with single input → the input itself
 /// - Slice(0..dim) covering the full tensor → x
 fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
-    let order = graph.topological_sort();
     let mut rewrites: Vec<(NodeId, NodeId)> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n.clone(),
-            None => continue,
-        };
+    let graph_ref = &*graph;
+    let _ = crate::utils::traverse_graph(graph_ref, |node_id, node| {
 
         let replacement = match node.opcode {
             Opcode::Reshape => {
                 // Identity reshape: target shape matches input shape
                 let input_id = node.inputs.first().copied();
                 input_id.and_then(|inp_id| {
-                    let input_node = graph.get_node(inp_id)?;
+                    let input_node = graph_ref.get_node(inp_id)?;
                     let target_shape_str = node.attrs.get("shape")?;
                     let target_shape = parse_shape_attr(target_shape_str);
                     if shapes_equal(&input_node.output_type.shape, &target_shape) {
@@ -96,7 +93,7 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
             Opcode::Cast => {
                 // Identity cast: input dtype matches output dtype
                 node.inputs.first().copied().and_then(|inp_id| {
-                    let input_node = graph.get_node(inp_id)?;
+                    let input_node = graph_ref.get_node(inp_id)?;
                     if input_node.output_type.dtype == node.output_type.dtype {
                         Some(inp_id)
                     } else {
@@ -117,7 +114,7 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
             Opcode::Slice => {
                 // Full-tensor slice: Slice(0..dim) that covers the entire dimension
                 node.inputs.first().copied().and_then(|inp_id| {
-                    let input_node = graph.get_node(inp_id)?;
+                    let input_node = graph_ref.get_node(inp_id)?;
                     let dim: usize = node.attrs.get("dim").and_then(|s| s.parse().ok())?;
                     let start: u64 = node.attrs.get("start").and_then(|s| s.parse().ok()).unwrap_or(0);
                     let end: u64 = node.attrs.get("end").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -140,7 +137,8 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
         if let Some(replacement_id) = replacement {
             rewrites.push((node_id, replacement_id));
         }
-    }
+        Ok(())
+    });
 
     if rewrites.is_empty() {
         return 0;
@@ -176,26 +174,4 @@ fn shapes_equal(a: &[DimExpr], b: &[DimExpr]) -> bool {
     })
 }
 
-fn parse_shape_attr(s: &str) -> Vec<DimExpr> {
-    let trimmed = s.trim();
-    let inner = trimmed
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(trimmed);
-    if inner.is_empty() {
-        return Vec::new();
-    }
-    inner
-        .split(',')
-        .map(|part| {
-            let p = part.trim();
-            if let Ok(v) = p.parse::<u64>() {
-                DimExpr::Known(v)
-            } else if p.is_empty() {
-                DimExpr::Known(1)
-            } else {
-                DimExpr::Symbol(p.to_string())
-            }
-        })
-        .collect()
-}
+

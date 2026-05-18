@@ -5,6 +5,8 @@ per-channel weight quantization (U4/U8), and arena-based memory planning.
 See https://github.com/PetrouilFan/fastnn for full documentation.
 """
 
+import warnings
+
 import numpy as np
 import fastnn._core as _core
 import fastnn.precision as precision
@@ -326,7 +328,7 @@ _NUMPY_DTYPE_MAP = {
     "i64": np.int64,
     "bool": np.bool_,
     "f16": np.float16,
-    "bf16": np.float32,
+    "bf16": np.float32,  # lossy: bf16 stored as f32
 }
 
 
@@ -337,22 +339,14 @@ def _patch_numpy(tensor_cls):
         data = _original_numpy(self)
         shape = self.shape
         np_dtype = _NUMPY_DTYPE_MAP.get(self.dtype, np.float32)
+        if self.dtype == "bf16":
+            warnings.warn("bf16 dtype is lossily mapped to float32 during numpy conversion")
         return np.array(data, dtype=np_dtype).reshape(shape)
 
     tensor_cls.numpy = _new_numpy
 
 
-def _patch_backward(tensor_cls):
-    _original_backward = tensor_cls.backward
-
-    def _new_backward(self, grad=None):
-        return _original_backward(self, grad)
-
-    tensor_cls.backward = _new_backward
-
-
 _patch_numpy(_core.PyTensor)
-_patch_backward(_core.PyTensor)
 
 
 add = _core.add

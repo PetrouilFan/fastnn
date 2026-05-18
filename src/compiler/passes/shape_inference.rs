@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::ir::node::{ComputeGraph, DimExpr, IRNode, Opcode};
+use crate::utils::{parse_conv_attrs, parse_shape_attr, spatial_output_dim};
 use std::collections::HashMap;
 
 pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
@@ -639,14 +640,7 @@ fn conv2d_output_shape(
         ));
     }
 
-    let stride: i64 = attrs
-        .get("stride")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let padding: i64 = attrs
-        .get("padding")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let (stride, padding, _dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
@@ -655,44 +649,6 @@ fn conv2d_output_shape(
     let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, 1)?;
 
     Ok(vec![n, f, h_out, w_out])
-}
-
-fn spatial_output_dim(
-    input_dim: &DimExpr,
-    kernel_dim: &DimExpr,
-    stride: i64,
-    padding: i64,
-    dilation: i64,
-) -> Result<DimExpr, String> {
-    match (input_dim, kernel_dim) {
-        (DimExpr::Known(h), DimExpr::Known(k)) => {
-            let result = (*h as i64 + 2 * padding - dilation * (*k as i64 - 1) - 1) / stride + 1;
-            if result <= 0 {
-                return Err(format!(
-                    "Conv2d: output spatial dimension is non-positive ({})",
-                    result
-                ));
-            }
-            Ok(DimExpr::Known(result as u64))
-        }
-        _ => {
-            let h_val = input_dim.evaluate();
-            let k_val = kernel_dim.evaluate();
-            match (h_val, k_val) {
-                (Some(h), Some(k)) => {
-                    let result = (h as i64 + 2 * padding - dilation * (k as i64 - 1) - 1) / stride + 1;
-                    if result <= 0 {
-                        return Err(format!(
-                            "Conv2d: output spatial dimension is non-positive ({})",
-                            result
-                        ));
-                    }
-                    Ok(DimExpr::Known(result as u64))
-                }
-                _ => Ok(DimExpr::Symbol("?".to_string())),
-            }
-        }
-    }
 }
 
 fn conv1d_output_shape(
@@ -713,14 +669,7 @@ fn conv1d_output_shape(
         ));
     }
 
-    let stride: i64 = attrs
-        .get("stride")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let padding: i64 = attrs
-        .get("padding")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let (stride, padding, _dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
@@ -747,14 +696,7 @@ fn conv3d_output_shape(
         ));
     }
 
-    let stride: i64 = attrs
-        .get("stride")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let padding: i64 = attrs
-        .get("padding")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let (stride, padding, _dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
@@ -783,14 +725,7 @@ fn conv_transpose2d_output_shape(
         ));
     }
 
-    let stride: i64 = attrs
-        .get("stride")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let padding: i64 = attrs
-        .get("padding")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let (stride, padding, _dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[1].clone();
@@ -824,30 +759,6 @@ fn conv_transpose_spatial_dim(
             }
         }
     }
-}
-
-fn parse_shape_attr(s: &str) -> Vec<DimExpr> {
-    let trimmed = s.trim();
-    let inner = trimmed
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(trimmed);
-    if inner.is_empty() {
-        return Vec::new();
-    }
-    inner
-        .split(',')
-        .map(|part| {
-            let p = part.trim();
-            if let Ok(v) = p.parse::<u64>() {
-                DimExpr::Known(v)
-            } else if p.is_empty() {
-                DimExpr::Known(1)
-            } else {
-                DimExpr::Symbol(p.to_string())
-            }
-        })
-        .collect()
 }
 
 fn add_dim_exprs(a: DimExpr, b: DimExpr) -> DimExpr {

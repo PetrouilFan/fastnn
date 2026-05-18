@@ -18,29 +18,21 @@ impl PackedWord for U4x8 {
 
     #[inline]
     fn unpack_to_f32(self) -> [f32; 8] {
-        let mut out = [0.0f32; 8];
+        let mut arr = [0.0f32; 8];
         let word = self.0;
         for i in 0..8 {
-            let nibble = (word >> (i * 4)) & 0xF;
-            let signed = if nibble & 0x8 != 0 {
-                (nibble | 0xFFFFFFF0) as i32
-            } else {
-                nibble as i32
-            };
-            out[i] = signed as f32;
+            let nib = ((word >> (i * 4)) & 0xF) as i32;
+            arr[i] = ((nib << 28) >> 28) as f32;
         }
-        out
+        arr
     }
 
     #[inline]
     fn pack_from_f32(vals: [f32; 8]) -> Self {
         let mut word: u32 = 0;
         for i in 0..8 {
-            let clamped = vals[i].clamp(-8.0, 7.0);
-            let rounded = clamped.round();
-            let as_i32 = if rounded.is_nan() { 0 } else { rounded as i32 };
-            let nibble = (as_i32 as u32) & 0xF;
-            word |= nibble << (i * 4);
+            let clamped = vals[i].clamp(-8.0, 7.0).round() as i8;
+            word |= ((clamped as u8 as u32) & 0xF) << (i * 4);
         }
         U4x8(word)
     }

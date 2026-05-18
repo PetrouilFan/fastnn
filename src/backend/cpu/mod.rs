@@ -10,7 +10,7 @@
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::dtypes::{U4x8, U8x4};
+use crate::dtypes::{PackedWord, U4x8, U8x4};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
@@ -83,6 +83,252 @@ macro_rules! get_in_out_slices {
             bytemuck::cast_slice_mut::<_, f32>(&mut d[$out_start..$out_end])
         };
     };
+}
+
+/// Helper: extract two f32 slices from the arena, broadcast-loop with a binary op
+/// and activation function, and write the result to the output slice.
+///
+/// Generic closures `op` and `act` are monomorphized and should be fully inlined
+/// by LLVM — no runtime overhead vs the handwritten fused blocks.
+#[inline]
+fn fused_binary_activation_dispatch(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    out_start: usize,
+    out_end: usize,
+    op: impl Fn(f32, f32) -> f32 + Sync,
+    act: impl Fn(f32) -> f32 + Sync,
+) {
+    if let [a_slice, b_slice] = &input_slices[..] {
+        let (a, b) = {
+            let d = arena.data_mut();
+            (
+                bytemuck::cast_slice::<_, f32>(
+                    &d[a_slice.offset..a_slice.offset + a_slice.size],
+                )
+                .to_vec(),
+                bytemuck::cast_slice::<_, f32>(
+                    &d[b_slice.offset..b_slice.offset + b_slice.size],
+                )
+                .to_vec(),
+            )
+        };
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        let out_len = out_f32.len();
+        let a_len = a.len();
+        let b_len = b.len();
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..out_len {
+                let x = op(a[i % a_len], b[i % b_len]);
+                out_f32[i] = act(x);
+            }
+        }
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            out_f32[..out_len].par_iter_mut().enumerate().for_each(
+                |(i, o)| {
+                    let x = op(a[i % a_len], b[i % b_len]);
+                    *o = act(x);
+                },
+            );
+        }
+    }
+}
+
+/// Helper: build a `CallKernel` instruction for a scalar op.
+///
+/// All 6 scalar ops (gt, lt, eq, add, mul, div) share the same shape:
+/// no extra params, no secondary output, no weight metadata.
+#[inline]
+fn scalar_kernel_instruction(
+    node_id: usize,
+    kernel_name: &str,
+    input_slices: Vec<BufferSlice>,
+    output_slice: BufferSlice,
+) -> Instruction {
+    Instruction::CallKernel {
+        node_id: Some(node_id),
+        kernel_name: kernel_name.to_string(),
+        input_slices,
+        output_slice,
+        secondary_output_slice: None,
+        params: vec![],
+        param_dims: None,
+        weight_meta: None,
+    }
+}
+
+/// Helper: dispatch a scalar op (gt, lt, eq, add, mul, div) at runtime.
+///
+/// Extracts data + scalar slices from the arena, casts to f32, resolves the
+/// scalar value from the first element, and calls `op(data, scalar, output)`.
+/// Generic closure `op` is monomorphized and inlined — zero overhead vs the
+/// handwritten per-op blocks.
+#[inline]
+fn scalar_op_dispatch(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    out_start: usize,
+    out_end: usize,
+    op: impl Fn(&[f32], f32, &mut [f32]),
+) {
+    if let [data_slice, scalar_slice] = &input_slices[..] {
+        let (data, scalar) = {
+            let d = arena.data_mut();
+            (
+                bytemuck::cast_slice::<_, f32>(
+                    &d[data_slice.offset..data_slice.offset + data_slice.size],
+                )
+                .to_vec(),
+                bytemuck::cast_slice::<_, f32>(
+                    &d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size],
+                )
+                .to_vec(),
+            )
+        };
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        let s = scalar.first().copied().unwrap_or(0.0);
+        op(&data, s, out_f32);
+    }
+}
+
+/// Helper: dispatch a fused matmul + bias + activation kernel at runtime.
+///
+/// Handles both fused (with bias, 3 input slices) and non-fused (without bias,
+/// 2 input slices) matmul activation variants.  Extracts A and B (and optionally
+/// bias) from the arena, resolves [M,K,N] params, calls `matmul_blas_into`, and
+/// applies `act(x + bias[i % n])`.
+///
+/// Generic closure `act` is monomorphized and inlined — zero overhead vs the
+/// handwritten per-activation blocks.
+#[inline]
+fn matmul_activation_dispatch(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    out_start: usize,
+    out_end: usize,
+    kernel_name: &str,
+    act: impl Fn(f32) -> f32,
+) -> Result<(), BackendError> {
+    if let [a_slice, b_slice] = &input_slices[..2] {
+        let has_bias = input_slices.len() >= 3;
+        let (a, b, bias) = {
+            let d = arena.data_mut();
+            let a_f32 = bytemuck::cast_slice::<_, f32>(
+                &d[a_slice.offset..a_slice.offset + a_slice.size],
+            )
+            .to_vec();
+            let b_f32 = bytemuck::cast_slice::<_, f32>(
+                &d[b_slice.offset..b_slice.offset + b_slice.size],
+            )
+            .to_vec();
+            let bias_f32 = if has_bias {
+                let bias_slice = &input_slices[2];
+                bytemuck::cast_slice::<_, f32>(
+                    &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
+                )
+                .to_vec()
+            } else {
+                Vec::new()
+            };
+            (a_f32, b_f32, bias_f32)
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, _k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        matmul_blas_into(&a, &b, out_f32, m, _k, n);
+        for i in 0..out_f32.len() {
+            let x = out_f32[i]
+                + if has_bias && i % n < bias.len() {
+                    bias[i % n]
+                } else {
+                    0.0
+                };
+            out_f32[i] = act(x);
+        }
+    }
+    Ok(())
+}
+
+/// Helper: dispatch a quantized matmul (u4 or u8) at runtime.
+///
+/// Generic over `T: PackedWord` — monomorphized as `U4x8` or `U8x4`.
+/// Handles arena extraction, u32-aligned weight copy, PackedTensor
+/// construction, and `gemm_cpu_flat` dispatch.
+#[inline]
+fn quantized_matmul_dispatch<T: PackedWord>(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    out_start: usize,
+    out_end: usize,
+    bit_width: usize,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if let [a_slice, w_slice] = &input_slices[..] {
+        let (activations, packed_bytes) = {
+            let d = arena.data_mut();
+            (
+                bytemuck::cast_slice::<_, f32>(
+                    &d[a_slice.offset..a_slice.offset + a_slice.size],
+                )
+                .to_vec(),
+                {
+                    let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                    // Copy to u32-aligned buffer (arena may not be u32-aligned)
+                    let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                    let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                    byte_slice[..raw.len()].copy_from_slice(raw);
+                    aligned
+                },
+            )
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta.clone().unwrap_or_else(|| {
+            crate::backend::QuantizedWeightMeta {
+                bit_width,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            }
+        });
+        let typed_data: Vec<T> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = PackedTensor::from_raw(typed_data, meta.shape.clone(), meta.scales, meta.zero_points);
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(
+            &pt, &activations, out_f32, m, k, n,
+        );
+    }
+    Ok(())
 }
 
 /// Minimum number of elements for a parallel dispatch loop to be beneficial.
@@ -412,7 +658,7 @@ impl Backend for CpuBackend {
                                 _ => unreachable!(),
                             };
                         }
-                        _ => {}
+                        _ => {},
                     }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -1210,76 +1456,34 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::GtScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "gt_scalar_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    instructions.push(scalar_kernel_instruction(
+                        node_id, "gt_scalar_f32", input_slices, output_slice,
+                    ));
                 }
                 Opcode::LtScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "lt_scalar_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    instructions.push(scalar_kernel_instruction(
+                        node_id, "lt_scalar_f32", input_slices, output_slice,
+                    ));
                 }
                 Opcode::EqScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "eq_scalar_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    instructions.push(scalar_kernel_instruction(
+                        node_id, "eq_scalar_f32", input_slices, output_slice,
+                    ));
                 }
                 Opcode::AddScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "add_scalar_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    instructions.push(scalar_kernel_instruction(
+                        node_id, "add_scalar_f32", input_slices, output_slice,
+                    ));
                 }
                 Opcode::MulScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "mul_scalar_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    instructions.push(scalar_kernel_instruction(
+                        node_id, "mul_scalar_f32", input_slices, output_slice,
+                    ));
                 }
                 Opcode::DivScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "div_scalar_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    instructions.push(scalar_kernel_instruction(
+                        node_id, "div_scalar_f32", input_slices, output_slice,
+                    ));
                 }
                 // Input nodes have no producer instruction — data is written
                 // by the executor before dispatch.
@@ -2292,344 +2496,120 @@ impl Backend for CpuBackend {
                             }
                         }
                         "fused_matmul_add_relu" => {
-                            if let [a_slice, b_slice, bias_slice] = &input_slices[..] {
-                                let (a, b, bias) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    let bias_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32, bias_f32)
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "fused_matmul_add_relu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Use matrixmultiply::sgemm for the matmul, then add bias + relu
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for i in 0..out_f32.len() {
-                                    out_f32[i] = (out_f32[i]
-                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 })
-                                    .max(0.0);
-                                }
-                            }
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "fused_matmul_add_relu",
+                                |x| x.max(0.0),
+                            )?;
                         }
                         "fused_matmul_add_gelu" => {
-                            if let [a_slice, b_slice, bias_slice] = &input_slices[..] {
-                                let (a, b, bias) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    let bias_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32, bias_f32)
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "fused_matmul_add_gelu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for i in 0..out_f32.len() {
-                                    let x = out_f32[i]
-                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 };
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "fused_matmul_add_gelu",
+                                |x| {
                                     let x3 = x * x * x;
                                     let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                     let t = tanh_arg.tanh();
-                                    out_f32[i] = 0.5 * x * (1.0 + t);
-                                }
-                            }
+                                    0.5 * x * (1.0 + t)
+                                },
+                            )?;
                         }
                         "fused_matmul_add_silu" => {
-                            if let [a_slice, b_slice, bias_slice] = &input_slices[..] {
-                                let (a, b, bias) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    let bias_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32, bias_f32)
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "fused_matmul_add_silu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for i in 0..out_f32.len() {
-                                    let x = out_f32[i]
-                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 };
-                                    out_f32[i] = x / (1.0 + (-x).exp());
-                                }
-                            }
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "fused_matmul_add_silu",
+                                |x| x / (1.0 + (-x).exp()),
+                            )?;
                         }
                         "matmul_relu" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_relu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Use matrixmultiply::sgemm for the matmul, then apply relu
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for v in out_f32.iter_mut() {
-                                    *v = v.max(0.0);
-                                }
-                            }
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "matmul_relu",
+                                |x| x.max(0.0),
+                            )?;
                         }
                         "matmul_gelu" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_gelu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for v in out_f32.iter_mut() {
-                                    let x = *v;
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "matmul_gelu",
+                                |x| {
                                     let x3 = x * x * x;
                                     let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                     let t = tanh_arg.tanh();
-                                    *v = 0.5 * x * (1.0 + t);
-                                }
-                            }
+                                    0.5 * x * (1.0 + t)
+                                },
+                            )?;
                         }
                         "matmul_silu" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_silu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for v in out_f32.iter_mut() {
-                                    *v = *v / (1.0 + (-*v).exp());
-                                }
-                            }
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "matmul_silu",
+                                |x| x / (1.0 + (-x).exp()),
+                            )?;
                         }
                         "matmul_u4" => {
-                            // input_slices: [activation (f32), weight (packed U4)]
-                            if let [a_slice, w_slice] = &input_slices[..] {
-                                let (activations, packed_bytes) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        {
-                                            let raw =
-                                                &d[w_slice.offset..w_slice.offset + w_slice.size];
-                                            // Copy to u32-aligned buffer (arena may not be u32-aligned)
-                                            let mut aligned: Vec<u32> =
-                                                vec![0u32; raw.len().div_ceil(4)];
-                                            let byte_slice =
-                                                bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
-                                            byte_slice[..raw.len()].copy_from_slice(raw);
-                                            aligned
-                                        },
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_u4: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let meta = weight_meta.clone().unwrap_or_else(|| {
-                                    crate::backend::QuantizedWeightMeta {
-                                        bit_width: 4,
-                                        scales: vec![1.0],
-                                        zero_points: vec![0.0],
-                                        shape: vec![m, k],
-                                    }
-                                });
-                                // Construct PackedTensor from arena data and call SIMD gemm
-                                let u4x8_data: Vec<U4x8> =
-                                    bytemuck::cast_slice(&packed_bytes).to_vec();
-                                let pt = PackedTensor::from_raw(
-                                    u4x8_data,
-                                    meta.shape.clone(),
-                                    meta.scales,
-                                    meta.zero_points,
-                                );
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
-                                crate::backend::cpu::microkernels::gemm_cpu_flat::<U4x8>(
-                                    &pt,
-                                    &activations,
-                                    out_f32,
-                                    m, // num_pixels
-                                    k, // col_w
-                                    n, // oc
-                                );
-                            }
+                            quantized_matmul_dispatch::<U4x8>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                4,
+                                "matmul_u4",
+                            )?;
                         }
                         "matmul_u8" => {
-                            // input_slices: [activation (f32), weight (packed U8)]
-                            if let [a_slice, w_slice] = &input_slices[..] {
-                                let (activations, packed_bytes) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        {
-                                            let raw =
-                                                &d[w_slice.offset..w_slice.offset + w_slice.size];
-                                            // Copy to u32-aligned buffer (arena may not be u32-aligned)
-                                            let mut aligned: Vec<u32> =
-                                                vec![0u32; raw.len().div_ceil(4)];
-                                            let byte_slice =
-                                                bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
-                                            byte_slice[..raw.len()].copy_from_slice(raw);
-                                            aligned
-                                        },
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_u8: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let meta = weight_meta.clone().unwrap_or_else(|| {
-                                    crate::backend::QuantizedWeightMeta {
-                                        bit_width: 8,
-                                        scales: vec![1.0],
-                                        zero_points: vec![0.0],
-                                        shape: vec![m, k],
-                                    }
-                                });
-                                // Construct PackedTensor from arena data and call SIMD gemm
-                                let u8x4_data: Vec<U8x4> =
-                                    bytemuck::cast_slice(&packed_bytes).to_vec();
-                                let pt = PackedTensor::from_raw(
-                                    u8x4_data,
-                                    meta.shape.clone(),
-                                    meta.scales,
-                                    meta.zero_points,
-                                );
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
-                                crate::backend::cpu::microkernels::gemm_cpu_flat::<U8x4>(
-                                    &pt,
-                                    &activations,
-                                    out_f32,
-                                    m, // num_pixels = batch rows
-                                    k, // col_w = input features per row
-                                    n, // oc = output features per row
-                                );
-                            }
+                            quantized_matmul_dispatch::<U8x4>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                8,
+                                "matmul_u8",
+                            )?;
                         }
                         "reduce_f32" => {
                             get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
@@ -2751,115 +2731,13 @@ impl Backend for CpuBackend {
                             }
                         }
                         "add_relu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = (a[i % a_len] + b[i % b_len]).max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| *o = (a[i % a_len] + b[i % b_len]).max(0.0),
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a + b, |x| x.max(0.0));
                         }
                         "sub_relu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = (a[i % a_len] - b[i % b_len]).max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| *o = (a[i % a_len] - b[i % b_len]).max(0.0),
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a - b, |x| x.max(0.0));
                         }
                         "mul_relu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = (a[i % a_len] * b[i % b_len]).max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| *o = (a[i % a_len] * b[i % b_len]).max(0.0),
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a * b, |x| x.max(0.0));
                         }
                         "softmax" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -3009,395 +2887,53 @@ impl Backend for CpuBackend {
                             }
                         }
                         "div_relu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = (a[i % a_len] / b[i % b_len]).max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| *o = (a[i % a_len] / b[i % b_len]).max(0.0),
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a / b, |x| x.max(0.0));
                         }
                         // ── Fused elementwise + GELU ─────────────────────
                         "add_gelu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] + b[i % b_len];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] + b[i % b_len];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a + b, |x| {
+                                let x3 = x * x * x;
+                                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                let t = tanh_arg.tanh();
+                                0.5 * x * (1.0 + t)
+                            });
                         }
                         "sub_gelu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] - b[i % b_len];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] - b[i % b_len];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a - b, |x| {
+                                let x3 = x * x * x;
+                                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                let t = tanh_arg.tanh();
+                                0.5 * x * (1.0 + t)
+                            });
                         }
                         "mul_gelu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] * b[i % b_len];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] * b[i % b_len];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a * b, |x| {
+                                let x3 = x * x * x;
+                                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                let t = tanh_arg.tanh();
+                                0.5 * x * (1.0 + t)
+                            });
                         }
                         "div_gelu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] / b[i % b_len];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] / b[i % b_len];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a / b, |x| {
+                                let x3 = x * x * x;
+                                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                let t = tanh_arg.tanh();
+                                0.5 * x * (1.0 + t)
+                            });
                         }
                         // ── Fused elementwise + SiLU ─────────────────────
                         "add_silu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] + b[i % b_len];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] + b[i % b_len];
-                                            *o = x / (1.0 + (-x).exp());
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a + b, |x| x / (1.0 + (-x).exp()));
                         }
                         "sub_silu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] - b[i % b_len];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] - b[i % b_len];
-                                            *o = x / (1.0 + (-x).exp());
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a - b, |x| x / (1.0 + (-x).exp()));
                         }
                         "mul_silu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] * b[i % b_len];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] * b[i % b_len];
-                                            *o = x / (1.0 + (-x).exp());
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a * b, |x| x / (1.0 + (-x).exp()));
                         }
                         "div_silu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] / b[i % b_len];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] / b[i % b_len];
-                                            *o = x / (1.0 + (-x).exp());
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a / b, |x| x / (1.0 + (-x).exp()));
                         }
                         "conv2d" => {
                             if let [input_slice, weight_slice] = &input_slices[..] {
@@ -4548,154 +4084,58 @@ impl Backend for CpuBackend {
                             }
                         }
                         "gt_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                gt_scalar_f32(&data, s, out_f32);
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| gt_scalar_f32(data, s, out),
+                            );
                         }
                         "lt_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                lt_scalar_f32(&data, s, out_f32);
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| lt_scalar_f32(data, s, out),
+                            );
                         }
                         "eq_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                eq_scalar_f32(&data, s, out_f32);
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| eq_scalar_f32(data, s, out),
+                            );
                         }
                         "add_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                add_scalar_f32(&data, s, out_f32);
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| add_scalar_f32(data, s, out),
+                            );
                         }
                         "mul_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                mul_scalar_f32(&data, s, out_f32);
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| mul_scalar_f32(data, s, out),
+                            );
                         }
                         "div_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                div_scalar_f32(&data, s, out_f32);
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| div_scalar_f32(data, s, out),
+                            );
                         }
                         "argmax" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -5359,6 +4799,11 @@ impl Backend for CpuBackend {
                                 adamw_update_f32(w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd)
                             };
                             let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(
+                                &mut d[input_slices[0].offset
+                                    ..input_slices[0].offset + input_slices[0].size],
+                            )
+                            .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6371,6 +5816,46 @@ impl Backend for CpuBackend {
     }
 }
 
+macro_rules! impl_simd_unary_wrapper {
+    ($name:ident, $avx2:path, $scalar:path) => {
+        #[inline]
+        fn $name(input: &[f32], output: &mut [f32]) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            if microkernels::simd_avx2_available() {
+                return unsafe { $avx2(input, output) };
+            }
+            let len = output.len().min(input.len());
+            for i in 0..len { output[i] = $scalar(input[i]); }
+        }
+    };
+}
+
+macro_rules! impl_simd_binary_wrapper {
+    ($name:ident, $avx2:path, $scalar:path) => {
+        #[inline]
+        fn $name(a: &[f32], b: &[f32], output: &mut [f32]) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
+                return unsafe { $avx2(a, b, output) };
+            }
+            $scalar(a, b, output);
+        }
+    };
+}
+
+macro_rules! impl_simd_scalar_wrapper {
+    ($name:ident, $avx2:path, $scalar:path) => {
+        #[inline]
+        fn $name(data: &[f32], s: f32, output: &mut [f32]) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            if microkernels::simd_avx2_available() {
+                return unsafe { $avx2(data, s, output) };
+            }
+            $scalar(data, s, output);
+        }
+    };
+}
+
 // ============================================================
 // SIMD-aware elementwise dispatch wrappers
 // ============================================================
@@ -6380,85 +5865,22 @@ impl Backend for CpuBackend {
 // was previously inlined in the big `dispatch()` match arms —
 // flattened to reduce duplication.
 
-#[inline]
-fn relu_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::relu_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::relu_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn gelu_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::gelu_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::gelu_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn silu_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::silu_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::silu_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn sigmoid_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::sigmoid_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::sigmoid_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn tanh_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::tanh_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::tanh_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn exp_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::exp_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::exp_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn log_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::log_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::log_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn sqrt_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::sqrt_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::sqrt_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn neg_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::neg_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::neg_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn abs_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::abs_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::abs_f32_scalar(input[i]); }
-}
+impl_simd_unary_wrapper!(relu_f32, microkernels::relu_f32_avx2, microkernels::relu_f32_scalar);
+impl_simd_unary_wrapper!(gelu_f32, microkernels::gelu_f32_avx2, microkernels::gelu_f32_scalar);
+impl_simd_unary_wrapper!(silu_f32, microkernels::silu_f32_avx2, microkernels::silu_f32_scalar);
+impl_simd_unary_wrapper!(sigmoid_f32, microkernels::sigmoid_f32_avx2, microkernels::sigmoid_f32_scalar);
+impl_simd_unary_wrapper!(tanh_f32, microkernels::tanh_f32_avx2, microkernels::tanh_f32_scalar);
+impl_simd_unary_wrapper!(exp_f32, microkernels::exp_f32_avx2, microkernels::exp_f32_scalar);
+impl_simd_unary_wrapper!(log_f32, microkernels::log_f32_avx2, microkernels::log_f32_scalar);
+impl_simd_unary_wrapper!(sqrt_f32, microkernels::sqrt_f32_avx2, microkernels::sqrt_f32_scalar);
+impl_simd_unary_wrapper!(neg_f32, microkernels::neg_f32_avx2, microkernels::neg_f32_scalar);
+impl_simd_unary_wrapper!(abs_f32, microkernels::abs_f32_avx2, microkernels::abs_f32_scalar);
+impl_simd_unary_wrapper!(elu_f32, microkernels::elu_f32_avx2, microkernels::elu_f32_scalar);
+impl_simd_unary_wrapper!(softplus_f32, microkernels::softplus_f32_avx2, microkernels::softplus_f32_scalar);
+impl_simd_unary_wrapper!(hardswish_f32, microkernels::hardswish_f32_avx2, microkernels::hardswish_f32_scalar);
+impl_simd_unary_wrapper!(sign_f32, microkernels::sign_f32_avx2, microkernels::sign_f32_scalar);
+impl_simd_unary_wrapper!(logical_not_f32, microkernels::logical_not_f32_avx2, microkernels::logical_not_f32_scalar);
+impl_simd_unary_wrapper!(mish_f32, microkernels::mish_f32_avx2, microkernels::mish_f32_scalar);
 
 #[inline]
 fn leaky_relu_f32(input: &[f32], output: &mut [f32], slope: f32) {
@@ -6466,30 +5888,6 @@ fn leaky_relu_f32(input: &[f32], output: &mut [f32], slope: f32) {
     if microkernels::simd_avx2_available() { return unsafe { microkernels::leaky_relu_f32_avx2(input, output, slope) }; }
     let len = output.len().min(input.len());
     for i in 0..len { output[i] = microkernels::leaky_relu_f32_scalar(input[i], slope); }
-}
-
-#[inline]
-fn elu_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::elu_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::elu_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn softplus_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::softplus_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::softplus_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn hardswish_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::hardswish_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::hardswish_f32_scalar(input[i]); }
 }
 
 #[inline]
@@ -6501,91 +5899,20 @@ fn clamp_f32(input: &[f32], output: &mut [f32], min_val: f32, max_val: f32) {
 }
 
 #[inline]
-fn sign_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::sign_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::sign_f32_scalar(input[i]); }
-}
-
-#[inline]
-fn logical_not_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::logical_not_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::logical_not_f32_scalar(input[i]); }
-}
-
-#[inline]
 fn log_softmax_f32(input: &[f32], output: &mut [f32]) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() { return unsafe { microkernels::log_softmax_f32_avx2(input, output) }; }
     microkernels::log_softmax_f32_scalar_all(input, output);
 }
 
-#[inline]
-fn mish_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::mish_f32_avx2(input, output) }; }
-    let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::mish_f32_scalar(input[i]); }
-}
-
 // ── Binary ops ──────────────────────────────────────────────
 
-#[inline]
-fn add_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
-        return unsafe { microkernels::add_f32_avx2_broadcast(a, b, output) };
-    }
-    microkernels::add_f32_scalar_broadcast(a, b, output);
-}
-
-#[inline]
-fn sub_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
-        return unsafe { microkernels::sub_f32_avx2_broadcast(a, b, output) };
-    }
-    microkernels::sub_f32_scalar_broadcast(a, b, output);
-}
-
-#[inline]
-fn mul_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
-        return unsafe { microkernels::mul_f32_avx2_broadcast(a, b, output) };
-    }
-    microkernels::mul_f32_scalar_broadcast(a, b, output);
-}
-
-#[inline]
-fn div_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
-        return unsafe { microkernels::div_f32_avx2_broadcast(a, b, output) };
-    }
-    microkernels::div_f32_scalar_broadcast(a, b, output);
-}
-
-#[inline]
-fn max_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
-        return unsafe { microkernels::max_f32_avx2_broadcast(a, b, output) };
-    }
-    microkernels::max_f32_scalar_broadcast(a, b, output);
-}
-
-#[inline]
-fn min_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
-        return unsafe { microkernels::min_f32_avx2_broadcast(a, b, output) };
-    }
-    microkernels::min_f32_scalar_broadcast(a, b, output);
-}
+impl_simd_binary_wrapper!(add_f32, microkernels::add_f32_avx2_broadcast, microkernels::add_f32_scalar_broadcast);
+impl_simd_binary_wrapper!(sub_f32, microkernels::sub_f32_avx2_broadcast, microkernels::sub_f32_scalar_broadcast);
+impl_simd_binary_wrapper!(mul_f32, microkernels::mul_f32_avx2_broadcast, microkernels::mul_f32_scalar_broadcast);
+impl_simd_binary_wrapper!(div_f32, microkernels::div_f32_avx2_broadcast, microkernels::div_f32_scalar_broadcast);
+impl_simd_binary_wrapper!(max_f32, microkernels::max_f32_avx2_broadcast, microkernels::max_f32_scalar_broadcast);
+impl_simd_binary_wrapper!(min_f32, microkernels::min_f32_avx2_broadcast, microkernels::min_f32_scalar_broadcast);
 
 // ============================================================
 // New dispatch wrappers — Reductions
@@ -6612,63 +5939,17 @@ fn reduce_f32(input: &[f32], output: &mut [f32], group_size: usize, is_mean: boo
 // New dispatch wrappers — Scalar arithmetic
 // ============================================================
 
-#[inline]
-fn add_scalar_f32(data: &[f32], s: f32, output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::add_scalar_f32_avx2(data, s, output) };
-    }
-    microkernels::add_scalar_f32_scalar(data, s, output);
-}
-
-#[inline]
-fn mul_scalar_f32(data: &[f32], s: f32, output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::mul_scalar_f32_avx2(data, s, output) };
-    }
-    microkernels::mul_scalar_f32_scalar(data, s, output);
-}
-
-#[inline]
-fn div_scalar_f32(data: &[f32], s: f32, output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::div_scalar_f32_avx2(data, s, output) };
-    }
-    microkernels::div_scalar_f32_scalar(data, s, output);
-}
+impl_simd_scalar_wrapper!(add_scalar_f32, microkernels::add_scalar_f32_avx2, microkernels::add_scalar_f32_scalar);
+impl_simd_scalar_wrapper!(mul_scalar_f32, microkernels::mul_scalar_f32_avx2, microkernels::mul_scalar_f32_scalar);
+impl_simd_scalar_wrapper!(div_scalar_f32, microkernels::div_scalar_f32_avx2, microkernels::div_scalar_f32_scalar);
 
 // ============================================================
 // New dispatch wrappers — Scalar comparison
 // ============================================================
 
-#[inline]
-fn gt_scalar_f32(data: &[f32], s: f32, output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::gt_scalar_f32_avx2(data, s, output) };
-    }
-    microkernels::gt_scalar_f32_scalar(data, s, output);
-}
-
-#[inline]
-fn lt_scalar_f32(data: &[f32], s: f32, output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::lt_scalar_f32_avx2(data, s, output) };
-    }
-    microkernels::lt_scalar_f32_scalar(data, s, output);
-}
-
-#[inline]
-fn eq_scalar_f32(data: &[f32], s: f32, output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::eq_scalar_f32_avx2(data, s, output) };
-    }
-    microkernels::eq_scalar_f32_scalar(data, s, output);
-}
+impl_simd_scalar_wrapper!(gt_scalar_f32, microkernels::gt_scalar_f32_avx2, microkernels::gt_scalar_f32_scalar);
+impl_simd_scalar_wrapper!(lt_scalar_f32, microkernels::lt_scalar_f32_avx2, microkernels::lt_scalar_f32_scalar);
+impl_simd_scalar_wrapper!(eq_scalar_f32, microkernels::eq_scalar_f32_avx2, microkernels::eq_scalar_f32_scalar);
 
 // ============================================================
 // New dispatch wrappers — BiasAdd, Norm, RMS Norm, Softmax

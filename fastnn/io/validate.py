@@ -98,28 +98,33 @@ def validate_against_onnx(
 
     # Run ONNX Runtime
     ort_session = ort.InferenceSession(onnx_path)
-    ort_input_name = ort_session.get_inputs()[0].name
-    ort_results = ort_session.run(output_names, {ort_input_name: input_data})
+    if isinstance(input_data, dict):
+        ort_inputs = input_data
+    else:
+        ort_inputs = {inp.name: input_data for inp in ort_session.get_inputs()}
+    ort_results = ort_session.run(output_names, ort_inputs)
 
     # Get ONNX output names
     if output_names is None:
         output_names = [o.name for o in ort_session.get_outputs()]
 
     # Run FastNN model
-    fnn_input = {ort_input_name: input_data}
+    fnn_input = ort_inputs
     try:
         fnn_results_dict = fnn_model.forward(fnn_input)
     except (AttributeError, TypeError):
         # Fallback: call as function
         try:
             fnn_results_dict = fnn_model(input_data)
-        except (TypeError, Exception):
+        except Exception:
             # Wrap in dict
             result = fnn_model(input_data)
             if isinstance(result, dict):
                 fnn_results_dict = result
             else:
                 fnn_results_dict = {output_names[0]: result}
+        except KeyboardInterrupt:
+            raise
 
     # Build report
     report = ValidationReport()

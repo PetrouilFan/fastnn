@@ -4,7 +4,7 @@ use crate::autograd::{
 use crate::ir::node::{DimExpr, IrDType, TensorType};
 use crate::tensor::Tensor;
 use crate::{
-    impl_training_state,
+    impl_norm, impl_training_state,
     nn::{clear_grad, Module, TrainingState},
 };
 use parking_lot::RwLock;
@@ -72,23 +72,7 @@ impl Module for LayerNorm {
         }
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone(), self.bias.clone()]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![
-            ("weight".to_string(), self.weight.clone()),
-            ("bias".to_string(), self.bias.clone()),
-        ]
-    }
-
-    fn zero_grad(&self) {
-        clear_grad(&self.weight);
-        clear_grad(&self.bias);
-    }
-
-    impl_training_state!(self, self.training);
+    impl_norm!(weight, bias, training);
 }
 
 #[derive(Clone)]
@@ -374,21 +358,7 @@ impl Module for RMSNorm {
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone()]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![("weight".to_string(), self.weight.clone())]
-    }
-
-    fn zero_grad(&self) {
-        if let Some(meta) = &self.weight.inner.autograd_meta {
-            let mut lock = meta.lock();
-            lock.grad = None;
-        }
-    }
-
+    impl_norm!(weight);
 }
 
 #[derive(Clone)]
@@ -519,26 +489,7 @@ impl Module for GroupNorm {
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone(), self.bias.clone()]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![
-            ("weight".to_string(), self.weight.clone()),
-            ("bias".to_string(), self.bias.clone()),
-        ]
-    }
-
-    fn zero_grad(&self) {
-        for t in [&self.weight, &self.bias] {
-            if let Some(meta) = &t.inner.autograd_meta {
-                let mut lock = meta.lock();
-                lock.grad = None;
-            }
-        }
-    }
-
+    impl_norm!(weight, bias);
 }
 
 pub struct BatchNorm2d {
@@ -656,7 +607,7 @@ impl Module for BatchNorm2d {
             let new_mean = running_mean_lock
                 .mul_scalar(inv_mom)
                 .add(&batch_mean.mul_scalar(mom));
-            *running_mean_lock = new_mean;
+            *running_mean_lock = new_mean.detach();
 
             let mut running_var_lock = self.running_var.write();
             let n = (batch * spatial) as f32;
@@ -668,7 +619,7 @@ impl Module for BatchNorm2d {
             let new_var = running_var_lock
                 .mul_scalar(inv_mom)
                 .add(&unbiased_var.mul_scalar(mom));
-            *running_var_lock = new_var;
+            *running_var_lock = new_var.detach();
         }
 
         // Attach autograd
@@ -689,21 +640,5 @@ impl Module for BatchNorm2d {
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone(), self.bias.clone()]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![
-            ("weight".to_string(), self.weight.clone()),
-            ("bias".to_string(), self.bias.clone()),
-        ]
-    }
-
-    fn zero_grad(&self) {
-        clear_grad(&self.weight);
-        clear_grad(&self.bias);
-    }
-
-    impl_training_state!(self, self.training);
+    impl_norm!(weight, bias, training);
 }

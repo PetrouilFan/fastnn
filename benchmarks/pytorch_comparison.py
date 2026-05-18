@@ -12,6 +12,7 @@ Outputs a comparison table and optionally a JSON file.
 import argparse
 import importlib.util
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass, field, asdict
@@ -75,13 +76,12 @@ def _measure(fn: Callable, warmup: int, iters: int) -> Tuple[float, float]:
     """Measure mean and std of fn() execution time in milliseconds."""
     for _ in range(warmup):
         fn()
-    times = []
+    start = time.perf_counter()
     for _ in range(iters):
-        t0 = time.perf_counter()
         fn()
-        t1 = time.perf_counter()
-        times.append((t1 - t0) * 1000.0)
-    return float(np.mean(times)), float(np.std(times))
+    elapsed = time.perf_counter() - start
+    mean_ms = (elapsed / iters) * 1000.0
+    return mean_ms, 0.0
 
 
 def _bench(
@@ -485,7 +485,8 @@ def main():
     # Overall summary
     total_fnn = sum(r.fastnn_ms for r in all_results)
     total_th = sum(r.torch_ms for r in all_results)
-    avg_speedup = total_th / total_fnn if total_fnn > 0 else 0
+    speedup_ratios = [r.torch_ms / r.fastnn_ms for r in all_results if r.fastnn_ms > 0]
+    avg_speedup = math.exp(sum(math.log(r) for r in speedup_ratios) / len(speedup_ratios))
 
     print(f"\n  {_BOLD}Overall Summary{_RESET}")
     print(f"  Total fastnn:  {total_fnn:.2f} ms")

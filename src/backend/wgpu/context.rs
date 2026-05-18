@@ -360,6 +360,7 @@ pub struct GpuContext {
     shader_cache_dir: PathBuf,
     bind_group_cache: RwLock<HashMap<u64, wgpu::BindGroup>>,
     bind_group_cache_max_size: usize,
+    readback_mutex: Mutex<()>,
 }
 
 impl Clone for GpuContext {
@@ -378,6 +379,7 @@ impl Clone for GpuContext {
             shader_cache_dir: self.shader_cache_dir.clone(),
             bind_group_cache: RwLock::new(HashMap::new()),
             bind_group_cache_max_size: self.bind_group_cache_max_size,
+            readback_mutex: Mutex::new(()),
         }
     }
 }
@@ -433,6 +435,7 @@ impl GpuContext {
             shader_cache_dir,
             bind_group_cache: RwLock::new(HashMap::new()),
             bind_group_cache_max_size: 256,
+            readback_mutex: Mutex::new(()),
         })
     }
 
@@ -769,6 +772,11 @@ impl GpuContext {
     }
 
     pub fn read_buffer_from_arc(&self, buffer: &Arc<wgpu::Buffer>, size: usize) -> Vec<f32> {
+        // Serialize readback operations so that concurrent threads don't
+        // issue overlapping copy_buffer_to_buffer + map_async on the same
+        // shared staging buffer.
+        let _lock = self.readback_mutex.lock();
+
         let staging = self.ensure_staging_buffer_gpu_to_cpu(size);
 
         let mut encoder = self

@@ -41,11 +41,10 @@ def test_device_attr():
 
 def test_gpu_detection():
     """Test GPU detection if available."""
-    print("Testing GPU detection...")
-
-    # Check if wgpu is available by trying to check the packed_layer function
     try:
         is_gpu = fastnn.is_wgpu()
-        print(f"  GPU available: {is_gpu}")
+        assert isinstance(is_gpu, bool), "is_wgpu() should return a bool"
+        if is_gpu:
+            assert fastnn.is_wgpu_device_available() is True
     except AttributeError:
-        print("  SKIPPED: is_wgpu not available")
+        pytest.skip("fastnn does not have wgpu support")

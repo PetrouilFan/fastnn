@@ -307,7 +307,7 @@ impl TransformerEncoder {
 
         // Use precomputed position tensor, slice to actual seq_len
         let pos_tensor = self.pos_cache.get().unwrap().as_ref().unwrap();
-        let pos_indices = pos_tensor.slice(0, 0, seq_len, 1);
+        let pos_indices = pos_tensor.slice(1, 0, seq_len, 1);
         // Expand to [batch, seq_len] for batching, embedding handles the d_model conversion
         let pos_expanded = pos_indices.expand(vec![batch, seq_len]);
         let pos_expanded = pos_expanded.to_dtype(DType::I64);

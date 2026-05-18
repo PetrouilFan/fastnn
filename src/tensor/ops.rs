@@ -153,13 +153,13 @@ macro_rules! impl_inplace_binary_op {
                     }
                 }
                 DType::F64 => {
-                    let sp = self_ptr as *mut f64;
-                    let op = other_ptr as *const f64;
+                    let sp = self.data_ptr_mut() as *mut f64;
+                    let op = other.data_ptr() as *const f64;
                     for i in 0..numel { unsafe { *sp.add(i) $assign_op *op.add(i); } }
                 }
                 DType::I32 => {
-                    let sp = self_ptr as *mut i32;
-                    let op = other_ptr as *const i32;
+                    let sp = self.data_ptr_mut() as *mut i32;
+                    let op = other.data_ptr() as *const i32;
                     for i in 0..numel { unsafe { *sp.add(i) $assign_op *op.add(i); } }
                 }
                 DType::BF16 => {
@@ -390,6 +390,7 @@ impl Tensor {
             && self.inner.sizes == tensor2.inner.sizes
         {
             let numel = self.inner.numel() as usize;
+            self.inner.increment_version();
             let self_ptr = self.data_ptr_f32_mut();
             let t1_ptr = tensor1.data_ptr_f32();
             let t2_ptr = tensor2.data_ptr_f32();

@@ -67,12 +67,7 @@ impl MemoryPlan {
         // ── Compute tightened kernel params ──────────────────────────
         // Iterate over every node in topological order and re-derive
         // shape-dependent kernel parameters using the concrete ShapeEnv.
-        let order = graph.topological_sort();
-        for &node_id in &order {
-            let node = match graph.get_node(node_id) {
-                Some(n) => n,
-                None => continue,
-            };
+        crate::utils::traverse_graph(graph, |node_id, node| {
             let resolved_input_shapes: Vec<Vec<u64>> = node
                 .inputs
                 .iter()
@@ -89,7 +84,7 @@ impl MemoryPlan {
             let tightened = match node.opcode {
                 Opcode::MatMul => {
                     if resolved_input_shapes.len() < 2 {
-                        continue;
+                        return Ok(());
                     }
                     let m = resolved_input_shapes[0]
                         .get(resolved_input_shapes[0].len().saturating_sub(2))
@@ -180,10 +175,11 @@ impl MemoryPlan {
                     };
                     vec![group_size, is_mean, is_max]
                 }
-                _ => continue,
+                _ => return Ok(()),
             };
             mp.tightened_params.insert(node_id, tightened);
-        }
+            Ok(())
+        }).unwrap_or(());
 
         mp
     }
@@ -363,12 +359,7 @@ pub fn plan_memory_with_env(
 
     let mut alloc_infos: Vec<AllocInfo> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-
+    crate::utils::traverse_graph(graph, |node_id, node| {
         // Primary output
         let size = tensor_byte_size(&node.output_type, shape_env);
         if size > 0 {
@@ -419,7 +410,8 @@ pub fn plan_memory_with_env(
                 });
             }
         }
-    }
+        Ok(())
+    }).unwrap_or(());
 
     // Sort by (start_time, primary-first, size-desc).
     // The primary-first tiebreaker ensures that a node's primary output

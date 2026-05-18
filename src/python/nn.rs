@@ -394,6 +394,8 @@ impl_nn_module!(ConvTranspose2d {
                 kernel_size,
                 stride,
                 padding,
+                1,  // dilation (ignored by ConvTranspose2d)
+                1,  // groups (ignored by ConvTranspose2d)
                 bias,
             ),
         }
@@ -411,7 +413,7 @@ struct Conv1d {
 
 impl_nn_module!(Conv1d {
     #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, dilation = 1, bias = true))]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, dilation = 1, groups = 1, bias = true))]
     fn new(
         in_channels: i64,
         out_channels: i64,
@@ -419,6 +421,7 @@ impl_nn_module!(Conv1d {
         stride: i64,
         padding: i64,
         dilation: i64,
+        groups: i64,
         bias: bool,
     ) -> Self {
         Conv1d {
@@ -429,6 +432,7 @@ impl_nn_module!(Conv1d {
                 stride,
                 padding,
                 dilation,
+                groups,
                 bias,
             ),
         }
@@ -446,7 +450,7 @@ struct Conv3d {
 
 impl_nn_module!(Conv3d {
     #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, dilation = 1, bias = true))]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride = 1, padding = 0, dilation = 1, groups = 1, bias = true))]
     fn new(
         in_channels: i64,
         out_channels: i64,
@@ -454,6 +458,7 @@ impl_nn_module!(Conv3d {
         stride: i64,
         padding: i64,
         dilation: i64,
+        groups: i64,
         bias: bool,
     ) -> Self {
         Conv3d {
@@ -464,6 +469,7 @@ impl_nn_module!(Conv3d {
                 stride,
                 padding,
                 dilation,
+                groups,
                 bias,
             ),
         }
@@ -841,7 +847,7 @@ impl Mish {
     fn __call__(&self, x: &PyTensor) -> PyTensor {
         // mish(x) = x * tanh(softplus(x))
         // softplus(x) = ln(1 + exp(x))
-        let sp = x.inner.add_scalar(1.0).exp().ln();
+        let sp = x.inner.exp().add_scalar(1.0).ln();
         let tanh_sp = sp.tanh();
         PyTensor::from_tensor(x.inner.mul(&tanh_sp))
     }
@@ -1220,7 +1226,9 @@ impl AotExecutor {
                 // Resolve the output node's dtype and shape from the graph.
                 let output_node_id = self.graph.outputs[*idx];
                 let output_node = self.graph.get_node(output_node_id)
-                    .expect("AotExecutor: output node not found in graph");
+                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                        "AotExecutor: output node not found in graph"
+                    ))?;
                 let ir_dtype = output_node.output_type.dtype.clone();
                 // Extract quantization metadata before ir_to_dtype strips it
                 let (q_scales, q_zero_points) = match &ir_dtype {

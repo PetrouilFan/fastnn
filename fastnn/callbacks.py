@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import fastnn as fnn
+import fastnn._core as _core
 from typing import Optional, Dict, Any, List, Union, Tuple
 
 # Default CSV fields for CSVLogger
@@ -168,7 +169,6 @@ class ModelCheckpoint(MonitorCallback):
 
     def save_model(self, model: Any) -> None:
         if self.should_save:
-            import fastnn as fnn
             fnn.io.save(model, self.filepath)
             self.should_save = False
 
@@ -201,7 +201,7 @@ class EarlyStopping(MonitorCallback):
             self.best_value = value
             self.counter = 0
             if self.restore_best_weights and self.model is not None:
-                self.best_weights = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                self.best_weights = {k: v.copy() if hasattr(v, 'copy') else v.cpu().clone() for k, v in self.model.state_dict().items()}
             return
 
         improved = self._is_improvement(
@@ -211,7 +211,7 @@ class EarlyStopping(MonitorCallback):
             self.best_value = value
             self.counter = 0
             if self.restore_best_weights and self.model is not None:
-                self.best_weights = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                self.best_weights = {k: v.copy() if hasattr(v, 'copy') else v.cpu().clone() for k, v in self.model.state_dict().items()}
         else:
             self.counter += 1
             if self.counter >= self.patience:
@@ -221,7 +221,12 @@ class EarlyStopping(MonitorCallback):
     def on_train_end(self, logs: Optional[Dict[str, Any]] = None) -> None:
         if self.restore_best_weights and self.best_weights is not None and self.model is not None:
             print("Restoring best model weights...")
-            weights_on_device = {k: v.to(self.model.device) for k, v in self.best_weights.items()}
+            weights_on_device = {}
+            for k, v in self.best_weights.items():
+                if hasattr(v, 'copy'):  # fastnn tensor
+                    weights_on_device[k] = _core.to_device(v, self.model.device)
+                else:  # pytorch tensor
+                    weights_on_device[k] = v.to(self.model.device)
             self.model.load_state_dict(weights_on_device)
             self.best_weights = None
 

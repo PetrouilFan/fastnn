@@ -137,7 +137,7 @@ pub struct OptimizerState {
     pub state: HashMap<usize, ParamState>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct ParamState {
     pub step: u64,

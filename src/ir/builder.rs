@@ -86,7 +86,7 @@ fn cache_plan(key: u64, plan: ExecutablePlan, mp: MemoryPlan, graph: ComputeGrap
 
 /// Look up a plan in the cache.
 fn lookup_plan(key: u64) -> Option<(ExecutablePlan, MemoryPlan, ComputeGraph)> {
-    PLAN_CACHE.lock().ok().and_then(|mut cache| cache.remove(&key))
+    PLAN_CACHE.lock().ok().and_then(|mut cache| cache.get(&key).cloned())
 }
 
 // =============================================================================

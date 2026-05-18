@@ -1,4 +1,6 @@
 use crate::autograd::{self, Edge};
+use crate::impl_cpu_fast_path;
+use crate::impl_scalar_op;
 use crate::ir::node::DimExpr;
 use crate::storage::{DType, Device, Storage};
 use std::sync::Arc;
@@ -91,53 +93,7 @@ impl Tensor {
         }
     }
 
-    pub fn gt_scalar(&self, threshold: f32) -> Tensor {
-        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("avx2") && numel >= 8 {
-                    unsafe {
-                        let threshold_v = _mm256_set1_ps(threshold);
-                        let one_v = _mm256_set1_ps(1.0);
-                        let mut i = 0;
-                        while i + 8 <= numel {
-                            let av = _mm256_loadu_ps(a_ptr.add(i));
-                            let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_GT_OQ);
-                            _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
-                            i += 8;
-                        }
-                        for j in i..numel {
-                            *out_ptr.add(j) = if *a_ptr.add(j) > threshold { 1.0 } else { 0.0 };
-                        }
-                    }
-                } else {
-                    for i in 0..numel {
-                        unsafe {
-                            *out_ptr.add(i) = if *a_ptr.add(i) > threshold { 1.0 } else { 0.0 };
-                        }
-                    }
-                }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
-                for i in 0..numel {
-                    unsafe {
-                        *out_ptr.add(i) = if *a_ptr.add(i) > threshold { 1.0 } else { 0.0 };
-                    }
-                }
-            }
-            return output;
-        }
-
-        let scalar = Tensor::from_scalar(threshold);
-        Tensor::exec_aot(&[self, &scalar], |g, ins| {
-            vec![g.gt_scalar(&ins[0], &ins[1])]
-        })
-        .expect("Tensor::gt_scalar: AOT execution failed")
-        .into_iter()
-        .next()
-        .unwrap()
-    }
+    impl_scalar_op!(gt_scalar, _CMP_GT_OQ, >);
 
     pub fn sign(&self) -> Tensor {
         Tensor::exec_aot(&[self], |g, ins| vec![g.sign(&ins[0])])
@@ -186,217 +142,13 @@ impl Tensor {
         .unwrap()
     }
 
-    pub fn lt_scalar(&self, threshold: f32) -> Tensor {
-        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("avx2") && numel >= 8 {
-                    unsafe {
-                        let threshold_v = _mm256_set1_ps(threshold);
-                        let one_v = _mm256_set1_ps(1.0);
-                        let mut i = 0;
-                        while i + 8 <= numel {
-                            let av = _mm256_loadu_ps(a_ptr.add(i));
-                            let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_LT_OQ);
-                            _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
-                            i += 8;
-                        }
-                        for j in i..numel {
-                            *out_ptr.add(j) = if *a_ptr.add(j) < threshold { 1.0 } else { 0.0 };
-                        }
-                    }
-                } else {
-                    for i in 0..numel {
-                        unsafe {
-                            *out_ptr.add(i) = if *a_ptr.add(i) < threshold { 1.0 } else { 0.0 };
-                        }
-                    }
-                }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
-                for i in 0..numel {
-                    unsafe {
-                        *out_ptr.add(i) = if *a_ptr.add(i) < threshold { 1.0 } else { 0.0 };
-                    }
-                }
-            }
-            return output;
-        }
+    impl_scalar_op!(lt_scalar, _CMP_LT_OQ, <);
 
-        let scalar = Tensor::from_scalar(threshold);
-        Tensor::exec_aot(&[self, &scalar], |g, ins| {
-            vec![g.lt_scalar(&ins[0], &ins[1])]
-        })
-        .expect("Tensor::lt_scalar: AOT execution failed")
-        .into_iter()
-        .next()
-        .unwrap()
-    }
+    impl_scalar_op!(eq_scalar, _CMP_EQ_OQ, ==);
 
-    pub fn eq_scalar(&self, threshold: f32) -> Tensor {
-        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("avx2") && numel >= 8 {
-                    unsafe {
-                        let threshold_v = _mm256_set1_ps(threshold);
-                        let one_v = _mm256_set1_ps(1.0);
-                        let mut i = 0;
-                        while i + 8 <= numel {
-                            let av = _mm256_loadu_ps(a_ptr.add(i));
-                            let cmp = _mm256_cmp_ps(av, threshold_v, _CMP_EQ_OQ);
-                            _mm256_storeu_ps(out_ptr.add(i), _mm256_and_ps(cmp, one_v));
-                            i += 8;
-                        }
-                        for j in i..numel {
-                            *out_ptr.add(j) =
-                                if *a_ptr.add(j) == threshold { 1.0 } else { 0.0 };
-                        }
-                    }
-                } else {
-                    for i in 0..numel {
-                        unsafe {
-                            *out_ptr.add(i) =
-                                if *a_ptr.add(i) == threshold { 1.0 } else { 0.0 };
-                        }
-                    }
-                }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
-                for i in 0..numel {
-                    unsafe {
-                        *out_ptr.add(i) = if *a_ptr.add(i) == threshold { 1.0 } else { 0.0 };
-                    }
-                }
-            }
-            return output;
-        }
+    impl_cpu_fast_path!(add_scalar, _mm256_add_ps, +, AddScalarBackward);
 
-        let scalar = Tensor::from_scalar(threshold);
-        Tensor::exec_aot(&[self, &scalar], |g, ins| {
-            vec![g.eq_scalar(&ins[0], &ins[1])]
-        })
-        .expect("Tensor::eq_scalar: AOT execution failed")
-        .into_iter()
-        .next()
-        .unwrap()
-    }
-
-    pub fn add_scalar(&self, scalar: f32) -> Tensor {
-        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("avx2") && numel >= 8 {
-                    unsafe {
-                        let scalar_v = _mm256_set1_ps(scalar);
-                        let mut i = 0;
-                        while i + 8 <= numel {
-                            let av = _mm256_loadu_ps(a_ptr.add(i));
-                            _mm256_storeu_ps(out_ptr.add(i), _mm256_add_ps(av, scalar_v));
-                            i += 8;
-                        }
-                        for j in i..numel {
-                            *out_ptr.add(j) = *a_ptr.add(j) + scalar;
-                        }
-                    }
-                } else {
-                    for i in 0..numel {
-                        unsafe {
-                            *out_ptr.add(i) = *a_ptr.add(i) + scalar;
-                        }
-                    }
-                }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
-                for i in 0..numel {
-                    unsafe {
-                        *out_ptr.add(i) = *a_ptr.add(i) + scalar;
-                    }
-                }
-            }
-            if autograd::is_grad_enabled() && self.requires_grad() {
-                let s = Tensor::from_scalar(scalar);
-                let inputs = vec![self.clone(), s.clone()];
-                return Self::attach_grad_fn(output, autograd::make_node_info("AddScalarBackward", inputs));
-            } else {
-                return output;
-            }
-        }
-
-        let s = Tensor::from_scalar(scalar);
-        let output = Tensor::exec_aot(&[self, &s], |g, ins| vec![g.add_scalar(&ins[0], &ins[1])])
-            .expect("Tensor::add_scalar: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap();
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let _edges = autograd::make_edge(self);
-            let inputs = vec![self.clone(), s.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("AddScalarBackward", inputs))
-        } else {
-            output
-        }
-    }
-
-    pub fn div_scalar(&self, scalar: f32) -> Tensor {
-        if let Some((numel, a_ptr, out_ptr, output)) = cpu_f32_fast_path_setup(self) {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                if is_x86_feature_detected!("avx2") && numel >= 8 {
-                    unsafe {
-                        let scalar_v = _mm256_set1_ps(scalar);
-                        let mut i = 0;
-                        while i + 8 <= numel {
-                            let av = _mm256_loadu_ps(a_ptr.add(i));
-                            _mm256_storeu_ps(out_ptr.add(i), _mm256_div_ps(av, scalar_v));
-                            i += 8;
-                        }
-                        for j in i..numel {
-                            *out_ptr.add(j) = *a_ptr.add(j) / scalar;
-                        }
-                    }
-                } else {
-                    for i in 0..numel {
-                        unsafe {
-                            *out_ptr.add(i) = *a_ptr.add(i) / scalar;
-                        }
-                    }
-                }
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
-                for i in 0..numel {
-                    unsafe {
-                        *out_ptr.add(i) = *a_ptr.add(i) / scalar;
-                    }
-                }
-            }
-            if autograd::is_grad_enabled() && self.requires_grad() {
-                let s = Tensor::from_scalar(scalar);
-                let inputs = vec![self.clone(), s.clone()];
-                return Self::attach_grad_fn(output, autograd::make_node_info("DivScalarBackward", inputs));
-            } else {
-                return output;
-            }
-        }
-
-        let s = Tensor::from_scalar(scalar);
-        let output = Tensor::exec_aot(&[self, &s], |g, ins| vec![g.div_scalar(&ins[0], &ins[1])])
-            .expect("Tensor::div_scalar: AOT execution failed")
-            .into_iter()
-            .next()
-            .unwrap();
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let _edges = autograd::make_edge(self);
-            let inputs = vec![self.clone(), s.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("DivScalarBackward", inputs))
-        } else {
-            output
-        }
-    }
+    impl_cpu_fast_path!(div_scalar, _mm256_div_ps, /, DivScalarBackward);
 
     pub fn logical_not(&self) -> Tensor {
         Tensor::exec_aot(&[self], |g, ins| vec![g.logical_not(&ins[0])])
@@ -551,27 +303,30 @@ impl Tensor {
         }
     }
 
-    pub fn nonzero(&self) -> Vec<Vec<i64>> {
+    pub fn nonzero(&self) -> Vec<i64> {
         let data = self.as_f32_slice();
         let shape = self.shape_ref();
-        let mut result = Vec::new();
+        let ndim = shape.len();
 
-        if shape.is_empty() {
-            return result;
+        if ndim == 0 {
+            return Vec::new();
+        }
+
+        // Precompute strides for fast flat-index decomposition
+        let mut strides = vec![1usize; ndim];
+        for i in (0..ndim - 1).rev() {
+            strides[i] = strides[i + 1] * shape[i + 1] as usize;
         }
 
         let total = data.len();
+        let mut result = Vec::with_capacity(total.saturating_mul(ndim));
         for i in 0..total {
             if data[i] != 0.0 {
-                // Convert flat index to multi-dimensional index
-                let mut idx = i;
-                let mut coords = Vec::with_capacity(shape.len());
-                for &dim in shape.iter().rev() {
-                    coords.push((idx % dim as usize) as i64);
-                    idx /= dim as usize;
+                let mut remaining = i;
+                for d in 0..ndim {
+                    result.push((remaining / strides[d]) as i64);
+                    remaining %= strides[d];
                 }
-                coords.reverse();
-                result.push(coords);
             }
         }
         result

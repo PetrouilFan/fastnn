@@ -146,7 +146,7 @@ def convert_precision(
 
                 # Refine scales where possible
                 params_v3 = []
-                for name, (data, dtype, scales, zeros) in raw_params.items():
+                for name, (data, dtype, scales, zeros, shape) in raw_params.items():
                     if dtype in (2, 3) and config.should_quantize_param(name):
                         # Get original f32 weights by dequantizing
                         from fastnn import PackedTensor4, PackedTensor8
@@ -204,12 +204,13 @@ def convert_precision(
 
         params_v3 = []
         for name, value in params.items():
-            if isinstance(value, tuple) and len(value) == 4:
-                data, dtype, scales, zeros = value
+            if isinstance(value, tuple) and len(value) >= 4:
+                data, dtype, scales, zeros = value[:4]
+                shape = value[4] if len(value) >= 5 else []
                 if dtype == DTYPE_F32:
-                    params_v3.append((name, data, DTYPE_F32, [], []))
+                    params_v3.append((name, data, DTYPE_F32, [], [], shape))
                 else:
-                    params_v3.append((name, data, dtype, scales, zeros))
+                    params_v3.append((name, data, dtype, scales, zeros, shape))
             else:
                 # v2 f32 tensor
                 arr = value
