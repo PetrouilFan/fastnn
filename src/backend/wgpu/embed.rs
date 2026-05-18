@@ -113,7 +113,11 @@ pub(super) fn dispatch_embed_gpu(
 }
 
 fn build_embed_shader() -> String {
-    r#"
+    // Note: `enable i64;` is required by WGSL when using i64 types.
+    // The vocab_size is compared as u64 to avoid truncation when
+    // vocab_size > i32::MAX (which would silently bypass the bounds check).
+    r#"enable i64;
+
 @group(0) @binding(0) var<storage, read>     indices: array<i64>;
 @group(0) @binding(1) var<storage, read>     weight:  array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
@@ -131,12 +135,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= params.num_indices) { return; }
     let idx = indices[i];
     let dst_base = i * params.embedding_dim;
-    if (idx < 0 || idx >= i32(params.vocab_size)) {
+    // Compare using u64 so vocab_size > i32::MAX is handled correctly.
+    if (idx < 0 || u64(idx) >= u64(params.vocab_size)) {
         for (var j = 0u; j < params.embedding_dim; j = j + 1u) {
             output[dst_base + j] = 0.0;
         }
         return;
     }
+    // idx is guaranteed non-negative and < vocab_size ≤ u32::MAX, so u32 cast is safe.
     let src_base = u32(idx) * params.embedding_dim;
     for (var j = 0u; j < params.embedding_dim; j = j + 1u) {
         output[dst_base + j] = weight[src_base + j];

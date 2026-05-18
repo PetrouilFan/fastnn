@@ -439,8 +439,9 @@ impl<'a> OnnxConverter<'a> {
             }
             "GlobalAveragePool" => {
                 // Reduce over dims 2 and 3 (spatial dims of NCHW)
-                let r1 = self.graph.reduce_mean(&ins[0], 2, false);
-                self.out(node, self.graph.reduce_mean(&r1, 2, false));
+                // ONNX GlobalAveragePool always keeps spatial dimensions as size-1.
+                let r1 = self.graph.reduce_mean(&ins[0], 2, true);
+                self.out(node, self.graph.reduce_mean(&r1, 2, true));
             }
 
             // ── Normalization ───────────────────────────────────────
@@ -775,18 +776,22 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, gt);
             }
             "Cast" => {
-                // Cast to target type. ONNX "to" attr is an int enum:
-                //   1=FLOAT, 7=INT64, 10=INT32, 11=BOOL, etc.
+                // Cast to target type. ONNX "to" attr is an int enum from
+                // TensorProto.DataType:
+                //   1=FLOAT, 5=INT16, 6=INT32, 7=INT64, 9=BOOL, 10=FLOAT16, 11=DOUBLE
                 let to: i64 = node
                     .attrs
                     .get("to")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1); // default FLOAT
                 let target_dtype = match to {
-                    1 | 6 => IrDType::F32, // FLOAT
-                    7 => IrDType::I64,
-                    10 => IrDType::I32,
-                    11 => IrDType::Bool,
+                    1 => IrDType::F32,   // FLOAT
+                    5 => IrDType::I32,   // INT16 → upcast to I32
+                    6 => IrDType::I32,   // INT32
+                    7 => IrDType::I64,   // INT64
+                    9 => IrDType::Bool,  // BOOL
+                    10 => IrDType::F32,  // FLOAT16 → upcast to F32
+                    11 => IrDType::F32,  // DOUBLE → downcast to F32 (no F64 in IrDType)
                     _ => ins[0].dtype(), // fallback: keep input dtype
                 };
                 let gt = self.graph.cast_op(&ins[0], target_dtype);
@@ -827,30 +832,76 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, self.graph.prelu(&ins[0], slope));
             }
 
-            // ── Reduce ops ──────────────────────────────────────────
+            // ── Reduce ops (multi-axis with sorted descending) ──────
             "ReduceSum" => {
-                let axis: usize = node
+                let axes_str = node.attrs.get("axes");
+                let keepdim: bool = node
                     .attrs
-                    .get("axes")
-                    .and_then(|a| a.split(',').next().and_then(|v| v.trim().parse().ok()))
-                    .unwrap_or(0);
-                self.out(node, self.graph.reduce_sum(&ins[0], axis, false));
+                    .get("keepdims")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(true); // ONNX default
+                if let Some(axes_str) = axes_str {
+                    let mut axes: Vec<usize> = axes_str
+                        .split(',')
+                        .filter_map(|v| v.trim().parse().ok())
+                        .collect();
+                    // Sort descending so earlier reduce ops don't shift later axes
+                    axes.sort_by(|a, b| b.cmp(a));
+                    axes.dedup();
+                    let mut out = ins[0].clone();
+                    for &axis in &axes {
+                        out = self.graph.reduce_sum(&out, axis, keepdim);
+                    }
+                    self.out(node, out);
+                } else {
+                    self.out(node, self.graph.reduce_sum(&ins[0], 0, keepdim));
+                }
             }
             "ReduceMean" => {
-                let axis: usize = node
+                let axes_str = node.attrs.get("axes");
+                let keepdim: bool = node
                     .attrs
-                    .get("axes")
-                    .and_then(|a| a.split(',').next().and_then(|v| v.trim().parse().ok()))
-                    .unwrap_or(0);
-                self.out(node, self.graph.reduce_mean(&ins[0], axis, false));
+                    .get("keepdims")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(true);
+                if let Some(axes_str) = axes_str {
+                    let mut axes: Vec<usize> = axes_str
+                        .split(',')
+                        .filter_map(|v| v.trim().parse().ok())
+                        .collect();
+                    axes.sort_by(|a, b| b.cmp(a));
+                    axes.dedup();
+                    let mut out = ins[0].clone();
+                    for &axis in &axes {
+                        out = self.graph.reduce_mean(&out, axis, keepdim);
+                    }
+                    self.out(node, out);
+                } else {
+                    self.out(node, self.graph.reduce_mean(&ins[0], 0, keepdim));
+                }
             }
             "ReduceMax" => {
-                let axis: usize = node
+                let axes_str = node.attrs.get("axes");
+                let keepdim: bool = node
                     .attrs
-                    .get("axes")
-                    .and_then(|a| a.split(',').next().and_then(|v| v.trim().parse().ok()))
-                    .unwrap_or(0);
-                self.out(node, self.graph.reduce_max(&ins[0], axis, false));
+                    .get("keepdims")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(true);
+                if let Some(axes_str) = axes_str {
+                    let mut axes: Vec<usize> = axes_str
+                        .split(',')
+                        .filter_map(|v| v.trim().parse().ok())
+                        .collect();
+                    axes.sort_by(|a, b| b.cmp(a));
+                    axes.dedup();
+                    let mut out = ins[0].clone();
+                    for &axis in &axes {
+                        out = self.graph.reduce_max(&out, axis, keepdim);
+                    }
+                    self.out(node, out);
+                } else {
+                    self.out(node, self.graph.reduce_max(&ins[0], 0, keepdim));
+                }
             }
 
             // ── InstanceNorm (decomposed) ───────────────────────────
@@ -1033,18 +1084,30 @@ impl<'a> OnnxConverter<'a> {
                 if ins.len() < 8 {
                     return Err("QLinearMatMul needs 8 inputs: A, A_scale, A_zp, B, B_scale, B_zp, Y_scale, Y_zp".to_string());
                 }
-                // Dequantize A: a_f32 = (A - A_zp) * A_scale
-                let a_float = self.graph.sub(&ins[0], &ins[2]);
-                let a_deq = self.graph.mul(&a_float, &ins[1]);
-                // Dequantize B: b_f32 = (B - B_zp) * B_scale
-                let b_float = self.graph.sub(&ins[3], &ins[5]);
-                let b_deq = self.graph.mul(&b_float, &ins[4]);
+                // Cast quantized U8 inputs to F32 before arithmetic.
+                // ONNX QLinearMatMul inputs A, A_zp, B, B_zp are typically UINT8;
+                // A_scale, B_scale, Y_scale, Y_zp are F32.
+                let a_f32 = self.graph.cast_op(&ins[0], IrDType::F32);
+                let a_zp_f32 = self.graph.cast_op(&ins[2], IrDType::F32);
+                let b_f32 = self.graph.cast_op(&ins[3], IrDType::F32);
+                let b_zp_f32 = self.graph.cast_op(&ins[5], IrDType::F32);
+                // Dequantize A: a_deq = (A_f32 - A_zp_f32) * A_scale
+                let a_diff = self.graph.sub(&a_f32, &a_zp_f32);
+                let a_deq = self.graph.mul(&a_diff, &ins[1]);
+                // Dequantize B: b_deq = (B_f32 - B_zp_f32) * B_scale
+                let b_diff = self.graph.sub(&b_f32, &b_zp_f32);
+                let b_deq = self.graph.mul(&b_diff, &ins[4]);
                 // f32 matmul
                 let c = self.graph.matmul(&a_deq, &b_deq);
-                // Requantize: clamp(c / Y_scale + Y_zp, 0, 255)
+                // Requantize: y = clamp(round(c / Y_scale) + Y_zp, 0, 255)
                 let c_scaled = self.graph.div(&c, &ins[6]);
                 let c_biased = self.graph.add(&c_scaled, &ins[7]);
-                let y = self.graph.clamp(&c_biased, 0.0, 255.0);
+                let y_f32 = self.graph.clamp(&c_biased, 0.0, 255.0);
+                // Cast output back to U8 (the output type of QLinearMatMul is UINT8)
+                let y = self.graph.cast_op(&y_f32, IrDType::U8 {
+                    scales: vec![],
+                    zero_points: vec![],
+                });
                 self.out(node, y);
             }
             "QLinearConv" => {
@@ -1164,13 +1227,10 @@ impl<'a> OnnxConverter<'a> {
                 let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
                 let h_c_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
 
-                // Create zero initial states if not provided
+                // Create zero initial states if not provided.
+                // Use byte_size() which handles symbolic dims via SYMBOL_DIM_MAX fallback.
                 let zero_tt = TensorType::new(h_c_shape.clone(), IrDType::F32);
-                let zero_numel: usize = h_c_shape
-                    .iter()
-                    .filter_map(|d| d.evaluate())
-                    .product::<u64>() as usize;
-                let zero_bytes = vec![0u8; zero_numel * 4];
+                let zero_bytes = vec![0u8; zero_tt.byte_size()];
                 let h_prev = if ins.len() > 5 {
                     self.graph.squeeze(&ins[5], 0)
                 } else {
@@ -1315,9 +1375,7 @@ impl<'a> OnnxConverter<'a> {
                 let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
                 let h_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
                 let zero_tt = TensorType::new(h_shape.clone(), IrDType::F32);
-                let zero_numel: usize =
-                    h_shape.iter().filter_map(|d| d.evaluate()).product::<u64>() as usize;
-                let zero_bytes = vec![0u8; zero_numel * 4];
+                let zero_bytes = vec![0u8; zero_tt.byte_size()];
                 let h_prev = if ins.len() > 5 {
                     self.graph.squeeze(&ins[5], 0)
                 } else {

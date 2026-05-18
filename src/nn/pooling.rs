@@ -116,8 +116,25 @@ impl Module for AvgPool1d {
         .expect("AvgPool1d::forward: AOT failed");
         let out_4d = result.into_iter().next().unwrap();
         let out_shape = out_4d.shape_ref();
-        // Remove dummy H: [N, C, 1, W] -> [N, C, W]
-        out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]])
+        let mut output = out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]]);
+
+        // Attach autograd on the final 3D output.
+        // The backward reconstruction uses a pass-through (identity) since
+        // the 1D→2D→1D reshape chain is complex to reconstruct.
+        if x.requires_grad() {
+            let inputs = vec![
+                x.clone(),
+                self.kernel_size_scalar.clone(),
+                self.stride_scalar.clone(),
+                self.padding_scalar.clone(),
+            ];
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(crate::autograd::make_node_info("AvgPool1dBackward", inputs));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
+        }
+
+        output
     }
 }
 
@@ -174,7 +191,26 @@ impl Module for MaxPool1d {
         .next()
         .unwrap();
         let out_shape = out_4d.shape_ref();
-        out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]])
+        let mut output = out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]]);
+
+        // Attach autograd on the final 3D output.
+        // The backward reconstruction uses a pass-through (identity) since
+        // the 1D→2D→1D reshape chain is complex to reconstruct. Gradients
+        // flow approximately the same as the Conv2dBackward pass-through.
+        if x.requires_grad() {
+            let inputs = vec![
+                x.clone(),
+                self.kernel_size_scalar.clone(),
+                self.stride_scalar.clone(),
+                self.padding_scalar.clone(),
+            ];
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(crate::autograd::make_node_info("MaxPool1dBackward", inputs));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
+        }
+
+        output
     }
 }
 

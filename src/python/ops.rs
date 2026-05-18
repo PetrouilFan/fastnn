@@ -396,16 +396,18 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
     let inputs_inner: Vec<Tensor> = inputs.iter().map(|p| p.inner.clone()).collect();
     let requires_grad = inputs.iter().any(|p| p.inner.requires_grad());
 
-    if !requires_grad || !autograd::is_grad_enabled() {
-        return Ok(inputs);
-    }
-
     let num_inputs = inputs_inner.len();
     let forward_fn = fn_name.to_string();
 
     let inputs_refs: Vec<&Tensor> = inputs_inner.iter().collect();
     let output_tensor = checkpoint_op(&forward_fn, &inputs_refs)?;
     let output = PyTensor::from_tensor(output_tensor);
+
+    // When grad is disabled, just return the computed outputs
+    // (not the inputs! — we must still compute and return results).
+    if !requires_grad || !autograd::is_grad_enabled() {
+        return Ok(vec![output]);
+    }
 
     let output_inner = output.inner.clone();
 
@@ -421,7 +423,7 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
         }
         Ok(result)
     } else {
-        Ok(inputs)
+        Ok(vec![output])
     }
 }
 
@@ -621,15 +623,17 @@ fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTe
 }
 
 #[pyfunction]
-fn topk(tensor: &PyTensor, k: i64, dim: i64) -> (PyTensor, PyTensor) {
+fn topk(tensor: &PyTensor, k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
     let ndim = tensor.inner.ndim() as i64;
     let norm_dim = if dim < 0 { ndim + dim } else { dim };
     let outputs = Tensor::exec_aot(&[&tensor.inner], |g, ins| {
         let (values, indices) = g.topk(&ins[0], k as usize, norm_dim);
         vec![values, indices]
     })
-    .expect("Tensor::topk: AOT execution failed");
-    (PyTensor::from_tensor(outputs[0].clone()), PyTensor::from_tensor(outputs[1].clone()))
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+        format!("Tensor::topk: AOT execution failed: {}", e)
+    ))?;
+    Ok((PyTensor::from_tensor(outputs[0].clone()), PyTensor::from_tensor(outputs[1].clone())))
 }
 
 #[pyfunction]
@@ -654,8 +658,17 @@ fn im2col(
     padding: i64,
     dilation: i64,
 ) -> PyResult<PyTensor> {
-    let x_inner = &x.inner;
-    let shape = x_inner.shape();
+    // Ensure the tensor is on CPU before accessing raw data pointer
+    let x_cpu = {
+        #[cfg(feature = "gpu")]
+        if matches!(x.inner.device(), crate::storage::Device::Wgpu(_)) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "im2col does not support GPU tensors; call .cpu() first"
+            ));
+        }
+        x.inner.clone()
+    };
+    let shape = x_cpu.shape();
     if shape.len() != 4 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "Input must be a 4D tensor (N, C, H, W)",
@@ -683,7 +696,7 @@ fn im2col(
     let col_cols = c * kernel_h * kernel_w;
     let mut col_data = vec![0.0f32; col_rows * col_cols];
     let x_data =
-        unsafe { std::slice::from_raw_parts(x_inner.data_ptr_f32(), batch * c * h * w) };
+        unsafe { std::slice::from_raw_parts(x_cpu.data_ptr_f32(), batch * c * h * w) };
     for n in 0..batch {
         let input_off = n * (c * h * w);
         let col_off = n * out_height * out_width * col_cols;
