@@ -1,7 +1,7 @@
 use crate::autograd::{self, Edge};
 use crate::impl_cpu_fast_path;
 use crate::impl_scalar_op;
-use crate::ir::node::DimExpr;
+use crate::ir::node::{DimExpr, IrDType, TensorType};
 use crate::storage::{DType, Device, Storage};
 use std::sync::Arc;
 
@@ -119,10 +119,15 @@ impl Tensor {
     }
 
     pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
-        // ge(a,b) = not(lt(a,b))
+        // ge(a,b) = not(b > a) = not(gt_scalar(b - a, 0))
         Tensor::exec_aot(&[self, other], |g, ins| {
-            let lt = g.lt_scalar(&ins[0], &ins[1]);
-            vec![g.logical_not(&lt)]
+            let diff = g.sub(&ins[1], &ins[0]); // b - a
+            let zero = g.constant(
+                &0.0f32.to_le_bytes(),
+                TensorType::new(vec![], IrDType::F32),
+            );
+            let gt = g.gt_scalar(&diff, &zero); // b - a > 0  (i.e. b > a)
+            vec![g.logical_not(&gt)] // not(b > a) = a >= b
         })
         .expect("Tensor::ge_tensor: AOT execution failed")
         .into_iter()
@@ -131,10 +136,15 @@ impl Tensor {
     }
 
     pub fn le_tensor(&self, other: &Tensor) -> Tensor {
-        // le(a,b) = not(gt(a,b))
+        // le(a,b) = not(a > b) = not(gt_scalar(a - b, 0))
         Tensor::exec_aot(&[self, other], |g, ins| {
-            let gt = g.gt_scalar(&ins[0], &ins[1]);
-            vec![g.logical_not(&gt)]
+            let diff = g.sub(&ins[0], &ins[1]); // a - b
+            let zero = g.constant(
+                &0.0f32.to_le_bytes(),
+                TensorType::new(vec![], IrDType::F32),
+            );
+            let gt = g.gt_scalar(&diff, &zero); // a - b > 0 (i.e. a > b)
+            vec![g.logical_not(&gt)] // not(a > b) = a <= b
         })
         .expect("Tensor::le_tensor: AOT execution failed")
         .into_iter()

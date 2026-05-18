@@ -602,7 +602,7 @@ impl Tensor {
     }
 
     impl_unary_op!(try_abs, abs, abs, "AbsBackward");
-    impl_unary_op_extra!(try_log_softmax, log_softmax, "LogSoftmaxBackward", (_dim: i32), log_softmax);
+    impl_unary_op_extra!(try_log_softmax, log_softmax, "LogSoftmaxBackward", (dim: i32), log_softmax, dim as i64);
 
     pub fn as_i64_slice(&self) -> Vec<i64> {
         let src = self.to_cpu();
