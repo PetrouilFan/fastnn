@@ -54,7 +54,12 @@ impl Module for MaxPool2d {
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() {
-            let inputs = vec![x.clone()];
+            let inputs = vec![
+                x.clone(),
+                self.kernel_size_scalar.clone(),
+                self.stride_scalar.clone(),
+                self.padding_scalar.clone(),
+            ];
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(crate::autograd::make_node_info("MaxPool2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
@@ -207,7 +212,12 @@ impl Module for AvgPool2d {
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() {
-            let inputs = vec![x.clone()];
+            let inputs = vec![
+                x.clone(),
+                Tensor::from_scalar(self.kernel_size as f32),
+                Tensor::from_scalar(self.stride as f32),
+                Tensor::from_scalar(self.padding as f32),
+            ];
             let mut meta = AutogradMeta::new_non_leaf(true);
             meta.grad_fn = Some(crate::autograd::make_node_info("AvgPool2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
