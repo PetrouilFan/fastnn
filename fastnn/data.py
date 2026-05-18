@@ -749,6 +749,7 @@ class DataLoader:
 
         if batch_sampler is not None:
             self.batch_sampler = batch_sampler
+            self.sampler = None  # No sampler when batch_sampler is provided
         else:
             if sampler is not None:
                 self.sampler = sampler
@@ -791,7 +792,7 @@ class DataLoader:
             self.prefetch_size = prefetch
             self._metrics.reset()
 
-        if self.shuffle:
+        if self.shuffle and self.sampler is not None:
             if isinstance(self.sampler, RandomSampler):
                 self.sampler.generator = self.generator
             # Only recreate BatchSampler if the sampler has changed

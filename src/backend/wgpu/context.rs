@@ -130,12 +130,14 @@ impl WgpuContext {
     }
 
     /// Create a GPU buffer from raw bytes.
+    /// Returns a 1-byte buffer if `data` is empty (WGPU requires non-zero buffer sizes).
     pub fn create_buffer(&self, data: &[u8], label: &str) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
+        let contents = if data.is_empty() { &[0u8] } else { data };
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
-                contents: data,
+                contents,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             })
     }

@@ -649,12 +649,31 @@ impl TensorType {
                 },
             })
             .product();
-        // For packed types, use the actual packed byte size (accounts for
-        // word-level packing and SIMD margin) rather than the logical per-element
-        // overestimate.  The packed data stored in TensorValue::Data already
-        // includes the SIMD margin, so the slot must be large enough to hold it.
+        // For packed types, compute per-row packed byte size to match
+        // PackedTensor's actual storage layout (rows * ceil(inner / ITEMS) + MARGIN).
+        // This differs from flat packing (ceil(total / ITEMS)) when the inner
+        // dimension is not a multiple of ITEMS, which would cause slot under-allocation.
         match &self.dtype {
-            IrDType::U4 { .. } | IrDType::U8 { .. } => self.dtype.packed_byte_size(numel),
+            IrDType::U4 { .. } => {
+                let inner_dim = self.shape.last().map(|d| match d {
+                    DimExpr::Known(v) => *v as usize,
+                    DimExpr::Bounded { max, .. } => *max as usize,
+                    DimExpr::Symbol(_) => 8,
+                }).unwrap_or(1);
+                let rows = if inner_dim > 0 { numel.div_ceil(inner_dim) } else { 1 };
+                let words = rows * inner_dim.div_ceil(8) + 16;
+                words * 4
+            }
+            IrDType::U8 { .. } => {
+                let inner_dim = self.shape.last().map(|d| match d {
+                    DimExpr::Known(v) => *v as usize,
+                    DimExpr::Bounded { max, .. } => *max as usize,
+                    DimExpr::Symbol(_) => 4,
+                }).unwrap_or(1);
+                let rows = if inner_dim > 0 { numel.div_ceil(inner_dim) } else { 1 };
+                let words = rows * inner_dim.div_ceil(4) + 16;
+                words * 4
+            }
             _ => numel * self.dtype.byte_size(),
         }
     }

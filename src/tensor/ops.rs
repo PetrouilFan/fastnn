@@ -72,7 +72,7 @@ use std::arch::x86_64::{
 macro_rules! impl_inplace_binary_op {
     ($fn_name:ident, $immutable_fn:ident, $simd_intrin:ident, $assign_op:tt, $binop:tt) => {
         pub fn $fn_name(&mut self, other: &Tensor) -> &mut Self {
-            if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() || self.inner.dtype != DType::F32 || other.inner.dtype != DType::F32 {
                 let result = (self as &Tensor).$immutable_fn(other);
                 *self = result;
                 return self;

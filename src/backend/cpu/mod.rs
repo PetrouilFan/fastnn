@@ -1316,6 +1316,11 @@ impl Backend for CpuBackend {
                         .get("padding")
                         .and_then(|p| p.parse().ok())
                         .unwrap_or(0);
+                    let dilation: usize = node
+                        .attrs
+                        .get("dilation")
+                        .and_then(|d| d.parse().ok())
+                        .unwrap_or(1);
                     let input_c = input_shapes
                         .first()
                         .and_then(|s| s.get(1).copied())
@@ -1351,7 +1356,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         secondary_output_slice: None,
                         params: vec![
-                            stride, padding, input_c, input_d, input_h, input_w, kernel_d,
+                            stride, padding, dilation, input_c, input_d, input_h, input_w, kernel_d,
                             kernel_h, kernel_w,
                         ],
                         param_dims: None,
@@ -1502,13 +1507,26 @@ impl Backend for CpuBackend {
                     } else {
                         axis.min((rank - 1).max(0))
                     };
+                    let (dim_size, inner) = input_shapes
+                        .first()
+                        .and_then(|s| {
+                            let idx = normalized as usize;
+                            if idx < s.len() {
+                                let ds = s[idx] as usize;
+                                let inn: usize = s[idx + 1..].iter().copied().map(|x| x as usize).product();
+                                Some((ds, inn))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or((0, 1));
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "argmax".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![normalized as usize],
+                        params: vec![normalized as usize, dim_size, inner],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -3049,7 +3067,7 @@ impl Backend for CpuBackend {
                                 } else {
                                     vec![]
                                 };
-                                let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, _kernel_w] =
+                                let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
                                     &params[..]
                                 else {
                                     return Err(BackendError::Dispatch("conv2d_u4/u8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
@@ -3076,22 +3094,22 @@ impl Backend for CpuBackend {
                                 let c = input_c;
                                 let h = input_h;
                                 let w = input_w;
-                                let kernel_size = kernel_h;
                                 if groups == 0 {
                                     return Err(BackendError::Dispatch(
                                         "conv2d_u4/u8: groups=0".into(),
                                     ));
                                 }
                                 let c_per_g = c / groups;
-                                let dk = (kernel_size - 1) * dilation + 1;
+                                let dk_h = (kernel_h - 1) * dilation + 1;
+                                let dk_w = (kernel_w - 1) * dilation + 1;
                                 let n = input_data.len() / (c * h * w).max(1);
-                                let h_out = if h + 2 * padding >= dk {
-                                    (h + 2 * padding - dk) / stride + 1
+                                let h_out = if h + 2 * padding >= dk_h {
+                                    (h + 2 * padding - dk_h) / stride + 1
                                 } else {
                                     0
                                 };
-                                let w_out = if w + 2 * padding >= dk {
-                                    (w + 2 * padding - dk) / stride + 1
+                                let w_out = if w + 2 * padding >= dk_w {
+                                    (w + 2 * padding - dk_w) / stride + 1
                                 } else {
                                     0
                                 };
@@ -3107,17 +3125,18 @@ impl Backend for CpuBackend {
                                             meta.scales,
                                             meta.zero_points,
                                         );
-                                        let col_w = c_per_g * kernel_size * kernel_size;
+                                        let col_w = c_per_g * kernel_h * kernel_w;
                                         for nn in 0..n {
                                             let num_pixels = h_out * w_out;
                                             let mut col_matrix = vec![0.0f32; num_pixels * col_w];
                                             unsafe {
-                                                crate::backend::cpu::im2col::im2col_kernel(
+                                                crate::backend::cpu::im2col::im2col_kernel_rect(
                                                     &input_data[nn * (c * h * w)..],
                                                     c_per_g,
                                                     h,
                                                     w,
-                                                    kernel_size,
+                                                    kernel_h,
+                                                    kernel_w,
                                                     stride,
                                                     padding,
                                                     dilation,
@@ -3661,16 +3680,16 @@ impl Backend for CpuBackend {
                                         .to_vec(),
                                     )
                                 };
-                                let &[stride, padding, c, d, h, w, kd, kh, kw] = &params[..] else {
+                                let &[stride, padding, dilation, c, d, h, w, kd, kh, kw] = &params[..] else {
                                     return Err(BackendError::Dispatch(
-                                        "conv3d: expected params [stride, padding, input_c, input_d, input_h, input_w, kernel_d, kernel_h, kernel_w]".into(),
+                                        "conv3d: expected params [stride, padding, dilation, input_c, input_d, input_h, input_w, kernel_d, kernel_h, kernel_w]".into(),
                                     ));
                                 };
                                 let n = input.len() / (c * d * h * w).max(1);
                                 let f = weight.len() / (c * kd * kh * kw).max(1);
-                                let d_out = (d + 2 * padding).saturating_sub(kd) / stride + 1;
-                                let h_out = (h + 2 * padding).saturating_sub(kh) / stride + 1;
-                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
+                                let d_out = (d + 2 * padding).saturating_sub(dilation * (kd - 1) + 1) / stride + 1;
+                                let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
+                                let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -3685,9 +3704,9 @@ impl Backend for CpuBackend {
                                                         for kkd in 0..kd {
                                                             for kkh in 0..kh {
                                                                 for kkw in 0..kw {
-                                                                    let d_in = dd * stride + kkd;
-                                                                    let h_in = hh * stride + kkh;
-                                                                    let w_in = ww * stride + kkw;
+                                                                    let d_in = dd * stride + kkd * dilation;
+                                                                    let h_in = hh * stride + kkh * dilation;
+                                                                    let w_in = ww * stride + kkw * dilation;
                                                                     if d_in >= padding
                                                                         && h_in >= padding
                                                                         && w_in >= padding
@@ -3941,7 +3960,13 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 let len = out_f32.len().min(main.len()).min(residual.len());
-                                let row_size = len;
+                                let row_size = if !weight.is_empty() {
+                                    weight.len()
+                                } else if !bias.is_empty() {
+                                    bias.len()
+                                } else {
+                                    len
+                                };
                                 for i in 0..len {
                                     out_f32[i] = main[i] + residual[i % residual.len()];
                                 }
@@ -4156,11 +4181,13 @@ impl Backend for CpuBackend {
                                     .to_vec()
                                 };
                                 let axis = params.first().copied().unwrap_or(usize::MAX);
+                                let dim_size = params.get(1).copied().unwrap_or(0);
+                                let _inner = params.get(2).copied().unwrap_or(1);
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, u64>(&mut d[out_start..out_end])
                                 };
-                                if axis == usize::MAX {
+                                if axis == usize::MAX || dim_size == 0 || dim_size > input.len() {
                                     let max_idx = input
                                         .iter()
                                         .enumerate()
@@ -4173,37 +4200,24 @@ impl Backend for CpuBackend {
                                         *v = max_idx;
                                     }
                                 } else {
-                                    let dim_size = axis;
-                                    if dim_size > 0 && input.len() % dim_size == 0 {
-                                        let num_rows = input.len() / dim_size;
-                                        for row in 0..num_rows {
-                                            let start = row * dim_size;
-                                            let end = start + dim_size;
-                                            let max_idx = input[start..end]
-                                                .iter()
-                                                .enumerate()
-                                                .max_by(|(_, a), (_, b)| {
-                                                    a.partial_cmp(b)
-                                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                                })
-                                                .map(|(i, _)| (row * dim_size + i) as u64)
-                                                .unwrap_or(0);
-                                            if row < out_f32.len() {
-                                                out_f32[row] = max_idx;
+                                    let outer = input.len() / (dim_size * _inner);
+                                    for o in 0..outer {
+                                        for i in 0.._inner {
+                                            let base = o * dim_size * _inner + i;
+                                            let mut best_flat = base as u64;
+                                            let mut best_val = input[base];
+                                            for k in 1..dim_size {
+                                                let flat_idx = base + k * _inner;
+                                                let val = input[flat_idx];
+                                                if val > best_val {
+                                                    best_val = val;
+                                                    best_flat = flat_idx as u64;
+                                                }
                                             }
-                                        }
-                                    } else {
-                                        let max_idx = input
-                                            .iter()
-                                            .enumerate()
-                                            .max_by(|(_, a), (_, b)| {
-                                                a.partial_cmp(b)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            })
-                                            .map(|(i, _)| i as u64)
-                                            .unwrap_or(0);
-                                        for v in out_f32.iter_mut() {
-                                            *v = max_idx;
+                                            let out_idx = o * _inner + i;
+                                            if out_idx < out_f32.len() {
+                                                out_f32[out_idx] = best_flat;
+                                            }
                                         }
                                     }
                                 }

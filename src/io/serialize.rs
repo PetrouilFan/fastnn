@@ -42,9 +42,14 @@ fn write_slice_i64(writer: &mut impl Write, slice: &[i64]) -> FastnnResult<()> {
 }
 
 /// Read a slice of i64 values with length prefix.
+/// Uses safe byte-by-byte conversion to avoid alignment UB.
 fn read_slice_i64(reader: &mut impl Read) -> FastnnResult<Vec<i64>> {
     let bytes = read_length_prefixed(reader)?;
-    Ok(bytemuck::cast_slice(&bytes).to_vec())
+    let result: Vec<i64> = bytes
+        .chunks_exact(8)
+        .map(|chunk| i64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]))
+        .collect();
+    Ok(result)
 }
 
 /// Read a tensor using the v1 format (used by Python's write_tensor/read_tensor).
@@ -81,7 +86,13 @@ fn read_tensor_v1(reader: &mut impl Read) -> FastnnResult<(String, Vec<u32>, Vec
         .read_exact(&mut data_len_bytes)
         .map_err(FastnnError::Io)?;
     let data_len = u64::from_le_bytes(data_len_bytes) as usize;
-    let mut data_bytes = vec![0u8; data_len * 4]; // f32 is 4 bytes
+    let byte_count = data_len.checked_mul(4).ok_or_else(|| {
+        FastnnError::Serialization(format!(
+            "Integer overflow: data_len {} * 4 exceeds usize",
+            data_len
+        ))
+    })?;
+    let mut data_bytes = vec![0u8; byte_count];
     reader
         .read_exact(&mut data_bytes)
         .map_err(FastnnError::Io)?;
@@ -114,11 +125,8 @@ pub fn save_state_dict(state_dict: Vec<(String, Tensor)>, path: &str) -> FastnnR
             write_length_prefixed(&mut writer, bytes)?;
         } else {
             let data = tensor.to_numpy();
-            // SAFETY: `data` is a `Vec<f32>` whose pointer and length are valid
-            // for the entire slice. Reinterpreting as `*const u8` is safe because
-            // `f32` has no padding and the length is multiplied by 4 (size of f32).
-            let bytes =
-                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
+            // Convert f32 vec to bytes using safe reinterpretation.
+            let bytes = bytemuck::cast_slice(&data);
             write_length_prefixed(&mut writer, bytes)?;
         }
     }
@@ -181,7 +189,15 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
 
             let data_bytes = read_length_prefixed(&mut reader)?;
 
-            let expected_numel: usize = shape.iter().map(|&d| d as usize).product();
+            let expected_numel: usize = shape
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
+                .ok_or_else(|| {
+                    FastnnError::Serialization(format!(
+                        "Integer overflow computing numel from shape {:?} for parameter '{}'",
+                        shape, name
+                    ))
+                })?;
             let data_len = data_bytes.len() / 4; // f32 is 4 bytes
             if expected_numel != data_len {
                 return Err(FastnnError::Serialization(format!(
@@ -190,9 +206,12 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
                 )));
             }
 
-            let data = unsafe {
-                std::slice::from_raw_parts(data_bytes.as_ptr() as *const f32, data_len).to_vec()
-            };
+            // SAFE: Use safe byte-to-float conversion instead of unsafe `from_raw_parts`
+            // to avoid undefined behaviour from misaligned pointers.
+            let data: Vec<f32> = data_bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
 
             let tensor = Tensor::from_vec(data, shape);
             result.insert(name, tensor);
@@ -228,7 +247,15 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
             let data_bytes = read_length_prefixed(&mut reader)?;
             let nbytes = data_bytes.len();
 
-            let expected_numel: usize = shape.iter().map(|&d| d as usize).product();
+            let expected_numel: usize = shape
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
+                .ok_or_else(|| {
+                    FastnnError::Serialization(format!(
+                        "Integer overflow computing numel from shape {:?} for parameter '{}'",
+                        shape, name
+                    ))
+                })?;
             let elem_size = dtype.size();
             let data_len = nbytes / elem_size;
             if expected_numel != data_len {

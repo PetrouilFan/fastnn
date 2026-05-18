@@ -445,13 +445,13 @@ impl GraphBuilder {
         let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
 
         let h_out = if a_shape.len() > 2 && w_shape.len() > 2 {
-            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
 
         let w_out = if a_shape.len() > 3 && w_shape.len() > 3 {
-            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding)
+            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
@@ -889,6 +889,7 @@ impl GraphBuilder {
                 &DimExpr::Known(kernel_size as u64),
                 stride,
                 padding,
+                1,
             )
         } else {
             DimExpr::Known(1)
@@ -899,6 +900,7 @@ impl GraphBuilder {
                 &DimExpr::Known(kernel_size as u64),
                 stride,
                 padding,
+                1,
             )
         } else {
             DimExpr::Known(1)
@@ -949,6 +951,7 @@ impl GraphBuilder {
                 &DimExpr::Known(kernel_size as u64),
                 stride,
                 padding,
+                1,
             )
         } else {
             DimExpr::Known(1)
@@ -959,6 +962,7 @@ impl GraphBuilder {
                 &DimExpr::Known(kernel_size as u64),
                 stride,
                 padding,
+                1,
             )
         } else {
             DimExpr::Known(1)
@@ -1302,30 +1306,19 @@ impl GraphBuilder {
     }
 
     /// Tile (repeat) tensor along each axis.
+    /// The `repeats` tensor provides per-axis repeat counts at runtime.
+    /// Output shape is the same as input shape (dynamic at graph-build time).
     pub fn tile_op(&self, input: &GraphTensor, repeats: &GraphTensor) -> GraphTensor {
         let input_shape = input.shape();
-        let attrs = HashMap::new();
-        let repeats_str: String = attrs.get("repeats").cloned().unwrap_or_default();
-        let rep_vals: Vec<i64> = repeats_str.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        let output_shape: Vec<DimExpr> = if rep_vals.is_empty() {
-            input_shape.to_vec()
-        } else {
-            input_shape.iter().enumerate().map(|(i, d)| {
-                let r = rep_vals.get(i).copied().unwrap_or(1);
-                let base = match d {
-                    DimExpr::Known(v) => *v as i64,
-                    _ => 1,
-                };
-                DimExpr::Known((base * r) as u64)
-            }).collect()
-        };
-        let output_type = TensorType::new(output_shape, input.dtype());
+        // NOTE: repeats are runtime-dynamic (second graph input). We can't
+        // know their values at graph-build time, so output shape = input shape.
+        // The backward pass infers repeats by comparing input/output shapes.
+        let output_type = TensorType::new(input_shape.to_vec(), input.dtype());
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node_with_attrs(
+        let node_id = inner.graph.add_node(
             Opcode::Tile,
             vec![input.node_id, repeats.node_id],
             output_type.clone(),
-            attrs,
         );
         GraphTensor::new(self.clone(), node_id, output_type)
     }
@@ -1360,13 +1353,14 @@ impl GraphBuilder {
         weight: &GraphTensor,
         stride: usize,
         padding: usize,
+        dilation: usize,
     ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let w_out = if a_shape.len() > 2 && w_shape.len() > 2 {
-            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
@@ -1374,6 +1368,7 @@ impl GraphBuilder {
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
+        attrs.insert("dilation".to_string(), dilation.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::Conv1d,
@@ -1384,30 +1379,31 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Convolution 3D.
+    /// Convolution 3D: `out = (input + 2p - d*(k-1) - 1)/s + 1`.
     pub fn conv3d(
         &self,
         input: &GraphTensor,
         weight: &GraphTensor,
         stride: usize,
         padding: usize,
+        dilation: usize,
     ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let d_out = if a_shape.len() > 2 && w_shape.len() > 2 {
-            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
         let h_out = if a_shape.len() > 3 && w_shape.len() > 3 {
-            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding)
+            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
         let w_out = if a_shape.len() > 4 && w_shape.len() > 4 {
-            conv_spatial_dim(&a_shape[4], &w_shape[4], stride, padding)
+            conv_spatial_dim(&a_shape[4], &w_shape[4], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
@@ -1418,6 +1414,7 @@ impl GraphBuilder {
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
+        attrs.insert("dilation".to_string(), dilation.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::Conv3d,
@@ -2341,32 +2338,34 @@ where
 }
 
 /// Compute the spatial output dimension for a convolution:
-/// `out = (input + 2*padding - kernel) / stride + 1`.
+/// `out = (input + 2p - d*(k-1) - 1)/s + 1`.
 fn conv_spatial_dim(
     input_dim: &DimExpr,
     kernel_dim: &DimExpr,
     stride: usize,
     padding: usize,
+    dilation: usize,
 ) -> DimExpr {
     let s = stride as u64;
     let p = padding as u64;
+    let d = dilation as u64;
     match (input_dim, kernel_dim) {
         (DimExpr::Known(h), DimExpr::Known(k)) => {
-            DimExpr::Known(((h + 2 * p).saturating_sub(*k)) / s + 1)
+            DimExpr::Known(((h + 2 * p).saturating_sub(d * (k - 1) + 1)) / s + 1)
         }
         _ => {
             // Attempt partial evaluation
             let h_val = input_dim.evaluate();
             let k_val = kernel_dim.evaluate();
             match (h_val, k_val) {
-                (Some(h), Some(k)) => DimExpr::Known(((h + 2 * p).saturating_sub(k)) / s + 1),
+                (Some(h), Some(k)) => DimExpr::Known(((h + 2 * p).saturating_sub(d * (k - 1) + 1)) / s + 1),
                 _ => {
                     // Cannot fully evaluate — produce a Bounded expression with provenance
                     let h_eval = input_dim
                         .evaluate()
                         .unwrap_or(SYMBOL_DIM_MAX.load(Ordering::Relaxed));
                     let k_eval = kernel_dim.evaluate().unwrap_or(1);
-                    let estimated = ((h_eval + 2 * p).saturating_sub(k_eval)) / s + 1;
+                    let estimated = ((h_eval + 2 * p).saturating_sub(d * (k_eval - 1) + 1)) / s + 1;
                     let sym_name = match (input_dim, kernel_dim) {
                         (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
                             format!("conv_spatial({},{})", s, t)
