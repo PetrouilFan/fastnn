@@ -335,7 +335,27 @@ impl Tensor {
                         };
                         slice.fill(half::f16::from_f32(value));
                     }
-                    _ => {}
+                    DType::I64 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                data.as_mut_ptr() as *mut i64,
+                                numel,
+                            )
+                        };
+                        slice.fill(value as i64);
+                    }
+                    DType::Bool => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                data.as_mut_ptr() as *mut u8,
+                                numel,
+                            )
+                        };
+                        slice.fill(if value != 0.0 { 1u8 } else { 0u8 });
+                    }
+                    DType::U4 | DType::U8 => {
+                        panic!("full() does not support packed U4/U8 dtypes. Use zeros() or from_vec() with packed data.");
+                    }
                 }
                 let strides = compute_strides(&sizes);
                 Tensor::new(TensorImpl {

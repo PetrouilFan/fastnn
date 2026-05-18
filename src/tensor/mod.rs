@@ -1049,19 +1049,22 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
     for t in tensors {
         if let Some(g) = t.grad() {
             let g_data = g.as_f32_slice();
-            let param_norm = if norm_type == 2.0 {
-                g_data.iter().map(|x| x * x).sum::<f32>().sqrt()
+            if norm_type == 2.0 {
+                let param_norm = g_data.iter().map(|x| x * x).sum::<f32>().sqrt();
+                total_norm += param_norm * param_norm;
             } else {
-                g_data
+                total_norm += g_data
                     .iter()
                     .map(|x| x.abs().powf(norm_type))
-                    .sum::<f32>()
-                    .powf(1.0 / norm_type)
-            };
-            total_norm += param_norm * param_norm;
+                    .sum::<f32>();
+            }
         }
     }
-    total_norm = total_norm.sqrt();
+    if norm_type == 2.0 {
+        total_norm = total_norm.sqrt();
+    } else {
+        total_norm = total_norm.powf(1.0 / norm_type);
+    }
     let clip_coef = max_norm / (total_norm.max(1e-6));
     if clip_coef < 1.0 {
         for t in tensors {
