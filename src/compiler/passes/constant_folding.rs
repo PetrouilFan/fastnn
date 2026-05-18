@@ -1,34 +1,39 @@
-use crate::ir::node::{ComputeGraph, DimExpr, IRNode, IrDType, Opcode, TensorType, TensorValue};
+use crate::ir::node::{ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, TensorType, TensorValue};
 
 pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
-    let order = graph.topological_sort();
-    let mut folded = 0;
+    struct Fold {
+        node_id: NodeId,
+        value: TensorValue,
+    }
+    let mut folds: Vec<Fold> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n.clone(),
-            None => continue,
-        };
-
+    let graph_ref = &*graph;
+    let _ = crate::utils::traverse_graph(graph_ref, |node_id, node| {
         if node.inputs.is_empty() || has_side_effects(&node.opcode) {
-            continue;
+            return Ok(());
         }
 
         let all_const = node
             .inputs
             .iter()
-            .all(|&input_id| graph.get_node(input_id).map_or(false, |n| matches!(n.opcode, Opcode::Constant(_))));
+            .all(|&input_id| graph_ref.get_node(input_id).map_or(false, |n| matches!(n.opcode, Opcode::Constant(_))));
 
         if !all_const {
-            continue;
+            return Ok(());
         }
 
-        if let Some(value) = evaluate_node(graph, &node) {
-            if let Some(node_mut) = graph.get_node_mut(node_id) {
-                node_mut.opcode = Opcode::Constant(value);
-                node_mut.inputs.clear();
-            }
-            folded += 1;
+        if let Some(value) = evaluate_node(graph_ref, node) {
+            folds.push(Fold { node_id, value });
+        }
+
+        Ok(())
+    });
+
+    let folded = folds.len();
+    for f in folds {
+        if let Some(node_mut) = graph.get_node_mut(f.node_id) {
+            node_mut.opcode = Opcode::Constant(f.value);
+            node_mut.inputs.clear();
         }
     }
 

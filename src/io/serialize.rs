@@ -41,23 +41,7 @@ fn write_slice_i64(writer: &mut impl Write, slice: &[i64]) -> FastnnResult<()> {
 /// Read a slice of i64 values with length prefix.
 fn read_slice_i64(reader: &mut impl Read) -> FastnnResult<Vec<i64>> {
     let bytes = read_length_prefixed(reader)?;
-    let len = bytes.len() / 8;
-    let mut result = Vec::with_capacity(len);
-    for i in 0..len {
-        let start = i * 8;
-        let val = i64::from_le_bytes([
-            bytes[start],
-            bytes[start + 1],
-            bytes[start + 2],
-            bytes[start + 3],
-            bytes[start + 4],
-            bytes[start + 5],
-            bytes[start + 6],
-            bytes[start + 7],
-        ]);
-        result.push(val);
-    }
-    Ok(result)
+    Ok(bytemuck::cast_slice(&bytes).to_vec())
 }
 
 /// Read a tensor using the v1 format (used by Python's write_tensor/read_tensor).

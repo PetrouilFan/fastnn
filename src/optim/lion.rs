@@ -1,9 +1,6 @@
-use crate::optim::{
-    zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState, WeightDecayOptimizer,
-};
+use crate::optim::{zeros_like, Optimizer, WeightDecayOptimizer};
 use crate::tensor::Tensor;
-use crate::{get_grad_or_skip, impl_params_mut};
-use std::collections::HashMap;
+use crate::{get_grad_or_skip, impl_optim_boilerplate, impl_params_mut, impl_weight_decay};
 
 pub struct Lion {
     pub params: Vec<Tensor>,
@@ -34,15 +31,7 @@ impl Lion {
 }
 
 impl WeightDecayOptimizer for Lion {
-    fn params(&self) -> &Vec<Tensor> {
-        &self.params
-    }
-    fn no_decay(&self) -> &Vec<bool> {
-        &self.no_decay
-    }
-    fn no_decay_mut(&mut self) -> &mut Vec<bool> {
-        &mut self.no_decay
-    }
+    impl_weight_decay!();
 }
 
 impl Optimizer for Lion {
@@ -85,49 +74,5 @@ impl Optimizer for Lion {
         }
     }
 
-    fn add_param_group(&mut self, params: Vec<Tensor>) {
-        let m = zeros_like(&params);
-
-        self.m.extend(m);
-        self.step.extend(vec![0u64; params.len()]);
-        self.no_decay.extend(vec![false; params.len()]);
-        self.params.extend(params);
-    }
-
-    fn state_dict(&self) -> OptimizerState {
-        let mut state = HashMap::new();
-        for (i, _) in self.params.iter().enumerate() {
-            state.insert(
-                i,
-                ParamState {
-                    step: self.step[i],
-                    m: Some(self.m[i].clone()),
-                    v: None,
-                    v_hat: None,
-                },
-            );
-        }
-        OptimizerState {
-            param_groups: vec![ParamGroup {
-                params: self.params.clone(),
-            }],
-            state,
-        }
-    }
-
-    fn load_state_dict(&mut self, state: OptimizerState) {
-        if let Some(group) = state.param_groups.first() {
-            self.params = group.params.clone();
-        }
-        for (i, param_state) in state.state {
-            if i < self.m.len() {
-                if let Some(m) = param_state.m {
-                    self.m[i] = m;
-                }
-                if i < self.step.len() {
-                    self.step[i] = param_state.step;
-                }
-            }
-        }
-    }
+    impl_optim_boilerplate!(true, m);
 }

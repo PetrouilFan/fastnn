@@ -12,7 +12,7 @@
 //! Run this pass **after** shape inference (so shapes are known) and **before**
 //! memory planning (so the planner allocates slots for the new nodes).
 
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 
 /// Insert `QuantizeActivations`/`DequantizeActivations` around every `MatMul`
 /// node whose first input (the activation) is not already quantized.
@@ -20,91 +20,92 @@ use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 /// The pass is idempotent — it skips MatMuls whose first input is already
 /// a `QuantizeActivations` output.
 pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
-    let order = graph.topological_sort();
-
-    // Collect rewrites first, then apply them, to avoid borrow-checker issues.
     struct Rewrite {
         matmul_id: NodeId,
-        quantize_id: NodeId,
-        dequantize_id: NodeId,
+        act_id: NodeId,
+        matmul_shape: Vec<DimExpr>,
+        act_shape: Vec<DimExpr>,
+        consumers: Vec<NodeId>,
+        is_graph_output: bool,
     }
 
     let mut rewrites: Vec<Rewrite> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-
+    let graph_ref = &*graph;
+    crate::utils::traverse_graph(graph_ref, |node_id, node| {
         if node.opcode != Opcode::MatMul {
-            continue;
+            return Ok(());
         }
 
         let &act_id = match node.inputs.first() {
             Some(id) => id,
-            None => continue,
+            None => return Ok(()),
         };
 
         let matmul_shape = node.output_type.shape.clone();
 
-        if let Some(act_node) = graph.get_node(act_id) {
+        if let Some(act_node) = graph_ref.get_node(act_id) {
             if act_node.opcode == Opcode::QuantizeActivations {
-                continue;
+                return Ok(());
             }
         }
 
-        if let Some(act_node) = graph.get_node(act_id) {
+        if let Some(act_node) = graph_ref.get_node(act_id) {
             if matches!(act_node.opcode, Opcode::Input | Opcode::Constant(_)) {
-                continue;
+                return Ok(());
             }
         }
 
         let output_id = node_id;
-        let consumers: Vec<NodeId> = graph.consumers(output_id);
-        let is_graph_output = graph.outputs.contains(&output_id);
+        let consumers: Vec<NodeId> = graph_ref.consumers(output_id);
+        let is_graph_output = graph_ref.outputs.contains(&output_id);
 
-        let act_shape = graph
+        let act_shape = graph_ref
             .get_node(act_id)
             .map(|n| n.output_type.shape.clone())
             .unwrap_or_default();
-        let quant_type = TensorType::new(act_shape, IrDType::I8);
-        let quantize_id = graph.add_node(Opcode::QuantizeActivations, vec![act_id], quant_type);
 
-        if let Some(mm_node) = graph.get_node_mut(node_id) {
+        rewrites.push(Rewrite {
+            matmul_id: node_id,
+            act_id,
+            matmul_shape,
+            act_shape,
+            consumers,
+            is_graph_output,
+        });
+
+        Ok(())
+    })?;
+
+    for rw in rewrites {
+        let quant_type = TensorType::new(rw.act_shape, IrDType::I8);
+        let quantize_id = graph.add_node(Opcode::QuantizeActivations, vec![rw.act_id], quant_type);
+
+        if let Some(mm_node) = graph.get_node_mut(rw.matmul_id) {
             mm_node.inputs[0] = quantize_id;
         }
 
-        let dequant_type = TensorType::new(matmul_shape, IrDType::F32);
+        let dequant_type = TensorType::new(rw.matmul_shape, IrDType::F32);
         let dequantize_id =
-            graph.add_node(Opcode::DequantizeActivations, vec![output_id], dequant_type);
+            graph.add_node(Opcode::DequantizeActivations, vec![rw.matmul_id], dequant_type);
 
-        // Rewire consumers of the MatMul output to consume DequantizeActivations.
-        for &consumer_id in &consumers {
+        for &consumer_id in &rw.consumers {
             if let Some(consumer) = graph.get_node_mut(consumer_id) {
                 for inp in consumer.inputs.iter_mut() {
-                    if *inp == output_id {
+                    if *inp == rw.matmul_id {
                         *inp = dequantize_id;
                     }
                 }
             }
         }
 
-        // If the MatMul was a graph output, replace it with DequantizeActivations.
-        if is_graph_output {
-            if let Some(pos) = graph.outputs.iter().position(|&id| id == output_id) {
+        if rw.is_graph_output {
+            if let Some(pos) = graph.outputs.iter().position(|&id| id == rw.matmul_id) {
                 graph.outputs[pos] = dequantize_id;
             }
         }
-
-        rewrites.push(Rewrite {
-            matmul_id: node_id,
-            quantize_id,
-            dequantize_id,
-        });
     }
 
-    let _ = rewrites; // Keep for potential future diagnostics
     Ok(())
 }
 

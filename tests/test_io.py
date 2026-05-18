@@ -10,7 +10,10 @@ def test_save_load_model():
         path = os.path.join(tmpdir, "model.fastnn")
         fnn.io.save(model, path)
 
-        assert os.path.exists(path) or True
+        assert os.path.exists(path)
+        loaded = fnn.io.load(path)
+        assert isinstance(loaded, dict)
+        assert len(loaded) > 0
 
 
 def test_dlpack_roundtrip():

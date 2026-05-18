@@ -39,11 +39,12 @@ def test_trainer_evaluate():
 
 
 def test_early_stopping():
-    es = EarlyStopping(patience=3, min_delta=0.01)
+    es = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=False)
+    losses = [0.9, 0.7, 0.5, 0.6, 0.7, 0.8]
 
-    for i in range(10):
-        logs = {"val_loss": 1.0 - i * 0.01}
-        if logs["val_loss"] > 0.97:
-            break
+    for loss in losses:
+        logs = {"val_loss": loss}
+        es.step(logs)
 
-    assert es.counter == 0 or es.counter > 0
+    assert es.early_stop
+    assert es.best_value == 0.5

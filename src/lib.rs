@@ -30,6 +30,10 @@
 
 pub mod error;
 pub mod io;
+pub mod utils;
+
+// v2.4: shared macros for reducing boilerplate
+pub mod macros;
 
 pub mod nn;
 pub mod onnx;

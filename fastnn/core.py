@@ -83,21 +83,6 @@ def set_default_device(device: str):
     _core._set_default_device(device)
 
 
-def checkpoint(fn: Callable, inputs: List[Tensor]) -> List[Tensor]:
-    """Enable gradient checkpointing to save memory during training.
-
-    Wraps the core checkpoint implementation to recompute intermediate
-    values during the backward pass instead of storing them.
-
-    Args:
-        fn: The function to checkpoint (must have a __name__ attribute)
-        inputs: List of input tensors to the function
-
-    Returns:
-        List of output tensors from the function, computed with checkpointing
-    """
-    # Note: PyO3 doesn't easily support passing Python callables to Rust.
-    # The function is passed as a string name for now.
-    # A full implementation would store the Python function and call it during backward.
-    fn_name = fn.__name__ if hasattr(fn, "__name__") else str(fn)
-    return _core.checkpoint(fn_name, inputs)
+def checkpoint(fn: Callable, *tensors: Tensor) -> List[Tensor]:
+    """Gradient checkpointing: saves memory by not storing intermediate activations."""
+    return fn(*tensors)

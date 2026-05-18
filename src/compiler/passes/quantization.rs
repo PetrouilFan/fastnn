@@ -22,31 +22,25 @@ use crate::packed_tensor::PackedTensor;
 /// the CPU backend can feed them into `PackedTensor::from_raw(…)`.
 pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), String> {
     // ---- Phase 1: collect (constant_id, consumer_id) pairs to quantize ----
-    let order = graph.topological_sort();
-
     // We collect first, then mutate, to avoid borrow-checker issues.
     let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-
+    let graph_ref = &*graph;
+    crate::utils::traverse_graph(graph_ref, |node_id, node| {
         // Only quantize weights for MatMul-family and Conv-family ops.
         let is_consumer = matches!(
             node.opcode,
             Opcode::MatMul | Opcode::Conv1d | Opcode::Conv2d | Opcode::Conv3d
         );
         if !is_consumer {
-            continue;
+            return Ok(());
         }
 
         // The weight is typically input[1] (input[0] is the activation).
         if let Some(&weight_id) = node.inputs.get(1) {
-            let weight_node = match graph.get_node(weight_id) {
+            let weight_node = match graph_ref.get_node(weight_id) {
                 Some(n) => n,
-                None => continue,
+                None => return Ok(()),
             };
 
             // Only quantize f32/bf16/f16 constants (skip already-quantized).
@@ -62,7 +56,8 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
                 }
             }
         }
-    }
+        Ok(())
+    })?;
 
     if to_quantize.is_empty() {
         return Ok(());
@@ -196,8 +191,6 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
 pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> {
     use std::collections::HashMap;
 
-    let order = graph.topological_sort();
-
     // Collect optimizer nodes that need wrapping, along with their
     // weight input ID and the bit_width to requantize to.
     #[derive(Clone)]
@@ -211,12 +204,8 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
 
     let mut to_wrap: Vec<OptimizerWrap> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-
+    let graph_ref = &*graph;
+    crate::utils::traverse_graph(graph_ref, |node_id, node| {
         let is_optimizer = matches!(
             node.opcode,
             Opcode::SgdUpdate
@@ -227,24 +216,24 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
                 | Opcode::RmspropUpdate
         );
         if !is_optimizer {
-            continue;
+            return Ok(());
         }
 
         // input[0] is the weight — check its dtype
         let weight_id = match node.inputs.first() {
             Some(&id) => id,
-            None => continue,
+            None => return Ok(()),
         };
 
-        let weight_node = match graph.get_node(weight_id) {
+        let weight_node = match graph_ref.get_node(weight_id) {
             Some(n) => n,
-            None => continue,
+            None => return Ok(()),
         };
 
         let bit_width = match &weight_node.output_type.dtype {
             IrDType::U4 { .. } => 4,
             IrDType::U8 { .. } => 8,
-            _ => continue, // weight is not quantized, skip
+            _ => return Ok(()), // weight is not quantized, skip
         };
 
         // Save the remaining inputs (grad, m, v) and attrs
@@ -257,7 +246,8 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
             opt_inputs: remaining_inputs,
             opt_attrs: node.attrs.clone(),
         });
-    }
+        Ok(())
+    })?;
 
     if to_wrap.is_empty() {
         return Ok(());

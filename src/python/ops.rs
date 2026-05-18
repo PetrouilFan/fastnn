@@ -31,6 +31,24 @@ fn reduce_sum_all(t: &Tensor) -> Tensor {
     result
 }
 
+fn reduce_max_all(t: &Tensor) -> Tensor {
+    let ndim = t.ndim();
+    let mut result = t.clone();
+    for _ in 0..ndim {
+        result = result.max(0, false);
+    }
+    result
+}
+
+fn reduce_min_all(t: &Tensor) -> Tensor {
+    let ndim = t.ndim();
+    let mut result = t.clone();
+    for _ in 0..ndim {
+        result = result.neg().max(0, false).neg();
+    }
+    result
+}
+
 fn checkpoint_op(name: &str, inputs: &[&Tensor]) -> PyResult<Tensor> {
     match name {
         "add" => Ok(inputs[0].add(inputs[1])),
@@ -258,22 +276,28 @@ fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.sum(d, keepdim))
+    match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.sum(d, keepdim)),
+        None => PyTensor::from_tensor(reduce_sum_all(&a.inner)),
+    }
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.mean(d, keepdim))
+    match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.mean(d, keepdim)),
+        None => PyTensor::from_tensor(reduce_mean_all(&a.inner)),
+    }
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.max(d, keepdim))
+    match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.max(d, keepdim)),
+        None => PyTensor::from_tensor(reduce_max_all(&a.inner)),
+    }
 }
 
 #[pyfunction]
@@ -291,8 +315,10 @@ fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a.inner.neg().max(d, keepdim).neg())
+    match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.neg().max(d, keepdim).neg()),
+        None => PyTensor::from_tensor(reduce_min_all(&a.inner)),
+    }
 }
 
 // Argmax and argmin using macro
@@ -409,12 +435,16 @@ use rayon::ThreadPoolBuilder;
 
 #[pyfunction]
 #[cfg(feature = "parallel")]
-fn _set_num_threads(n: i32) {
+fn _set_num_threads(n: i32) -> PyResult<()> {
     if n > 0 {
         ThreadPoolBuilder::new()
             .num_threads(n as usize)
             .build_global()
-            .expect("Failed to set rayon thread pool");
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("Failed to set num threads: {}", e)
+            ))
+    } else {
+        Ok(())
     }
 }
 
@@ -426,7 +456,7 @@ fn _get_num_threads() -> usize {
 
 #[pyfunction]
 #[cfg(not(feature = "parallel"))]
-fn _set_num_threads(_n: i32) {}
+fn _set_num_threads(_n: i32) -> PyResult<()> { Ok(()) }
 
 #[pyfunction]
 #[cfg(not(feature = "parallel"))]
@@ -591,10 +621,15 @@ fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTe
 }
 
 #[pyfunction]
-fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> (PyTensor, PyTensor) {
-    let values = tensor.inner.max(dim as i32, false);
-    let indices = tensor.inner.argmax(Some(dim as usize));
-    (PyTensor::from_tensor(values), PyTensor::from_tensor(indices))
+fn topk(tensor: &PyTensor, k: i64, dim: i64) -> (PyTensor, PyTensor) {
+    let ndim = tensor.inner.ndim() as i64;
+    let norm_dim = if dim < 0 { ndim + dim } else { dim };
+    let outputs = Tensor::exec_aot(&[&tensor.inner], |g, ins| {
+        let (values, indices) = g.topk(&ins[0], k as usize, norm_dim);
+        vec![values, indices]
+    })
+    .expect("Tensor::topk: AOT execution failed");
+    (PyTensor::from_tensor(outputs[0].clone()), PyTensor::from_tensor(outputs[1].clone()))
 }
 
 #[pyfunction]
@@ -700,7 +735,12 @@ fn erf(tensor: &PyTensor) -> PyTensor {
 #[allow(dead_code)]
 #[pyfunction]
 fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
-    tensor.inner.nonzero()
+    let flat = tensor.inner.nonzero();
+    let ndim = tensor.inner.shape_ref().len();
+    if ndim == 0 {
+        return Vec::new();
+    }
+    flat.chunks(ndim).map(|c| c.to_vec()).collect()
 }
 
 #[pyfunction]
