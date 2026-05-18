@@ -113,11 +113,10 @@ impl MultiHeadAttention {
     }
 
     fn build_causal_mask(seq_len: i64) -> Tensor {
-        let mut mask_data = vec![0.0f32; (seq_len * seq_len) as usize];
-        for i in 0..seq_len as usize {
-            for j in (i + 1)..seq_len as usize {
-                mask_data[i * seq_len as usize + j] = f32::NEG_INFINITY;
-            }
+        let n = seq_len as usize;
+        let mut mask_data = vec![0.0f32; n * n];
+        for i in 0..n {
+            mask_data[i * n + i + 1..(i + 1) * n].fill(f32::NEG_INFINITY);
         }
         Tensor::from_vec(mask_data, vec![seq_len, seq_len])
     }

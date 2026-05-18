@@ -106,10 +106,26 @@ impl Tensor {
         Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 
-    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, _device: Device) -> Self {
+    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
-        Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+        match device {
+            Device::Cpu => {
+                let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
+                Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+            }
+            #[cfg(feature = "gpu")]
+            Device::Wgpu(device_id) => {
+                let ctx = get_wgpu_context(device_id);
+                let buffer = ctx.create_gpu_buffer_from_data(&values, "from_vec");
+                let storage = Arc::new(Storage::Wgpu(GpuStorage {
+                    buffer: buffer.buffer,
+                    nbytes: values.len() * 4,
+                    device_id,
+                    staging: RwLock::new(None),
+                }));
+                Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+            }
+        }
     }
 
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
