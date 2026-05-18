@@ -49,6 +49,12 @@ pub(super) fn dispatch_pool_gpu(
         .map_err(BackendError::Dispatch)?;
 
     let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "pool_input");
+    let buf_dummy = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("pool_dummy"),
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
 
     let output_size = (output_len * 4) as u64;
     let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -99,7 +105,7 @@ pub(super) fn dispatch_pool_gpu(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: buf_input.as_entire_binding(),
+                resource: buf_dummy.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,

@@ -423,14 +423,23 @@ impl<B: Backend> GraphExecutor<B> {
             self.backend.write_arena(&arena, slot.offset, data);
         }
 
-        // Write zero-initialized optimizer state (m, v for AdamW)
+        // Write zero-initialized optimizer state (m, v for AdamW),
+        // with t (timestep counter) initialized to 1.
         for state_nodes in &injection.state_input_nodes {
             for &state_id in state_nodes {
                 let slot = memory_plan.slots.get(&state_id).ok_or_else(|| {
                     BackendError::Compilation(format!("state node {} slot not found", state_id))
                 })?;
-                let zeros = vec![0u8; slot.size];
-                self.backend.write_arena(&arena, slot.offset, &zeros);
+                let is_t = final_graph
+                    .get_node(state_id)
+                    .map(|n| n.name.starts_with("optimizer/t_"))
+                    .unwrap_or(false);
+                let init_data: Vec<u8> = if is_t {
+                    1u64.to_le_bytes().to_vec()
+                } else {
+                    vec![0u8; slot.size]
+                };
+                self.backend.write_arena(&arena, slot.offset, &init_data);
             }
         }
 
@@ -520,21 +529,21 @@ impl<B: Backend> CompiledTrainingModel<B> {
         Ok(loss)
     }
 
-    /// Increment `t` (params[4]) in all Adam/AdamW kernel instructions.
+    /// Increment `t` in all Adam/AdamW kernel instructions.
     /// This advances the bias correction denominator for the next step.
+    /// For AdamW, `t` is stored in the arena at input_slices[4].
+    /// For Adam, `t` is still in params[4].
     fn increment_optimizer_steps(&mut self) -> Result<(), BackendError> {
         for instr in &mut self.plan.instructions {
             if let Instruction::CallKernel {
                 kernel_name,
                 params,
+                input_slices,
                 ..
             } = instr
             {
                 match kernel_name.as_str() {
-                    "adam_update_f32"
-                    | "adam_update_f16_state"
-                    | "adamw_update_f32"
-                    | "adamw_update_f16_state" => {
+                    "adam_update_f32" | "adam_update_f16_state" => {
                         if params.len() <= 4 {
                             return Err(BackendError::Dispatch(format!(
                                 "{} expected >=5 params, got {}",
@@ -542,12 +551,37 @@ impl<B: Backend> CompiledTrainingModel<B> {
                                 params.len()
                             )));
                         }
-                        // params[4] = step counter t (u64 stored as usize)
                         params[4] = params[4].checked_add(1).ok_or_else(|| {
                             BackendError::Dispatch(
                                 "train_step: Adam step overflow (t > u64::MAX)".into(),
                             )
                         })?;
+                    }
+                    "adamw_update_f32" | "adamw_update_f16_state" => {
+                        if input_slices.len() <= 4 {
+                            return Err(BackendError::Dispatch(format!(
+                                "{} expected >=5 input slices, got {}",
+                                kernel_name,
+                                input_slices.len()
+                            )));
+                        }
+                        let t_slice = &input_slices[4];
+                        let t_bytes =
+                            self.backend.read_arena(&self.arena, t_slice.offset, 8);
+                        let t_arr: [u8; 8] = t_bytes[..8].try_into().map_err(|_| {
+                            BackendError::Dispatch("invalid t step value".into())
+                        })?;
+                        let t_val = u64::from_le_bytes(t_arr);
+                        let new_t = t_val.checked_add(1).ok_or_else(|| {
+                            BackendError::Dispatch(
+                                "train_step: AdamW step overflow (t > u64::MAX)".into(),
+                            )
+                        })?;
+                        self.backend.write_arena(
+                            &self.arena,
+                            t_slice.offset,
+                            &new_t.to_le_bytes(),
+                        );
                     }
                     _ => {}
                 }

@@ -232,7 +232,7 @@ pub(super) fn dispatch_argmax_gpu(
 fn build_argmax_level1_shader() -> String {
     r#"
 @group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> intermediate: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read_write> intermediate: array<vec2<u32>>;
 
 struct AmParamsL1 {
     numel: u32,
@@ -284,7 +284,7 @@ fn main(
     }
 
     if lid.x == 0u {
-        intermediate[wg] = vec2<f32>(shared_val[0], f32(shared_idx[0]));
+        intermediate[wg] = vec2<u32>(bitcast<u32>(shared_val[0]), shared_idx[0]);
     }
 }
 "#
@@ -293,7 +293,7 @@ fn main(
 
 fn build_argmax_level2_shader() -> String {
     r#"
-@group(0) @binding(0) var<storage, read> intermediate: array<vec2<f32>>;
+@group(0) @binding(0) var<storage, read> intermediate: array<vec2<u32>>;
 @group(0) @binding(1) var<storage, read_write> output: array<u64>;
 
 struct AmParamsL2 {
@@ -311,10 +311,10 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     var local_max_idx = 0u;
     var j = lid.x;
     while j < params.n_wgs {
-        let v = intermediate[j].x;
+        let v = bitcast<f32>(intermediate[j].x);
         if v > local_max_val {
             local_max_val = v;
-            local_max_idx = u32(intermediate[j].y);
+            local_max_idx = intermediate[j].y;
         }
         j = j + 256u;
     }
