@@ -2136,7 +2136,7 @@ impl GraphBuilder {
         // mapping from forward node IDs to their gradient accumulator node IDs.
         let (grad_graph, grads) = {
             let inner = self.inner.borrow();
-            crate::autograd::build_backward_graph(&inner.graph, loss.node_id, 1.0f32)?
+            crate::autograd::build_backward_graph(&inner.graph, loss.node_id, None)?
         };
 
         // Update the shared inner state with the combined forward+backward graph

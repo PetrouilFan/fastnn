@@ -329,7 +329,7 @@ impl<B: Backend> GraphExecutor<B> {
         let mut combined_graph = forward_graph.clone();
 
         // 2. Build backward graph (result already contains forward + backward nodes)
-        let (grad_graph, grad_map) = build_backward_graph(&combined_graph, loss_node, 1.0f32)
+        let (grad_graph, grad_map) = build_backward_graph(&combined_graph, loss_node, None)
             .map_err(|e| BackendError::Compilation(format!("build_backward_graph: {e}")))?;
         combined_graph = grad_graph;
 
