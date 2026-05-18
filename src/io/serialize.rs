@@ -1,9 +1,12 @@
 use crate::error::{FastnnError, FastnnResult};
 use crate::nn::Module;
-use crate::tensor::Tensor;
+use crate::storage::{CpuStorage, DType, Storage};
+use crate::tensor::{Tensor, TensorImpl};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::sync::Arc;
 
 // Magic bytes to identify fastnn checkpoint format
 const MAGIC_BYTES: [u8; 4] = [0x46, 0x4E, 0x4E, 0x00]; // "FNN\0"
@@ -11,7 +14,7 @@ const MAGIC_BYTES: [u8; 4] = [0x46, 0x4E, 0x4E, 0x00]; // "FNN\0"
 #[allow(dead_code)] // Reserved for future optimizer state serialization
 const OPTIMIZER_MAGIC: [u8; 4] = [0x46, 0x4E, 0x4F, 0x00]; // "FNO\0"
                                                            // Format version for forward compatibility
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 
 /// Write a length-prefixed byte slice (length as little-endian u64, then data).
 fn write_length_prefixed(writer: &mut impl Write, bytes: &[u8]) -> FastnnResult<()> {
@@ -105,6 +108,7 @@ pub fn save_state_dict(state_dict: Vec<(String, Tensor)>, path: &str) -> FastnnR
     for (name, tensor) in &state_dict {
         write_length_prefixed(&mut writer, name.as_bytes())?;
         write_slice_i64(&mut writer, &tensor.shape())?;
+        writer.write_all(&[tensor.dtype() as u8])?;
 
         if let Some(bytes) = tensor.as_byte_slice() {
             write_length_prefixed(&mut writer, bytes)?;
@@ -167,20 +171,16 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
             let tensor = Tensor::from_vec(data, shape.into_iter().map(|d| d as i64).collect());
             result.insert(name, tensor);
         }
-    } else {
-        // Version 2+ format: uses length-prefixed encoding
+    } else if version == 2 {
+        // Version 2 format: length-prefixed, no dtype byte (assumes F32)
         for _ in 0..num_params {
-            // Read name using helper
             let name_bytes = read_length_prefixed(&mut reader)?;
             let name = String::from_utf8(name_bytes).map_err(FastnnError::Utf8)?;
 
-            // Read shape using helper
             let shape = read_slice_i64(&mut reader)?;
 
-            // Read data
             let data_bytes = read_length_prefixed(&mut reader)?;
 
-            // Validate shape matches data length
             let expected_numel: usize = shape.iter().map(|&d| d as usize).product();
             let data_len = data_bytes.len() / 4; // f32 is 4 bytes
             if expected_numel != data_len {
@@ -190,14 +190,62 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
                 )));
             }
 
-            // SAFETY: `data_bytes` length was verified to match `data_len * 4`,
-            // and `data_len` was validated against the tensor shape. The pointer
-            // and length are valid for a `&[f32]` of `data_len` elements.
             let data = unsafe {
                 std::slice::from_raw_parts(data_bytes.as_ptr() as *const f32, data_len).to_vec()
             };
 
             let tensor = Tensor::from_vec(data, shape);
+            result.insert(name, tensor);
+        }
+    } else {
+        // Version 3+ format: length-prefixed with dtype byte
+        for _ in 0..num_params {
+            let name_bytes = read_length_prefixed(&mut reader)?;
+            let name = String::from_utf8(name_bytes).map_err(FastnnError::Utf8)?;
+
+            let shape = read_slice_i64(&mut reader)?;
+
+            let mut dtype_byte = [0u8; 1];
+            reader.read_exact(&mut dtype_byte)?;
+            let dtype = match dtype_byte[0] {
+                0 => DType::F32,
+                1 => DType::F64,
+                2 => DType::I32,
+                3 => DType::I64,
+                4 => DType::Bool,
+                5 => DType::F16,
+                6 => DType::BF16,
+                7 => DType::U4,
+                8 => DType::U8,
+                other => {
+                    return Err(FastnnError::Serialization(format!(
+                        "Unknown dtype tag {} for parameter '{}'",
+                        other, name
+                    )));
+                }
+            };
+
+            let data_bytes = read_length_prefixed(&mut reader)?;
+            let nbytes = data_bytes.len();
+
+            let expected_numel: usize = shape.iter().map(|&d| d as usize).product();
+            let elem_size = dtype.size();
+            let data_len = nbytes / elem_size;
+            if expected_numel != data_len {
+                return Err(FastnnError::Serialization(format!(
+                    "Shape mismatch for parameter '{}': shape {:?} expects {} elements of {:?}, but data has {} elements",
+                    name, shape, expected_numel, dtype, data_len
+                )));
+            }
+
+            let sizes: SmallVec<[i64; 8]> = shape.into();
+            let storage = Arc::new(Storage::Cpu(CpuStorage {
+                data: Arc::new(data_bytes),
+                nbytes,
+                #[cfg(feature = "gpu")]
+                gpu_buffer_cache: Default::default(),
+            }));
+            let tensor = Tensor::new(TensorImpl::new(storage, sizes, dtype));
             result.insert(name, tensor);
         }
     }
