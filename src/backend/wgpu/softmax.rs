@@ -1,5 +1,6 @@
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use crate::dispatch_gpu_compute;
 use super::PendingRead;
 
 #[repr(C)]
@@ -13,6 +14,7 @@ dispatch_gpu_compute!(
     dispatch_softmax_gpu,
     build_softmax_shader(),
     "softmax",
+    input, arg1, arg2,
     (arg1 * 4) as u64,
     {
         let rs = if arg2 > 0 { arg2 } else { 1 };
