@@ -4,37 +4,58 @@
 
 /// Generate a compute shader dispatch function.
 ///
-/// Generates `pub(super) fn $fn_name(ctx, encoder, pending_reads, input, arg1, arg2, cpu_offset)`
+/// Generates `pub(super) fn $fn_name(ctx, encoder, pending_reads, $input, $arg1, $arg2, cpu_offset)`
 /// that builds the shader, ensures the pipeline, creates input / output / uniform buffers,
 /// sets up the bind group (3 entries: input, output, params), records a compute pass,
 /// and pushes a deferred readback.
 ///
-/// Two forms:
-/// - **6‑arg** (1‑D dispatch) — `$wg_y` / `$wg_z` default to `1u32`.
-/// - **8‑arg** (3‑D dispatch) — all three dispatch dimensions supplied.
+/// The `$input`, `$arg1`, `$arg2` identifiers must be plain identifier tokens that match
+/// the variable names used in `$output_size`, `$params`, and the workgroup expressions.
+/// In practice all callers pass `input, arg1, arg2` — these are the function parameter names
+/// and the names used in the caller's expression fragments.
 ///
-/// The `$params` expression can reference `input`, `arg1`, `arg2`, `ctx`, etc. –
-/// everything that is in scope inside the generated function body.
+/// Two forms:
+/// - **9‑arg** (1‑D dispatch) — `$wg_y` / `$wg_z` default to `1u32`.
+/// - **11‑arg** (3‑D dispatch) — all three dispatch dimensions supplied.
+///
+/// # Example
+///
+/// ```ignore
+/// dispatch_gpu_compute!(
+///     dispatch_softmax_gpu,
+///     build_softmax_shader(),
+///     "softmax",
+///     input, arg1, arg2,
+///     (arg1 * 4) as u64,                 // output_size
+///     SfParams { numel: arg1 as u32, .. }, // params
+///     wg_x_expr,
+/// );
+/// ```
 #[macro_export]
 macro_rules! dispatch_gpu_compute {
+    // ── 9-arg form (1-D dispatch) ──────────────────────────────────────
     (
         $fn_name:ident,
         $shader_builder:expr,
         $shader_key:literal,
+        $input:ident, $arg1:ident, $arg2:ident,
         $output_size:expr,
         $params:expr,
         $wg_x:expr,
     ) => {
         $crate::dispatch_gpu_compute!(
             $fn_name, $shader_builder, $shader_key,
+            $input, $arg1, $arg2,
             $output_size, $params,
             $wg_x, 1u32, 1u32,
         );
     };
+    // ── 11-arg form (3-D dispatch) ─────────────────────────────────────
     (
         $fn_name:ident,
         $shader_builder:expr,
         $shader_key:literal,
+        $input:ident, $arg1:ident, $arg2:ident,
         $output_size:expr,
         $params:expr,
         $wg_x:expr,
@@ -45,9 +66,9 @@ macro_rules! dispatch_gpu_compute {
             ctx: &mut $crate::backend::wgpu::context::WgpuContext,
             encoder: &mut wgpu::CommandEncoder,
             pending_reads: &mut Vec<$crate::backend::wgpu::PendingRead>,
-            input: &[f32],
-            arg1: usize,
-            arg2: usize,
+            $input: &[f32],
+            $arg1: usize,
+            $arg2: usize,
             cpu_offset: usize,
         ) -> Result<(), $crate::backend::BackendError> {
             let shader = $shader_builder;
@@ -55,7 +76,7 @@ macro_rules! dispatch_gpu_compute {
                 .map_err($crate::backend::BackendError::Dispatch)?;
 
             let buf_in = ctx.create_buffer(
-                bytemuck::cast_slice(input),
+                bytemuck::cast_slice($input),
                 concat!($shader_key, "_input"),
             );
             let output_size: u64 = $output_size.max(1); // WGPU requires non-zero buffer size
