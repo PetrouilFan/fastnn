@@ -3067,6 +3067,17 @@ impl Backend for CpuBackend {
                                 _ => None,
                             };
                             if let [input_slice, weight_slice] = &input_slices[..2] {
+                                let &[stride, padding, dilation, groups, c, h, w, kh, kw] =
+                                    &params[..]
+                                else {
+                                    return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
+                                };
+                                let c_per_group = c / groups.max(1);
+
+                                // Copy input and weight from arena (arena regions may overlap with
+                                // output — the memory planner reuses space for dead tensors — so
+                                // we cannot safely pass arena slices directly as &[f32] and &mut [f32]
+                                // to the same microkernel).
                                 let (input_data, weight_data) = {
                                     let d = arena.data_mut();
                                     (
@@ -3092,13 +3103,6 @@ impl Backend for CpuBackend {
                                 } else {
                                     vec![]
                                 };
-                                // params: [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]
-                                let &[stride, padding, dilation, groups, c, h, w, kh, kw] =
-                                    &params[..]
-                                else {
-                                    return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
-                                };
-                                let c_per_group = c / groups.max(1);
                                 let n = input_data.len() / (c * h * w).max(1);
                                 let f = weight_data.len() / (c_per_group * kh * kw).max(1);
                                 let _h_out = (h + 2 * padding)
@@ -3114,6 +3118,24 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
+                                // Build optional activation closure for fused conv+activation.
+                                // The activation is applied inside the scatter loop, avoiding a
+                                // separate memory round-trip over the output tensor.
+                                // Note: this is scalar activation per-element (inside the scatter loop
+                                // which processes one output channel at a time) rather than the SIMD
+                                // vectorized activation used in the separate pass. But it saves the
+                                // entire extra memory round-trip over the output tensor.
+                                let relu_fn: fn(f32) -> f32 = |x| x.max(0.0);
+                                let gelu_fn: fn(f32) -> f32 = |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
+                                let silu_fn: fn(f32) -> f32 = |x| x / (1.0 + (-x).exp());
+                                let identity_fn: fn(f32) -> f32 = |x| x;
+                                let conv_act: Option<fn(f32) -> f32> = fused_act.map(|act| match act {
+                                    "relu" => relu_fn,
+                                    "gelu" => gelu_fn,
+                                    "silu" => silu_fn,
+                                    _ => identity_fn,
+                                });
+
                                 // Delegate to the im2col + GEMM microkernel (falls back to tiled for small tensors)
                                 crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
                                     &input_data,
@@ -3131,73 +3153,8 @@ impl Backend for CpuBackend {
                                     padding,
                                     dilation,
                                     groups,
+                                    conv_act,
                                 );
-                                // Apply fused activation in-place on the output buffer
-                                // using the SIMD microkernels when available.
-                                // Apply fused activation in-place on the output buffer
-                                // using the SIMD microkernels when available.
-                                if let Some(act) = fused_act {
-                                    match act {
-                                        "relu" => {
-                                            #[cfg(feature = "simd")]
-                                            {
-                                                use crate::backend::cpu::microkernels::has_avx2;
-                                                if has_avx2() {
-                                                    let len = out_f32.len();
-                                                    let ptr = out_f32.as_mut_ptr();
-                                                    unsafe {
-                                                        let in_view = std::slice::from_raw_parts(ptr, len);
-                                                        crate::backend::cpu::microkernels::relu_f32_avx2(in_view, out_f32);
-                                                    }
-                                                    continue;
-                                                }
-                                            }
-                                            for x in out_f32.iter_mut() {
-                                                *x = x.max(0.0);
-                                            }
-                                        }
-                                        "gelu" => {
-                                            #[cfg(feature = "simd")]
-                                            {
-                                                use crate::backend::cpu::microkernels::has_avx2;
-                                                if has_avx2() {
-                                                    // Reinterpret &mut [f32] as (&[f32], &mut [f32]) for in-place SIMD.
-                                                    // The microkernel reads input before writing output per chunk, so
-                                                    // aliasing is safe here.
-                                                    let len = out_f32.len();
-                                                    let ptr = out_f32.as_mut_ptr();
-                                                    unsafe {
-                                                        let in_view = std::slice::from_raw_parts(ptr, len);
-                                                        crate::backend::cpu::microkernels::gelu_f32_avx2(in_view, out_f32);
-                                                    }
-                                                    continue;
-                                                }
-                                            }
-                                            for x in out_f32.iter_mut() {
-                                                *x = 0.5 * *x * (1.0 + (*x * 0.7978845608028654_f32).tanh());
-                                            }
-                                        }
-                                        "silu" => {
-                                            #[cfg(feature = "simd")]
-                                            {
-                                                use crate::backend::cpu::microkernels::has_avx2;
-                                                if has_avx2() {
-                                                    let len = out_f32.len();
-                                                    let ptr = out_f32.as_mut_ptr();
-                                                    unsafe {
-                                                        let in_view = std::slice::from_raw_parts(ptr, len);
-                                                        crate::backend::cpu::microkernels::silu_f32_avx2(in_view, out_f32);
-                                                    }
-                                                    continue;
-                                                }
-                                            }
-                                            for x in out_f32.iter_mut() {
-                                                *x = *x / (1.0 + (-*x).exp());
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
                             }
                         }
                         "conv2d_u4" | "conv2d_u8" => {
