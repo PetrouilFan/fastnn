@@ -1892,10 +1892,17 @@ impl GraphBuilder {
     /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
     /// is automatically wrapped with Dequantize/Quantize so the update
     /// happens in full precision.
-    pub fn apply_sgd(&self, weight: &GraphTensor, grad: &GraphTensor, lr: f32) -> GraphTensor {
+    pub fn apply_sgd(
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        lr: f32,
+        weight_decay: f32,
+    ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
+        attrs.insert("weight_decay".to_string(), weight_decay.to_string());
         let tt = w.tensor_type().clone(); // F32 after dequantize
         let node_id = {
             let mut inner = self.inner.borrow_mut();
@@ -2053,12 +2060,14 @@ impl GraphBuilder {
         lr: f32,
         beta1: f32,
         beta2: f32,
+        weight_decay: f32,
     ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
         attrs.insert("beta1".to_string(), beta1.to_string());
         attrs.insert("beta2".to_string(), beta2.to_string());
+        attrs.insert("weight_decay".to_string(), weight_decay.to_string());
         let tt = w.tensor_type().clone();
         let node_id = {
             let mut inner = self.inner.borrow_mut();
@@ -3177,7 +3186,7 @@ mod tests {
 
         // Test optimizer step
         let dW = &grads[1];
-        let updated_W = g.apply_sgd(&W, dW, 0.1);
+        let updated_W = g.apply_sgd(&W, dW, 0.1, 0.0);
 
         let opt_result = g
             .compile_and_execute(&[&updated_W], CpuBackend, &[&x_data, &W_data, &b_data])
@@ -3406,7 +3415,7 @@ mod tests {
         let inv_scale_bytes = bytemuck::cast_slice::<_, u8>(&[1.0 / scale]).to_vec();
         let inv_scale_t = g.constant(&inv_scale_bytes, TensorType::new(vec![], IrDType::F32));
         let dW = g.mul_scalar(dW_scaled, &inv_scale_t);
-        let updated_W = g.apply_sgd(&W, &dW, 0.1);
+        let updated_W = g.apply_sgd(&W, &dW, 0.1, 0.0);
 
         // Without scaling: grads should be different
         let g2 = GraphBuilder::new();
@@ -3416,7 +3425,7 @@ mod tests {
         let loss2 = g2.reduce_mean(&mm2, 0, false);
         let grads2 = g2.backward(&loss2).unwrap();
         let dW2 = &grads2[1];
-        let updated_W2 = g2.apply_sgd(&W2, dW2, 0.1);
+        let updated_W2 = g2.apply_sgd(&W2, dW2, 0.1, 0.0);
 
         let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
         let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
