@@ -88,10 +88,11 @@ macro_rules! get_in_out_slices {
 /// Helper: extract two f32 slices from the arena, broadcast-loop with a binary op
 /// and activation function, and write the result to the output slice.
 ///
-/// Generic closures `op` and `act` are monomorphized and should be fully inlined
-/// by LLVM — no runtime overhead vs the handwritten fused blocks.
+/// Uses SIMD microkernels for fused binary+activation when available (identified
+/// by `kernel_name`), falling back to the generic closure loop.
 #[inline]
 fn fused_binary_activation_dispatch(
+    kernel_name: &str,
     input_slices: &[BufferSlice],
     arena: &CpuBuffer,
     out_start: usize,
@@ -117,6 +118,48 @@ fn fused_binary_activation_dispatch(
             let d = arena.data_mut();
             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
         };
+
+        // SIMD fast path: chain elementwise op + activation using existing
+        // SIMD microkernels. The `kernel_name` tells us which combination
+        // to dispatch. Two SIMD passes is still 4-8x faster than scalar.
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if microkernels::simd_avx2_available() && out_f32.len() >= 8 {
+            // Binary op dispatch
+            let binary_dispatched = if kernel_name.starts_with("add_") {
+                add_f32(&a, &b, out_f32); true
+            } else if kernel_name.starts_with("sub_") {
+                sub_f32(&a, &b, out_f32); true
+            } else if kernel_name.starts_with("mul_") {
+                mul_f32(&a, &b, out_f32); true
+            } else if kernel_name.starts_with("div_") {
+                div_f32(&a, &b, out_f32); true
+            } else { false };
+
+            if binary_dispatched {
+                // Activation dispatch — chain in-place on the output buffer.
+                // We use raw pointer to avoid &[f32] + &mut [f32] aliasing.
+                let len = out_f32.len();
+                let ptr = out_f32.as_mut_ptr();
+                if kernel_name.ends_with("relu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::relu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                } else if kernel_name.ends_with("gelu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::gelu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                } else if kernel_name.ends_with("silu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::silu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                }
+                return;
+            }
+        }
+
         let out_len = out_f32.len();
         let a_len = a.len();
         let b_len = b.len();
@@ -2812,13 +2855,13 @@ impl Backend for CpuBackend {
                             }
                         }
                         "add_relu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a + b, |x| x.max(0.0));
+                            fused_binary_activation_dispatch("add_relu_f32", input_slices, arena, out_start, out_end, |a, b| a + b, |x| x.max(0.0));
                         }
                         "sub_relu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a - b, |x| x.max(0.0));
+                            fused_binary_activation_dispatch("sub_relu_f32", input_slices, arena, out_start, out_end, |a, b| a - b, |x| x.max(0.0));
                         }
                         "mul_relu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a * b, |x| x.max(0.0));
+                            fused_binary_activation_dispatch("mul_relu_f32", input_slices, arena, out_start, out_end, |a, b| a * b, |x| x.max(0.0));
                         }
                         "softmax" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -2968,11 +3011,11 @@ impl Backend for CpuBackend {
                             }
                         }
                         "div_relu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a / b, |x| x.max(0.0));
+                            fused_binary_activation_dispatch("div_relu_f32", input_slices, arena, out_start, out_end, |a, b| a / b, |x| x.max(0.0));
                         }
                         // ── Fused elementwise + GELU ─────────────────────
                         "add_gelu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a + b, |x| {
+                            fused_binary_activation_dispatch("add_gelu_f32", input_slices, arena, out_start, out_end, |a, b| a + b, |x| {
                                 let x3 = x * x * x;
                                 let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                 let t = tanh_arg.tanh();
@@ -2980,7 +3023,7 @@ impl Backend for CpuBackend {
                             });
                         }
                         "sub_gelu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a - b, |x| {
+                            fused_binary_activation_dispatch("sub_gelu_f32", input_slices, arena, out_start, out_end, |a, b| a - b, |x| {
                                 let x3 = x * x * x;
                                 let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                 let t = tanh_arg.tanh();
@@ -2988,7 +3031,7 @@ impl Backend for CpuBackend {
                             });
                         }
                         "mul_gelu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a * b, |x| {
+                            fused_binary_activation_dispatch("mul_gelu_f32", input_slices, arena, out_start, out_end, |a, b| a * b, |x| {
                                 let x3 = x * x * x;
                                 let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                 let t = tanh_arg.tanh();
@@ -2996,7 +3039,7 @@ impl Backend for CpuBackend {
                             });
                         }
                         "div_gelu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a / b, |x| {
+                            fused_binary_activation_dispatch("div_gelu_f32", input_slices, arena, out_start, out_end, |a, b| a / b, |x| {
                                 let x3 = x * x * x;
                                 let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                 let t = tanh_arg.tanh();
@@ -3005,16 +3048,16 @@ impl Backend for CpuBackend {
                         }
                         // ── Fused elementwise + SiLU ─────────────────────
                         "add_silu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a + b, |x| x / (1.0 + (-x).exp()));
+                            fused_binary_activation_dispatch("add_silu_f32", input_slices, arena, out_start, out_end, |a, b| a + b, |x| x / (1.0 + (-x).exp()));
                         }
                         "sub_silu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a - b, |x| x / (1.0 + (-x).exp()));
+                            fused_binary_activation_dispatch("sub_silu_f32", input_slices, arena, out_start, out_end, |a, b| a - b, |x| x / (1.0 + (-x).exp()));
                         }
                         "mul_silu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a * b, |x| x / (1.0 + (-x).exp()));
+                            fused_binary_activation_dispatch("mul_silu_f32", input_slices, arena, out_start, out_end, |a, b| a * b, |x| x / (1.0 + (-x).exp()));
                         }
                         "div_silu_f32" => {
-                            fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a / b, |x| x / (1.0 + (-x).exp()));
+                            fused_binary_activation_dispatch("div_silu_f32", input_slices, arena, out_start, out_end, |a, b| a / b, |x| x / (1.0 + (-x).exp()));
                         }
                         "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu" => {
                             let fused_act = match kernel_name.as_str() {

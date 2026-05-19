@@ -3894,15 +3894,13 @@ pub unsafe fn softmax_f32_avx2_strided(input: &[f32], output: &mut [f32], axis_d
         while i + 8 <= end {
             let vx = _mm256_loadu_ps(input.as_ptr().add(i));
             let vshifted = _mm256_sub_ps(vx, vmax_bcast);
-            // Store shifted values for the exp phase
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), vshifted);
-            // Scalar exp for each lane for precision
-            let arr: [f32; 8] = std::mem::transmute(vshifted);
+            // Vectorized exp using existing polynomial approximation
+            let vexp = exp_avx2_vec(vshifted);
+            let arr: [f32; 8] = std::mem::transmute(vexp);
             for k in 0..8 {
-                let e = arr[k].exp();
-                sum += e as f64;
-                *output.as_mut_ptr().add(i + k) = e;
+                sum += arr[k] as f64;
             }
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), vexp);
             i += 8;
         }
         for j in i..end {
@@ -4450,16 +4448,13 @@ pub fn conv2d_f32_im2col_gemm(
             }
         }
 
-        let weight_off = f_start * c_per_group * kh * kw;
-        let mut weight_transposed = get_conv_buf!(&CONV_WEIGHT_T_BUF, col_w * f_per_group);
-        for ff in 0..f_per_group {
-            for cc in 0..col_w {
-                weight_transposed[cc * f_per_group + ff] = weight[weight_off + ff * col_w + cc];
-            }
-        }
+        let weight_off = f_start * col_w;
 
         let mut temp_out = get_conv_buf!(&CONV_TEMP_OUT_BUF, num_pixels * f_per_group);
         unsafe {
+            // Read weight directly as column-major to avoid explicit transpose.
+            // Weight is stored as [f_per_group][col_w] row-major. With rs_b=1, cs_b=col_w,
+            // sgemm reads it as [col_w][f_per_group] column-major, eliminating the transpose.
             matrixmultiply::sgemm(
                 num_pixels,
                 col_w,
@@ -4468,9 +4463,9 @@ pub fn conv2d_f32_im2col_gemm(
                 col_matrix.as_ptr(),
                 col_w as isize,
                 1isize,
-                weight_transposed.as_ptr(),
-                f_per_group as isize,
+                weight.as_ptr().add(weight_off),
                 1isize,
+                col_w as isize,
                 0.0,
                 temp_out.as_mut_ptr(),
                 f_per_group as isize,
