@@ -6207,7 +6207,7 @@ fn rms_norm_f32(input: &[f32], weight: &[f32], output: &mut [f32], row_size: usi
 #[inline]
 fn softmax_f32(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: usize, num_rows: usize) {
     #[cfg(feature = "parallel")]
-    if num_rows > 1 {
+    if num_rows > 1 && stride == 1 {
         use rayon::prelude::*;
         let has_avx2 = {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -6219,7 +6219,7 @@ fn softmax_f32(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: 
         // to satisfy the borrow checker and rayon's Send requirements.
         let mut row_slices: Vec<(&[f32], &mut [f32])> = Vec::with_capacity(num_rows);
         for row in 0..num_rows {
-            let offset = row * stride;
+            let offset = row * axis_dim_size;
             let inp = &input[offset..offset + axis_dim_size];
             // SAFETY: Each row writes to a unique non-overlapping region of output.
             let out = unsafe { std::slice::from_raw_parts_mut(output.as_mut_ptr().add(offset), axis_dim_size) };
