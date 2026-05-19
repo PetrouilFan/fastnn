@@ -136,6 +136,14 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
             .or_else(|| binary_int_op(&input_vals, |a, b| a / b))
             .or_else(|| binary_f32_data_op(&input_vals, |a, b| a / b)),
 
+        Opcode::Minimum => binary_float_op(&input_vals, |a, b| a.min(b))
+            .or_else(|| binary_int_op(&input_vals, |a, b| a.min(b)))
+            .or_else(|| binary_f32_data_op(&input_vals, |a, b| a.min(b))),
+
+        Opcode::Maximum => binary_float_op(&input_vals, |a, b| a.max(b))
+            .or_else(|| binary_int_op(&input_vals, |a, b| a.max(b)))
+            .or_else(|| binary_f32_data_op(&input_vals, |a, b| a.max(b))),
+
         Opcode::Sign => unary_float_op(&input_vals, |x| x.signum())
             .or_else(|| unary_int_op(&input_vals, |x| x.signum())),
 

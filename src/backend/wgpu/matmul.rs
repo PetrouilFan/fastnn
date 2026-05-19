@@ -250,7 +250,7 @@ const TILE_A_STRIDE: u32 = 33u;
 var<workgroup> tileA: array<array<f32, TILE_A_STRIDE>, TILE_DIM>;
 var<workgroup> tileB: array<array<f32, TILE_DIM>, TILE_DIM>;
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(16, 16)
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_id)   lid: vec3<u32>,
@@ -443,7 +443,7 @@ fn apply_activation(x: f32, act: u32) -> f32 {
     }
 }
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(16, 16)
 fn main(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_id)   lid: vec3<u32>,

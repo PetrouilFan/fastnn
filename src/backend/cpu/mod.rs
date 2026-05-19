@@ -423,7 +423,10 @@ impl Backend for CpuBackend {
     }
 
     fn allocate_arena(&self, total_bytes: usize) -> CpuBuffer {
-        CpuBuffer::new(vec![0u8; total_bytes])
+        // No need to zero-fill — every output slot is written before read
+        let mut buf = Vec::with_capacity(total_bytes);
+        unsafe { buf.set_len(total_bytes); }
+        CpuBuffer::new(buf)
     }
 
     fn compile(
@@ -829,7 +832,14 @@ impl Backend for CpuBackend {
                         });
                         (kernel.to_string(), meta)
                     } else {
-                        ("conv2d".to_string(), None)
+                        let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
+                        let base_name = match fused_type {
+                            Some("OpRelu") => "conv2d_relu",
+                            Some("OpGelu") => "conv2d_gelu",
+                            Some("OpSilu") => "conv2d_silu",
+                            _ => "conv2d",
+                        };
+                        (base_name.to_string(), None)
                     };
                     // Extract spatial dims from input shapes to avoid
                     // ambiguous dim inference at dispatch time.
@@ -1715,13 +1725,18 @@ impl Backend for CpuBackend {
                         .get("lr")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.01);
+                    let wd: f32 = node
+                        .attrs
+                        .get("weight_decay")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "sgd_update_f32".to_string(),
                         input_slices, // [weight, grad] — weight must be same slot as output
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![lr.to_bits() as usize],
+                        params: vec![lr.to_bits() as usize, wd.to_bits() as usize],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -1902,6 +1917,11 @@ impl Backend for CpuBackend {
                         .get("beta2")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.999);
+                    let wd: f32 = node
+                        .attrs
+                        .get("weight_decay")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "lion_update_f32".to_string(),
@@ -1912,6 +1932,7 @@ impl Backend for CpuBackend {
                             lr.to_bits() as usize,
                             beta1.to_bits() as usize,
                             beta2.to_bits() as usize,
+                            wd.to_bits() as usize,
                         ],
                         param_dims: None,
                         weight_meta: None,
@@ -2505,23 +2526,46 @@ impl Backend for CpuBackend {
                                         );
                                     }
                                 } else {
-                                    for batch in 0..batch_count {
-                                        let a_s = batch * a_stride;
-                                        let b_s = if b_batched { batch * b_stride } else { 0 };
-                                        let out_s = batch * out_stride;
-                                        let (a_slice, b_slice, out_slice) = (
-                                            &a[a_s..a_s + a_stride],
-                                            &b[b_s..b_s + b_stride],
-                                            &mut out_f32[out_s..out_s + out_stride],
-                                        );
-                                        for i in 0..m {
-                                            for j in 0..n {
-                                                let mut sum = 0.0f32;
-                                                for kk in 0.._k {
-                                                    sum += a_slice[i * _k + kk] * b_slice[kk * n + j];
-                                                }
-                                                out_slice[i * n + j] = sum;
+                                    // Use SIMD+tiled blocked_row_matmul for small-to-medium matmuls
+                                    let total_rows = batch_count * m;
+                                    let b_batch_stride
+                                        = if b_batched { b_stride } else { 0 };
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        // Wrap raw pointers in usize for Send+Sync safety.
+                                        // Each parallel task writes to a different row of output.
+                                        let a_raw = a.as_ptr() as usize;
+                                        let b_raw = b.as_ptr() as usize;
+                                        let out_raw = out_f32.as_mut_ptr() as usize;
+                                        (0..total_rows).into_par_iter().for_each(move |row| {
+                                            let a_ptr = a_raw as *const f32;
+                                            let b_ptr = b_raw as *const f32;
+                                            let out_ptr = out_raw as *mut f32;
+                                            unsafe {
+                                                crate::backend::cpu::microkernels::blocked_row_matmul(
+                                                    a_ptr, b_ptr, out_ptr, row,
+                                                    m, n, _k,
+                                                    a_stride, _k, 1,
+                                                    b_batch_stride,
+                                                    n, 1,
+                                                );
                                             }
+                                        });
+                                    }
+                                    #[cfg(not(feature = "parallel"))]
+                                    for row in 0..total_rows {
+                                        unsafe {
+                                            crate::backend::cpu::microkernels::blocked_row_matmul(
+                                                a.as_ptr(),
+                                                b.as_ptr(),
+                                                out_f32.as_mut_ptr(),
+                                                row,
+                                                m, n, _k,
+                                                a_stride, _k, 1,
+                                                b_batch_stride,
+                                                n, 1,
+                                            );
                                         }
                                     }
                                 }
@@ -2967,7 +3011,13 @@ impl Backend for CpuBackend {
                         "div_silu_f32" => {
                             fused_binary_activation_dispatch(input_slices, arena, out_start, out_end, |a, b| a / b, |x| x / (1.0 + (-x).exp()));
                         }
-                        "conv2d" => {
+                        "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu" => {
+                            let fused_act = match kernel_name.as_str() {
+                                "conv2d_relu" => Some("relu"),
+                                "conv2d_gelu" => Some("gelu"),
+                                "conv2d_silu" => Some("silu"),
+                                _ => None,
+                            };
                             if let [input_slice, weight_slice] = &input_slices[..] {
                                 let (input_data, weight_data) = {
                                     let d = arena.data_mut();
@@ -3034,6 +3084,27 @@ impl Backend for CpuBackend {
                                     dilation,
                                     groups,
                                 );
+                                // Apply fused activation in-place on the output buffer
+                                if let Some(act) = fused_act {
+                                    match act {
+                                        "relu" => {
+                                            for x in out_f32.iter_mut() {
+                                                *x = x.max(0.0);
+                                            }
+                                        }
+                                        "gelu" => {
+                                            for x in out_f32.iter_mut() {
+                                                *x = 0.5 * *x * (1.0 + (*x * 0.7978845608028654_f32).tanh());
+                                            }
+                                        }
+                                        "silu" => {
+                                            for x in out_f32.iter_mut() {
+                                                *x = *x / (1.0 + (-*x).exp());
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                         }
                         "conv2d_u4" | "conv2d_u8" => {
@@ -4705,7 +4776,12 @@ impl Backend for CpuBackend {
                                         ..input_slices[1].offset + input_slices[1].size],
                                 );
                                 let lr = f32::from_bits(params[0] as u32);
-                                sgd_update_f32(w_init, g_slice, lr)
+                                let wd = if params.len() > 1 {
+                                    f32::from_bits(params[1] as u32)
+                                } else {
+                                    0.0
+                                };
+                                sgd_update_f32(w_init, g_slice, lr, wd)
                             };
                             let d = arena.data_mut();
                             let w_off = input_slices[0].offset;
@@ -4913,7 +4989,12 @@ impl Backend for CpuBackend {
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
-                                lion_update_f32(w_init, g_slice, m_init, lr, beta1, beta2)
+                                let wd = if params.len() > 3 {
+                                    f32::from_bits(params[3] as u32)
+                                } else {
+                                    0.0
+                                };
+                                lion_update_f32(w_init, g_slice, m_init, lr, beta1, beta2, wd)
                             };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -5891,7 +5972,7 @@ macro_rules! impl_simd_binary_wrapper {
         #[inline]
         fn $name(a: &[f32], b: &[f32], output: &mut [f32]) {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if a.len() == output.len() && b.len() == output.len() && microkernels::simd_avx2_available() {
+            if (a.len() == output.len() || b.len() == output.len()) && microkernels::simd_avx2_available() {
                 return unsafe { $avx2(a, b, output) };
             }
             $scalar(a, b, output);
@@ -6053,12 +6134,12 @@ fn softmax_f32(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: 
 // ============================================================
 
 #[inline]
-fn sgd_update_f32(w: &[f32], g: &[f32], lr: f32) -> Vec<f32> {
+fn sgd_update_f32(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec<f32> {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::sgd_update_f32_avx2(w, g, lr) };
+        return unsafe { microkernels::sgd_update_f32_avx2(w, g, lr, wd) };
     }
-    microkernels::sgd_update_f32_scalar(w, g, lr)
+    microkernels::sgd_update_f32_scalar(w, g, lr, wd)
 }
 
 #[inline]
@@ -6086,12 +6167,12 @@ fn adamw_update_f32(
 }
 
 #[inline]
-fn lion_update_f32(w: &[f32], g: &[f32], m: &[f32], lr: f32, beta1: f32, beta2: f32) -> (Vec<f32>, Vec<f32>) {
+fn lion_update_f32(w: &[f32], g: &[f32], m: &[f32], lr: f32, beta1: f32, beta2: f32, wd: f32) -> (Vec<f32>, Vec<f32>) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::lion_update_f32_avx2(w, g, m, lr, beta1, beta2) };
+        return unsafe { microkernels::lion_update_f32_avx2(w, g, m, lr, beta1, beta2, wd) };
     }
-    microkernels::lion_update_f32_scalar(w, g, m, lr, beta1, beta2)
+    microkernels::lion_update_f32_scalar(w, g, m, lr, beta1, beta2, wd)
 }
 
 #[inline]
