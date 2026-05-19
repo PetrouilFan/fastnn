@@ -80,8 +80,8 @@ pub(crate) fn apply_weight_decay(
 pub(crate) fn get_grad(param: &Tensor) -> Option<Tensor> {
     let inner = &param.inner;
     if let Some(meta) = &inner.autograd_meta {
-        let lock = meta.lock();
-        return lock.grad.clone();
+        let mut lock = meta.lock();
+        return lock.grad.take();
     }
     None
 }

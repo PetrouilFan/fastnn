@@ -456,6 +456,7 @@ fn test_lion_mlp_converges() {
                     lr: 0.05,
                     beta1: 0.9,
                     beta2: 0.99,
+                    weight_decay: 0.0,
                 },
                 quantize: None,
             },

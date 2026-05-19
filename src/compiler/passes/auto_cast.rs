@@ -47,6 +47,9 @@ pub fn auto_cast(graph: &mut ComputeGraph, options: &AutoCastOptions) -> Result<
     // ── Step 3: Activation quantization ───────────────────────────────
     if options.enable_activation_quant {
         super::activation_quantization::quantize_activations(graph)?;
+        // Prune redundant DequantizeActivations→QuantizeActivations pairs
+        // that were created by the activation quantization pass.
+        super::prune_qdq_pairs::prune_qdq_pairs(graph)?;
         changes += 1; // approximate: the pass may insert many nodes
     }
 

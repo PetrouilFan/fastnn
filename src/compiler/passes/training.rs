@@ -22,6 +22,7 @@ pub enum OptimizerConfig {
         lr: f32,
         beta1: f32,
         beta2: f32,
+        weight_decay: f32,
     },
     RMSprop {
         lr: f32,
@@ -167,7 +168,7 @@ pub fn inject_optimizer(
                 updated_param_nodes.push(muon_id);
                 state_input_nodes.push(vec![m_id]);
             }
-            OptimizerConfig::Lion { lr, beta1, beta2 } => {
+            OptimizerConfig::Lion { lr, beta1, beta2, weight_decay } => {
                 let m_id = graph.add_node(
                     Opcode::Input,
                     vec![],
@@ -184,6 +185,7 @@ pub fn inject_optimizer(
                 attrs.insert("lr".to_string(), lr.to_string());
                 attrs.insert("beta1".to_string(), beta1.to_string());
                 attrs.insert("beta2".to_string(), beta2.to_string());
+                attrs.insert("weight_decay".to_string(), weight_decay.to_string());
                 let lion_id = graph.add_node_with_attrs(
                     Opcode::LionUpdate,
                     vec![param_id, grad_id, m_id],

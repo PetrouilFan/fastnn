@@ -65,6 +65,7 @@ pub fn compile_train_model(
             lr: lr as f32,
             beta1: beta1.unwrap_or(0.9) as f32,
             beta2: beta2.unwrap_or(0.999) as f32,
+            weight_decay: weight_decay as f32,
         },
         "rmsprop" => OptimizerConfig::RMSprop {
             lr: lr as f32,

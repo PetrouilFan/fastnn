@@ -560,8 +560,8 @@ mod tests {
             IrDType::F32,
         );
         let dW_id = dW.node_id;
-        // Optimizer step: weight -= 0.01 * grad
-        let _updated = gb.apply_sgd(&weight, &dW, 0.01);
+        // Optimizer step: weight -= 0.01 * (grad + 0.0 * weight)
+        let _updated = gb.apply_sgd(&weight, &dW, 0.01, 0.0);
         let input_id = input.node_id;
         (gb, input_id, dW_id, weight_id)
     }
@@ -851,7 +851,7 @@ mod tests {
         // Gradient is F32
         let dW = gb.parameter(&[4, 2], IrDType::F32);
         // This should auto-wrap with Dequantize/Quantize
-        let updated = gb.apply_sgd(&W, &dW, 0.01);
+        let updated = gb.apply_sgd(&W, &dW, 0.01, 0.0);
 
         // The updated tensor should be Quantize(SgdUpdate(Dequantize(W), dW))
         let graph = gb.to_graph();
