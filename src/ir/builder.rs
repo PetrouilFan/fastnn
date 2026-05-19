@@ -538,6 +538,7 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    impl_unary_op!(round, Round);
     impl_unary_op!(sign, Sign);
     impl_unary_op!(logical_not, LogicalNot);
     pub fn log_softmax(&self, input: &GraphTensor, dim: i64) -> GraphTensor {
@@ -1432,6 +1433,7 @@ impl GraphBuilder {
         weight: &GraphTensor,
         stride: usize,
         padding: usize,
+        dilation: usize,
     ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
@@ -1440,13 +1442,13 @@ impl GraphBuilder {
         let h_out = if a_shape.len() > 2 && w_shape.len() > 2 {
             match (&a_shape[2], &w_shape[2]) {
                 (DimExpr::Known(h), DimExpr::Known(kh)) => {
-                    DimExpr::Known((h - 1) * stride as u64 + kh - 2 * padding as u64)
+                    DimExpr::Known((h - 1) * stride as u64 - 2 * padding as u64 + dilation as u64 * (kh - 1) + 1)
                 }
                 _ => {
                     let h_val = a_shape[2].evaluate().unwrap_or(0);
                     let kh_val = w_shape[2].evaluate().unwrap_or(1);
                     let estimated =
-                        (h_val.saturating_sub(1)) * stride as u64 + kh_val - 2 * padding as u64;
+                        (h_val.saturating_sub(1)) * stride as u64 + dilation as u64 * (kh_val.saturating_sub(1)) + 1 - 2 * padding as u64;
                     DimExpr::Bounded {
                         sym: format!("conv_trans_spatial({})", estimated),
                         max: estimated,
@@ -1459,13 +1461,13 @@ impl GraphBuilder {
         let w_out = if a_shape.len() > 3 && w_shape.len() > 3 {
             match (&a_shape[3], &w_shape[3]) {
                 (DimExpr::Known(w), DimExpr::Known(kw)) => {
-                    DimExpr::Known((w - 1) * stride as u64 + kw - 2 * padding as u64)
+                    DimExpr::Known((w - 1) * stride as u64 - 2 * padding as u64 + dilation as u64 * (kw - 1) + 1)
                 }
                 _ => {
                     let w_val = a_shape[3].evaluate().unwrap_or(0);
                     let kw_val = w_shape[3].evaluate().unwrap_or(1);
                     let estimated =
-                        (w_val.saturating_sub(1)) * stride as u64 + kw_val - 2 * padding as u64;
+                        (w_val.saturating_sub(1)) * stride as u64 + dilation as u64 * (kw_val.saturating_sub(1)) + 1 - 2 * padding as u64;
                     DimExpr::Bounded {
                         sym: format!("conv_trans_spatial({})", estimated),
                         max: estimated,
@@ -1479,6 +1481,7 @@ impl GraphBuilder {
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
+        attrs.insert("dilation".to_string(), dilation.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::ConvTranspose2d,

@@ -41,6 +41,10 @@ fn reduce_max_all(t: &Tensor) -> Tensor {
 }
 
 fn reduce_min_all(t: &Tensor) -> Tensor {
+    // Decompose min(x) = -max(-x). This is correct for all finite f32 inputs.
+    // For inputs near the negation boundary (~-3.4e38), negation may overflow to
+    // +inf, producing an incorrect -inf result. A native ReduceMin op would avoid
+    // this, but the IR currently only has ReduceMax.
     let ndim = t.ndim();
     let mut result = t.clone();
     for _ in 0..ndim {
