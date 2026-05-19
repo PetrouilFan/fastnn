@@ -33,6 +33,7 @@ pub enum Opcode {
     Hardswish,
     Clamp,
     Sign,
+    Round,
     Maximum,
     Minimum,
     LogicalNot,

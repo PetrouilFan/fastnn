@@ -33,11 +33,13 @@ pub unsafe fn im2col_kernel(
                     for kw in 0..kernel_size {
                         let ih = (oh * stride + kh * dilation).wrapping_sub(padding);
                         let iw = (ow * stride + kw * dilation).wrapping_sub(padding);
+                        let dst =
+                            row * col_w + ic * kernel_size * kernel_size + kh * kernel_size + kw;
                         if ih < h && iw < w {
                             let src = (ic * h + ih) * w + iw;
-                            let dst =
-                                row * col_w + ic * kernel_size * kernel_size + kh * kernel_size + kw;
                             col[dst] = data[src];
+                        } else {
+                            col[dst] = 0.0;
                         }
                     }
                 }
@@ -82,10 +84,12 @@ pub unsafe fn im2col_kernel_rect(
                     for kkw in 0..kw {
                         let ih = oh * stride + kkh * dilation;
                         let iw = ow * stride + kkw * dilation;
+                        let dst = row * col_w + ic * kh * kw + kkh * kw + kkw;
                         if ih < h + padding && iw < w + padding && ih >= padding && iw >= padding {
                             let src = (ic * h + (ih - padding)) * w + (iw - padding);
-                            let dst = row * col_w + ic * kh * kw + kkh * kw + kkw;
                             col[dst] = data[src];
+                        } else {
+                            col[dst] = 0.0;
                         }
                     }
                 }

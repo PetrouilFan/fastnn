@@ -403,6 +403,22 @@ pub unsafe fn sign_f32_avx2(input: &[f32], output: &mut [f32]) {
 }
 
 #[inline]
+pub fn round_f32_scalar(x: f32) -> f32 { x.round() }
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn round_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    while i + 8 <= len {
+        _mm256_storeu_ps(output.as_mut_ptr().add(i),
+            _mm256_round_ps(_mm256_loadu_ps(input.as_ptr().add(i)), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        i += 8;
+    }
+    for j in i..len { output[j] = round_f32_scalar(input[j]); }
+}
+
+#[inline]
 pub fn logical_not_f32_scalar(x: f32) -> f32 { if x == 0.0 { 1.0 } else { 0.0 } }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -3477,55 +3493,9 @@ pub fn conv2d_f32_im2col_gemm(
         return;
     }
 
-    // Fast path for 1x1 convolutions (no im2col needed)
-    if kh == 1 && kw == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1 {
-        let num_pixels = n * h * w;
-
-        // Transpose weights: [F, C] -> [C, F]
-        let mut weight_t = get_conv_buf!(&CONV_WEIGHT_T_BUF, c * f);
-        for ff in 0..f {
-            for cc in 0..c {
-                weight_t[cc * f + ff] = weight[ff * c + cc];
-            }
-        }
-
-        // GEMM: input_reshaped [num_pixels, c] x weight_t [c, f] = temp_out [num_pixels, f]
-        let mut temp_out = get_conv_buf!(&CONV_TEMP_OUT_BUF, num_pixels * f);
-        unsafe {
-            matrixmultiply::sgemm(
-                num_pixels,
-                c,
-                f,
-                1.0,
-                input.as_ptr(),
-                c as isize,
-                1isize,
-                weight_t.as_ptr(),
-                f as isize,
-                1isize,
-                0.0,
-                temp_out.as_mut_ptr(),
-                f as isize,
-                1isize,
-            );
-        }
-
-        // Add bias and write output
-        for pixel in 0..num_pixels {
-            let nn = pixel / (h * w);
-            let spatial = pixel % (h * w);
-            for ff in 0..f {
-                let mut val = temp_out[pixel * f + ff];
-                if !bias.is_empty() {
-                    val += bias[ff];
-                }
-                output[nn * (f * h * w) + ff * (h * w) + spatial] = val;
-            }
-        }
-        return;
-    }
-
-    // General case: im2col + GEMM
+    // General case: im2col + GEMM (also handles 1x1 correctly — im2col
+    // for 1x1 is just an element copy, which correctly handles the NCHW
+    // memory layout that direct GEMM access would misinterpret).
     for g in 0..groups {
         let f_start = g * f_per_group;
         let input_group_off = g * c_per_group * (h * w);

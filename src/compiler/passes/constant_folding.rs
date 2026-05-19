@@ -147,6 +147,123 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
             }
         }),
 
+        Opcode::Round => unary_float_op(&input_vals, |x| x.round())
+            .or_else(|| unary_f32_data_op(&input_vals, |x| x.round())),
+
+        Opcode::Erf => unary_float_op(&input_vals, |x| {
+            // Approximation of erf(x) using the Horner form of the Abramowitz & Stegun formula
+            let sign = x.signum();
+            let x_abs = x.abs();
+            let t = 1.0 / (1.0 + 0.3275911 * x_abs);
+            let y = 1.0 - ((((1.061405429 * t + 1.453152027) * t + 1.421413741) * t
+                - 0.284496736)
+                * t
+                + 0.254829592)
+                * t
+                * (-x_abs * x_abs).exp();
+            sign * y
+        })
+        .or_else(|| {
+            unary_f32_data_op(&input_vals, |x| {
+                let sign = x.signum();
+                let x_abs = x.abs();
+                let t = 1.0 / (1.0 + 0.3275911 * x_abs);
+                let y = 1.0 - ((((1.061405429 * t + 1.453152027) * t + 1.421413741) * t
+                    - 0.284496736)
+                    * t
+                    + 0.254829592)
+                    * t
+                    * (-x_abs * x_abs).exp();
+                sign * y
+            })
+        }),
+
+        Opcode::Reshape => {
+            // Reshape of constant data: change the TensorType shape metadata
+            if let Some(TensorValue::Data { bytes, tensor_type: _ }) = input_vals.first() {
+                let output_type = &node.output_type;
+                Some(TensorValue::Data {
+                    bytes: bytes.clone(),
+                    tensor_type: output_type.clone(),
+                })
+            } else if let Some(TensorValue::Float(v)) = input_vals.first() {
+                let output_type = &node.output_type;
+                let n: u64 = output_type.shape.iter().filter_map(|d| d.evaluate()).product();
+                if output_type.dtype == IrDType::F32 && n == 1 {
+                    Some(TensorValue::Data {
+                        bytes: v.to_le_bytes().to_vec(),
+                        tensor_type: output_type.clone(),
+                    })
+                } else {
+                    None
+                }
+            } else if let Some(TensorValue::Int(v)) = input_vals.first() {
+                let output_type = &node.output_type;
+                let n: u64 = output_type.shape.iter().filter_map(|d| d.evaluate()).product();
+                if output_type.dtype == IrDType::I64 && n == 1 {
+                    Some(TensorValue::Data {
+                        bytes: v.to_le_bytes().to_vec(),
+                        tensor_type: output_type.clone(),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+
+        Opcode::Cast => {
+            // Cast constant data to target dtype (stored in output_type.dtype)
+            let target = &node.output_type.dtype;
+            if let Some(TensorValue::Data { bytes, tensor_type }) = input_vals.first() {
+                let src_dtype = &tensor_type.dtype;
+                let out_shape = tensor_type.shape.clone();
+                let elem_count = tensor_type.numel().unwrap_or(bytes.len() as u64 / 4) as usize;
+                match (src_dtype, target) {
+                    (IrDType::F32, IrDType::I32) => {
+                        let src: &[f32] = bytemuck::cast_slice(bytes);
+                        let dst: Vec<i32> = src.iter().take(elem_count).map(|&x| x as i32).collect();
+                        Some(TensorValue::Data {
+                            bytes: bytemuck::cast_slice(&dst).to_vec(),
+                            tensor_type: TensorType::new(out_shape, target.clone()),
+                        })
+                    }
+                    (IrDType::I32, IrDType::F32) => {
+                        let src: &[i32] = bytemuck::cast_slice(bytes);
+                        let dst: Vec<f32> = src.iter().take(elem_count).map(|&x| x as f32).collect();
+                        Some(TensorValue::Data {
+                            bytes: bytemuck::cast_slice(&dst).to_vec(),
+                            tensor_type: TensorType::new(out_shape, target.clone()),
+                        })
+                    }
+                    (IrDType::F32, IrDType::I64) => {
+                        let src: &[f32] = bytemuck::cast_slice(bytes);
+                        let dst: Vec<i64> = src.iter().take(elem_count).map(|&x| x as i64).collect();
+                        Some(TensorValue::Data {
+                            bytes: bytemuck::cast_slice(&dst).to_vec(),
+                            tensor_type: TensorType::new(out_shape, target.clone()),
+                        })
+                    }
+                    (IrDType::I64, IrDType::F32) => {
+                        let src: &[i64] = bytemuck::cast_slice(bytes);
+                        let dst: Vec<f32> = src.iter().take(elem_count).map(|&x| x as f32).collect();
+                        Some(TensorValue::Data {
+                            bytes: bytemuck::cast_slice(&dst).to_vec(),
+                            tensor_type: TensorType::new(out_shape, target.clone()),
+                        })
+                    }
+                    (IrDType::F32, IrDType::F16) | (IrDType::F32, IrDType::BF16) => {
+                        // Fall back to runtime kernel for F16/BF16 conversion
+                        None
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+
         Opcode::Shape => {
             let first_input = node.inputs.first()?;
             let input_node = graph.get_node(*first_input)?;
