@@ -229,8 +229,8 @@ impl Module for ConvTranspose2d {
         let h_in = x_shape[2];
         let w_in = x_shape[3];
 
-        let _h_out = (h_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
-        let _w_out = (w_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
+        let _h_out = (h_in - 1) * self.stride - 2 * self.padding + self.dilation * (self.kernel_size - 1) + 1;
+        let _w_out = (w_in - 1) * self.stride - 2 * self.padding + self.dilation * (self.kernel_size - 1) + 1;
 
         let mut output = Tensor::exec_aot(&[x, &self.weight], |g, ins| {
             vec![g.conv_transpose2d(
@@ -238,6 +238,7 @@ impl Module for ConvTranspose2d {
                 &ins[1],
                 self.stride as usize,
                 self.padding as usize,
+                self.dilation as usize,
             )]
         })
         .expect("ConvTranspose2d::forward: AOT failed")

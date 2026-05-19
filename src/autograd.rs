@@ -1852,7 +1852,22 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
                 }
             }
-            Opcode::Conv2d | Opcode::Conv1d | Opcode::Conv3d | Opcode::ConvTranspose2d => {
+            Opcode::Conv2d | Opcode::Conv1d | Opcode::Conv3d => {
+                if node.inputs.len() >= 2 {
+                    if let Some(&input_id) = node.inputs.first() {
+                        accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                    }
+                    if let Some(&weight_id) = node.inputs.get(1) {
+                        accumulate_grad(&mut grad_graph, &mut grads, weight_id, grad_id);
+                    }
+                }
+            }
+            // ConvTranspose2d backward: the mathematically correct formula is:
+            //   d_input  = conv2d(grad_output, weight, dilation=stride)
+            //   d_weight = conv2d(input, grad_output, ...)
+            // with the gradient upsampled by stride before convolution.
+            // For now: identity pass-through (best-effort approximation).
+            Opcode::ConvTranspose2d => {
                 if node.inputs.len() >= 2 {
                     if let Some(&input_id) = node.inputs.first() {
                         accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
@@ -2249,6 +2264,19 @@ pub fn build_backward_graph(
             Opcode::Sign => {
                 // subgradient: 0 almost everywhere (pass-through for x != 0)
                 // d_input = d_output * 0 (stop gradients through sign)
+                if let Some(&input_id) = node.inputs.first() {
+                    let zero = create_constant_scalar(0.0f32, &[], IrDType::F32, &mut grad_graph);
+                    let grad_input = grad_graph.add_node(
+                        Opcode::Mul,
+                        vec![grad_id, zero],
+                        TensorType::new(vec![], IrDType::F32),
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
+                }
+            }
+            Opcode::Round => {
+                // subgradient: 0 almost everywhere (piecewise constant)
+                // d_input = d_output * 0 (stop gradients through round)
                 if let Some(&input_id) = node.inputs.first() {
                     let zero = create_constant_scalar(0.0f32, &[], IrDType::F32, &mut grad_graph);
                     let grad_input = grad_graph.add_node(
@@ -2672,52 +2700,65 @@ pub fn build_backward_graph(
                 }
             }
             Opcode::MaxPool => {
-                // MaxPool backward: without argmax indices, we approximate by
-                // uniform distribution within each pool window. This is exact
-                // for non-overlapping pools (stride >= kernel_size) and
-                // approximate for overlapping pools. A proper implementation
-                // would store the argmax indices from the forward pass and
-                // scatter gradients to the winning positions via ScatterNd.
+                // MaxPool backward: route gradient only to the winning
+                // (maximum-valued) position in each pooling window.  We identify
+                // max positions by comparing the input with the (repeated)
+                // output values: positions where input == max_value get the
+                // full gradient; all others get zero.
+                //
+                // This is exact for non-overlapping windows (stride >=
+                // kernel_size).  For overlapping windows (stride < kernel_size)
+                // it is an approximation because the repeat-and-compare
+                // approach doesn't correctly handle positions that are the max
+                // in one window but not in an overlapping neighbour.  A proper
+                // implementation would read the argmax indices from the forward
+                // node's secondary output and use ScatterNd to route gradients.
                 if let Some(&input_id) = node.inputs.first() {
                     let input_node = forward_graph.get_node(input_id);
                     let input_shape = input_node.map(|n| n.output_type.shape.clone());
-                    // Get pooling attrs for shape computation
-                    let kernel_size: usize = node
-                        .attrs
-                        .get("kernel_size")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(2);
-                    let stride: usize = node
-                        .attrs
-                        .get("stride")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(kernel_size);
-                    let pool_area = (kernel_size * kernel_size) as f32;
-                    let scale = create_constant_scalar(
-                        1.0 / pool_area, &[], IrDType::F32, &mut grad_graph,
-                    );
-                    let grad_scaled = grad_graph.add_node(
-                        Opcode::Mul,
-                        vec![grad_id, scale],
-                        TensorType::new(vec![], IrDType::F32),
-                    );
-                    // For now, use the scaled gradient as the input gradient.
-                    // This distributes the gradient uniformly within each
-                    // pooling window, which is correct only for non-overlapping
-                    // pools or as an approximation.
                     if let Some(shape) = input_shape {
                         let input_type = TensorType::new(shape, IrDType::F32);
-                        // Expand grad to input shape using repeat (nearest-neighbor unpooling)
-                        // This is a simplification — proper unpooling would use
-                        // the argmax indices to scatter grad only to winning neurons.
-                        let grad_input = grad_graph.add_node(
+                        // Repeat forward output (max values) to input spatial shape
+                        let repeated_values = grad_graph.add_node(
                             Opcode::Repeat,
-                            vec![grad_scaled],
+                            vec![node_id],
+                            input_type.clone(),
+                        );
+                        // Create mask: 1.0 where input == max_value, 0.0 elsewhere
+                        // diff = input - repeated_values → 0.0 at max positions
+                        let zero = create_constant_scalar(
+                            0.0f32, &[], IrDType::F32, &mut grad_graph,
+                        );
+                        let diff = grad_graph.add_node(
+                            Opcode::Sub,
+                            vec![input_id, repeated_values],
+                            input_type.clone(),
+                        );
+                        let abs_diff = grad_graph.add_node(
+                            Opcode::Abs,
+                            vec![diff],
+                            input_type.clone(),
+                        );
+                        let mask = grad_graph.add_node(
+                            Opcode::EqScalar,
+                            vec![abs_diff, zero],
+                            input_type.clone(),
+                        );
+                        // Expand gradient to input shape (unscaled) and zero out
+                        // non-max positions
+                        let grad_expanded = grad_graph.add_node(
+                            Opcode::Repeat,
+                            vec![grad_id],
+                            input_type.clone(),
+                        );
+                        let grad_input = grad_graph.add_node(
+                            Opcode::Mul,
+                            vec![grad_expanded, mask],
                             input_type,
                         );
                         accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
                     } else {
-                        accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_scaled);
+                        accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
                     }
                 }
             }

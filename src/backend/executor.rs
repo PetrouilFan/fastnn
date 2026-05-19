@@ -77,38 +77,6 @@ impl<B: Backend> GraphExecutor<B> {
         self.compile_with_plan_and_quantize(graph, None)
     }
 
-    /// Rolling hash of graph topology + attributes + output types for
-    /// determinism diagnostics.  Used to verify that compiler passes change
-    /// the graph as expected, and to detect unintended hash collisions.
-    fn _graph_state_hash(&self, graph: &ComputeGraph) -> u64 {
-        use std::hash::Hash;
-        use std::hash::Hasher;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for node in &graph.nodes {
-            node.id.hash(&mut hasher);
-            std::mem::discriminant(&node.opcode).hash(&mut hasher);
-            node.inputs.len().hash(&mut hasher);
-            for &inp in &node.inputs {
-                inp.hash(&mut hasher);
-            }
-            // Hash node attributes (sorted for determinism)
-            let mut attrs: Vec<(&String, &String)> = node.attrs.iter().collect();
-            attrs.sort_by(|a, b| a.0.cmp(b.0));
-            for (k, v) in &attrs {
-                k.hash(&mut hasher);
-                v.hash(&mut hasher);
-            }
-            // Hash output type debug representation
-            format!("{:?}", node.output_type).hash(&mut hasher);
-            if let Some(ref sec) = node.secondary_output_type {
-                format!("{:?}", sec).hash(&mut hasher);
-            }
-        }
-        graph.inputs.len().hash(&mut hasher);
-        graph.outputs.len().hash(&mut hasher);
-        hasher.finish()
-    }
-
     /// Same as [`compile_with_plan`] but with optional weight quantization.
     ///
     /// Pass `Some(4)` or `Some(8)` to quantize f32 weight constants to
@@ -120,23 +88,13 @@ impl<B: Backend> GraphExecutor<B> {
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         let mut graph = graph.clone();
 
-        
-        eprintln!("[FNN_DBG_DET] phase=baseline nodes={} hash={:016x}",
-            graph.nodes.len(), self._graph_state_hash(&graph));
-
         // ── Phase 1: Shape inference ──────────────────────────────────────
         shape_inference::infer_shapes(&mut graph)
             .map_err(|e| BackendError::Compilation(format!("shape inference: {e}")))?;
-        
-        eprintln!("[FNN_DBG_DET] phase=shape_inference nodes={} hash={:016x}",
-            graph.nodes.len(), self._graph_state_hash(&graph));
  
          // ── Phase 2: Operator fusion ──────────────────────────────────────
          operator_fusion::fuse_operators(&mut graph)
              .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
-         
-         eprintln!("[FNN_DBG_DET] phase=operator_fusion nodes={} hash={:016x}",
-            graph.nodes.len(), self._graph_state_hash(&graph));
 
         // ── Phase 2.5: Quantization (optional) ───────────────────────────
         if let Some(bit_width) = quantize {
@@ -156,18 +114,11 @@ impl<B: Backend> GraphExecutor<B> {
         }
 
         // ── Phase 3: Dead code elimination ────────────────────────────────
-        let removed = dead_code_elimination::eliminate_dead_code(&mut graph);
-        if removed > 0 {
-            eprintln!("DCE removed {} dead node(s)", removed);
-        }
-        eprintln!("[FNN_DBG_DET] phase=DCE nodes={} hash={:016x}",
-            graph.nodes.len(), self._graph_state_hash(&graph));
+        let _removed = dead_code_elimination::eliminate_dead_code(&mut graph);
 
         // ── Phase 4: Memory planning ──────────────────────────────────────
         let memory_plan = memory_planning::plan_memory(&graph)
             .map_err(|e| BackendError::Compilation(format!("memory planning: {e}")))?;
-        eprintln!("[FNN_DBG_DET] phase=memory_planning nodes={} hash={:016x}",
-            graph.nodes.len(), self._graph_state_hash(&graph));
 
         // ── Phase 5: Backend compilation ──────────────────────────────────
         let plan = self.backend.compile(&graph, &memory_plan)?;
@@ -1177,6 +1128,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             | Opcode::Exp
             | Opcode::Log
             | Opcode::Sqrt
+            | Opcode::Round
             | Opcode::Relu
             | Opcode::Gelu
             | Opcode::Silu

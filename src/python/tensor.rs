@@ -45,7 +45,6 @@ impl PyTensor {
         // For 0-d (scalar) arrays, buffer.shape() returns an empty slice.
         // Treat this as a scalar tensor with shape [].
         let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
-        eprintln!("[FNN_DBG_FROM_BUF] shape={:?}", shape);
         let data_len: usize = if shape.is_empty() { 1 } else { shape.iter().product::<i64>() as usize };
         let nbytes = data_len * 4;
         let mut storage_bytes = vec![0u8; nbytes];

@@ -62,6 +62,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             | Opcode::Hardswish
             | Opcode::Clamp
             | Opcode::Sign
+            | Opcode::Round
             | Opcode::LogicalNot
             | Opcode::LogSoftmax
             | Opcode::Mish => inputs.first().map(|i| i.output_type.shape.clone()),
@@ -733,13 +734,13 @@ fn conv_transpose2d_output_shape(
         ));
     }
 
-    let (stride, padding, _dilation) = parse_conv_attrs(attrs);
+    let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[1].clone();
 
-    let h_out = conv_transpose_spatial_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
-    let w_out = conv_transpose_spatial_dim(&input_shape[3], &weight_shape[3], stride, padding)?;
+    let h_out = conv_transpose_spatial_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
+    let w_out = conv_transpose_spatial_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
 
     Ok(vec![n, f, h_out, w_out])
 }
@@ -749,9 +750,10 @@ fn conv_transpose_spatial_dim(
     kernel_dim: &DimExpr,
     stride: i64,
     padding: i64,
+    dilation: i64,
 ) -> Result<DimExpr, String> {
     let result = |input: i64, kernel: i64| -> DimExpr {
-        DimExpr::Known(((input - 1) * stride - 2 * padding + kernel) as u64)
+        DimExpr::Known(((input - 1) * stride - 2 * padding + dilation * (kernel - 1) + 1) as u64)
     };
     match (input_dim, kernel_dim) {
         (DimExpr::Known(h), DimExpr::Known(k)) => {

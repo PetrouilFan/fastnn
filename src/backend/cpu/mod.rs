@@ -687,6 +687,7 @@ impl Backend for CpuBackend {
                 | Opcode::Hardswish
                 | Opcode::Clamp
                 | Opcode::Sign
+                | Opcode::Round
                 | Opcode::LogicalNot
                 | Opcode::LogSoftmax
                 | Opcode::Mish => {
@@ -707,6 +708,7 @@ impl Backend for CpuBackend {
                         Opcode::Hardswish => "hardswish_f32",
                         Opcode::Clamp => "clamp_f32",
                         Opcode::Sign => "sign_f32",
+                        Opcode::Round => "round_f32",
                         Opcode::LogicalNot => "logical_not_f32",
                         Opcode::LogSoftmax => "log_softmax_f32",
                         Opcode::Mish => "mish_f32",
@@ -2427,6 +2429,10 @@ impl Backend for CpuBackend {
                         "sign_f32" => {
                             get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
                             sign_f32(&input, out_f32);
+                        }
+                        "round_f32" => {
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            round_f32(&input, out_f32);
                         }
                         "logical_not_f32" => {
                             get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
@@ -5929,6 +5935,7 @@ impl_simd_unary_wrapper!(elu_f32, microkernels::elu_f32_avx2, microkernels::elu_
 impl_simd_unary_wrapper!(softplus_f32, microkernels::softplus_f32_avx2, microkernels::softplus_f32_scalar);
 impl_simd_unary_wrapper!(hardswish_f32, microkernels::hardswish_f32_avx2, microkernels::hardswish_f32_scalar);
 impl_simd_unary_wrapper!(sign_f32, microkernels::sign_f32_avx2, microkernels::sign_f32_scalar);
+impl_simd_unary_wrapper!(round_f32, microkernels::round_f32_avx2, microkernels::round_f32_scalar);
 impl_simd_unary_wrapper!(logical_not_f32, microkernels::logical_not_f32_avx2, microkernels::logical_not_f32_scalar);
 impl_simd_unary_wrapper!(mish_f32, microkernels::mish_f32_avx2, microkernels::mish_f32_scalar);
 

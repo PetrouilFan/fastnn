@@ -375,6 +375,11 @@ impl<'a> OnnxConverter<'a> {
                     .get("pads")
                     .and_then(|s| s.split(',').next().and_then(|v| v.trim().parse().ok()))
                     .unwrap_or(0);
+                let dilation: usize = node
+                    .attrs
+                    .get("dilations")
+                    .and_then(|s| s.split(',').next().and_then(|v| v.trim().parse().ok()))
+                    .unwrap_or(1);
                 let _groups: usize = node
                     .attrs
                     .get("group")
@@ -384,7 +389,7 @@ impl<'a> OnnxConverter<'a> {
                 self.out(
                     node,
                     self.graph
-                        .conv_transpose2d(&ins[0], &ins[1], stride, padding),
+                        .conv_transpose2d(&ins[0], &ins[1], stride, padding, dilation),
                 );
             }
 
@@ -1057,14 +1062,14 @@ impl<'a> OnnxConverter<'a> {
             // ── Quantized ops (decomposed to f32) ──────────────────
             "QuantizeLinear" => {
                 // y = saturate(round(x / y_scale) + y_zero_point, 0, 255)
-                // Decompose: div + add + clamp (without round — acceptable approximation)
                 if ins.len() < 3 {
                     return Err(
                         "QuantizeLinear needs 3 inputs: x, y_scale, y_zero_point".to_string()
                     );
                 }
                 let x_div = self.graph.div(&ins[0], &ins[1]);
-                let x_biased = self.graph.add(&x_div, &ins[2]);
+                let x_rounded = self.graph.round(&x_div);
+                let x_biased = self.graph.add(&x_rounded, &ins[2]);
                 let y = self.graph.clamp(&x_biased, 0.0, 255.0);
                 self.out(node, y);
             }
@@ -1101,7 +1106,8 @@ impl<'a> OnnxConverter<'a> {
                 let c = self.graph.matmul(&a_deq, &b_deq);
                 // Requantize: y = clamp(round(c / Y_scale) + Y_zp, 0, 255)
                 let c_scaled = self.graph.div(&c, &ins[6]);
-                let c_biased = self.graph.add(&c_scaled, &ins[7]);
+                let c_rounded = self.graph.round(&c_scaled);
+                let c_biased = self.graph.add(&c_rounded, &ins[7]);
                 let y_f32 = self.graph.clamp(&c_biased, 0.0, 255.0);
                 // Cast output back to U8 (the output type of QLinearMatMul is UINT8)
                 let y = self.graph.cast_op(&y_f32, IrDType::U8 {
@@ -1143,9 +1149,10 @@ impl<'a> OnnxConverter<'a> {
                 } else {
                     c
                 };
-                // Requantize: clamp(c / Y_scale + Y_zp, 0, 255)
+                // Requantize: clamp(round(c / Y_scale) + Y_zp, 0, 255)
                 let c_scaled = self.graph.div(&c, &ins[6]);
-                let c_biased = self.graph.add(&c_scaled, &ins[7]);
+                let c_rounded = self.graph.round(&c_scaled);
+                let c_biased = self.graph.add(&c_rounded, &ins[7]);
                 let y = self.graph.clamp(&c_biased, 0.0, 255.0);
                 self.out(node, y);
             }
