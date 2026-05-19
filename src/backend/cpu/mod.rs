@@ -2725,22 +2725,27 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..m {
-                                        for j in 0..n {
-                                            out_f32[j * m + i] = input[i * n + j];
+                                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
+                                    unsafe { microkernels::transpose_f32_avx2(&input, out_f32, m, n); }
+                                } else {
+                                    #[cfg(not(feature = "parallel"))]
+                                    {
+                                        for i in 0..m {
+                                            for j in 0..n {
+                                                out_f32[j * m + i] = input[i * n + j];
+                                            }
                                         }
                                     }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32.par_chunks_mut(m).enumerate().for_each(|(j, col)| {
-                                        for i in 0..m {
-                                            col[i] = input[i * n + j];
-                                        }
-                                    });
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        out_f32.par_chunks_mut(m).enumerate().for_each(|(j, col)| {
+                                            for i in 0..m {
+                                                col[i] = input[i * n + j];
+                                            }
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -2915,29 +2920,29 @@ impl Backend for CpuBackend {
                                             &mut d[out_start..out_end],
                                         )
                                     };
-                                    let c = weight.len();
-                                    let len = out_f32.len().min(data.len());
-                                    #[cfg(not(feature = "parallel"))]
+                                    #[cfg(feature = "simd")]
                                     {
-                                        for i in 0..len {
-                                            let ch = i % c;
-                                            out_f32[i] = (data[i] - running_mean[ch])
-                                                / (running_var[ch] + eps).sqrt()
-                                                * weight[ch]
-                                                + bias[ch];
+                                        use crate::backend::cpu::microkernels::has_avx2;
+                                        if has_avx2() {
+                                            // SAFETY: AVX2 feature checked by has_avx2()
+                                            unsafe {
+                                                crate::backend::cpu::microkernels::batch_norm_inference_f32_avx2(
+                                                    &data, &weight, &bias, &running_mean, &running_var,
+                                                    out_f32, eps,
+                                                );
+                                            }
+                                        } else {
+                                            crate::backend::cpu::microkernels::batch_norm_inference_f32(
+                                                &data, &weight, &bias, &running_mean, &running_var,
+                                                out_f32, eps,
+                                            );
                                         }
                                     }
-                                    #[cfg(feature = "parallel")]
+                                    #[cfg(not(feature = "simd"))]
                                     {
-                                        use rayon::prelude::*;
-                                        out_f32[..len].par_iter_mut().enumerate().for_each(
-                                            |(i, o)| {
-                                                let ch = i % c;
-                                                *o = (data[i] - running_mean[ch])
-                                                    / (running_var[ch] + eps).sqrt()
-                                                    * weight[ch]
-                                                    + bias[ch];
-                                            },
+                                        crate::backend::cpu::microkernels::batch_norm_inference_f32(
+                                            &data, &weight, &bias, &running_mean, &running_var,
+                                            out_f32, eps,
                                         );
                                     }
                                 }
@@ -3018,7 +3023,7 @@ impl Backend for CpuBackend {
                                 "conv2d_silu" => Some("silu"),
                                 _ => None,
                             };
-                            if let [input_slice, weight_slice] = &input_slices[..] {
+                            if let [input_slice, weight_slice] = &input_slices[..2] {
                                 let (input_data, weight_data) = {
                                     let d = arena.data_mut();
                                     (
@@ -3085,19 +3090,64 @@ impl Backend for CpuBackend {
                                     groups,
                                 );
                                 // Apply fused activation in-place on the output buffer
+                                // using the SIMD microkernels when available.
+                                // Apply fused activation in-place on the output buffer
+                                // using the SIMD microkernels when available.
                                 if let Some(act) = fused_act {
                                     match act {
                                         "relu" => {
+                                            #[cfg(feature = "simd")]
+                                            {
+                                                use crate::backend::cpu::microkernels::has_avx2;
+                                                if has_avx2() {
+                                                    let len = out_f32.len();
+                                                    let ptr = out_f32.as_mut_ptr();
+                                                    unsafe {
+                                                        let in_view = std::slice::from_raw_parts(ptr, len);
+                                                        crate::backend::cpu::microkernels::relu_f32_avx2(in_view, out_f32);
+                                                    }
+                                                    continue;
+                                                }
+                                            }
                                             for x in out_f32.iter_mut() {
                                                 *x = x.max(0.0);
                                             }
                                         }
                                         "gelu" => {
+                                            #[cfg(feature = "simd")]
+                                            {
+                                                use crate::backend::cpu::microkernels::has_avx2;
+                                                if has_avx2() {
+                                                    // Reinterpret &mut [f32] as (&[f32], &mut [f32]) for in-place SIMD.
+                                                    // The microkernel reads input before writing output per chunk, so
+                                                    // aliasing is safe here.
+                                                    let len = out_f32.len();
+                                                    let ptr = out_f32.as_mut_ptr();
+                                                    unsafe {
+                                                        let in_view = std::slice::from_raw_parts(ptr, len);
+                                                        crate::backend::cpu::microkernels::gelu_f32_avx2(in_view, out_f32);
+                                                    }
+                                                    continue;
+                                                }
+                                            }
                                             for x in out_f32.iter_mut() {
                                                 *x = 0.5 * *x * (1.0 + (*x * 0.7978845608028654_f32).tanh());
                                             }
                                         }
                                         "silu" => {
+                                            #[cfg(feature = "simd")]
+                                            {
+                                                use crate::backend::cpu::microkernels::has_avx2;
+                                                if has_avx2() {
+                                                    let len = out_f32.len();
+                                                    let ptr = out_f32.as_mut_ptr();
+                                                    unsafe {
+                                                        let in_view = std::slice::from_raw_parts(ptr, len);
+                                                        crate::backend::cpu::microkernels::silu_f32_avx2(in_view, out_f32);
+                                                    }
+                                                    continue;
+                                                }
+                                            }
                                             for x in out_f32.iter_mut() {
                                                 *x = *x / (1.0 + (-*x).exp());
                                             }
@@ -3264,7 +3314,7 @@ impl Backend for CpuBackend {
                                 let num_inputs = input_slices.len();
                                 let mut block_sizes: Vec<usize> = Vec::with_capacity(num_inputs);
                                 for slice in input_slices {
-                                    let elems = slice.size / core::mem::size_of::<f32>();
+                                    let elems = slice.size / std::mem::size_of::<f32>();
                                     block_sizes.push(elems / outer_count.max(1));
                                 }
                                 let out_f32 = {
@@ -3287,8 +3337,23 @@ impl Backend for CpuBackend {
                                         let src_end = (src_start + bs).min(input_data.len());
                                         let copy_len = src_end - src_start;
                                         let dst_end = (output_offset + copy_len).min(out_f32.len());
+                                        let actual_copy = dst_end - output_offset;
+                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                        if microkernels::simd_avx2_available() {
+                                            unsafe {
+                                                microkernels::concat_f32_avx2(
+                                                    &input_data[src_start..src_start + actual_copy],
+                                                    out_f32,
+                                                    output_offset,
+                                                );
+                                            }
+                                        } else {
+                                            out_f32[output_offset..dst_end]
+                                                .copy_from_slice(&input_data[src_start..src_start + actual_copy]);
+                                        }
+                                        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                         out_f32[output_offset..dst_end]
-                                            .copy_from_slice(&input_data[src_start..src_start + (dst_end - output_offset)]);
+                                            .copy_from_slice(&input_data[src_start..src_start + actual_copy]);
                                         #[cfg(debug_assertions)]
                                         eprintln!(
                                             "[FNN_DBG_CONCAT] out=[{},{}) outer={} input[{}]: off={} sz={} block={} copy={}",
@@ -3315,8 +3380,23 @@ impl Backend for CpuBackend {
                                         )
                                     };
                                     let end = (output_offset + input_data.len()).min(out_f32.len());
+                                    let actual_copy = end - output_offset;
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                    if microkernels::simd_avx2_available() {
+                                        unsafe {
+                                            microkernels::concat_f32_avx2(
+                                                &input_data[..actual_copy],
+                                                out_f32,
+                                                output_offset,
+                                            );
+                                        }
+                                    } else {
+                                        out_f32[output_offset..end]
+                                            .copy_from_slice(&input_data[..actual_copy]);
+                                    }
+                                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                     out_f32[output_offset..end]
-                                        .copy_from_slice(&input_data[..end - output_offset]);
+                                        .copy_from_slice(&input_data[..actual_copy]);
                                     #[cfg(debug_assertions)]
                                     eprintln!(
                                         "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} (flat fallback)",
@@ -3355,84 +3435,56 @@ impl Backend for CpuBackend {
                                 // ── Sequential path ──────────────────────
                                 #[cfg(not(feature = "parallel"))]
                                 {
-                                    let mut indices_out: Option<&mut [i64]> = if is_max == 1 {
-                                        secondary_output_slice.as_ref().map(|sec_slice| {
-                                            let d = arena.data_mut();
-                                            bytemuck::cast_slice_mut::<_, i64>(
-                                                &mut d[sec_slice.offset
-                                                    ..sec_slice.offset + sec_slice.size],
-                                            )
-                                        })
+                                    if is_max == 1 {
+                                        let indices_out: Option<&mut [i64]> =
+                                            secondary_output_slice.as_ref().map(|sec_slice| {
+                                                let d = arena.data_mut();
+                                                bytemuck::cast_slice_mut::<_, i64>(
+                                                    &mut d[sec_slice.offset
+                                                        ..sec_slice.offset + sec_slice.size],
+                                                )
+                                            });
+                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                        if microkernels::simd_avx2_available() {
+                                            unsafe { microkernels::pool_max_f32_avx2(
+                                                &input, out_f32, n, c, h, w,
+                                                kernel, stride_val, padding_val, h_out, w_out,
+                                                indices_out,
+                                            ); }
+                                        } else {
+                                            microkernels::pool_max_f32_scalar(
+                                                &input, out_f32, n, c, h, w,
+                                                kernel, stride_val, padding_val, h_out, w_out,
+                                                indices_out,
+                                            );
+                                        }
+                                        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                        {
+                                            microkernels::pool_max_f32_scalar(
+                                                &input, out_f32, n, c, h, w,
+                                                kernel, stride_val, padding_val, h_out, w_out,
+                                                indices_out,
+                                            );
+                                        }
                                     } else {
-                                        None
-                                    };
-                                    for nn in 0..n {
-                                        for cc in 0..c {
-                                            for hh in 0..h_out {
-                                                for ww in 0..w_out {
-                                                    let mut val = if is_max == 1 {
-                                                        f32::NEG_INFINITY
-                                                    } else {
-                                                        0.0f32
-                                                    };
-                                                    let mut best_kh = 0usize;
-                                                    let mut best_kw = 0usize;
-                                                    let mut count = 0usize;
-                                                    for kh in 0..kernel {
-                                                        for kw in 0..kernel {
-                                                            let h_in = hh * stride_val + kh;
-                                                            let w_in = ww * stride_val + kw;
-                                                            if h_in >= padding_val
-                                                                && w_in >= padding_val
-                                                            {
-                                                                let h_in_s = h_in - padding_val;
-                                                                let w_in_s = w_in - padding_val;
-                                                                if h_in_s < h && w_in_s < w {
-                                                                    let idx = nn * (c * h * w)
-                                                                        + cc * (h * w)
-                                                                        + h_in_s * w
-                                                                        + w_in_s;
-                                                                    if idx < input.len() {
-                                                                        if is_max == 1 {
-                                                                            if input[idx] > val {
-                                                                                val = input[idx];
-                                                                                best_kh = kh;
-                                                                                best_kw = kw;
-                                                                            }
-                                                                        } else {
-                                                                            val += input[idx];
-                                                                        }
-                                                                        count += 1;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    if is_max == 0 && count > 0 {
-                                                        val /= count as f32;
-                                                    }
-                                                    let out_idx = nn * (c * hw_out)
-                                                        + cc * hw_out
-                                                        + hh * w_out
-                                                        + ww;
-                                                    if out_idx < out_f32.len() {
-                                                        out_f32[out_idx] = val;
-                                                    }
-                                                    // Debug: log first MaxPool write value
-                                                    #[cfg(debug_assertions)]
-                                                    if nn == 0 && cc == 0 && hh == 0 && ww == 0 {
-                                                        eprintln!("[FNN_DBG_POOL] MaxPool out_start={} wrote={}",
-                                                            out_start, val);
-                                                    }
-                                                    // Write argmax index if this is max pooling
-                                                    if let Some(ref mut idx_out) = indices_out {
-                                                        if out_idx < idx_out.len() {
-                                                            idx_out[out_idx] =
-                                                                (best_kh * kernel + best_kw) as i64;
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                        if microkernels::simd_avx2_available() {
+                                            unsafe { microkernels::pool_avg_f32_avx2(
+                                                &input, out_f32, n, c, h, w,
+                                                kernel, stride_val, padding_val, h_out, w_out,
+                                            ); }
+                                        } else {
+                                            microkernels::pool_avg_f32_scalar(
+                                                &input, out_f32, n, c, h, w,
+                                                kernel, stride_val, padding_val, h_out, w_out,
+                                            );
+                                        }
+                                        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                        {
+                                            microkernels::pool_avg_f32_scalar(
+                                                &input, out_f32, n, c, h, w,
+                                                kernel, stride_val, padding_val, h_out, w_out,
+                                            );
                                         }
                                     }
                                 }
@@ -3441,9 +3493,16 @@ impl Backend for CpuBackend {
                                 {
                                     use rayon::prelude::*;
                                     let nc = n * c;
-                                    let out_ptr_usize = out_f32.as_mut_ptr() as usize;
-                                    let (idx_ptr_usize, has_indices) = if is_max == 1 {
-                                        if let Some(sec_slice) = secondary_output_slice {
+                                    let input_ptr_val = input.as_ptr() as usize;
+                                    let out_ptr_val = out_f32.as_mut_ptr() as usize;
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                    let use_simd = microkernels::simd_avx2_available();
+                                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                    let use_simd = false;
+                                    if is_max == 1 {
+                                        let (idx_ptr_val, has_indices) = if let Some(sec_slice) =
+                                            secondary_output_slice
+                                        {
                                             let d = arena.data_mut();
                                             let idx_end = sec_slice.offset + sec_slice.size;
                                             let idx_slice = bytemuck::cast_slice_mut::<_, i64>(
@@ -3452,69 +3511,96 @@ impl Backend for CpuBackend {
                                             (idx_slice.as_mut_ptr() as usize, true)
                                         } else {
                                             (0usize, false)
-                                        }
-                                    } else {
-                                        (0usize, false)
-                                    };
-                                    (0..nc).into_par_iter().for_each(|nc_idx| {
-                                        let out_ptr = out_ptr_usize as *mut f32;
-                                        let idx_ptr = idx_ptr_usize as *mut i64;
-                                        let nn = nc_idx / c;
-                                        let cc = nc_idx % c;
-                                        for hh in 0..h_out {
-                                            for ww in 0..w_out {
-                                                let mut val = if is_max == 1 {
-                                                    f32::NEG_INFINITY
-                                                } else {
-                                                    0.0f32
-                                                };
-                                                let mut best_kh = 0usize;
-                                                let mut best_kw = 0usize;
-                                                let mut count = 0usize;
-                                                for kh in 0..kernel {
-                                                    for kw in 0..kernel {
-                                                        let h_in = hh * stride_val + kh;
-                                                        let w_in = ww * stride_val + kw;
-                                                        if h_in >= padding_val
-                                                            && w_in >= padding_val
-                                                        {
-                                                            let h_in_s = h_in - padding_val;
-                                                            let w_in_s = w_in - padding_val;
-                                                            if h_in_s < h && w_in_s < w {
-                                                                let idx = nn * (c * h * w)
-                                                                    + cc * (h * w)
-                                                                    + h_in_s * w
-                                                                    + w_in_s;
-                                                                if idx < input.len() {
-                                                                    if is_max == 1 {
-                                                                        if input[idx] > val {
-                                                                            val = input[idx];
-                                                                            best_kh = kh;
-                                                                            best_kw = kw;
-                                                                        }
-                                                                    } else {
-                                                                        val += input[idx];
-                                                                    }
-                                                                    count += 1;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                if is_max == 0 && count > 0 {
-                                                    val /= count as f32;
-                                                }
-                                                let out_pos = nc_idx * hw_out + hh * w_out + ww;
-                                                unsafe {
-                                                    *out_ptr.add(out_pos) = val;
-                                                    if has_indices {
-                                                        *idx_ptr.add(out_pos) =
-                                                            (best_kh * kernel + best_kw) as i64;
-                                                    }
-                                                }
+                                        };
+                                        (0..nc).into_par_iter().for_each(|nc_idx| {
+                                            let nn = nc_idx / c;
+                                            let cc = nc_idx % c;
+                                            let inp = unsafe {
+                                                std::slice::from_raw_parts(
+                                                    (input_ptr_val
+                                                        + (nn * (c * h * w) + cc * (h * w))
+                                                            * std::mem::size_of::<f32>())
+                                                        as *const f32,
+                                                    h * w,
+                                                )
+                                            };
+                                            let out = unsafe {
+                                                std::slice::from_raw_parts_mut(
+                                                    (out_ptr_val
+                                                        + (nn * (c * hw_out) + cc * hw_out)
+                                                            * std::mem::size_of::<f32>())
+                                                        as *mut f32,
+                                                    hw_out,
+                                                )
+                                            };
+                                            let idx: Option<&mut [i64]> = if has_indices {
+                                                Some(unsafe {
+                                                    std::slice::from_raw_parts_mut(
+                                                        (idx_ptr_val
+                                                            + (nn * (c * hw_out) + cc * hw_out)
+                                                                * core::mem::size_of::<i64>())
+                                                            as *mut i64,
+                                                        hw_out,
+                                                    )
+                                                })
+                                            } else {
+                                                None
+                                            };
+                                            if use_simd {
+                                                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                                unsafe { microkernels::pool_max_f32_avx2(
+                                                    inp, out, 1, 1, h, w,
+                                                    kernel, stride_val, padding_val, h_out, w_out,
+                                                    idx,
+                                                ); }
+                                                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                                { unreachable!(); }
+                                            } else {
+                                                microkernels::pool_max_f32_scalar(
+                                                    inp, out, 1, 1, h, w,
+                                                    kernel, stride_val, padding_val, h_out, w_out,
+                                                    idx,
+                                                );
                                             }
-                                        }
-                                    });
+                                        });
+                                    } else {
+                                        (0..nc).into_par_iter().for_each(|nc_idx| {
+                                            let nn = nc_idx / c;
+                                            let cc = nc_idx % c;
+                                            let inp = unsafe {
+                                                std::slice::from_raw_parts(
+                                                    (input_ptr_val
+                                                        + (nn * (c * h * w) + cc * (h * w))
+                                                            * std::mem::size_of::<f32>())
+                                                        as *const f32,
+                                                    h * w,
+                                                )
+                                            };
+                                            let out = unsafe {
+                                                std::slice::from_raw_parts_mut(
+                                                    (out_ptr_val
+                                                        + (nn * (c * hw_out) + cc * hw_out)
+                                                            * std::mem::size_of::<f32>())
+                                                        as *mut f32,
+                                                    hw_out,
+                                                )
+                                            };
+                                            if use_simd {
+                                                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                                unsafe { microkernels::pool_avg_f32_avx2(
+                                                    inp, out, 1, 1, h, w,
+                                                    kernel, stride_val, padding_val, h_out, w_out,
+                                                ); }
+                                                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                                { unreachable!(); }
+                                            } else {
+                                                microkernels::pool_avg_f32_scalar(
+                                                    inp, out, 1, 1, h, w,
+                                                    kernel, stride_val, padding_val, h_out, w_out,
+                                                );
+                                            }
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -4419,34 +4505,29 @@ impl Backend for CpuBackend {
                                 let h_in = params.get(2).copied().unwrap_or(1);
                                 let w_in = params.get(3).copied().unwrap_or(1);
                                 let hw = h_in * w_in;
-                                let out_len = out_f32.len();
                                 let in_len = input.len();
                                 if scale_h > 0
                                     && scale_w > 0
                                     && hw > 0
-                                    && out_len == in_len * scale_h * scale_w
                                     && in_len > 0
                                     && in_len % hw == 0
                                 {
                                     let nc = in_len / hw;
-                                    for nci in 0..nc {
-                                        for hi in 0..h_in {
-                                            for wi in 0..w_in {
-                                                let val = input[nci * hw + hi * w_in + wi];
-                                                for sh in 0..scale_h {
-                                                    for sw in 0..scale_w {
-                                                        let out_idx = nci * hw * scale_h * scale_w
-                                                            + (hi * scale_h + sh)
-                                                                * (w_in * scale_w)
-                                                            + (wi * scale_w + sw);
-                                                        if out_idx < out_len {
-                                                            out_f32[out_idx] = val;
-                                                        }
-                                                    }
-                                                }
+                                    #[cfg(feature = "simd")]
+                                    {
+                                        use crate::backend::cpu::microkernels::has_avx2;
+                                        if has_avx2() {
+                                            unsafe {
+                                                crate::backend::cpu::microkernels::upsample_nearest2d_f32_avx2(
+                                                    &input, out_f32, nc, h_in, w_in, scale_h, scale_w,
+                                                );
                                             }
+                                            continue; // skip scalar fallback
                                         }
                                     }
+                                    crate::backend::cpu::microkernels::upsample_nearest2d_f32(
+                                        &input, out_f32, nc, h_in, w_in, scale_h, scale_w,
+                                    );
                                 }
                             }
                         }
@@ -4543,34 +4624,9 @@ impl Backend for CpuBackend {
                                         }
                                         let w = hw / h;
                                         if h >= out_h && w >= out_w && h > 0 && w > 0 {
-                                            for nci in 0..nc {
-                                                for ohi in 0..out_h {
-                                                    for owi in 0..out_w {
-                                                        let h_start = ohi * h / out_h;
-                                                        let h_end = (ohi + 1) * h / out_h;
-                                                        let w_start = owi * w / out_w;
-                                                        let w_end = (owi + 1) * w / out_w;
-                                                        let mut sum = 0.0f32;
-                                                        let mut count = 0;
-                                                        for hi in h_start..h_end {
-                                                            for wi in w_start..w_end {
-                                                                sum +=
-                                                                    input[nci * hw + hi * w + wi];
-                                                                count += 1;
-                                                            }
-                                                        }
-                                                        let out_idx =
-                                                            nci * out_h * out_w + ohi * out_w + owi;
-                                                        if out_idx < out_len {
-                                                            out_f32[out_idx] = if count > 0 {
-                                                                sum / count as f32
-                                                            } else {
-                                                                0.0
-                                                            };
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                            microkernels::adaptive_avg_pool2d_f32_scalar(
+                                                &input, out_f32, nc, h, w, out_h, out_w,
+                                            );
                                         }
                                     }
                                 }
@@ -5962,32 +6018,60 @@ macro_rules! impl_simd_unary_wrapper {
                 return unsafe { $avx2(input, output) };
             }
             let len = output.len().min(input.len());
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
+                    *o = $scalar(input[i]);
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
             for i in 0..len { output[i] = $scalar(input[i]); }
         }
     };
 }
 
 macro_rules! impl_simd_binary_wrapper {
-    ($name:ident, $avx2:path, $scalar:path) => {
+    ($name:ident, $avx2:path, $scalar:path, $op:expr) => {
         #[inline]
         fn $name(a: &[f32], b: &[f32], output: &mut [f32]) {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             if (a.len() == output.len() || b.len() == output.len()) && microkernels::simd_avx2_available() {
                 return unsafe { $avx2(a, b, output) };
             }
+            let len = output.len().min(a.len().max(b.len()));
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                let a_len = a.len();
+                let b_len = b.len();
+                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
+                    *o = $op(a[i % a_len], b[i % b_len]);
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
             $scalar(a, b, output);
         }
     };
 }
 
 macro_rules! impl_simd_scalar_wrapper {
-    ($name:ident, $avx2:path, $scalar:path) => {
+    ($name:ident, $avx2:path, $scalar:path, $op:expr) => {
         #[inline]
         fn $name(data: &[f32], s: f32, output: &mut [f32]) {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             if microkernels::simd_avx2_available() {
                 return unsafe { $avx2(data, s, output) };
             }
+            let len = output.len().min(data.len());
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
+                    *o = $op(data[i], s);
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
             $scalar(data, s, output);
         }
     };
@@ -6045,12 +6129,12 @@ fn log_softmax_f32(input: &[f32], output: &mut [f32]) {
 
 // ── Binary ops ──────────────────────────────────────────────
 
-impl_simd_binary_wrapper!(add_f32, microkernels::add_f32_avx2_broadcast, microkernels::add_f32_scalar_broadcast);
-impl_simd_binary_wrapper!(sub_f32, microkernels::sub_f32_avx2_broadcast, microkernels::sub_f32_scalar_broadcast);
-impl_simd_binary_wrapper!(mul_f32, microkernels::mul_f32_avx2_broadcast, microkernels::mul_f32_scalar_broadcast);
-impl_simd_binary_wrapper!(div_f32, microkernels::div_f32_avx2_broadcast, microkernels::div_f32_scalar_broadcast);
-impl_simd_binary_wrapper!(max_f32, microkernels::max_f32_avx2_broadcast, microkernels::max_f32_scalar_broadcast);
-impl_simd_binary_wrapper!(min_f32, microkernels::min_f32_avx2_broadcast, microkernels::min_f32_scalar_broadcast);
+impl_simd_binary_wrapper!(add_f32, microkernels::add_f32_avx2_broadcast, microkernels::add_f32_scalar_broadcast, |a, b| a + b);
+impl_simd_binary_wrapper!(sub_f32, microkernels::sub_f32_avx2_broadcast, microkernels::sub_f32_scalar_broadcast, |a, b| a - b);
+impl_simd_binary_wrapper!(mul_f32, microkernels::mul_f32_avx2_broadcast, microkernels::mul_f32_scalar_broadcast, |a, b| a * b);
+impl_simd_binary_wrapper!(div_f32, microkernels::div_f32_avx2_broadcast, microkernels::div_f32_scalar_broadcast, |a, b| a / b);
+impl_simd_binary_wrapper!(max_f32, microkernels::max_f32_avx2_broadcast, microkernels::max_f32_scalar_broadcast, |a: f32, b: f32| a.max(b));
+impl_simd_binary_wrapper!(min_f32, microkernels::min_f32_avx2_broadcast, microkernels::min_f32_scalar_broadcast, |a: f32, b: f32| a.min(b));
 
 // ============================================================
 // New dispatch wrappers — Reductions
@@ -6077,17 +6161,17 @@ fn reduce_f32(input: &[f32], output: &mut [f32], group_size: usize, is_mean: boo
 // New dispatch wrappers — Scalar arithmetic
 // ============================================================
 
-impl_simd_scalar_wrapper!(add_scalar_f32, microkernels::add_scalar_f32_avx2, microkernels::add_scalar_f32_scalar);
-impl_simd_scalar_wrapper!(mul_scalar_f32, microkernels::mul_scalar_f32_avx2, microkernels::mul_scalar_f32_scalar);
-impl_simd_scalar_wrapper!(div_scalar_f32, microkernels::div_scalar_f32_avx2, microkernels::div_scalar_f32_scalar);
+impl_simd_scalar_wrapper!(add_scalar_f32, microkernels::add_scalar_f32_avx2, microkernels::add_scalar_f32_scalar, |a, s| a + s);
+impl_simd_scalar_wrapper!(mul_scalar_f32, microkernels::mul_scalar_f32_avx2, microkernels::mul_scalar_f32_scalar, |a, s| a * s);
+impl_simd_scalar_wrapper!(div_scalar_f32, microkernels::div_scalar_f32_avx2, microkernels::div_scalar_f32_scalar, |a, s| a / s);
 
 // ============================================================
 // New dispatch wrappers — Scalar comparison
 // ============================================================
 
-impl_simd_scalar_wrapper!(gt_scalar_f32, microkernels::gt_scalar_f32_avx2, microkernels::gt_scalar_f32_scalar);
-impl_simd_scalar_wrapper!(lt_scalar_f32, microkernels::lt_scalar_f32_avx2, microkernels::lt_scalar_f32_scalar);
-impl_simd_scalar_wrapper!(eq_scalar_f32, microkernels::eq_scalar_f32_avx2, microkernels::eq_scalar_f32_scalar);
+impl_simd_scalar_wrapper!(gt_scalar_f32, microkernels::gt_scalar_f32_avx2, microkernels::gt_scalar_f32_scalar, |a, s| if a > s { 1.0 } else { 0.0 });
+impl_simd_scalar_wrapper!(lt_scalar_f32, microkernels::lt_scalar_f32_avx2, microkernels::lt_scalar_f32_scalar, |a, s| if a < s { 1.0 } else { 0.0 });
+impl_simd_scalar_wrapper!(eq_scalar_f32, microkernels::eq_scalar_f32_avx2, microkernels::eq_scalar_f32_scalar, |a, s| if a == s { 1.0 } else { 0.0 });
 
 // ============================================================
 // New dispatch wrappers — BiasAdd, Norm, RMS Norm, Softmax
@@ -6122,6 +6206,35 @@ fn rms_norm_f32(input: &[f32], weight: &[f32], output: &mut [f32], row_size: usi
 
 #[inline]
 fn softmax_f32(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: usize, num_rows: usize) {
+    #[cfg(feature = "parallel")]
+    if num_rows > 1 {
+        use rayon::prelude::*;
+        let has_avx2 = {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            { microkernels::simd_avx2_available() }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            { false }
+        };
+        // Build non-overlapping row slices before the parallel section
+        // to satisfy the borrow checker and rayon's Send requirements.
+        let mut row_slices: Vec<(&[f32], &mut [f32])> = Vec::with_capacity(num_rows);
+        for row in 0..num_rows {
+            let offset = row * stride;
+            let inp = &input[offset..offset + axis_dim_size];
+            // SAFETY: Each row writes to a unique non-overlapping region of output.
+            let out = unsafe { std::slice::from_raw_parts_mut(output.as_mut_ptr().add(offset), axis_dim_size) };
+            row_slices.push((inp, out));
+        }
+        row_slices.par_iter_mut().for_each(|(inp, out)| {
+            if has_avx2 {
+                unsafe { microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1); }
+            } else {
+                microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
+            }
+        });
+        return;
+    }
+    // Single-threaded fallback
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::softmax_f32_avx2_strided(input, output, axis_dim_size, stride, num_rows) };

@@ -1,4 +1,5 @@
 use crate::backend::wgpu::context::WgpuContext;
+use crate::build_pipeline;
 
 build_pipeline!(ensure_compute_pipeline, "wgpu_backend_", [
     wgpu::BindGroupLayoutEntry {

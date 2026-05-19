@@ -1,3 +1,5 @@
+#![cfg(feature = "gpu")]
+
 //! Integration tests for the WGPU (GPU) backend.
 //!
 //! Tests all ops that have dedicated GPU shaders: MatMul, element-wise,

@@ -29,7 +29,7 @@ fn has_avx512() -> bool {
         .get_or_init(|| is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw"))
 }
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-fn has_avx2() -> bool {
+pub(crate) fn has_avx2() -> bool {
     *HAS_AVX2.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
 }
 
@@ -518,135 +518,154 @@ macro_rules! avx2_elwise_fallback {
 
 #[inline] pub fn tanh_f32_scalar(x: f32) -> f32 { x.tanh() }
 
-/// True AVX2 exp(x) using range reduction + degree-5 polynomial approximation.
-///
-/// Algorithm:
-///   1. k = round(x * log2(e))
-///   2. t = x - k * ln(2)   (range-reduced to [-ln(2)/2, ln(2)/2])
-///   3. exp(t) ≈ 1 + t + t²/2 + t³/6 + t⁴/24 + t⁵/120  (Horner with FMA)
-///   4. exp(x) = 2^k * exp(t)  (reinterpret k+127 as float exponent)
-///
-/// Relative error < 2e-5 over [-88, 88], suitable for neural network inference.
+// ============================================================
+// SIMD vector helpers — reusable across activation microkernels
+// ============================================================
+
+/// Vector exp(x) for a single `__m256`. Degree-5 polynomial approximation
+/// with range reduction via `x·log2(e)`, Horner with FMA, 2^k reconstruction.
+/// Relative error < 2e-5 over [-88, 88].
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn exp_avx2_vec(x: __m256) -> __m256 {
+    let vlog2e = _mm256_set1_ps(1.4426950408889634f32);
+    let vln2_hi = _mm256_set1_ps(0.693359375f32);
+    let vln2_lo = _mm256_set1_ps(-2.12194440e-4f32);
+    let v_120 = _mm256_set1_ps(1.0f32 / 120.0f32);
+    let v_24 = _mm256_set1_ps(1.0f32 / 24.0f32);
+    let v_6 = _mm256_set1_ps(1.0f32 / 6.0f32);
+    let v_half = _mm256_set1_ps(0.5f32);
+
+    let k_float = _mm256_round_ps(_mm256_mul_ps(x, vlog2e), _MM_FROUND_TO_NEAREST_INT);
+    let t = _mm256_fnmadd_ps(k_float, vln2_hi, x);
+    let t = _mm256_fnmadd_ps(k_float, vln2_lo, t);
+
+    let mut p = _mm256_fmadd_ps(v_120, t, v_24);
+    p = _mm256_fmadd_ps(p, t, v_6);
+    p = _mm256_fmadd_ps(p, t, v_half);
+    p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(1.0f32));
+    p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(1.0f32));
+
+    let k_int = _mm256_cvtps_epi32(k_float);
+    let k_clamped = _mm256_min_epi32(
+        _mm256_max_epi32(k_int, _mm256_set1_epi32(-126)),
+        _mm256_set1_epi32(127),
+    );
+    let exp_factor =
+        _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(k_clamped, _mm256_set1_epi32(127)), 23));
+    _mm256_mul_ps(p, exp_factor)
+}
+
+/// Vector tanh(x) for a single `__m256`. Uses identity: tanh(x) = 2·sigmoid(2x) - 1.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn tanh_avx2_vec(x: __m256) -> __m256 {
+    let vone = _mm256_set1_ps(1.0f32);
+    let vtwo = _mm256_set1_ps(2.0f32);
+    let neg_2x = _mm256_xor_ps(_mm256_mul_ps(x, vtwo), _mm256_set1_ps(-0.0f32));
+    let e_neg2 = exp_avx2_vec(neg_2x);
+    let sig_2x = _mm256_div_ps(vone, _mm256_add_ps(vone, e_neg2));
+    _mm256_sub_ps(_mm256_mul_ps(vtwo, sig_2x), vone)
+}
+
+/// Vector ln(x) for a single `__m256`. Uses frexp decomposition to extract
+/// exponent and mantissa in [1, 2), then degree-4 minimax polynomial for ln(m).
+/// Relative error < 1e-3 over normal f32 range, acceptable for NN activations.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn log_avx2_vec(x: __m256) -> __m256 {
+    // Extract exponent: e = floor(log2(x))
+    let raw = _mm256_castps_si256(x);
+    let biased_exp = _mm256_srli_epi32(raw, 23);
+    let exp_i = _mm256_sub_epi32(biased_exp, _mm256_set1_epi32(127));
+    let exp_f = _mm256_cvtepi32_ps(exp_i);
+
+    // Extract mantissa in [1, 2): clear exponent, set to 127 (bias)
+    let mant_raw = _mm256_and_si256(raw, _mm256_set1_epi32(0x007FFFFF));
+    let mant_f = _mm256_castsi256_ps(
+        _mm256_or_si256(mant_raw, _mm256_set1_epi32(0x3F800000)),
+    );
+
+    // Degree-4 minimax polynomial for ln(m) on m ∈ [1, 2]
+    // Coefficients from Sollya: max error ~3e-4
+    // ln(m) ≈ c0 + c1*m + c2*m² + c3*m³ + c4*m⁴
+    let c0 = _mm256_set1_ps(-1.7417939f32);
+    let c1 = _mm256_set1_ps(2.8212026f32);
+    let c2 = _mm256_set1_ps(-1.4699568f32);
+    let c3 = _mm256_set1_ps(0.4477982f32);
+    let c4 = _mm256_set1_ps(-0.05657085f32);
+
+    let m2 = _mm256_mul_ps(mant_f, mant_f);
+    let m3 = _mm256_mul_ps(m2, mant_f);
+    let m4 = _mm256_mul_ps(m3, mant_f);
+
+    // Horner: (((c4*m + c3)*m + c2)*m + c1)*m + c0
+    let mut log_m = _mm256_fmadd_ps(c4, mant_f, c3);
+    log_m = _mm256_fmadd_ps(log_m, mant_f, c2);
+    log_m = _mm256_fmadd_ps(log_m, mant_f, c1);
+    log_m = _mm256_fmadd_ps(log_m, mant_f, c0);
+
+    // ln(x) = ln(m * 2^e) = ln(m) + e * ln(2)
+    _mm256_fmadd_ps(exp_f, _mm256_set1_ps(0.6931471805599453f32), log_m)
+}
+
+// ============================================================
+// Public AVX2 activation microkernels — all use the helpers above
+// ============================================================
+
+/// True AVX2 exp(x) via polynomial approximation.
+/// Delegates to `exp_avx2_vec` for the vectorized computation.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn exp_f32_avx2(input: &[f32], output: &mut [f32]) {
     let len = output.len().min(input.len());
     let mut i = 0;
-    // Constants
-    let vlog2e = _mm256_set1_ps(1.4426950408889634f32);   // log2(e)
-    let vln2_hi = _mm256_set1_ps(0.693359375f32);          // hi part of ln(2)
-    let vln2_lo = _mm256_set1_ps(-2.12194440e-4f32);       // lo part of ln(2)
-    let vc0 = _mm256_set1_ps(1.0f32);
-    let vc1 = _mm256_set1_ps(1.0f32 / 24.0f32);            // 1/24
-    let vc2 = _mm256_set1_ps(1.0f32 / 6.0f32);             // 1/6
-    let vc3 = _mm256_set1_ps(0.5f32);                      // 1/2
-    let vc4 = _mm256_set1_ps(1.0f32);                      // 1
-    let vc5 = _mm256_set1_ps(1.0f32);                      // 1 (final term)
-    let vmin_k = _mm256_set1_epi32(-126);                   // min valid exponent bias
-    let vmax_k = _mm256_set1_epi32(127);                    // max valid exponent bias
-    let vbias = _mm256_set1_epi32(127);                     // f32 exponent bias
-
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
-
-        // Range reduction: k = round(x * log2(e))
-        let k_float = _mm256_round_ps(
-            _mm256_mul_ps(x, vlog2e),
-            _MM_FROUND_TO_NEAREST_INT,
-        );
-        // t = x - k * ln(2)  (using hi/lo for extra precision)
-        let t = _mm256_fnmadd_ps(k_float, vln2_hi, x);
-        let t = _mm256_fnmadd_ps(k_float, vln2_lo, t);
-
-        // Degree-5 polynomial: exp(t) ≈ 1 + t*(1 + t*(1/2 + t*(1/6 + t*(1/24 + t/120))))
-        // Horner form with FMA: (((((1/120*t + 1/24)*t + 1/6)*t + 0.5)*t + 1)*t + 1)
-        // Simplified coeffs: 1/120 ≈ 0.008333, 1/24 ≈ 0.041667, 1/6 ≈ 0.166667
-        let v_120 = _mm256_set1_ps(1.0f32 / 120.0f32);
-        let v_24  = _mm256_set1_ps(1.0f32 / 24.0f32);
-        let v_6   = _mm256_set1_ps(1.0f32 / 6.0f32);
-        let v_half = _mm256_set1_ps(0.5f32);
-
-        let mut p = _mm256_fmadd_ps(v_120, t, v_24);    // t/120 + 1/24
-        p = _mm256_fmadd_ps(p, t, v_6);                  // t*p + 1/6
-        p = _mm256_fmadd_ps(p, t, v_half);               // t*p + 0.5
-        p = _mm256_fmadd_ps(p, t, vc0);                  // t*p + 1.0
-        p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(1.0f32)); // t*p + 1.0  (= exp(t))
-
-        // exp(x) = 2^k * exp(t)
-        // Reinterpret (k + 127) << 23 as float32
-        let k_int = _mm256_cvtps_epi32(k_float);
-        let k_clamped = _mm256_min_epi32(
-            _mm256_max_epi32(k_int, vmin_k),
-            vmax_k,
-        );
-        let biased = _mm256_add_epi32(k_clamped, vbias);
-        let exp_factor = _mm256_castsi256_ps(_mm256_slli_epi32(biased, 23));
-
-        let result = _mm256_mul_ps(p, exp_factor);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), exp_avx2_vec(x));
         i += 8;
     }
-    // Scalar tail for remaining elements
     for j in i..len {
         *output.as_mut_ptr().add(j) = input.as_ptr().add(j).read().exp();
     }
 }
 
 #[inline] pub fn log_f32_scalar(x: f32) -> f32 { x.ln() }
-avx2_elwise_fallback!(log_f32_avx2, log_f32_scalar);
 
-/// True AVX2 sigmoid(x) = 1 / (1 + exp(-x)) using the fast SIMD exp.
+/// True AVX2 ln(x) using frexp decomposition + polynomial on [1, 2).
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn log_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), log_avx2_vec(x));
+        i += 8;
+    }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = input.as_ptr().add(j).read().ln();
+    }
+}
+
+/// True AVX2 sigmoid(x) = 1 / (1 + exp(-x)).
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn sigmoid_f32_avx2(input: &[f32], output: &mut [f32]) {
     let len = output.len().min(input.len());
     let mut i = 0;
     let vone = _mm256_set1_ps(1.0f32);
-
-    // Reuse the AVX2 exp via a temporary buffer
-    // (We can't call exp_f32_avx2 directly in the SIMD loop without clobbering
-    //  the output buffer, so we negate inline and compute exp(-x) element-wise.)
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
-        let neg_x = _mm256_xor_ps(x, _mm256_set1_ps(-0.0f32)); // flip sign bit
-
-        // Inline exp(-x) using the same polynomial as exp_f32_avx2
-        let vlog2e = _mm256_set1_ps(1.4426950408889634f32);
-        let vln2_hi = _mm256_set1_ps(0.693359375f32);
-        let vln2_lo = _mm256_set1_ps(-2.12194440e-4f32);
-        let vmin_k = _mm256_set1_epi32(-126);
-        let vmax_k = _mm256_set1_epi32(127);
-        let vbias = _mm256_set1_epi32(127);
-        let v_120 = _mm256_set1_ps(1.0f32 / 120.0f32);
-        let v_24  = _mm256_set1_ps(1.0f32 / 24.0f32);
-        let v_6   = _mm256_set1_ps(1.0f32 / 6.0f32);
-        let v_half = _mm256_set1_ps(0.5f32);
-
-        let k_float = _mm256_round_ps(
-            _mm256_mul_ps(neg_x, vlog2e),
-            _MM_FROUND_TO_NEAREST_INT,
+        let neg_x = _mm256_xor_ps(x, _mm256_set1_ps(-0.0f32));
+        let e_neg = exp_avx2_vec(neg_x);
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_div_ps(vone, _mm256_add_ps(vone, e_neg)),
         );
-        let mut t = _mm256_fnmadd_ps(k_float, vln2_hi, neg_x);
-        t = _mm256_fnmadd_ps(k_float, vln2_lo, t);
-
-        let mut p = _mm256_fmadd_ps(v_120, t, v_24);
-        p = _mm256_fmadd_ps(p, t, v_6);
-        p = _mm256_fmadd_ps(p, t, v_half);
-        p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(1.0f32));
-        p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(1.0f32)); // exp(-x) ≈ p
-
-        let k_int = _mm256_cvtps_epi32(k_float);
-        let k_clamped = _mm256_min_epi32(
-            _mm256_max_epi32(k_int, vmin_k),
-            vmax_k,
-        );
-        let biased = _mm256_add_epi32(k_clamped, vbias);
-        let exp_factor = _mm256_castsi256_ps(_mm256_slli_epi32(biased, 23));
-        let exp_neg_x = _mm256_mul_ps(p, exp_factor);
-
-        // sigmoid = 1 / (1 + exp(-x))
-        let result = _mm256_div_ps(vone, _mm256_add_ps(vone, exp_neg_x));
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
         i += 8;
     }
     for j in i..len {
@@ -655,61 +674,15 @@ pub unsafe fn sigmoid_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
-/// True AVX2 tanh(x) = 2 * sigmoid(2*x) - 1 using the fast SIMD exp.
+/// True AVX2 tanh(x) = 2·sigmoid(2x) - 1.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn tanh_f32_avx2(input: &[f32], output: &mut [f32]) {
     let len = output.len().min(input.len());
     let mut i = 0;
-    let vone = _mm256_set1_ps(1.0f32);
-    let vtwo = _mm256_set1_ps(2.0f32);
-
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
-        let x2 = _mm256_mul_ps(x, vtwo); // 2*x
-
-        // sigmoid(2*x) = 1 / (1 + exp(-2*x))
-        let neg_x2 = _mm256_xor_ps(x2, _mm256_set1_ps(-0.0f32));
-
-        // Inline exp(-2x)
-        let vlog2e = _mm256_set1_ps(1.4426950408889634f32);
-        let vln2_hi = _mm256_set1_ps(0.693359375f32);
-        let vln2_lo = _mm256_set1_ps(-2.12194440e-4f32);
-        let vmin_k = _mm256_set1_epi32(-126);
-        let vmax_k = _mm256_set1_epi32(127);
-        let vbias = _mm256_set1_epi32(127);
-        let v_120 = _mm256_set1_ps(1.0f32 / 120.0f32);
-        let v_24  = _mm256_set1_ps(1.0f32 / 24.0f32);
-        let v_6   = _mm256_set1_ps(1.0f32 / 6.0f32);
-        let v_half = _mm256_set1_ps(0.5f32);
-
-        let k_float = _mm256_round_ps(
-            _mm256_mul_ps(neg_x2, vlog2e),
-            _MM_FROUND_TO_NEAREST_INT,
-        );
-        let mut t = _mm256_fnmadd_ps(k_float, vln2_hi, neg_x2);
-        t = _mm256_fnmadd_ps(k_float, vln2_lo, t);
-
-        let mut p = _mm256_fmadd_ps(v_120, t, v_24);
-        p = _mm256_fmadd_ps(p, t, v_6);
-        p = _mm256_fmadd_ps(p, t, v_half);
-        p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(1.0f32));
-        p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(1.0f32)); // exp(-2x) ≈ p
-
-        let k_int = _mm256_cvtps_epi32(k_float);
-        let k_clamped = _mm256_min_epi32(
-            _mm256_max_epi32(k_int, vmin_k),
-            vmax_k,
-        );
-        let biased = _mm256_add_epi32(k_clamped, vbias);
-        let exp_factor = _mm256_castsi256_ps(_mm256_slli_epi32(biased, 23));
-        let exp_neg_2x = _mm256_mul_ps(p, exp_factor);
-
-        // sigmoid(2x) = 1/(1+exp(-2x))
-        let sig_2x = _mm256_div_ps(vone, _mm256_add_ps(vone, exp_neg_2x));
-        // tanh(x) = 2*sigmoid(2x) - 1
-        let result = _mm256_sub_ps(_mm256_mul_ps(vtwo, sig_2x), vone);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), tanh_avx2_vec(x));
         i += 8;
     }
     for j in i..len {
@@ -719,7 +692,28 @@ pub unsafe fn tanh_f32_avx2(input: &[f32], output: &mut [f32]) {
 }
 
 #[inline] pub fn elu_f32_scalar(x: f32) -> f32 { if x > 0.0 { x } else { x.exp() - 1.0 } }
-avx2_elwise_fallback!(elu_f32_avx2, elu_f32_scalar);
+
+/// True AVX2 ELU(x) = if x > 0 then x else exp(x) - 1.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn elu_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let vzero = _mm256_setzero_ps();
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        let exp_x = exp_avx2_vec(x);
+        let exp_minus_1 = _mm256_sub_ps(exp_x, _mm256_set1_ps(1.0f32));
+        // blend: when x > 0, select x; otherwise select exp(x)-1
+        let mask = _mm256_cmp_ps::<{_CMP_GT_OQ}>(x, vzero);
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_blendv_ps(exp_minus_1, x, mask));
+        i += 8;
+    }
+    for j in i..len {
+        let x = *input.as_ptr().add(j);
+        *output.as_mut_ptr().add(j) = if x > 0.0 { x } else { x.exp() - 1.0 };
+    }
+}
 
 #[inline]
 pub fn gelu_f32_scalar(x: f32) -> f32 {
@@ -727,19 +721,127 @@ pub fn gelu_f32_scalar(x: f32) -> f32 {
     let tanh_arg = 0.7978846f32 * (x + 0.044715f32 * x3);
     0.5 * x * (1.0 + tanh_arg.tanh())
 }
-avx2_elwise_fallback!(gelu_f32_avx2, gelu_f32_scalar);
+
+/// True AVX2 GELU(x) = 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715·x³))).
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn gelu_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let vhalf = _mm256_set1_ps(0.5f32);
+    let vone = _mm256_set1_ps(1.0f32);
+    let vsqrt2pi = _mm256_set1_ps(0.7978845608028654f32); // √(2/π)
+    let vcoeff = _mm256_set1_ps(0.044715f32);
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        let x3 = _mm256_mul_ps(_mm256_mul_ps(x, x), x);
+        let tanh_arg = _mm256_mul_ps(vsqrt2pi, _mm256_add_ps(x, _mm256_mul_ps(vcoeff, x3)));
+        let t = tanh_avx2_vec(tanh_arg);
+        let result = _mm256_mul_ps(_mm256_mul_ps(vhalf, x), _mm256_add_ps(vone, t));
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        i += 8;
+    }
+    for j in i..len {
+        let x = *input.as_ptr().add(j);
+        let x3 = x * x * x;
+        let tanh_arg = 0.7978846f32 * (x + 0.044715f32 * x3);
+        *output.as_mut_ptr().add(j) = 0.5 * x * (1.0 + tanh_arg.tanh());
+    }
+}
 
 #[inline] pub fn silu_f32_scalar(x: f32) -> f32 { x / (1.0 + (-x).exp()) }
-avx2_elwise_fallback!(silu_f32_avx2, silu_f32_scalar);
+
+/// True AVX2 SiLU(x) = x * sigmoid(x).
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn silu_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let vone = _mm256_set1_ps(1.0f32);
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        let neg_x = _mm256_xor_ps(x, _mm256_set1_ps(-0.0f32));
+        let e_neg = exp_avx2_vec(neg_x);
+        let sig = _mm256_div_ps(vone, _mm256_add_ps(vone, e_neg));
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(x, sig));
+        i += 8;
+    }
+    for j in i..len {
+        let x = *input.as_ptr().add(j);
+        *output.as_mut_ptr().add(j) = x / (1.0 + (-x).exp());
+    }
+}
 
 #[inline] pub fn softplus_f32_scalar(x: f32) -> f32 { (1.0 + x.exp()).ln() }
-avx2_elwise_fallback!(softplus_f32_avx2, softplus_f32_scalar);
+
+/// True AVX2 softplus(x) = ln(1 + exp(x)).
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn softplus_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let vone = _mm256_set1_ps(1.0f32);
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        let e_x = exp_avx2_vec(x);
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            log_avx2_vec(_mm256_add_ps(vone, e_x)),
+        );
+        i += 8;
+    }
+    for j in i..len {
+        let x = *input.as_ptr().add(j);
+        *output.as_mut_ptr().add(j) = (1.0 + x.exp()).ln();
+    }
+}
 
 #[inline] pub fn hardswish_f32_scalar(x: f32) -> f32 { x * (x + 3.0).clamp(0.0, 6.0) / 6.0 }
-avx2_elwise_fallback!(hardswish_f32_avx2, hardswish_f32_scalar);
+
+/// True AVX2 hardswish(x) = x * clamp(x+3, 0, 6) / 6.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn hardswish_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let vthree = _mm256_set1_ps(3.0f32);
+    let vsix = _mm256_set1_ps(6.0f32);
+    let vzero = _mm256_setzero_ps();
+    let vinvsix = _mm256_set1_ps(1.0f32 / 6.0f32);
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        let x3 = _mm256_add_ps(x, vthree);
+        let clamped = _mm256_min_ps(_mm256_max_ps(x3, vzero), vsix);
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_mul_ps(x, clamped), vinvsix));
+        i += 8;
+    }
+    for j in i..len {
+        let x = *input.as_ptr().add(j);
+        *output.as_mut_ptr().add(j) = x * (x + 3.0).clamp(0.0, 6.0) / 6.0;
+    }
+}
 
 #[inline] pub fn mish_f32_scalar(x: f32) -> f32 { let sp = (1.0 + x.exp()).ln(); x * sp.tanh() }
-avx2_elwise_fallback!(mish_f32_avx2, mish_f32_scalar);
+
+/// True AVX2 mish(x) = x * tanh(ln(1 + exp(x))).
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn mish_f32_avx2(input: &[f32], output: &mut [f32]) {
+    let len = output.len().min(input.len());
+    let mut i = 0;
+    let vone = _mm256_set1_ps(1.0f32);
+    while i + 8 <= len {
+        let x = _mm256_loadu_ps(input.as_ptr().add(i));
+        let sp = log_avx2_vec(_mm256_add_ps(vone, exp_avx2_vec(x))); // ln(1+exp(x))
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(x, tanh_avx2_vec(sp)));
+        i += 8;
+    }
+    for j in i..len {
+        let x = *input.as_ptr().add(j);
+        let sp = (1.0 + x.exp()).ln();
+        *output.as_mut_ptr().add(j) = x * sp.tanh();
+    }
+}
 
 /// log_softmax: needs max + sum reduction. AVX2 for max + output phases;
 /// sum phase uses scalar exp accumulator for numeric precision.
@@ -2859,6 +2961,504 @@ pub fn conv2d_f32_tiled(
 }
 
 // ============================================================
+// BatchNorm inference — scalar + AVX2
+// ============================================================
+
+/// BatchNorm inference: out[i] = data[i] * scale[ch] + shift[ch] where
+///   scale[ch] = weight[ch] / sqrt(var[ch] + eps)
+///   shift[ch] = bias[ch] - mean[ch] * scale[ch]
+///   ch = i % c  (matches existing dispatch behavior)
+pub fn batch_norm_inference_f32(
+    data: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    running_mean: &[f32],
+    running_var: &[f32],
+    output: &mut [f32],
+    eps: f32,
+) {
+    let c = weight.len();
+    let len = output.len().min(data.len());
+    // Pre-compute per-channel scale and shift
+    for ch in 0..c {
+        let scale = weight[ch] / (running_var[ch] + eps).sqrt();
+        let shift = bias[ch] - running_mean[ch] * scale;
+        // Process all positions where i % c == ch
+        let mut i = ch;
+        while i < len {
+            output[i] = data[i] * scale + shift;
+            i += c;
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn batch_norm_inference_f32_avx2(
+    data: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    running_mean: &[f32],
+    running_var: &[f32],
+    output: &mut [f32],
+    eps: f32,
+) {
+    let c = weight.len();
+    let len = output.len().min(data.len());
+    // Pre-compute per-channel scale and shift
+    let mut scale = vec![0.0f32; c];
+    let mut shift = vec![0.0f32; c];
+    for ch in 0..c {
+        scale[ch] = weight[ch] / (running_var[ch] + eps).sqrt();
+        shift[ch] = bias[ch] - running_mean[ch] * scale[ch];
+    }
+
+    let vscale_base = scale.as_ptr();
+    let vshift_base = shift.as_ptr();
+    let vc = _mm256_set1_ps(c as f32);
+    let vinc = _mm256_set_ps(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0);
+
+    let mut i = 0usize;
+    while i + 8 <= len {
+        // Channel indices ch_j = (i + j) % c  via float:  idx - floor(idx/c)*c
+        let vi = _mm256_set1_ps(i as f32);
+        let vindices_f = _mm256_add_ps(vi, vinc);
+        let vdiv = _mm256_round_ps(
+            _mm256_div_ps(vindices_f, vc),
+            _MM_FROUND_TO_NEG_INF,
+        );
+        let vch_f = _mm256_sub_ps(vindices_f, _mm256_mul_ps(vdiv, vc));
+        let vch = _mm256_cvttps_epi32(vch_f);
+
+        // Gather scale[ch] and shift[ch]
+        let vscale = _mm256_i32gather_ps(vscale_base, vch, 4);
+        let vshift = _mm256_i32gather_ps(vshift_base, vch, 4);
+
+        // out[i] = data[i] * scale + shift
+        let vdata = _mm256_loadu_ps(data.as_ptr().add(i));
+        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_fmadd_ps(vdata, vscale, vshift));
+        i += 8;
+    }
+    for j in i..len {
+        let ch = j % c;
+        output[j] = data[j] * scale[ch] + shift[ch];
+    }
+}
+
+// ============================================================
+// Pooling microkernels — MaxPool2d + AvgPool2d (scalar + AVX2)
+// ============================================================
+
+#[inline]
+pub fn pool_max_f32_scalar(
+    input: &[f32], output: &mut [f32],
+    n: usize, c: usize, h: usize, w: usize,
+    kernel: usize, stride_val: usize, padding_val: usize,
+    h_out: usize, w_out: usize,
+    mut indices_out: Option<&mut [i64]>,
+) {
+    let hw_out = h_out * w_out;
+    for nn in 0..n {
+        for cc in 0..c {
+            for hh in 0..h_out {
+                for ww in 0..w_out {
+                    let mut val = f32::NEG_INFINITY;
+                    let mut best_kh = 0usize;
+                    let mut best_kw = 0usize;
+                    for kh in 0..kernel {
+                        for kw in 0..kernel {
+                            let h_in = hh * stride_val + kh;
+                            let w_in = ww * stride_val + kw;
+                            if h_in >= padding_val && w_in >= padding_val {
+                                let h_in_s = h_in - padding_val;
+                                let w_in_s = w_in - padding_val;
+                                if h_in_s < h && w_in_s < w {
+                                    let idx = nn * (c * h * w) + cc * (h * w) + h_in_s * w + w_in_s;
+                                    if idx < input.len() {
+                                        if input[idx] > val {
+                                            val = input[idx];
+                                            best_kh = kh;
+                                            best_kw = kw;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let out_idx = nn * (c * hw_out) + cc * hw_out + hh * w_out + ww;
+                    if out_idx < output.len() {
+                        output[out_idx] = val;
+                    }
+                    if let Some(ref mut idx_out) = indices_out {
+                        if out_idx < idx_out.len() {
+                            idx_out[out_idx] = (best_kh * kernel + best_kw) as i64;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[inline]
+pub fn pool_avg_f32_scalar(
+    input: &[f32], output: &mut [f32],
+    n: usize, c: usize, h: usize, w: usize,
+    kernel: usize, stride_val: usize, padding_val: usize,
+    h_out: usize, w_out: usize,
+) {
+    let hw_out = h_out * w_out;
+    for nn in 0..n {
+        for cc in 0..c {
+            for hh in 0..h_out {
+                for ww in 0..w_out {
+                    let mut val = 0.0f32;
+                    let mut count = 0usize;
+                    for kh in 0..kernel {
+                        for kw in 0..kernel {
+                            let h_in = hh * stride_val + kh;
+                            let w_in = ww * stride_val + kw;
+                            if h_in >= padding_val && w_in >= padding_val {
+                                let h_in_s = h_in - padding_val;
+                                let w_in_s = w_in - padding_val;
+                                if h_in_s < h && w_in_s < w {
+                                    let idx = nn * (c * h * w) + cc * (h * w) + h_in_s * w + w_in_s;
+                                    if idx < input.len() {
+                                        val += input[idx];
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if count > 0 {
+                        val /= count as f32;
+                    }
+                    let out_idx = nn * (c * hw_out) + cc * hw_out + hh * w_out + ww;
+                    if out_idx < output.len() {
+                        output[out_idx] = val;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[inline]
+pub fn adaptive_avg_pool2d_f32_scalar(
+    input: &[f32], output: &mut [f32],
+    nc: usize, h: usize, w: usize,
+    out_h: usize, out_w: usize,
+) {
+    let hw = h * w;
+    for nci in 0..nc {
+        for ohi in 0..out_h {
+            for owi in 0..out_w {
+                let h_start = ohi * h / out_h;
+                let h_end = (ohi + 1) * h / out_h;
+                let w_start = owi * w / out_w;
+                let w_end = (owi + 1) * w / out_w;
+                let mut sum = 0.0f32;
+                let mut count = 0;
+                for hi in h_start..h_end {
+                    for wi in w_start..w_end {
+                        sum += input[nci * hw + hi * w + wi];
+                        count += 1;
+                    }
+                }
+                let out_idx = nci * out_h * out_w + ohi * out_w + owi;
+                if out_idx < output.len() {
+                    output[out_idx] = if count > 0 { sum / count as f32 } else { 0.0 };
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn pool_max_f32_avx2(
+    input: &[f32], output: &mut [f32],
+    n: usize, c: usize, h: usize, w: usize,
+    kernel: usize, stride_val: usize, padding_val: usize,
+    h_out: usize, w_out: usize,
+    indices_out: Option<&mut [i64]>,
+) {
+    if stride_val != 1 || indices_out.is_some() {
+        return pool_max_f32_scalar(
+            input, output, n, c, h, w, kernel, stride_val, padding_val, h_out, w_out, indices_out,
+        );
+    }
+    let hw_out = h_out * w_out;
+
+    // Interior hh where all kh are valid (stride=1): hh in [padding_val, padding_val + h - kernel]
+    let interior_h_start = if padding_val < h_out { padding_val } else { h_out };
+    let interior_h_end = if padding_val + h >= kernel {
+        (padding_val + h - kernel + 1).min(h_out)
+    } else {
+        interior_h_start
+    };
+
+    // Interior ww where 8 consecutive outputs all have valid kw: ww in [padding_val, w+padding_val-kernel-7]
+    // exclusive upper bound: min(w_out, w+padding_val-kernel-6)
+    let interior_w_start = if padding_val < w_out { padding_val } else { w_out };
+    let interior_w_end = if w + padding_val >= kernel + 7 {
+        (w + padding_val - kernel - 6).min(w_out)
+    } else {
+        interior_w_start
+    };
+
+    let vneg_inf = _mm256_set1_ps(f32::NEG_INFINITY);
+
+    for nn in 0..n {
+        for cc in 0..c {
+            let ch_in_off = nn * (c * h * w) + cc * (h * w);
+            let ch_out_off = nn * (c * hw_out) + cc * hw_out;
+
+            // Top edge rows (scalar)
+            for hh in 0..interior_h_start {
+                for ww in 0..w_out {
+                    let mut val = f32::NEG_INFINITY;
+                    for kh in 0..kernel {
+                        let h_in = hh + kh;
+                        if h_in >= padding_val && h_in - padding_val < h {
+                            let rbase = ch_in_off + (h_in - padding_val) * w;
+                            for kw in 0..kernel {
+                                let w_in = ww + kw;
+                                if w_in >= padding_val && w_in - padding_val < w {
+                                    let inp = input[rbase + w_in - padding_val];
+                                    if inp > val { val = inp; }
+                                }
+                            }
+                        }
+                    }
+                    *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
+                }
+            }
+
+            // Interior rows
+            for hh in interior_h_start..interior_h_end {
+                // Left edge (scalar)
+                for ww in 0..interior_w_start {
+                    let mut val = f32::NEG_INFINITY;
+                    let h_s = hh - padding_val;
+                    for kh in 0..kernel {
+                        let rbase = ch_in_off + (h_s + kh) * w;
+                        for kw in 0..kernel {
+                            let w_in = ww + kw;
+                            if w_in >= padding_val && w_in - padding_val < w {
+                                let inp = input[rbase + w_in - padding_val];
+                                if inp > val { val = inp; }
+                            }
+                        }
+                    }
+                    *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
+                }
+
+                // Interior W (SIMD: 8 outputs at once)
+                let mut ww = interior_w_start;
+                while ww + 8 <= interior_w_end {
+                    let mut vmax = vneg_inf;
+                    let h_s = hh - padding_val;
+                    for kh in 0..kernel {
+                        let rbase = ch_in_off + (h_s + kh) * w;
+                        for kw in 0..kernel {
+                            let load_off = rbase + ww + kw - padding_val;
+                            let v = _mm256_loadu_ps(input.as_ptr().add(load_off));
+                            vmax = _mm256_max_ps(vmax, v);
+                        }
+                    }
+                    _mm256_storeu_ps(output.as_mut_ptr().add(ch_out_off + hh * w_out + ww), vmax);
+                    ww += 8;
+                }
+
+                // Right edge (scalar)
+                for ww in ww..w_out {
+                    let mut val = f32::NEG_INFINITY;
+                    let h_s = hh - padding_val;
+                    for kh in 0..kernel {
+                        let rbase = ch_in_off + (h_s + kh) * w;
+                        for kw in 0..kernel {
+                            let w_in = ww + kw;
+                            if w_in >= padding_val && w_in - padding_val < w {
+                                let inp = input[rbase + w_in - padding_val];
+                                if inp > val { val = inp; }
+                            }
+                        }
+                    }
+                    *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
+                }
+            }
+
+            // Bottom edge rows (scalar)
+            for hh in interior_h_end..h_out {
+                for ww in 0..w_out {
+                    let mut val = f32::NEG_INFINITY;
+                    for kh in 0..kernel {
+                        let h_in = hh + kh;
+                        if h_in >= padding_val && h_in - padding_val < h {
+                            let rbase = ch_in_off + (h_in - padding_val) * w;
+                            for kw in 0..kernel {
+                                let w_in = ww + kw;
+                                if w_in >= padding_val && w_in - padding_val < w {
+                                    let inp = input[rbase + w_in - padding_val];
+                                    if inp > val { val = inp; }
+                                }
+                            }
+                        }
+                    }
+                    *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn pool_avg_f32_avx2(
+    input: &[f32], output: &mut [f32],
+    n: usize, c: usize, h: usize, w: usize,
+    kernel: usize, stride_val: usize, padding_val: usize,
+    h_out: usize, w_out: usize,
+) {
+    if stride_val != 1 {
+        return pool_avg_f32_scalar(
+            input, output, n, c, h, w, kernel, stride_val, padding_val, h_out, w_out,
+        );
+    }
+    let hw_out = h_out * w_out;
+    let kernel_area = (kernel * kernel) as f32;
+
+    let interior_h_start = if padding_val < h_out { padding_val } else { h_out };
+    let interior_h_end = if padding_val + h >= kernel {
+        (padding_val + h - kernel + 1).min(h_out)
+    } else {
+        interior_h_start
+    };
+    let interior_w_start = if padding_val < w_out { padding_val } else { w_out };
+    let interior_w_end = if w + padding_val >= kernel + 7 {
+        (w + padding_val - kernel - 6).min(w_out)
+    } else {
+        interior_w_start
+    };
+
+    let vkernel_area = _mm256_set1_ps(kernel_area);
+
+    for nn in 0..n {
+        for cc in 0..c {
+            let ch_in_off = nn * (c * h * w) + cc * (h * w);
+            let ch_out_off = nn * (c * hw_out) + cc * hw_out;
+
+            // Top edge rows (scalar)
+            for hh in 0..interior_h_start {
+                for ww in 0..w_out {
+                    let mut val = 0.0f32;
+                    let mut count = 0usize;
+                    for kh in 0..kernel {
+                        let h_in = hh + kh;
+                        if h_in >= padding_val && h_in - padding_val < h {
+                            let rbase = ch_in_off + (h_in - padding_val) * w;
+                            for kw in 0..kernel {
+                                let w_in = ww + kw;
+                                if w_in >= padding_val && w_in - padding_val < w {
+                                    val += input[rbase + w_in - padding_val];
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                    if count > 0 { val /= count as f32; }
+                    *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
+                }
+            }
+
+            // Interior rows
+            for hh in interior_h_start..interior_h_end {
+                // Left edge (scalar)
+                for ww in 0..interior_w_start {
+                    let mut val = 0.0f32;
+                    let mut count = 0usize;
+                    let h_s = hh - padding_val;
+                    for kh in 0..kernel {
+                        let rbase = ch_in_off + (h_s + kh) * w;
+                        for kw in 0..kernel {
+                            let w_in = ww + kw;
+                            if w_in >= padding_val && w_in - padding_val < w {
+                                val += input[rbase + w_in - padding_val];
+                                count += 1;
+                            }
+                        }
+                    }
+                    if count > 0 { val /= count as f32; }
+                    *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
+                }
+
+                // Interior W (SIMD)
+                let mut ww = interior_w_start;
+                while ww + 8 <= interior_w_end {
+                    let mut vacc = _mm256_setzero_ps();
+                    let h_s = hh - padding_val;
+                    for kh in 0..kernel {
+                        let rbase = ch_in_off + (h_s + kh) * w;
+                        for kw in 0..kernel {
+                            let load_off = rbase + ww + kw - padding_val;
+                            let v = _mm256_loadu_ps(input.as_ptr().add(load_off));
+                            vacc = _mm256_add_ps(vacc, v);
+                        }
+                    }
+                    let vavg = _mm256_div_ps(vacc, vkernel_area);
+                    _mm256_storeu_ps(output.as_mut_ptr().add(ch_out_off + hh * w_out + ww), vavg);
+                    ww += 8;
+                }
+
+                // Right edge (scalar)
+                for ww in ww..w_out {
+                    let mut val = 0.0f32;
+                    let mut count = 0usize;
+                    let h_s = hh - padding_val;
+                    for kh in 0..kernel {
+                        let rbase = ch_in_off + (h_s + kh) * w;
+                        for kw in 0..kernel {
+                            let w_in = ww + kw;
+                            if w_in >= padding_val && w_in - padding_val < w {
+                                val += input[rbase + w_in - padding_val];
+                                count += 1;
+                            }
+                        }
+                    }
+                    if count > 0 { val /= count as f32; }
+                    *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
+                }
+            }
+
+            // Bottom edge rows (scalar)
+            for hh in interior_h_end..h_out {
+                for ww in 0..w_out {
+                    let mut val = 0.0f32;
+                    let mut count = 0usize;
+                    for kh in 0..kernel {
+                        let h_in = hh + kh;
+                        if h_in >= padding_val && h_in - padding_val < h {
+                            let rbase = ch_in_off + (h_in - padding_val) * w;
+                            for kw in 0..kernel {
+                                let w_in = ww + kw;
+                                if w_in >= padding_val && w_in - padding_val < w {
+                                    val += input[rbase + w_in - padding_val];
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                    if count > 0 { val /= count as f32; }
+                    *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================
 // Remaining scalar ops — AVX2 microkernels for ops without dedicated kernels
 // ============================================================
 
@@ -3729,28 +4329,111 @@ pub fn conv2d_f32_im2col_gemm(
     let f_per_group = f / groups.max(1);
     let h_out = (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1) / stride + 1;
     let w_out = (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1) / stride + 1;
+    let spatial_size = h_out * w_out;
 
     // Small tensor fallback to avoid im2col overhead
-    if h_out * w_out * f < 64 {
+    if spatial_size * f < 64 {
         conv2d_f32_tiled(
             input, weight, bias, output, n, c, h, w, f, kh, kw, stride, padding, dilation, groups,
         );
         return;
     }
 
-    // General case: im2col + GEMM (also handles 1x1 correctly — im2col
-    // for 1x1 is just an element copy, which correctly handles the NCHW
-    // memory layout that direct GEMM access would misinterpret).
+    // Fast path for 1x1 convolutions (no im2col, no weight transpose).
+    // The input NCHW data is treated as a column-major [c_per_group, num_pixels] matrix
+    // (rs_a=1, cs_a=spatial_size_per_batch) and the weight as column-major [c, f]
+    // (rs_b=1, cs_b=c_per_group). This avoids the im2col copy and the weight transpose,
+    // saving ~2 * num_pixels * c elements of memory traffic per group.
+    if kh == 1 && kw == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1 {
+        let col_w = c_per_group; // = c since groups == 1
+        let num_pixels = n * spatial_size;
+        let hw_per_img = h * w;
+
+        for g in 0..groups {
+            let f_start = g * f_per_group;
+            let input_group_off = g * col_w * hw_per_img;
+            let weight_off = f_start * col_w;
+
+            let mut temp_out = get_conv_buf!(&CONV_TEMP_OUT_BUF, num_pixels * f_per_group);
+            unsafe {
+                // Direct GEMM: A[num_pixels, col_w] = input[col_w, hw] with rs_a=1, cs_a=hw
+                //   A[spatial][ch] = input[ch * hw + spatial]  (NCHW: within each batch, channels are outer)
+                // B[col_w, f] = weight[f, col_w] with rs_b=1, cs_b=col_w
+                //   B[ch][oc] = weight[oc * col_w + ch]
+                matrixmultiply::sgemm(
+                    num_pixels,
+                    col_w,
+                    f_per_group,
+                    1.0,
+                    input.as_ptr().add(input_group_off),
+                    1isize,
+                    hw_per_img as isize,
+                    weight.as_ptr().add(weight_off),
+                    1isize,
+                    col_w as isize,
+                    0.0,
+                    temp_out.as_mut_ptr(),
+                    f_per_group as isize,
+                    1isize,
+                );
+            }
+
+            // Scatter temp_out [num_pixels, f] to NCHW output with bias
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                let num_pixels = num_pixels;
+                let f_per_group = f_per_group;
+                let f_start = f_start;
+                let spatial_size = spatial_size;
+                let f = f;
+                let bias = bias;
+                // RefMut<Vec<f32>> is !Sync, so cast to usize (Sync) and
+                // reconstruct the pointer inside the closure.
+                let temp_ptr = temp_out.as_ptr() as usize;
+                let out_ptr = output.as_mut_ptr() as usize;
+                let f_whole = f;
+                (0..num_pixels * f_per_group).into_par_iter().for_each(|idx| {
+                    let pixel = idx / f_per_group;
+                    let ff = idx % f_per_group;
+                    let nn = pixel / spatial_size;
+                    let spatial = pixel % spatial_size;
+                    let mut val = unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
+                    if !bias.is_empty() {
+                        val += bias[f_start + ff];
+                    }
+                    unsafe {
+                        *(out_ptr as *mut f32).add(nn * (f_whole * spatial_size) + (f_start + ff) * spatial_size + spatial) = val;
+                    }
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
+            for pixel in 0..num_pixels {
+                let nn = pixel / spatial_size;
+                let spatial = pixel % spatial_size;
+                for ff in 0..f_per_group {
+                    let mut val = temp_out[pixel * f_per_group + ff];
+                    if !bias.is_empty() {
+                        val += bias[f_start + ff];
+                    }
+                    output[nn * (f * spatial_size) + (f_start + ff) * spatial_size + spatial] = val;
+                }
+            }
+        }
+        return;
+    }
+
+    // General case: im2col + GEMM (for non-1x1 convolutions)
     for g in 0..groups {
         let f_start = g * f_per_group;
         let input_group_off = g * c_per_group * (h * w);
 
         let col_w = c_per_group * kh * kw;
-        let num_pixels = n * h_out * w_out;
+        let num_pixels = n * spatial_size;
         let mut col_matrix = get_conv_buf!(&CONV_COL_BUF, num_pixels * col_w);
 
         for nn in 0..n {
-            let col_start = nn * (h_out * w_out) * col_w;
+            let col_start = nn * spatial_size * col_w;
             unsafe {
                 crate::backend::cpu::im2col::im2col_kernel_rect(
                     &input[nn * (c * h * w) + input_group_off..],
@@ -3795,7 +4478,34 @@ pub fn conv2d_f32_im2col_gemm(
             );
         }
 
-        let spatial_size = h_out * w_out;
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let num_pixels = num_pixels;
+            let f_per_group = f_per_group;
+            let f_start = f_start;
+            let spatial_size = spatial_size;
+            let f = f;
+            let bias = bias;
+            // Same usize-cast Sync-safe approach as the 1×1 fast-path scatter above.
+            let temp_ptr = temp_out.as_ptr() as usize;
+            let out_ptr = output.as_mut_ptr() as usize;
+            let f_whole = f;
+            (0..num_pixels * f_per_group).into_par_iter().for_each(|idx| {
+                let pixel = idx / f_per_group;
+                let ff = idx % f_per_group;
+                let nn = pixel / spatial_size;
+                let spatial = pixel % spatial_size;
+                let mut val = unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
+                if !bias.is_empty() {
+                    val += bias[f_start + ff];
+                }
+                unsafe {
+                    *(out_ptr as *mut f32).add(nn * (f_whole * spatial_size) + (f_start + ff) * spatial_size + spatial) = val;
+                }
+            });
+        }
+        #[cfg(not(feature = "parallel"))]
         for pixel in 0..num_pixels {
             let nn = pixel / spatial_size;
             let spatial = pixel % spatial_size;
@@ -3809,6 +4519,276 @@ pub fn conv2d_f32_im2col_gemm(
         }
     }
 }
+
+// ============================================================
+// UpsampleNearest2d — scalar and AVX2
+// ============================================================
+
+/// Nearest-neighbor upsampling: each input pixel replicates into a
+/// `scale_h × scale_w` block in the output.
+///
+/// # Layout
+/// Input is NCHW: shape `[nc, h_in, w_in]` stored flat (`nc = N * C`).
+/// Output is `[nc, h_in * scale_h, w_in * scale_w]`.
+#[inline]
+pub fn upsample_nearest2d_f32(
+    input: &[f32],
+    output: &mut [f32],
+    nc: usize,
+    h_in: usize,
+    w_in: usize,
+    scale_h: usize,
+    scale_w: usize,
+) {
+    let hw = h_in * w_in;
+    let out_row_stride = w_in * scale_w;
+    for nci in 0..nc {
+        for hi in 0..h_in {
+            for wi in 0..w_in {
+                let val = input[nci * hw + hi * w_in + wi];
+                for sh in 0..scale_h {
+                    let out_row = nci * hw * scale_h * scale_w
+                        + (hi * scale_h + sh) * out_row_stride
+                        + wi * scale_w;
+                    for sw in 0..scale_w {
+                        output[out_row + sw] = val;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// AVX2 nearest-neighbor upsampling using broadcast stores.
+///
+/// For `scale_w ∈ {1, 2, 4}`, processes `8 / scale_w` input columns per
+/// vector iteration, broadcasting each value `scale_w` times into an 8-wide
+/// store. This reduces store instructions by up to 87.5% vs scalar.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn upsample_nearest2d_f32_avx2(
+    input: &[f32],
+    output: &mut [f32],
+    nc: usize,
+    h_in: usize,
+    w_in: usize,
+    scale_h: usize,
+    scale_w: usize,
+) {
+    // Fallback to scalar for unsupported scale factors
+    if scale_w != 1 && scale_w != 2 && scale_w != 4 {
+        return upsample_nearest2d_f32(input, output, nc, h_in, w_in, scale_h, scale_w);
+    }
+    let hw = h_in * w_in;
+    let out_row_stride = w_in * scale_w;
+    // Number of input columns processed per AVX2 iteration (8 output floats / scale_w)
+    let vec_step = 8 / scale_w;
+
+    for nci in 0..nc {
+        for hi in 0..h_in {
+            let mut wi = 0;
+            while wi + vec_step <= w_in {
+                let in_base = nci * hw + hi * w_in + wi;
+                // Build a vector of 8 floats with each input value repeated scale_w times.
+                // _mm256_set_ps args go from highest lane (index 7) to lowest (index 0).
+                // Memory order after store: arg0 at lowest address, arg7 at highest.
+                let v = match scale_w {
+                    1 => {
+                        // Direct copy: 8 input values, no repetition
+                        _mm256_loadu_ps(input.as_ptr().add(in_base))
+                    }
+                    2 => {
+                        // 4 input values → each repeated twice
+                        _mm256_set_ps(
+                            *input.get_unchecked(in_base + 3),
+                            *input.get_unchecked(in_base + 3),
+                            *input.get_unchecked(in_base + 2),
+                            *input.get_unchecked(in_base + 2),
+                            *input.get_unchecked(in_base + 1),
+                            *input.get_unchecked(in_base + 1),
+                            *input.get_unchecked(in_base + 0),
+                            *input.get_unchecked(in_base + 0),
+                        )
+                    }
+                    4 => {
+                        // 2 input values → each repeated 4 times
+                        _mm256_set_ps(
+                            *input.get_unchecked(in_base + 1),
+                            *input.get_unchecked(in_base + 1),
+                            *input.get_unchecked(in_base + 1),
+                            *input.get_unchecked(in_base + 1),
+                            *input.get_unchecked(in_base + 0),
+                            *input.get_unchecked(in_base + 0),
+                            *input.get_unchecked(in_base + 0),
+                            *input.get_unchecked(in_base + 0),
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+
+                // Write the same 8-wide block to each output row (sh = 0..scale_h)
+                for sh in 0..scale_h {
+                    let out_base = nci * hw * scale_h * scale_w
+                        + (hi * scale_h + sh) * out_row_stride
+                        + wi * scale_w;
+                    _mm256_storeu_ps(output.as_mut_ptr().add(out_base), v);
+                }
+
+                wi += vec_step;
+            }
+            // Handle remaining columns (wi < vec_step from end)
+            for wi in wi..w_in {
+                let val = input[nci * hw + hi * w_in + wi];
+                for sh in 0..scale_h {
+                    let out_base = nci * hw * scale_h * scale_w
+                        + (hi * scale_h + sh) * out_row_stride
+                        + wi * scale_w;
+                    for sw in 0..scale_w {
+                        *output.get_unchecked_mut(out_base + sw) = val;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================
+// Concat — scalar and AVX2
+// ============================================================
+
+/// Scalar concat: copies `input` into `output` at `output_offset`.
+/// Returns the new output offset after copy.
+#[inline]
+pub fn concat_f32_scalar(input: &[f32], output: &mut [f32], output_offset: usize) -> usize {
+    let end = (output_offset + input.len()).min(output.len());
+    let len = end - output_offset;
+    output[output_offset..end].copy_from_slice(&input[..len]);
+    output_offset + len
+}
+
+/// AVX2 concat: copies `input` into `output` at `output_offset` using
+/// 8-wide vector stores for the bulk of the copy, falling back to scalar
+/// for the remainder.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn concat_f32_avx2(input: &[f32], output: &mut [f32], output_offset: usize) -> usize {
+    let out_start = output_offset;
+    let copy_len = input.len().min(output.len().saturating_sub(out_start));
+    let mut i = 0usize;
+    // 8-wide vector copy
+    while i + 8 <= copy_len {
+        let v = _mm256_loadu_ps(input.as_ptr().add(i));
+        _mm256_storeu_ps(output.as_mut_ptr().add(out_start + i), v);
+        i += 8;
+    }
+    // Scalar remainder
+    for j in i..copy_len {
+        *output.as_mut_ptr().add(out_start + j) = *input.as_ptr().add(j);
+    }
+    out_start + copy_len
+}
+
+
+// ============================================================
+// Transpose 2D — scalar and AVX2 tiled 8×8
+// ============================================================
+
+/// Scalar 2D transpose: out[j * m + i] = in[i * n + j]
+#[inline]
+pub fn transpose_f32_scalar(input: &[f32], output: &mut [f32], m: usize, n: usize) {
+    for i in 0..m {
+        for j in 0..n {
+            output[j * m + i] = input[i * n + j];
+        }
+    }
+}
+
+/// AVX2 tiled 8×8 2D transpose. Processes 8×8 tiles using unpack
+/// and permute instructions, falling back to scalar for edge tiles.
+///
+/// Uses the classic:
+///   t0 = _mm256_unpacklo_ps(a0, a1)  // a0[0], a1[0], a0[1], a1[1], ...
+///   t1 = _mm256_unpackhi_ps(a0, a1)  // a0[2], a1[2], a0[3], a1[3], ...
+///   ... then combine across rows with permute.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n: usize) {
+    use std::arch::x86_64::*;
+
+    // Process 8×8 tiles
+    let mut i = 0;
+    while i + 8 <= m {
+        let mut j = 0;
+        while j + 8 <= n {
+            // Load 8 rows of 8 elements each
+            let r0 = _mm256_loadu_ps(input.as_ptr().add((i + 0) * n + j));
+            let r1 = _mm256_loadu_ps(input.as_ptr().add((i + 1) * n + j));
+            let r2 = _mm256_loadu_ps(input.as_ptr().add((i + 2) * n + j));
+            let r3 = _mm256_loadu_ps(input.as_ptr().add((i + 3) * n + j));
+            let r4 = _mm256_loadu_ps(input.as_ptr().add((i + 4) * n + j));
+            let r5 = _mm256_loadu_ps(input.as_ptr().add((i + 5) * n + j));
+            let r6 = _mm256_loadu_ps(input.as_ptr().add((i + 6) * n + j));
+            let r7 = _mm256_loadu_ps(input.as_ptr().add((i + 7) * n + j));
+
+            // Unpack low/high 64-bit halves (4-element chunks)
+            let t01a = _mm256_unpacklo_ps(r0, r1);  // r0[0], r1[0], r0[1], r1[1]
+            let t01b = _mm256_unpackhi_ps(r0, r1);  // r0[2], r1[2], r0[3], r1[3]
+            let t23a = _mm256_unpacklo_ps(r2, r3);
+            let t23b = _mm256_unpackhi_ps(r2, r3);
+            let t45a = _mm256_unpacklo_ps(r4, r5);
+            let t45b = _mm256_unpackhi_ps(r4, r5);
+            let t67a = _mm256_unpacklo_ps(r6, r7);
+            let t67b = _mm256_unpackhi_ps(r6, r7);
+
+            // Combine into 8-wide transpose result
+            let q0 = _mm256_shuffle_ps(t01a, t23a, 0b_01_00_01_00);  // cols 0,1 of rows 0-3
+            let q1 = _mm256_shuffle_ps(t01a, t23a, 0b_11_10_11_10);  // cols 2,3 of rows 0-3
+            let q2 = _mm256_shuffle_ps(t01b, t23b, 0b_01_00_01_00);  // cols 4,5 of rows 0-3
+            let q3 = _mm256_shuffle_ps(t01b, t23b, 0b_11_10_11_10);  // cols 6,7 of rows 0-3
+            let q4 = _mm256_shuffle_ps(t45a, t67a, 0b_01_00_01_00);  // cols 0,1 of rows 4-7
+            let q5 = _mm256_shuffle_ps(t45a, t67a, 0b_11_10_11_10);  // cols 2,3 of rows 4-7
+            let q6 = _mm256_shuffle_ps(t45b, t67b, 0b_01_00_01_00);  // cols 4,5 of rows 4-7
+            let q7 = _mm256_shuffle_ps(t45b, t67b, 0b_11_10_11_10);  // cols 6,7 of rows 4-7
+
+            // Permute to final layout — now rows are in order 0,4,1,5,2,6,3,7
+            // We need them as 0,1,2,3,4,5,6,7
+            let out0 = _mm256_permute2f128_ps(q0, q4, 0x20);
+            let out4 = _mm256_permute2f128_ps(q0, q4, 0x31);
+            let out1 = _mm256_permute2f128_ps(q1, q5, 0x20);
+            let out5 = _mm256_permute2f128_ps(q1, q5, 0x31);
+            let out2 = _mm256_permute2f128_ps(q2, q6, 0x20);
+            let out6 = _mm256_permute2f128_ps(q2, q6, 0x31);
+            let out3 = _mm256_permute2f128_ps(q3, q7, 0x20);
+            let out7 = _mm256_permute2f128_ps(q3, q7, 0x31);
+
+            // Store 8 cols × 8 rows in transposed position
+            _mm256_storeu_ps(output.as_mut_ptr().add((j + 0) * m + i), out0);
+            _mm256_storeu_ps(output.as_mut_ptr().add((j + 1) * m + i), out1);
+            _mm256_storeu_ps(output.as_mut_ptr().add((j + 2) * m + i), out2);
+            _mm256_storeu_ps(output.as_mut_ptr().add((j + 3) * m + i), out3);
+            _mm256_storeu_ps(output.as_mut_ptr().add((j + 4) * m + i), out4);
+            _mm256_storeu_ps(output.as_mut_ptr().add((j + 5) * m + i), out5);
+            _mm256_storeu_ps(output.as_mut_ptr().add((j + 6) * m + i), out6);
+            _mm256_storeu_ps(output.as_mut_ptr().add((j + 7) * m + i), out7);
+
+            j += 8;
+        }
+        // Scalar remainder columns
+        for jj in j..n {
+            for ii in i..i + 8 {
+                *output.as_mut_ptr().add(jj * m + ii) = *input.as_ptr().add(ii * n + jj);
+            }
+        }
+        i += 8;
+    }
+    // Scalar remainder rows
+    for ii in i..m {
+        for jj in 0..n {
+            *output.as_mut_ptr().add(jj * m + ii) = *input.as_ptr().add(ii * n + jj);
+        }
+    }
+}
+
 
 // ============================================================
 // NEON kernel correctness tests

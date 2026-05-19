@@ -1,5 +1,6 @@
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use crate::dispatch_gpu_compute;
 use super::PendingRead;
 
 #[repr(C)]
@@ -13,6 +14,7 @@ dispatch_gpu_compute!(
     dispatch_transpose_gpu,
     build_transpose_shader(),
     "transpose",
+    input, arg1, arg2,
     (arg1 * arg2 * 4) as u64,
     TpParams { m: arg1 as u32, n: arg2 as u32 },
     (arg1 as u32).div_ceil(16).max(1),

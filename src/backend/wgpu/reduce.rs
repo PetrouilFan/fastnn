@@ -1,5 +1,6 @@
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use crate::dispatch_gpu_compute;
 use super::PendingRead;
 
 #[repr(C)]
@@ -15,6 +16,7 @@ dispatch_gpu_compute!(
     dispatch_reduce_gpu,
     build_reduce_shader(),
     "reduce",
+    input, arg1, arg2,
     {
         let ng = input.len().checked_div(arg1).unwrap_or(1);
         (ng * 4) as u64

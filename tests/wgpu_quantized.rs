@@ -1,3 +1,5 @@
+#![cfg(feature = "gpu")]
+
 //! Tests for WGPU quantized inference (U4/U8 matmul & conv2d).
 //!
 //! Note: These tests require a GPU and are `#[ignore]` by default.
