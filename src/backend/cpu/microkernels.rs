@@ -4322,6 +4322,7 @@ pub fn conv2d_f32_im2col_gemm(
     padding: usize,
     dilation: usize,
     groups: usize,
+    activation: Option<fn(f32) -> f32>,
 ) {
     let c_per_group = c / groups.max(1);
     let f_per_group = f / groups.max(1);
@@ -4334,6 +4335,12 @@ pub fn conv2d_f32_im2col_gemm(
         conv2d_f32_tiled(
             input, weight, bias, output, n, c, h, w, f, kh, kw, stride, padding, dilation, groups,
         );
+        // Apply activation separately for tiled path
+        if let Some(act) = activation {
+            for x in output.iter_mut() {
+                *x = act(*x);
+            }
+        }
         return;
     }
 
@@ -4376,7 +4383,7 @@ pub fn conv2d_f32_im2col_gemm(
                 );
             }
 
-            // Scatter temp_out [num_pixels, f] to NCHW output with bias
+            // Scatter temp_out [num_pixels, f] to NCHW output with bias and optional activation
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
@@ -4386,6 +4393,7 @@ pub fn conv2d_f32_im2col_gemm(
                 let spatial_size = spatial_size;
                 let f = f;
                 let bias = bias;
+                let activation = activation;
                 // RefMut<Vec<f32>> is !Sync, so cast to usize (Sync) and
                 // reconstruct the pointer inside the closure.
                 let temp_ptr = temp_out.as_ptr() as usize;
@@ -4400,6 +4408,9 @@ pub fn conv2d_f32_im2col_gemm(
                     if !bias.is_empty() {
                         val += bias[f_start + ff];
                     }
+                    if let Some(act) = activation {
+                        val = act(val);
+                    }
                     unsafe {
                         *(out_ptr as *mut f32).add(nn * (f_whole * spatial_size) + (f_start + ff) * spatial_size + spatial) = val;
                     }
@@ -4413,6 +4424,9 @@ pub fn conv2d_f32_im2col_gemm(
                     let mut val = temp_out[pixel * f_per_group + ff];
                     if !bias.is_empty() {
                         val += bias[f_start + ff];
+                    }
+                    if let Some(act) = activation {
+                        val = act(val);
                     }
                     output[nn * (f * spatial_size) + (f_start + ff) * spatial_size + spatial] = val;
                 }
@@ -4482,6 +4496,7 @@ pub fn conv2d_f32_im2col_gemm(
             let spatial_size = spatial_size;
             let f = f;
             let bias = bias;
+            let activation = activation;
             // Same usize-cast Sync-safe approach as the 1×1 fast-path scatter above.
             let temp_ptr = temp_out.as_ptr() as usize;
             let out_ptr = output.as_mut_ptr() as usize;
@@ -4494,6 +4509,9 @@ pub fn conv2d_f32_im2col_gemm(
                 let mut val = unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
                 if !bias.is_empty() {
                     val += bias[f_start + ff];
+                }
+                if let Some(act) = activation {
+                    val = act(val);
                 }
                 unsafe {
                     *(out_ptr as *mut f32).add(nn * (f_whole * spatial_size) + (f_start + ff) * spatial_size + spatial) = val;
@@ -4508,6 +4526,9 @@ pub fn conv2d_f32_im2col_gemm(
                 let mut val = temp_out[pixel * f_per_group + ff];
                 if !bias.is_empty() {
                     val += bias[f_start + ff];
+                }
+                if let Some(act) = activation {
+                    val = act(val);
                 }
                 output[nn * (f * spatial_size) + (f_start + ff) * spatial_size + spatial] = val;
             }
