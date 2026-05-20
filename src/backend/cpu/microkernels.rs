@@ -4447,7 +4447,7 @@ pub fn conv2d_f32_im2col_gemm(
         for nn in 0..n {
             let col_start = nn * spatial_size * col_w;
             unsafe {
-                crate::backend::cpu::im2col::im2col_kernel_rect(
+                crate::backend::cpu::im2col::im2col_dispatch(
                     &input[nn * (c * h * w) + input_group_off..],
                     c_per_group,
                     h,
