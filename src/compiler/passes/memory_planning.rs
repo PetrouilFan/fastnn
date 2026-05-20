@@ -338,7 +338,7 @@ pub fn plan_memory_with_env(
     // Process nodes in reverse topological order so that consumers are
     // processed before their producers.
     for &node_id in order.iter().rev() {
-        let node = match graph.get_node(node_id) {
+        let _node = match graph.get_node(node_id) {
             Some(n) => n,
             None => continue,
         };

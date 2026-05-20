@@ -196,6 +196,7 @@ impl TensorImpl {
     pub fn cpu_data(&self) -> Option<&[u8]> {
         match self.storage.as_ref() {
             Storage::Cpu(cpu) => Some(&cpu.data),
+            #[cfg_attr(not(feature = "gpu"), allow(unreachable_patterns))]
             _ => None,
         }
     }

@@ -42,6 +42,7 @@ blas = []
 parallel = ["rayon"]
 simd = []
 simd_avx512 = []
+debug_canary = []
 
 # ── Fusion passes (compile-time modular) ─────────────────────────────
 fusion-forward = [

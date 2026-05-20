@@ -479,6 +479,7 @@ pub unsafe fn leaky_relu_f32_avx2(input: &[f32], output: &mut [f32], slope: f32)
 // ── Complex ops (SIMD struct load/store, per-element scalar math) ───
 
 /// Macro: unrolls 8-element SIMD struct loads/stores, calling `$scalar_fn` per lane.
+#[allow(unused_macros)]
 macro_rules! avx2_elwise_fallback {
     ($name:ident, $scalar_fn:expr) => {
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -600,7 +601,7 @@ unsafe fn log_avx2_vec(x: __m256) -> __m256 {
 
     let m2 = _mm256_mul_ps(mant_f, mant_f);
     let m3 = _mm256_mul_ps(m2, mant_f);
-    let m4 = _mm256_mul_ps(m3, mant_f);
+    let _m4 = _mm256_mul_ps(m3, mant_f);
 
     // Horner: (((c4*m + c3)*m + c2)*m + c1)*m + c0
     let mut log_m = _mm256_fmadd_ps(c4, mant_f, c3);
