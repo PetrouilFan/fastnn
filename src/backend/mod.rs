@@ -96,6 +96,10 @@ pub enum Instruction {
 pub struct ExecutablePlan {
     pub instructions: Vec<Instruction>,
     pub arena_size: usize,
+    /// Topological level for each instruction (same index as `instructions`).
+    /// Instructions with the same level have no data dependencies and can
+    /// execute in parallel. Levels increase monotonically.
+    pub levels: Vec<usize>,
 }
 
 impl ExecutablePlan {
