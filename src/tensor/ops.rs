@@ -44,6 +44,7 @@ macro_rules! impl_unary_op {
 /// after `&ins[0]` (e.g. `leaky_relu, negative_slope` produces `g.leaky_relu(&ins[0], negative_slope)`).
 macro_rules! impl_unary_op_extra {
     ($try_name:ident, $name:ident, $backward:literal, ($($param:ident: $ptype:ty),*), $ir_method:ident $(, $extra_arg:expr)*) => {
+        #[allow(unused_variables)]
         pub fn $try_name(&self, $($param: $ptype),*) -> Result<Tensor, BackendError> {
             let output = exec_single(&[self], |g, ins| vec![g.$ir_method(&ins[0] $(, $extra_arg)*)])?;
             if autograd::is_grad_enabled() && self.requires_grad() {
@@ -214,6 +215,7 @@ impl Tensor {
             {
                 let inner = Arc::make_mut(&mut output.inner);
                 let storage = Arc::make_mut(&mut inner.storage);
+                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
                 let Storage::Cpu(cpu_storage) = storage else {
                     unreachable!("add fast path only runs when both tensors are on CPU")
                 };

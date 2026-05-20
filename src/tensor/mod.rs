@@ -353,6 +353,7 @@ impl TensorImpl {
         // is derived from `data_ptr_f32_mut()` which ensures exclusive ownership.
         unsafe {
             // Unconditional bounds validation to prevent UB in release builds
+            #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
             if let Storage::Cpu(cpu) = self.storage.as_ref() {
                 let elem_size = self.dtype.size();
                 let storage_len = cpu.data.len() / elem_size;
@@ -1139,6 +1140,7 @@ impl Tensor {
                 let num_bytes = self.inner.numel() as usize * elem_size;
                 &cpu.data[offset..offset + num_bytes]
             }
+            #[cfg_attr(not(feature = "gpu"), allow(unreachable_patterns))]
             _ => panic!("as_bytes: GPU tensors not supported; call .to_cpu() first"),
         }
     }

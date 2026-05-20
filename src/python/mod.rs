@@ -13,7 +13,9 @@ use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
 use pyo3::PyAny;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(feature = "gpu")]
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 // Custom exception hierarchy for fastnn
@@ -68,6 +70,7 @@ pyo3::create_exception!(
 
 // Lock-free default device storage (AtomicU8 for variant, AtomicUsize for device_id)
 static DEFAULT_DEVICE_VARIANT: AtomicU8 = AtomicU8::new(0);
+#[cfg(feature = "gpu")]
 static DEFAULT_DEVICE_ID: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn get_default_device() -> Device {

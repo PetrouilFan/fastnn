@@ -73,6 +73,7 @@ impl Tensor {
     pub fn from_scalar(value: f32) -> Self {
         let mut storage = get_storage_pool().acquire_uninit(4, Device::Cpu);
         let storage_mut = Arc::make_mut(&mut storage);
+        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
         let Storage::Cpu(cpu_storage) = storage_mut else {
             panic!("Expected CPU storage");
         };
@@ -92,6 +93,7 @@ impl Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let nbytes = values.len() * 4;
         let mut storage = get_storage_pool().acquire_uninit(nbytes, Device::Cpu);
+        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
         let Storage::Cpu(cpu) = Arc::make_mut(&mut storage) else {
             panic!("Expected CPU storage");
         };
@@ -202,6 +204,7 @@ impl Tensor {
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
                 let inner = Arc::make_mut(&mut storage);
+                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
                 let Storage::Cpu(cpu_storage) = inner else {
                     panic!("Expected CPU storage for ones()");
                 };
@@ -294,6 +297,7 @@ impl Tensor {
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
                 let inner = Arc::make_mut(&mut storage);
+                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
                 let Storage::Cpu(cpu_storage) = inner else {
                     panic!("Expected CPU storage for full()");
                 };
