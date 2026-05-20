@@ -16,6 +16,7 @@ fn cpu_f32_fast_path_setup(t: &Tensor) -> Option<(usize, *const f32, *mut f32, T
         let mut output = Tensor::empty(t.shape(), DType::F32, Device::Cpu);
         let inner = Arc::make_mut(&mut output.inner);
         let storage = Arc::make_mut(&mut inner.storage);
+        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
         let Storage::Cpu(cpu_storage) = storage else { unreachable!() };
         let out_data = Arc::make_mut(&mut cpu_storage.data);
         let a_ptr = t.data_ptr_f32();

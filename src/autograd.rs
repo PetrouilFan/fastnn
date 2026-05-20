@@ -276,7 +276,7 @@ fn topological_order(nodes: &[Arc<NodeInfo>]) -> Vec<Arc<NodeInfo>> {
 fn scalar_from_tensor(t: &Tensor) -> f32 {
     let cpu_t = t.to_cpu();
     let data = cpu_t.as_bytes();
-    let dtype_size = t.dtype().size();
+    let _dtype_size = t.dtype().size();
     let offset = 0; // storage_offset not available on current Tensor API
     if data.len() >= offset + 4 {
         f32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
@@ -2771,7 +2771,7 @@ pub fn build_backward_graph(
                         .get("kernel_size")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(2);
-                    let stride: usize = node
+                    let _stride: usize = node
                         .attrs
                         .get("stride")
                         .and_then(|s| s.parse().ok())
@@ -3312,7 +3312,7 @@ pub fn build_backward_graph(
             Opcode::Repeat => {
                 // y = repeat(x, repeats)  =>  dL/dx = sum(grad) over repeated axes
                 if let Some(&input_id) = node.inputs.first() {
-                    let input_type = forward_graph
+                    let _input_type = forward_graph
                         .get_node(input_id)
                         .map(|n| n.output_type.clone())
                         .unwrap_or(TensorType::new(vec![], IrDType::F32));
