@@ -11,7 +11,7 @@ use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{PackedWord, U4x8, U8x4};
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorValue};
+use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use std::cell::UnsafeCell;
@@ -480,10 +480,30 @@ impl Backend for CpuBackend {
         let mut instructions = Vec::new();
         let order = graph.topological_sort();
 
+        // ── Pre‑compute topological levels for parallel dispatch ──────
+        // level[node] = max(level[input]) + 1   (with input level = 0 for graph inputs)
+        let mut node_level: std::collections::HashMap<NodeId, usize> =
+            std::collections::HashMap::new();
+        for &node_id in &order {
+            let node = graph
+                .get_node(node_id)
+                .expect("node in topological order must exist");
+            let level = node
+                .inputs
+                .iter()
+                .filter_map(|id| node_level.get(id))
+                .max()
+                .map(|l| l + 1)
+                .unwrap_or(0);
+            node_level.insert(node_id, level);
+        }
+        let mut instruction_levels: Vec<usize> = Vec::with_capacity(order.len());
+
         for &node_id in &order {
             let node = graph
                 .get_node(node_id)
                 .ok_or_else(|| BackendError::Compilation(format!("Node {} not found", node_id)))?;
+            let level = node_level[&node_id];
 
             let input_slices: Vec<BufferSlice> = node
                 .inputs
@@ -2351,15 +2371,19 @@ impl Backend for CpuBackend {
                                 dst: output_slice,
                                 src: BufferSlice::new(in_slot.offset, in_slot.size),
                             });
+                        } else {
+                            // no input slot — user‑error / unexpected
                         }
                     }
                 }
             }
+            instruction_levels.push(level);
         }
 
         Ok(ExecutablePlan {
             instructions,
             arena_size: memory_plan.total_size,
+            levels: instruction_levels,
         })
     }
 
