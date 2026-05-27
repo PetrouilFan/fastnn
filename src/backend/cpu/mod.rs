@@ -1466,7 +1466,7 @@ fn run_kernel_precopied(
                     let running_mean = bytemuck::cast_slice::<_, f32>(&inputs[3]);
                     let running_var = bytemuck::cast_slice::<_, f32>(&inputs[4]);
                     let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                    #[cfg(feature = "simd")]
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                     {
                         use crate::backend::cpu::microkernels::has_avx2;
                         if has_avx2() {
@@ -1493,7 +1493,7 @@ fn run_kernel_precopied(
                             );
                         }
                     }
-                    #[cfg(not(feature = "simd"))]
+                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                     {
                         crate::backend::cpu::microkernels::batch_norm_inference_f32(
                             data,
@@ -4562,7 +4562,7 @@ impl Backend for CpuBackend {
                                             &mut d[out_start..out_end],
                                         )
                                     };
-                                    #[cfg(feature = "simd")]
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                     {
                                         use crate::backend::cpu::microkernels::has_avx2;
                                         if has_avx2() {
@@ -4580,7 +4580,7 @@ impl Backend for CpuBackend {
                                             );
                                         }
                                     }
-                                    #[cfg(not(feature = "simd"))]
+                                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                     {
                                         crate::backend::cpu::microkernels::batch_norm_inference_f32(
                                             &data,
@@ -6324,7 +6324,7 @@ impl Backend for CpuBackend {
                                     && in_len % hw == 0
                                 {
                                     let nc = in_len / hw;
-                                    #[cfg(feature = "simd")]
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                     {
                                         use crate::backend::cpu::microkernels::has_avx2;
                                         if has_avx2() {
@@ -8198,13 +8198,14 @@ fn softmax_f32(
             row_slices.push((inp, out));
         }
         row_slices.par_iter_mut().for_each(|(inp, out)| {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             if has_avx2 {
                 unsafe {
                     microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1);
                 }
-            } else {
-                microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
+                return;
             }
+            microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
         });
         return;
     }

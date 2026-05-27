@@ -539,7 +539,7 @@ class TestFullPipelineIntegration:
         """Test that op handler count is reasonable."""
         from fastnn.io.onnx import import_onnx
         import inspect
-        source = inspect.getsource(import_onnx)
-        op_count = source.count('op_type == "')
+        source = inspect.getsource(import_onnx) + inspect.getsource(import_onnx.__globals__["import_onnx_to_compute_graph"])
+        op_count = source.count('op_type == "') + len(import_onnx.__globals__["ONNX_TO_IR_OP"])
         assert op_count >= 70, f"Expected >= 70 op handlers, found {op_count}"
         print(f"\nTotal ONNX op handlers: {op_count}")

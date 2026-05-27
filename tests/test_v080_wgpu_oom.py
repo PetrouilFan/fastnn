@@ -6,6 +6,8 @@ Ensures the framework handles VRAM exhaustion gracefully.
 
 import sys
 
+import pytest
+
 sys.path.insert(0, "/home/petrouil/Projects/github/fastnn")
 
 import fastnn
