@@ -218,6 +218,18 @@ class EarlyStopping(MonitorCallback):
                 print(f"Early stopping triggered at epoch {epoch}!")
                 self.should_stop = True
 
+    @property
+    def early_stop(self) -> bool:
+        return self.should_stop
+
+    def step(self, logs: Optional[Dict[str, Any]] = None) -> bool:
+        """Update early-stopping state from a metrics dict.
+
+        Returns True when stopping has been triggered.
+        """
+        self.on_epoch_end(self.counter, logs)
+        return self.should_stop
+
     def on_train_end(self, logs: Optional[Dict[str, Any]] = None) -> None:
         if self.restore_best_weights and self.best_weights is not None and self.model is not None:
             print("Restoring best model weights...")
