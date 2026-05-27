@@ -1,6 +1,6 @@
+use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
-use super::PendingRead;
 
 pub(super) fn dispatch_matmul_gpu(
     ctx: &mut WgpuContext,
@@ -139,11 +139,7 @@ pub(super) fn dispatch_matmul_activation_gpu(
 
     let a_data = read_slice(0);
     let b_data = read_slice(1);
-    let bias_data: Vec<f32> = if has_bias {
-        read_slice(2)
-    } else {
-        vec![0.0]
-    };
+    let bias_data: Vec<f32> = if has_bias { read_slice(2) } else { vec![0.0] };
     let bias_len: u32 = if has_bias { n as u32 } else { 0 };
 
     let shader = build_matmul_activation_shader();

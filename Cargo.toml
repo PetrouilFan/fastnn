@@ -2,6 +2,7 @@
 name = "fastnn"
 version = "2.2.0"
 edition = "2021"
+autobenches = false
 
 [lib]
 name = "fastnn"
@@ -32,6 +33,9 @@ blas-src     = { version = "0.10", features = ["openblas"], optional = true }
 fnv          = "1.0"
 rustc-hash  = "2.0"
 clap         = { version = "4", features = ["derive"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "html_reports"] }
 
 [features]
 default = ["simd", "parallel", "simd_avx512", "fusion-forward", "python"]
@@ -91,39 +95,8 @@ debug = false
 strip = true
 
 [[bench]]
-name = "quantized_vs_pytorch"
-path = "benches/quantized_vs_pytorch.rs"
-harness = false
-
-[[bench]]
-name = "packed_bench"
-path = "benches/packed_bench.rs"
-harness = false
-
-[[bench]]
-name = "wgpu_bench"
-path = "benches/wgpu_bench.rs"
-harness = false
-
-
-[[bench]]
-name = "perf_optimizations"
-path = "benches/perf_optimizations.rs"
-harness = false
-
-[[bench]]
-name = "packed_dispatch_bench"
-path = "benches/packed_dispatch_bench.rs"
-harness = false
-
-[[bench]]
-name = "compiled_training_vs_pytorch"
-path = "benches/compiled_training_vs_pytorch.rs"
-harness = false
-
-[[bench]]
-name = "wgpu_inference"
-path = "benches/wgpu_inference.rs"
+name = "cpu_baselines"
+path = "benches/cpu_baselines.rs"
 harness = false
 
 

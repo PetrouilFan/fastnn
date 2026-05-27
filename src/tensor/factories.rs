@@ -2,16 +2,16 @@
 
 #[cfg(feature = "gpu")]
 use crate::backend::wgpu::context::get_wgpu_context;
-use crate::storage::{DType, Device, Storage};
 #[cfg(feature = "gpu")]
 use crate::storage::GpuStorage;
+use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
 #[cfg(feature = "gpu")]
 use parking_lot::RwLock;
+use smallvec::smallvec;
+use smallvec::SmallVec;
 use std::sync::atomic::{AtomicI8, AtomicU64};
 use std::sync::Arc;
-use smallvec::SmallVec;
-use smallvec::smallvec;
 
 use super::shape::compute_strides;
 use super::{Tensor, TensorImpl};
@@ -74,7 +74,8 @@ impl Tensor {
         let mut storage = get_storage_pool().acquire_uninit(4, Device::Cpu);
         let storage_mut = Arc::make_mut(&mut storage);
         #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-        let Storage::Cpu(cpu_storage) = storage_mut else {
+        let Storage::Cpu(cpu_storage) = storage_mut
+        else {
             panic!("Expected CPU storage");
         };
         let data = Arc::make_mut(&mut cpu_storage.data);
@@ -150,19 +151,19 @@ impl Tensor {
             }
         };
 
-                let strides = compute_strides(&sizes);
-                Tensor::new(TensorImpl {
-                    storage,
-                    sizes,
-                    strides,
-                    storage_offset: 0,
-                    dtype,
-                    device,
-                    version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: None,
-                    requires_grad: false,
-                    contiguous_cache: AtomicI8::new(1),
-                })
+        let strides = compute_strides(&sizes);
+        Tensor::new(TensorImpl {
+            storage,
+            sizes,
+            strides,
+            storage_offset: 0,
+            dtype,
+            device,
+            version_counter: Arc::new(AtomicU64::new(0)),
+            autograd_meta: None,
+            requires_grad: false,
+            contiguous_cache: AtomicI8::new(1),
+        })
     }
 
     pub fn empty(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
@@ -205,7 +206,8 @@ impl Tensor {
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
                 let inner = Arc::make_mut(&mut storage);
                 #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-                let Storage::Cpu(cpu_storage) = inner else {
+                let Storage::Cpu(cpu_storage) = inner
+                else {
                     panic!("Expected CPU storage for ones()");
                 };
                 let data = Arc::make_mut(&mut cpu_storage.data);
@@ -298,7 +300,8 @@ impl Tensor {
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
                 let inner = Arc::make_mut(&mut storage);
                 #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-                let Storage::Cpu(cpu_storage) = inner else {
+                let Storage::Cpu(cpu_storage) = inner
+                else {
                     panic!("Expected CPU storage for full()");
                 };
                 let data = Arc::make_mut(&mut cpu_storage.data);
@@ -341,19 +344,13 @@ impl Tensor {
                     }
                     DType::I64 => {
                         let slice = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                data.as_mut_ptr() as *mut i64,
-                                numel,
-                            )
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i64, numel)
                         };
                         slice.fill(value as i64);
                     }
                     DType::Bool => {
                         let slice = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                data.as_mut_ptr() as *mut u8,
-                                numel,
-                            )
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, numel)
                         };
                         slice.fill(if value != 0.0 { 1u8 } else { 0u8 });
                     }

@@ -168,9 +168,11 @@ mod tests {
 
         // Should have removed DQ+Q pair (2 nodes)
         assert_eq!(
-            count_after, count_before - 2,
+            count_after,
+            count_before - 2,
             "pruning should remove 2 nodes (DQ+Q), before={}, after={}",
-            count_before, count_after
+            count_before,
+            count_after
         );
 
         // Verify no DQ feeds a Q (the round-trip chain is broken)
@@ -189,7 +191,9 @@ mod tests {
         }
 
         // Verify the final graph output DQ still exists
-        let dq_nodes: Vec<_> = graph.nodes.iter()
+        let dq_nodes: Vec<_> = graph
+            .nodes
+            .iter()
             .filter(|n| n.opcode == Opcode::DequantizeActivations)
             .collect();
         assert_eq!(dq_nodes.len(), 1, "only the final output DQ should remain");
@@ -223,7 +227,10 @@ mod tests {
         let count_before = graph.node_count();
         prune_qdq_pairs(&mut graph).unwrap();
         let count_after = graph.node_count();
-        assert_eq!(count_before, count_after, "no-op pass should not change node count");
+        assert_eq!(
+            count_before, count_after,
+            "no-op pass should not change node count"
+        );
     }
 
     #[test]

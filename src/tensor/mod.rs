@@ -43,7 +43,9 @@ impl TensorImpl {
     pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>, dtype: DType) -> Self {
         let device = storage.device(); // Get device from storage
         let numel: i128 = sizes.iter().map(|&s| s as i128).product();
-        if numel > i64::MAX as i128 { panic!("Tensor too large"); }
+        if numel > i64::MAX as i128 {
+            panic!("Tensor too large");
+        }
         let numel = numel as i64;
         let nbytes = (numel * dtype.size() as i64) as usize;
         // Validate storage is large enough for the declared shape.
@@ -84,7 +86,9 @@ impl TensorImpl {
         dtype: DType,
     ) -> Self {
         let numel: i128 = sizes.iter().map(|&s| s as i128).product();
-        if numel > i64::MAX as i128 { panic!("Tensor too large"); }
+        if numel > i64::MAX as i128 {
+            panic!("Tensor too large");
+        }
         let numel = numel as i64;
         let _nbytes = (numel * dtype.size() as i64) as usize;
 
@@ -128,7 +132,9 @@ impl TensorImpl {
     ) -> Self {
         let autograd_meta = self.autograd_meta.as_ref().map(|meta| {
             let lock = meta.lock();
-            Arc::new(parking_lot::Mutex::new(AutogradMeta::new(lock.requires_grad)))
+            Arc::new(parking_lot::Mutex::new(AutogradMeta::new(
+                lock.requires_grad,
+            )))
         });
         Self {
             storage: Arc::clone(&self.storage),
@@ -424,10 +430,7 @@ impl Tensor {
         self.inner.device
     }
 
-    pub(crate) fn attach_grad_fn(
-        mut output: Tensor,
-        backward: Arc<autograd::NodeInfo>,
-    ) -> Tensor {
+    pub(crate) fn attach_grad_fn(mut output: Tensor, backward: Arc<autograd::NodeInfo>) -> Tensor {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
         let inner = Arc::make_mut(&mut output.inner);
@@ -1050,10 +1053,7 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
                 let param_norm = g_data.iter().map(|x| x * x).sum::<f32>().sqrt();
                 total_norm += param_norm * param_norm;
             } else {
-                total_norm += g_data
-                    .iter()
-                    .map(|x| x.abs().powf(norm_type))
-                    .sum::<f32>();
+                total_norm += g_data.iter().map(|x| x.abs().powf(norm_type)).sum::<f32>();
             }
         }
     }

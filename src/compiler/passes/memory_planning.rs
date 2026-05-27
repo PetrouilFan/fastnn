@@ -95,10 +95,7 @@ impl MemoryPlan {
                     vec![m, k, n]
                 }
                 Opcode::Transpose => {
-                    let input_shape = resolved_input_shapes
-                        .first()
-                        .cloned()
-                        .unwrap_or_default();
+                    let input_shape = resolved_input_shapes.first().cloned().unwrap_or_default();
                     let rank = input_shape.len();
                     if rank == 2 {
                         // 2D transpose: params = [M, N]
@@ -118,10 +115,8 @@ impl MemoryPlan {
                                 params.push(i);
                             }
                         } else {
-                            let perm: Vec<usize> = perm_str
-                                .split(',')
-                                .filter_map(|s| s.parse().ok())
-                                .collect();
+                            let perm: Vec<usize> =
+                                perm_str.split(',').filter_map(|s| s.parse().ok()).collect();
                             for i in 0..rank {
                                 params.push(perm.get(i).copied().unwrap_or(i));
                             }
@@ -179,7 +174,8 @@ impl MemoryPlan {
             };
             mp.tightened_params.insert(node_id, tightened);
             Ok(())
-        }).unwrap_or(());
+        })
+        .unwrap_or(());
 
         mp
     }
@@ -343,8 +339,8 @@ pub fn plan_memory_with_env(
             None => continue,
         };
         let my_pos = position.get(&node_id).copied().unwrap_or(0);
-        let is_terminal = graph.outputs.contains(&node_id)
-            || graph.required_nodes.contains(&node_id);
+        let is_terminal =
+            graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id);
         let base = if is_terminal { order.len() - 1 } else { my_pos };
         // Start with our own position (or end if terminal)
         let mut last = base;
@@ -411,7 +407,8 @@ pub fn plan_memory_with_env(
             }
         }
         Ok(())
-    }).unwrap_or(());
+    })
+    .unwrap_or(());
 
     // Sort by (start_time, primary-first, size-desc).
     // The primary-first tiebreaker ensures that a node's primary output
@@ -511,9 +508,9 @@ pub fn plan_memory_with_env(
         }
         let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
         let consumers = graph.consumers(input_id);
-        let has_consumer_after = consumers.iter().any(|&cid| {
-            cid != info.node_id && position.get(&cid).copied().unwrap_or(0) > node_pos
-        });
+        let has_consumer_after = consumers
+            .iter()
+            .any(|&cid| cid != info.node_id && position.get(&cid).copied().unwrap_or(0) > node_pos);
         if has_consumer_after {
             continue;
         }

@@ -7,7 +7,6 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
 
     let graph_ref = &*graph;
     let _ = crate::utils::traverse_graph(graph_ref, |_node_id, node| {
-
         let action = match node.opcode {
             Opcode::Mul => {
                 let is_one = |id: NodeId| -> bool {
@@ -98,9 +97,13 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
 
             Opcode::Neg => {
                 if let Some(&inner_id) = node.inputs.first() {
-                    let is_neg = graph_ref.get_node(inner_id).is_some_and(|n| n.opcode == Opcode::Neg);
+                    let is_neg = graph_ref
+                        .get_node(inner_id)
+                        .is_some_and(|n| n.opcode == Opcode::Neg);
                     if is_neg {
-                        if let Some(&inner_input) = graph_ref.get_node(inner_id).and_then(|n| n.inputs.first()) {
+                        if let Some(&inner_input) =
+                            graph_ref.get_node(inner_id).and_then(|n| n.inputs.first())
+                        {
                             Some(RewriteAction::ReplaceWith(inner_input))
                         } else {
                             None
@@ -115,7 +118,9 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
 
             Opcode::Abs => {
                 if let Some(&inner_id) = node.inputs.first() {
-                    let is_abs = graph_ref.get_node(inner_id).is_some_and(|n| n.opcode == Opcode::Abs);
+                    let is_abs = graph_ref
+                        .get_node(inner_id)
+                        .is_some_and(|n| n.opcode == Opcode::Abs);
                     if is_abs {
                         Some(RewriteAction::ReplaceWith(inner_id))
                     } else {

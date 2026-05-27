@@ -70,7 +70,9 @@ macro_rules! impl_conv_type {
                     (1, false) => out_channels * in_channels * kernel_size,
                     (2, false) => out_channels * (in_channels / groups) * kernel_size * kernel_size,
                     (2, true) => in_channels * out_channels * kernel_size * kernel_size,
-                    (3, false) => out_channels * in_channels * kernel_size * kernel_size * kernel_size,
+                    (3, false) => {
+                        out_channels * in_channels * kernel_size * kernel_size * kernel_size
+                    }
                     _ => unreachable!(),
                 };
                 let weight_data: Vec<f32> = (0..weight_n)
@@ -78,9 +80,17 @@ macro_rules! impl_conv_type {
                     .collect();
                 let weight_shape: Vec<i64> = match ($ndim, $is_transpose) {
                     (1, false) => vec![out_channels, in_channels, kernel_size],
-                    (2, false) => vec![out_channels, in_channels / groups, kernel_size, kernel_size],
+                    (2, false) => {
+                        vec![out_channels, in_channels / groups, kernel_size, kernel_size]
+                    }
                     (2, true) => vec![in_channels, out_channels, kernel_size, kernel_size],
-                    (3, false) => vec![out_channels, in_channels, kernel_size, kernel_size, kernel_size],
+                    (3, false) => vec![
+                        out_channels,
+                        in_channels,
+                        kernel_size,
+                        kernel_size,
+                        kernel_size,
+                    ],
                     _ => unreachable!(),
                 };
                 let weight = Tensor::from_vec(weight_data, weight_shape).requires_grad_(true);
@@ -124,7 +134,11 @@ impl_conv_type!(Conv2d, false, 2);
 
 impl Module for Conv2d {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let effective_padding = if self.padding_mode == "same" { 0 } else { self.padding as usize };
+        let effective_padding = if self.padding_mode == "same" {
+            0
+        } else {
+            self.padding as usize
+        };
         let (input, _pad_scalar) = if self.padding_mode == "same" {
             let x_shape = x.shape_ref();
             if x_shape.len() < 4 {
@@ -229,8 +243,12 @@ impl Module for ConvTranspose2d {
         let h_in = x_shape[2];
         let w_in = x_shape[3];
 
-        let _h_out = (h_in - 1) * self.stride - 2 * self.padding + self.dilation * (self.kernel_size - 1) + 1;
-        let _w_out = (w_in - 1) * self.stride - 2 * self.padding + self.dilation * (self.kernel_size - 1) + 1;
+        let _h_out = (h_in - 1) * self.stride - 2 * self.padding
+            + self.dilation * (self.kernel_size - 1)
+            + 1;
+        let _w_out = (w_in - 1) * self.stride - 2 * self.padding
+            + self.dilation * (self.kernel_size - 1)
+            + 1;
 
         let mut output = Tensor::exec_aot(&[x, &self.weight], |g, ins| {
             vec![g.conv_transpose2d(

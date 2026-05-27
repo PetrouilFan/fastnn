@@ -366,6 +366,20 @@ impl ShapeEnv {
         self.symbols.insert(name.to_string(), value);
     }
 
+    /// Bind a symbol name to a concrete value, returning an error on conflicts.
+    pub fn try_bind(&mut self, name: &str, value: u64) -> Result<(), String> {
+        if let Some(&existing) = self.symbols.get(name) {
+            if existing != value {
+                return Err(format!(
+                    "ShapeEnv: symbol '{}' bound to {} then inconsistently to {}",
+                    name, existing, value
+                ));
+            }
+        }
+        self.symbols.insert(name.to_string(), value);
+        Ok(())
+    }
+
     /// Resolve a symbol name to its concrete value, if bound.
     pub fn resolve(&self, name: &str) -> Option<u64> {
         self.symbols.get(name).copied()
@@ -438,7 +452,7 @@ impl ShapeEnv {
                     .collect();
 
                 if symbolic.len() == 1 {
-                    env.bind(&symbolic[0], unknown_numel as u64);
+                    env.try_bind(&symbolic[0], unknown_numel as u64)?;
                 } else if symbolic.len() > 1 {
                     input_infos.push((input_id, known_numel, total_numel, symbolic));
                 }
@@ -466,7 +480,7 @@ impl ShapeEnv {
                 }
                 let val = total_numel / known_product;
                 if val > 0 {
-                    env.bind(unbound[0], val as u64);
+                    env.try_bind(unbound[0], val as u64)?;
                 }
             }
         }
@@ -561,15 +575,15 @@ macro_rules! impl_ir_dtype_props {
 }
 
 impl_ir_dtype_props!(
-    (Self::F32,       4, "f32",  32, 1),
-    (Self::F16,       2, "f16",  16, 2),
-    (Self::BF16,      2, "bf16", 16, 2),
-    (Self::I32,       4, "i32",  32, 1),
-    (Self::I64,       8, "i64",  64, 1),
-    (Self::Bool,      1, "bool",  1, 32),
-    (Self::I8,        1, "i8",    8, 4),
-    (Self::U4 { .. }, 1, "u4",    4, 8),
-    (Self::U8 { .. }, 1, "u8",    8, 4),
+    (Self::F32, 4, "f32", 32, 1),
+    (Self::F16, 2, "f16", 16, 2),
+    (Self::BF16, 2, "bf16", 16, 2),
+    (Self::I32, 4, "i32", 32, 1),
+    (Self::I64, 8, "i64", 64, 1),
+    (Self::Bool, 1, "bool", 1, 32),
+    (Self::I8, 1, "i8", 8, 4),
+    (Self::U4 { .. }, 1, "u4", 4, 8),
+    (Self::U8 { .. }, 1, "u8", 8, 4),
 );
 
 impl IrDType {
@@ -656,24 +670,44 @@ impl TensorType {
         // dimension is not a multiple of ITEMS, which would cause slot under-allocation.
         match &self.dtype {
             IrDType::U4 { .. } => {
-                let inner_dim = self.shape.last().map(|d| match d {
-                    DimExpr::Known(v) => *v as usize,
-                    DimExpr::Bounded { max, .. } => *max as usize,
-                    DimExpr::Symbol(_) => 8,
-                }).unwrap_or(1);
-                let rows = if inner_dim > 0 { numel.div_ceil(inner_dim) } else { 1 };
+                let inner_dim = self
+                    .shape
+                    .last()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as usize,
+                        DimExpr::Bounded { max, .. } => *max as usize,
+                        DimExpr::Symbol(_) => 8,
+                    })
+                    .unwrap_or(1);
+                let rows = if inner_dim > 0 {
+                    numel.div_ceil(inner_dim)
+                } else {
+                    1
+                };
                 let words = rows * inner_dim.div_ceil(8) + 16;
                 words * 4
             }
             IrDType::U8 { .. } => {
-                let inner_dim = self.shape.last().map(|d| match d {
-                    DimExpr::Known(v) => *v as usize,
-                    DimExpr::Bounded { max, .. } => *max as usize,
-                    DimExpr::Symbol(_) => 4,
-                }).unwrap_or(1);
-                let rows = if inner_dim > 0 { numel.div_ceil(inner_dim) } else { 1 };
+                let inner_dim = self
+                    .shape
+                    .last()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as usize,
+                        DimExpr::Bounded { max, .. } => *max as usize,
+                        DimExpr::Symbol(_) => 4,
+                    })
+                    .unwrap_or(1);
+                let rows = if inner_dim > 0 {
+                    numel.div_ceil(inner_dim)
+                } else {
+                    1
+                };
                 let words = rows * inner_dim.div_ceil(4) + 16;
                 words * 4
+            }
+            IrDType::I8 => {
+                // I8 activation payload includes 8-byte scale/zp header
+                numel + 8
             }
             _ => numel * self.dtype.byte_size(),
         }
