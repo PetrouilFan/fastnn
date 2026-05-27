@@ -44,8 +44,9 @@ use crate::ir::node::*;
 
 /// Key: hash of (graph topological structure + input byte lengths).
 /// Value: cached (ExecutablePlan, MemoryPlan, compiled_graph).
-static PLAN_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, (ExecutablePlan, MemoryPlan, ComputeGraph)>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
+static PLAN_CACHE: std::sync::LazyLock<
+    Mutex<HashMap<u64, (ExecutablePlan, MemoryPlan, ComputeGraph)>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
 
 /// Compute a ~unique hash for a graph + its input shapes.
 fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]]) -> u64 {
@@ -86,7 +87,10 @@ fn cache_plan(key: u64, plan: ExecutablePlan, mp: MemoryPlan, graph: ComputeGrap
 
 /// Look up a plan in the cache.
 fn lookup_plan(key: u64) -> Option<(ExecutablePlan, MemoryPlan, ComputeGraph)> {
-    PLAN_CACHE.lock().ok().and_then(|cache| cache.get(&key).cloned())
+    PLAN_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
 }
 
 // =============================================================================
@@ -251,9 +255,10 @@ macro_rules! impl_unary_op {
         pub fn $method(&self, input: &GraphTensor) -> GraphTensor {
             let output_type = input.tensor_type.clone();
             let mut inner = self.inner.borrow_mut();
-            let node_id = inner
-                .graph
-                .add_node(Opcode::$opcode, vec![input.node_id], output_type.clone());
+            let node_id =
+                inner
+                    .graph
+                    .add_node(Opcode::$opcode, vec![input.node_id], output_type.clone());
             GraphTensor::new(self.clone(), node_id, output_type)
         }
     };
@@ -1441,14 +1446,16 @@ impl GraphBuilder {
         let out_channels = w_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
         let h_out = if a_shape.len() > 2 && w_shape.len() > 2 {
             match (&a_shape[2], &w_shape[2]) {
-                (DimExpr::Known(h), DimExpr::Known(kh)) => {
-                    DimExpr::Known((h - 1) * stride as u64 - 2 * padding as u64 + dilation as u64 * (kh - 1) + 1)
-                }
+                (DimExpr::Known(h), DimExpr::Known(kh)) => DimExpr::Known(
+                    (h - 1) * stride as u64 - 2 * padding as u64 + dilation as u64 * (kh - 1) + 1,
+                ),
                 _ => {
                     let h_val = a_shape[2].evaluate().unwrap_or(0);
                     let kh_val = w_shape[2].evaluate().unwrap_or(1);
-                    let estimated =
-                        (h_val.saturating_sub(1)) * stride as u64 + dilation as u64 * (kh_val.saturating_sub(1)) + 1 - 2 * padding as u64;
+                    let estimated = (h_val.saturating_sub(1)) * stride as u64
+                        + dilation as u64 * (kh_val.saturating_sub(1))
+                        + 1
+                        - 2 * padding as u64;
                     DimExpr::Bounded {
                         sym: format!("conv_trans_spatial({})", estimated),
                         max: estimated,
@@ -1460,14 +1467,16 @@ impl GraphBuilder {
         };
         let w_out = if a_shape.len() > 3 && w_shape.len() > 3 {
             match (&a_shape[3], &w_shape[3]) {
-                (DimExpr::Known(w), DimExpr::Known(kw)) => {
-                    DimExpr::Known((w - 1) * stride as u64 - 2 * padding as u64 + dilation as u64 * (kw - 1) + 1)
-                }
+                (DimExpr::Known(w), DimExpr::Known(kw)) => DimExpr::Known(
+                    (w - 1) * stride as u64 - 2 * padding as u64 + dilation as u64 * (kw - 1) + 1,
+                ),
                 _ => {
                     let w_val = a_shape[3].evaluate().unwrap_or(0);
                     let kw_val = w_shape[3].evaluate().unwrap_or(1);
-                    let estimated =
-                        (w_val.saturating_sub(1)) * stride as u64 + dilation as u64 * (kw_val.saturating_sub(1)) + 1 - 2 * padding as u64;
+                    let estimated = (w_val.saturating_sub(1)) * stride as u64
+                        + dilation as u64 * (kw_val.saturating_sub(1))
+                        + 1
+                        - 2 * padding as u64;
                     DimExpr::Bounded {
                         sym: format!("conv_trans_spatial({})", estimated),
                         max: estimated,
@@ -2248,8 +2257,12 @@ impl GraphBuilder {
         // ── Plan cache: skip compilation when graph+shapes match ──
         let cache_key = plan_cache_key(&graph, inputs);
         if let Some((mut plan, memory_plan, compiled_graph)) = lookup_plan(cache_key) {
-            return GraphExecutor::new(backend)
-                .execute(&compiled_graph, &mut plan, &memory_plan, inputs);
+            return GraphExecutor::new(backend).execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                inputs,
+            );
         }
 
         let mut executor = GraphExecutor::new(backend);
@@ -2257,7 +2270,12 @@ impl GraphBuilder {
             executor.compile_with_plan_and_quantize(&graph, quantize)?;
 
         // Cache the compiled plan (clone only what's needed for reuse)
-        cache_plan(cache_key, plan.clone(), memory_plan.clone(), compiled_graph.clone());
+        cache_plan(
+            cache_key,
+            plan.clone(),
+            memory_plan.clone(),
+            compiled_graph.clone(),
+        );
 
         executor.execute(&compiled_graph, &mut plan, &memory_plan, inputs)
     }
@@ -2370,7 +2388,9 @@ fn conv_spatial_dim(
             let h_val = input_dim.evaluate();
             let k_val = kernel_dim.evaluate();
             match (h_val, k_val) {
-                (Some(h), Some(k)) => DimExpr::Known(((h + 2 * p).saturating_sub(d * (k - 1) + 1)) / s + 1),
+                (Some(h), Some(k)) => {
+                    DimExpr::Known(((h + 2 * p).saturating_sub(d * (k - 1) + 1)) / s + 1)
+                }
                 _ => {
                     // Cannot fully evaluate — produce a Bounded expression with provenance
                     let h_eval = input_dim
@@ -2616,7 +2636,12 @@ mod tests {
 
         // Execute with batch=3
         let result_3 = executor
-            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_3, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_3, &w_data],
+            )
             .unwrap();
         let out_3 = read_f32(&result_3[0]);
         // Output should be [3, 10] = 30 elements
@@ -2630,7 +2655,12 @@ mod tests {
         // Batch = 1: input data is 1*64*4 = 256 bytes — same compiled plan
         let x_data_1 = f32_data(&(0..64).map(|i| i as f32).collect::<Vec<_>>());
         let result_1 = executor
-            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_1, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_1, &w_data],
+            )
             .unwrap();
         let out_1 = read_f32(&result_1[0]);
         // Output should be [1, 10] = 10 elements
@@ -2655,7 +2685,12 @@ mod tests {
         // Batch = 7 (another shape) — verify the pattern generalizes
         let x_data_7 = f32_data(&(0..448).map(|i| i as f32).collect::<Vec<_>>()); // 7*64 = 448 f32s
         let result_7 = executor
-            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_7, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_7, &w_data],
+            )
             .unwrap();
         let out_7 = read_f32(&result_7[0]);
         assert_eq!(
@@ -2795,7 +2830,12 @@ mod tests {
         let x_data_2 = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let w_data = f32_data(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
         let result_2 = executor
-            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_2, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_2, &w_data],
+            )
             .unwrap();
         let out_2 = read_f32(&result_2[0]);
         // batch=2, feat=3 → 6 elements
@@ -2808,7 +2848,12 @@ mod tests {
         // Execute SAME plan with batch=1 — no recompilation
         let x_data_1 = f32_data(&[10.0, 20.0, 30.0, 40.0]);
         let result_1 = executor
-            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_data_1, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_1, &w_data],
+            )
             .unwrap();
         let out_1 = read_f32(&result_1[0]);
         // batch=1, feat=3 → 3 elements

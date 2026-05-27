@@ -1110,10 +1110,13 @@ impl<'a> OnnxConverter<'a> {
                 let c_biased = self.graph.add(&c_rounded, &ins[7]);
                 let y_f32 = self.graph.clamp(&c_biased, 0.0, 255.0);
                 // Cast output back to U8 (the output type of QLinearMatMul is UINT8)
-                let y = self.graph.cast_op(&y_f32, IrDType::U8 {
-                    scales: vec![],
-                    zero_points: vec![],
-                });
+                let y = self.graph.cast_op(
+                    &y_f32,
+                    IrDType::U8 {
+                        scales: vec![],
+                        zero_points: vec![],
+                    },
+                );
                 self.out(node, y);
             }
             "QLinearConv" => {

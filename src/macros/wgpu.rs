@@ -44,10 +44,17 @@ macro_rules! dispatch_gpu_compute {
         $wg_x:expr,
     ) => {
         $crate::dispatch_gpu_compute!(
-            $fn_name, $shader_builder, $shader_key,
-            $input, $arg1, $arg2,
-            $output_size, $params,
-            $wg_x, 1u32, 1u32,
+            $fn_name,
+            $shader_builder,
+            $shader_key,
+            $input,
+            $arg1,
+            $arg2,
+            $output_size,
+            $params,
+            $wg_x,
+            1u32,
+            1u32,
         );
     };
     // ── 11-arg form (3-D dispatch) ─────────────────────────────────────
@@ -72,13 +79,15 @@ macro_rules! dispatch_gpu_compute {
             cpu_offset: usize,
         ) -> Result<(), $crate::backend::BackendError> {
             let shader = $shader_builder;
-            $crate::backend::wgpu::pipeline::ensure_simple_compute_pipeline(ctx, $shader_key, &shader)
-                .map_err($crate::backend::BackendError::Dispatch)?;
+            $crate::backend::wgpu::pipeline::ensure_simple_compute_pipeline(
+                ctx,
+                $shader_key,
+                &shader,
+            )
+            .map_err($crate::backend::BackendError::Dispatch)?;
 
-            let buf_in = ctx.create_buffer(
-                bytemuck::cast_slice($input),
-                concat!($shader_key, "_input"),
-            );
+            let buf_in =
+                ctx.create_buffer(bytemuck::cast_slice($input), concat!($shader_key, "_input"));
             let output_size: u64 = $output_size.max(1); // WGPU requires non-zero buffer size
             let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(concat!($shader_key, "_output")),
@@ -88,10 +97,7 @@ macro_rules! dispatch_gpu_compute {
             });
 
             let params = $params;
-            let buf_params = ctx.create_uniform_buffer(
-                &params,
-                concat!($shader_key, "_params"),
-            );
+            let buf_params = ctx.create_uniform_buffer(&params, concat!($shader_key, "_params"));
 
             let pipeline_key = concat!("wgpu_simple_", $shader_key);
             let pipeline = &ctx.pipelines[pipeline_key];
@@ -170,31 +176,31 @@ macro_rules! build_pipeline {
                         source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
                     });
 
-                let layout = ctx
-                    .device
-                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some(&format!("{}_layout", pipeline_key)),
-                        entries: &$bindings,
-                    });
+                let layout =
+                    ctx.device
+                        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            label: Some(&format!("{}_layout", pipeline_key)),
+                            entries: &$bindings,
+                        });
 
-                let pipeline_layout = ctx
-                    .device
-                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some(&format!("{}_pl_layout", pipeline_key)),
-                        bind_group_layouts: &[&layout],
-                        push_constant_ranges: &[],
-                    });
+                let pipeline_layout =
+                    ctx.device
+                        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                            label: Some(&format!("{}_pl_layout", pipeline_key)),
+                            bind_group_layouts: &[&layout],
+                            push_constant_ranges: &[],
+                        });
 
-                let pipeline = ctx
-                    .device
-                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(&pipeline_key),
-                        layout: Some(&pipeline_layout),
-                        module: &shader,
-                        entry_point: Some("main"),
-                        compilation_options: Default::default(),
-                        cache: None,
-                    });
+                let pipeline =
+                    ctx.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(&pipeline_key),
+                            layout: Some(&pipeline_layout),
+                            module: &shader,
+                            entry_point: Some("main"),
+                            compilation_options: Default::default(),
+                            cache: None,
+                        });
 
                 ctx.pipelines.insert(pipeline_key, pipeline);
             }

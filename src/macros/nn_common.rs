@@ -111,8 +111,9 @@ macro_rules! impl_pooling {
     ($name:ident, $backward_name:literal, $exec_body:expr) => {
         impl $crate::nn::Module for $name {
             fn forward(&self, x: &$crate::tensor::Tensor) -> $crate::tensor::Tensor {
-                let result = $crate::tensor::Tensor::exec_aot(&[x], |g, ins| $exec_body)
-                    .expect(concat!(stringify!($name), "::forward: AOT execution failed"));
+                let result = $crate::tensor::Tensor::exec_aot(&[x], |g, ins| $exec_body).expect(
+                    concat!(stringify!($name), "::forward: AOT execution failed"),
+                );
                 let mut output = result.into_iter().next().unwrap();
                 $crate::utils::attach_grad(&mut output, $backward_name, &[x]);
                 output

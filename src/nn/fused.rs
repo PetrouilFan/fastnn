@@ -233,7 +233,6 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
             }
         }
     }
-
 }
 
 /// Fused Conv2d + BatchNorm2d + SiLU layer (inference only).

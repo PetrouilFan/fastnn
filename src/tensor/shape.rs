@@ -32,7 +32,9 @@ impl TensorImpl {
     }
 
     pub fn is_contiguous(&self) -> bool {
-        let cached = self.contiguous_cache.load(std::sync::atomic::Ordering::Relaxed);
+        let cached = self
+            .contiguous_cache
+            .load(std::sync::atomic::Ordering::Relaxed);
         if cached != -1 {
             return cached == 1;
         }
@@ -40,13 +42,15 @@ impl TensorImpl {
         for (size, &stride) in self.sizes.iter().rev().zip(self.strides.iter().rev()) {
             if *size != 1 {
                 if stride != expected_stride {
-                    self.contiguous_cache.store(0, std::sync::atomic::Ordering::Relaxed);
+                    self.contiguous_cache
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
                     return false;
                 }
                 expected_stride *= *size;
             }
         }
-        self.contiguous_cache.store(1, std::sync::atomic::Ordering::Relaxed);
+        self.contiguous_cache
+            .store(1, std::sync::atomic::Ordering::Relaxed);
         true
     }
 
@@ -434,7 +438,10 @@ impl Tensor {
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("TransposeBackward", inputs))
+            Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("TransposeBackward", inputs),
+            )
         } else {
             output
         }

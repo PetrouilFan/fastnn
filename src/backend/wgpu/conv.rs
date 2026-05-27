@@ -1,6 +1,6 @@
+use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
-use super::PendingRead;
 
 pub(super) fn dispatch_conv_gpu(
     ctx: &mut WgpuContext,

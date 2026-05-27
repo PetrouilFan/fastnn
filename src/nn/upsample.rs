@@ -49,5 +49,4 @@ impl Module for Upsample {
         .expect("Upsample::forward: AOT execution failed");
         result.into_iter().next().unwrap()
     }
-
 }

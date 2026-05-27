@@ -6,12 +6,12 @@
 // any path qualification.
 
 #[macro_use]
-pub mod tensor_ops;   // impl_scalar_op!, impl_cpu_fast_path!
+pub mod tensor_ops; // impl_scalar_op!, impl_cpu_fast_path!
 #[macro_use]
-pub mod optim;        // impl_optim!, base_optimizer macros
+pub mod optim; // impl_optim!, base_optimizer macros
 #[macro_use]
 pub mod python_bindings; // impl_py_optim!
 #[macro_use]
-pub mod nn_common;    // impl_norm!, impl_pooling!
+pub mod nn_common; // impl_norm!, impl_pooling!
 #[macro_use]
-pub mod wgpu;         // dispatch_gpu_compute!, build_pipeline!
+pub mod wgpu; // dispatch_gpu_compute!, build_pipeline!

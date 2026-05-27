@@ -11,9 +11,9 @@
 //! The conv2d path performs im2col on the CPU and then reuses the same
 //! quantized-matmul GPU pipeline.
 
+use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
-use super::PendingRead;
 
 // ─============================================================================
 // Quantized matmul dispatch (GPU)
@@ -79,7 +79,9 @@ pub(super) fn dispatch_quantized_matmul_gpu(
 
     let output_size = m * n * 4;
     dispatch_quantized_gemm_gpu(
-        ctx, encoder, pending_reads,
+        ctx,
+        encoder,
+        pending_reads,
         &act_padded,
         &packed_bytes,
         m,
@@ -227,7 +229,9 @@ pub(super) fn dispatch_quantized_conv_gpu(
     let padded_k = col_w.div_ceil(items) * items;
     let output_size = col_h * f * 4;
     dispatch_quantized_gemm_gpu(
-        ctx, encoder, pending_reads,
+        ctx,
+        encoder,
+        pending_reads,
         &col_matrix,
         &packed_bytes,
         col_h,

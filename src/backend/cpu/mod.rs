@@ -45,12 +45,10 @@ macro_rules! get_in_out_slices {
     ($arena:expr, $input_slices:expr => [$input:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
         let $input = if let Some(slice) = $input_slices.first() {
             let d = $arena.data_mut();
-            let src = bytemuck::cast_slice::<_, f32>(
-                &d[slice.offset..slice.offset + slice.size],
-            );
+            let src = bytemuck::cast_slice::<_, f32>(&d[slice.offset..slice.offset + slice.size]);
             let mut buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(src.len());
             buf.copy_from_slice(src);
-            buf  // ScopedVec — auto-returns to TLS pool on drop
+            buf // ScopedVec — auto-returns to TLS pool on drop
         } else {
             crate::backend::cpu::microkernels::TlsVecPool::alloc(0)
         };
@@ -63,20 +61,20 @@ macro_rules! get_in_out_slices {
     ($arena:expr, $input_slices:expr => [$a:ident, $b:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
         let ($a, $b) = if let [a_slice, b_slice] = &$input_slices[..] {
             let d = $arena.data_mut();
-            let a_src = bytemuck::cast_slice::<_, f32>(
-                &d[a_slice.offset..a_slice.offset + a_slice.size],
-            );
-            let b_src = bytemuck::cast_slice::<_, f32>(
-                &d[b_slice.offset..b_slice.offset + b_slice.size],
-            );
+            let a_src =
+                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]);
+            let b_src =
+                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]);
             let mut a_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(a_src.len());
             a_buf.copy_from_slice(a_src);
             let mut b_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(b_src.len());
             b_buf.copy_from_slice(b_src);
             (a_buf, b_buf)
         } else {
-            (crate::backend::cpu::microkernels::TlsVecPool::alloc(0),
-             crate::backend::cpu::microkernels::TlsVecPool::alloc(0))
+            (
+                crate::backend::cpu::microkernels::TlsVecPool::alloc(0),
+                crate::backend::cpu::microkernels::TlsVecPool::alloc(0),
+            )
         };
         let $output = {
             let d = $arena.data_mut();
@@ -104,14 +102,10 @@ fn fused_binary_activation_dispatch(
         let (a, b) = {
             let d = arena.data_mut();
             (
-                bytemuck::cast_slice::<_, f32>(
-                    &d[a_slice.offset..a_slice.offset + a_slice.size],
-                )
-                .to_vec(),
-                bytemuck::cast_slice::<_, f32>(
-                    &d[b_slice.offset..b_slice.offset + b_slice.size],
-                )
-                .to_vec(),
+                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
+                    .to_vec(),
+                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
+                    .to_vec(),
             )
         };
         let out_f32 = {
@@ -126,14 +120,20 @@ fn fused_binary_activation_dispatch(
         if microkernels::simd_avx2_available() && out_f32.len() >= 8 {
             // Binary op dispatch
             let binary_dispatched = if kernel_name.starts_with("add_") {
-                add_f32(&a, &b, out_f32); true
+                add_f32(&a, &b, out_f32);
+                true
             } else if kernel_name.starts_with("sub_") {
-                sub_f32(&a, &b, out_f32); true
+                sub_f32(&a, &b, out_f32);
+                true
             } else if kernel_name.starts_with("mul_") {
-                mul_f32(&a, &b, out_f32); true
+                mul_f32(&a, &b, out_f32);
+                true
             } else if kernel_name.starts_with("div_") {
-                div_f32(&a, &b, out_f32); true
-            } else { false };
+                div_f32(&a, &b, out_f32);
+                true
+            } else {
+                false
+            };
 
             if binary_dispatched {
                 // Activation dispatch — chain in-place on the output buffer.
@@ -173,12 +173,13 @@ fn fused_binary_activation_dispatch(
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                |(i, o)| {
+            out_f32[..out_len]
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, o)| {
                     let x = op(a[i % a_len], b[i % b_len]);
                     *o = act(x);
-                },
-            );
+                });
         }
     }
 }
@@ -268,14 +269,12 @@ fn matmul_activation_dispatch(
         let has_bias = input_slices.len() >= 3;
         let (a, b, bias) = {
             let d = arena.data_mut();
-            let a_f32 = bytemuck::cast_slice::<_, f32>(
-                &d[a_slice.offset..a_slice.offset + a_slice.size],
-            )
-            .to_vec();
-            let b_f32 = bytemuck::cast_slice::<_, f32>(
-                &d[b_slice.offset..b_slice.offset + b_slice.size],
-            )
-            .to_vec();
+            let a_f32 =
+                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
+                    .to_vec();
+            let b_f32 =
+                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
+                    .to_vec();
             let bias_f32 = if has_bias {
                 let bias_slice = &input_slices[2];
                 bytemuck::cast_slice::<_, f32>(
@@ -311,6 +310,69 @@ fn matmul_activation_dispatch(
     Ok(())
 }
 
+/// Validate quantized weight metadata and build a packed tensor.
+fn packed_tensor_from_meta<T: PackedWord>(
+    data: Vec<T>,
+    meta: crate::backend::QuantizedWeightMeta,
+    kernel_name: &str,
+) -> Result<PackedTensor<T>, BackendError> {
+    if meta.scales.is_empty() {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight metadata missing scales"
+        )));
+    }
+    if meta.zero_points.is_empty() {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight metadata missing zero_points"
+        )));
+    }
+    if meta.scales.len() != meta.zero_points.len() {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight metadata length mismatch: {} scales vs {} zero_points",
+            meta.scales.len(),
+            meta.zero_points.len()
+        )));
+    }
+
+    let rows = if meta.shape.len() >= 2 {
+        meta.shape[0]
+    } else {
+        1
+    };
+    let valid_meta_len = meta.scales.len() == 1 || meta.scales.len() == rows;
+    if !valid_meta_len {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1 or {})",
+            meta.scales.len(),
+            meta.shape,
+            rows
+        )));
+    }
+
+    let numel: usize = meta.shape.iter().product();
+    let expected_words = if meta.shape.len() >= 2 {
+        let inner: usize = meta.shape[1..].iter().product();
+        rows * inner.div_ceil(T::ITEMS)
+    } else {
+        numel.div_ceil(T::ITEMS)
+    };
+    if data.len() < expected_words {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight payload too short: got {} packed words for shape {:?}, expected at least {}",
+            data.len(),
+            meta.shape,
+            expected_words
+        )));
+    }
+
+    Ok(PackedTensor::from_raw(
+        data,
+        meta.shape,
+        meta.scales,
+        meta.zero_points,
+    ))
+}
+
 /// Helper: dispatch a quantized matmul (u4 or u8) at runtime.
 ///
 /// Generic over `T: PackedWord` — monomorphized as `U4x8` or `U8x4`.
@@ -333,10 +395,8 @@ fn quantized_matmul_dispatch<T: PackedWord>(
         let (activations, packed_bytes) = {
             let d = arena.data_mut();
             (
-                bytemuck::cast_slice::<_, f32>(
-                    &d[a_slice.offset..a_slice.offset + a_slice.size],
-                )
-                .to_vec(),
+                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
+                    .to_vec(),
                 {
                     let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
                     // Copy to u32-aligned buffer (arena may not be u32-aligned)
@@ -353,22 +413,140 @@ fn quantized_matmul_dispatch<T: PackedWord>(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let meta = weight_meta.clone().unwrap_or_else(|| {
-            crate::backend::QuantizedWeightMeta {
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
                 bit_width,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            }
-        });
+            });
         let typed_data: Vec<T> = bytemuck::cast_slice(&packed_bytes).to_vec();
-        let pt = PackedTensor::from_raw(typed_data, meta.shape.clone(), meta.scales, meta.zero_points);
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = {
             let d = arena.data_mut();
             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
         };
-        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(
-            &pt, &activations, out_f32, m, k, n,
+        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, &activations, out_f32, m, k, n);
+    }
+    Ok(())
+}
+
+/// Dispatch pre-quantized I8 activation × U8x4 packed-weight MatMul.
+///
+/// Reads activation from arena as raw bytes (I8 payload format:
+/// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<U8x4>` from
+/// the weight bytes, and calls the scalar I8×U8x4 microkernel.
+#[inline]
+fn quantized_matmul_dispatch_i8_u8(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    out_start: usize,
+    out_end: usize,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if let [a_slice, w_slice] = &input_slices[..] {
+        let (activation_payload, packed_bytes) = {
+            let d = arena.data_mut();
+            (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
+                let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                byte_slice[..raw.len()].copy_from_slice(raw);
+                aligned
+            })
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width: 8,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<U8x4> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
+            &pt,
+            &activation_payload,
+            out_f32,
+            m,
+            k,
+            n,
+        );
+    }
+    Ok(())
+}
+
+/// Dispatch pre-quantized I8 activation × U4x8 packed-weight MatMul.
+///
+/// Reads activation from arena as raw bytes (I8 payload format:
+/// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<U4x8>` from
+/// the weight bytes, and calls the scalar I8×U4x8 microkernel.
+#[inline]
+fn quantized_matmul_dispatch_i8_u4(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    out_start: usize,
+    out_end: usize,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if let [a_slice, w_slice] = &input_slices[..] {
+        let (activation_payload, packed_bytes) = {
+            let d = arena.data_mut();
+            (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
+                let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                byte_slice[..raw.len()].copy_from_slice(raw);
+                aligned
+            })
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width: 4,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<U4x8> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4x8(
+            &pt,
+            &activation_payload,
+            out_f32,
+            m,
+            k,
+            n,
         );
     }
     Ok(())
@@ -440,14 +618,20 @@ fn fused_binary_activation_dispatch_precopied(
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         if microkernels::simd_avx2_available() && out_f32.len() >= 8 {
             let binary_dispatched = if kernel_name.starts_with("add_") {
-                add_f32(a, b, out_f32); true
+                add_f32(a, b, out_f32);
+                true
             } else if kernel_name.starts_with("sub_") {
-                sub_f32(a, b, out_f32); true
+                sub_f32(a, b, out_f32);
+                true
             } else if kernel_name.starts_with("mul_") {
-                mul_f32(a, b, out_f32); true
+                mul_f32(a, b, out_f32);
+                true
             } else if kernel_name.starts_with("div_") {
-                div_f32(a, b, out_f32); true
-            } else { false };
+                div_f32(a, b, out_f32);
+                true
+            } else {
+                false
+            };
 
             if binary_dispatched {
                 let len = out_f32.len();
@@ -485,12 +669,13 @@ fn fused_binary_activation_dispatch_precopied(
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
-            out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                |(i, o)| {
+            out_f32[..out_len]
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, o)| {
                     let x = op(a[i % a_len], b[i % b_len]);
                     *o = act(x);
-                },
-            );
+                });
         }
     }
 }
@@ -576,19 +761,113 @@ fn quantized_matmul_dispatch_precopied<T: PackedWord>(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let meta = weight_meta.clone().unwrap_or_else(|| {
-            crate::backend::QuantizedWeightMeta {
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
                 bit_width,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            }
-        });
+            });
         let typed_data: Vec<T> = bytemuck::cast_slice(&packed_bytes).to_vec();
-        let pt = PackedTensor::from_raw(typed_data, meta.shape.clone(), meta.scales, meta.zero_points);
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(
-            &pt, activations, out_f32, m, k, n,
+        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, activations, out_f32, m, k, n);
+    }
+    Ok(())
+}
+
+/// Pre-copied dispatch for I8 activation × U8x4 packed-weight MatMul.
+///
+/// Reads activation as raw bytes (I8 payload format), weight as raw bytes,
+/// builds a `PackedTensor<U8x4>`, and calls the scalar I8×U8x4 microkernel.
+fn quantized_matmul_dispatch_precopied_i8_u8(
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if inputs.len() >= 2 {
+        let activation_payload = &inputs[0];
+        let raw = &inputs[1];
+        let mut packed_bytes = vec![0u32; raw.len().div_ceil(4)];
+        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
+        byte_slice[..raw.len()].copy_from_slice(raw);
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width: 8,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<U8x4> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
+            &pt,
+            activation_payload,
+            out_f32,
+            m,
+            k,
+            n,
+        );
+    }
+    Ok(())
+}
+
+/// Pre-copied dispatch for I8 activation × U4x8 packed-weight MatMul.
+///
+/// Reads activation as raw bytes (I8 payload format), weight as raw bytes,
+/// builds a `PackedTensor<U4x8>`, and calls the scalar I8×U4x8 microkernel.
+fn quantized_matmul_dispatch_precopied_i8_u4(
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if inputs.len() >= 2 {
+        let activation_payload = &inputs[0];
+        let raw = &inputs[1];
+        let mut packed_bytes = vec![0u32; raw.len().div_ceil(4)];
+        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
+        byte_slice[..raw.len()].copy_from_slice(raw);
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width: 4,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<U4x8> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4x8(
+            &pt,
+            activation_payload,
+            out_f32,
+            m,
+            k,
+            n,
         );
     }
     Ok(())
@@ -607,26 +886,22 @@ fn quantized_matmul_dispatch_precopied<T: PackedWord>(
 // ── Helper macros for run_kernel_precopied ──────────────────────────
 /// Expands to the body of a unary match arm: cast input[0]→f32, cast output→f32, call fn
 macro_rules! precopied_unary_body {
-    ($inputs:expr, $output:expr, $fn:ident) => {
-        {
-            if !$inputs.is_empty() {
-                let a = bytemuck::cast_slice::<_, f32>(&$inputs[0]);
-                let out = bytemuck::cast_slice_mut::<_, f32>($output);
-                $fn(a, out);
-            }
+    ($inputs:expr, $output:expr, $fn:ident) => {{
+        if !$inputs.is_empty() {
+            let a = bytemuck::cast_slice::<_, f32>(&$inputs[0]);
+            let out = bytemuck::cast_slice_mut::<_, f32>($output);
+            $fn(a, out);
         }
-    };
+    }};
 }
 /// Expands to the body of a binary match arm: cast input[0], input[1], output, call fn
 macro_rules! precopied_binary_body {
-    ($inputs:expr, $output:expr, $fn:ident) => {
-        {
-            let a = bytemuck::cast_slice::<_, f32>(&$inputs[0]);
-            let b = bytemuck::cast_slice::<_, f32>(&$inputs[1]);
-            let out = bytemuck::cast_slice_mut::<_, f32>($output);
-            $fn(a, b, out);
-        }
-    };
+    ($inputs:expr, $output:expr, $fn:ident) => {{
+        let a = bytemuck::cast_slice::<_, f32>(&$inputs[0]);
+        let b = bytemuck::cast_slice::<_, f32>(&$inputs[1]);
+        let out = bytemuck::cast_slice_mut::<_, f32>($output);
+        $fn(a, b, out);
+    }};
 }
 
 /// * `params` — integer kernel parameters
@@ -676,7 +951,11 @@ fn run_kernel_precopied(
             if !inputs.is_empty() {
                 let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
                 let out = bytemuck::cast_slice_mut::<_, f32>(output);
-                let slope = if !params.is_empty() { f32::from_bits(params[0] as u32) } else { 0.01 };
+                let slope = if !params.is_empty() {
+                    f32::from_bits(params[0] as u32)
+                } else {
+                    0.01
+                };
                 leaky_relu_f32(a, out, slope);
             }
         }
@@ -684,8 +963,16 @@ fn run_kernel_precopied(
             if !inputs.is_empty() {
                 let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
                 let out = bytemuck::cast_slice_mut::<_, f32>(output);
-                let min_val = if !params.is_empty() { f32::from_bits(params[0] as u32) } else { 0.0 };
-                let max_val = if params.len() > 1 { f32::from_bits(params[1] as u32) } else { 1.0 };
+                let min_val = if !params.is_empty() {
+                    f32::from_bits(params[0] as u32)
+                } else {
+                    0.0
+                };
+                let max_val = if params.len() > 1 {
+                    f32::from_bits(params[1] as u32)
+                } else {
+                    1.0
+                };
                 clamp_f32(a, out, min_val, max_val);
             }
         }
@@ -716,7 +1003,9 @@ fn run_kernel_precopied(
                             &a[a_s..a_s + a_stride],
                             &b[b_s..b_s + b_stride],
                             &mut out_f32[out_s..out_s + out_stride],
-                            m, _k, n,
+                            m,
+                            _k,
+                            n,
                         );
                     }
                 } else {
@@ -734,11 +1023,19 @@ fn run_kernel_precopied(
                             let out_ptr = out_raw as *mut f32;
                             unsafe {
                                 crate::backend::cpu::microkernels::blocked_row_matmul(
-                                    a_ptr, b_ptr, out_ptr, row,
-                                    m, n, _k,
-                                    a_stride, _k, 1,
+                                    a_ptr,
+                                    b_ptr,
+                                    out_ptr,
+                                    row,
+                                    m,
+                                    n,
+                                    _k,
+                                    a_stride,
+                                    _k,
+                                    1,
                                     b_batch_stride,
-                                    n, 1,
+                                    n,
+                                    1,
                                 );
                             }
                         });
@@ -751,10 +1048,15 @@ fn run_kernel_precopied(
                                 b.as_ptr(),
                                 out_f32.as_mut_ptr(),
                                 row,
-                                m, n, _k,
-                                a_stride, _k, 1,
+                                m,
+                                n,
+                                _k,
+                                a_stride,
+                                _k,
+                                1,
                                 b_batch_stride,
-                                n, 1,
+                                n,
+                                1,
                             );
                         }
                     }
@@ -763,38 +1065,126 @@ fn run_kernel_precopied(
         }
         // ── Fused matmul + activation ──────────────────────────
         "fused_matmul_add_relu" => {
-            matmul_activation_dispatch_precopied(inputs, output, params, param_dims, shape_env, "fused_matmul_add_relu", |x| x.max(0.0))?;
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "fused_matmul_add_relu",
+                |x| x.max(0.0),
+            )?;
         }
         "fused_matmul_add_gelu" => {
-            matmul_activation_dispatch_precopied(inputs, output, params, param_dims, shape_env, "fused_matmul_add_gelu", |x| {
-                let x3 = x * x * x;
-                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                let t = tanh_arg.tanh();
-                0.5 * x * (1.0 + t)
-            })?;
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "fused_matmul_add_gelu",
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            )?;
         }
         "fused_matmul_add_silu" => {
-            matmul_activation_dispatch_precopied(inputs, output, params, param_dims, shape_env, "fused_matmul_add_silu", |x| x / (1.0 + (-x).exp()))?;
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "fused_matmul_add_silu",
+                |x| x / (1.0 + (-x).exp()),
+            )?;
         }
         "matmul_relu" => {
-            matmul_activation_dispatch_precopied(inputs, output, params, param_dims, shape_env, "matmul_relu", |x| x.max(0.0))?;
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "matmul_relu",
+                |x| x.max(0.0),
+            )?;
         }
         "matmul_gelu" => {
-            matmul_activation_dispatch_precopied(inputs, output, params, param_dims, shape_env, "matmul_gelu", |x| {
-                let x3 = x * x * x;
-                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                let t = tanh_arg.tanh();
-                0.5 * x * (1.0 + t)
-            })?;
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "matmul_gelu",
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            )?;
         }
         "matmul_silu" => {
-            matmul_activation_dispatch_precopied(inputs, output, params, param_dims, shape_env, "matmul_silu", |x| x / (1.0 + (-x).exp()))?;
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "matmul_silu",
+                |x| x / (1.0 + (-x).exp()),
+            )?;
         }
         "matmul_u4" => {
-            quantized_matmul_dispatch_precopied::<U4x8>(inputs, output, params, param_dims, shape_env, weight_meta, 4, "matmul_u4")?;
+            quantized_matmul_dispatch_precopied::<U4x8>(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                weight_meta,
+                4,
+                "matmul_u4",
+            )?;
+        }
+        "matmul_u4_i8" => {
+            quantized_matmul_dispatch_precopied_i8_u4(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                weight_meta,
+                "matmul_u4_i8",
+            )?;
+        }
+        "matmul_u8_i8" => {
+            quantized_matmul_dispatch_precopied_i8_u8(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                weight_meta,
+                "matmul_u8_i8",
+            )?;
         }
         "matmul_u8" => {
-            quantized_matmul_dispatch_precopied::<U8x4>(inputs, output, params, param_dims, shape_env, weight_meta, 8, "matmul_u8")?;
+            quantized_matmul_dispatch_precopied::<U8x4>(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                weight_meta,
+                8,
+                "matmul_u8",
+            )?;
         }
         // ── Reduce ────────────────────────────────────────────
         "reduce_f32" => {
@@ -806,14 +1196,19 @@ fn run_kernel_precopied(
                 ));
             };
             let effective_group_size = match param_dims {
-                Some(dims) if !dims.is_empty() => {
-                    dims[0].evaluate_with_env(shape_env).map_err(|e| {
-                        BackendError::Dispatch(format!("reduce_f32: {e}"))
-                    })? as usize
-                }
+                Some(dims) if !dims.is_empty() => dims[0]
+                    .evaluate_with_env(shape_env)
+                    .map_err(|e| BackendError::Dispatch(format!("reduce_f32: {e}")))?
+                    as usize,
                 _ => group_size,
             };
-            reduce_f32(input, out_f32, effective_group_size, is_mean == 1, is_max == 1);
+            reduce_f32(
+                input,
+                out_f32,
+                effective_group_size,
+                is_mean == 1,
+                is_max == 1,
+            );
         }
         // ── Transpose ──────────────────────────────────────────
         "transpose_f32" => {
@@ -828,7 +1223,9 @@ fn run_kernel_precopied(
                 let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
-                    unsafe { microkernels::transpose_f32_avx2(input, out_f32, m, n); }
+                    unsafe {
+                        microkernels::transpose_f32_avx2(input, out_f32, m, n);
+                    }
                 } else {
                     #[cfg(not(feature = "parallel"))]
                     {
@@ -899,60 +1296,132 @@ fn run_kernel_precopied(
         }
         // ── Fused binary + activation ──────────────────────────
         "add_relu_f32" => {
-            fused_binary_activation_dispatch_precopied("add_relu_f32", inputs, output, |a, b| a + b, |x| x.max(0.0));
+            fused_binary_activation_dispatch_precopied(
+                "add_relu_f32",
+                inputs,
+                output,
+                |a, b| a + b,
+                |x| x.max(0.0),
+            );
         }
         "sub_relu_f32" => {
-            fused_binary_activation_dispatch_precopied("sub_relu_f32", inputs, output, |a, b| a - b, |x| x.max(0.0));
+            fused_binary_activation_dispatch_precopied(
+                "sub_relu_f32",
+                inputs,
+                output,
+                |a, b| a - b,
+                |x| x.max(0.0),
+            );
         }
         "mul_relu_f32" => {
-            fused_binary_activation_dispatch_precopied("mul_relu_f32", inputs, output, |a, b| a * b, |x| x.max(0.0));
+            fused_binary_activation_dispatch_precopied(
+                "mul_relu_f32",
+                inputs,
+                output,
+                |a, b| a * b,
+                |x| x.max(0.0),
+            );
         }
         "div_relu_f32" => {
-            fused_binary_activation_dispatch_precopied("div_relu_f32", inputs, output, |a, b| a / b, |x| x.max(0.0));
+            fused_binary_activation_dispatch_precopied(
+                "div_relu_f32",
+                inputs,
+                output,
+                |a, b| a / b,
+                |x| x.max(0.0),
+            );
         }
         "add_gelu_f32" => {
-            fused_binary_activation_dispatch_precopied("add_gelu_f32", inputs, output, |a, b| a + b, |x| {
-                let x3 = x * x * x;
-                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                let t = tanh_arg.tanh();
-                0.5 * x * (1.0 + t)
-            });
+            fused_binary_activation_dispatch_precopied(
+                "add_gelu_f32",
+                inputs,
+                output,
+                |a, b| a + b,
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            );
         }
         "sub_gelu_f32" => {
-            fused_binary_activation_dispatch_precopied("sub_gelu_f32", inputs, output, |a, b| a - b, |x| {
-                let x3 = x * x * x;
-                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                let t = tanh_arg.tanh();
-                0.5 * x * (1.0 + t)
-            });
+            fused_binary_activation_dispatch_precopied(
+                "sub_gelu_f32",
+                inputs,
+                output,
+                |a, b| a - b,
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            );
         }
         "mul_gelu_f32" => {
-            fused_binary_activation_dispatch_precopied("mul_gelu_f32", inputs, output, |a, b| a * b, |x| {
-                let x3 = x * x * x;
-                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                let t = tanh_arg.tanh();
-                0.5 * x * (1.0 + t)
-            });
+            fused_binary_activation_dispatch_precopied(
+                "mul_gelu_f32",
+                inputs,
+                output,
+                |a, b| a * b,
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            );
         }
         "div_gelu_f32" => {
-            fused_binary_activation_dispatch_precopied("div_gelu_f32", inputs, output, |a, b| a / b, |x| {
-                let x3 = x * x * x;
-                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                let t = tanh_arg.tanh();
-                0.5 * x * (1.0 + t)
-            });
+            fused_binary_activation_dispatch_precopied(
+                "div_gelu_f32",
+                inputs,
+                output,
+                |a, b| a / b,
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            );
         }
         "add_silu_f32" => {
-            fused_binary_activation_dispatch_precopied("add_silu_f32", inputs, output, |a, b| a + b, |x| x / (1.0 + (-x).exp()));
+            fused_binary_activation_dispatch_precopied(
+                "add_silu_f32",
+                inputs,
+                output,
+                |a, b| a + b,
+                |x| x / (1.0 + (-x).exp()),
+            );
         }
         "sub_silu_f32" => {
-            fused_binary_activation_dispatch_precopied("sub_silu_f32", inputs, output, |a, b| a - b, |x| x / (1.0 + (-x).exp()));
+            fused_binary_activation_dispatch_precopied(
+                "sub_silu_f32",
+                inputs,
+                output,
+                |a, b| a - b,
+                |x| x / (1.0 + (-x).exp()),
+            );
         }
         "mul_silu_f32" => {
-            fused_binary_activation_dispatch_precopied("mul_silu_f32", inputs, output, |a, b| a * b, |x| x / (1.0 + (-x).exp()));
+            fused_binary_activation_dispatch_precopied(
+                "mul_silu_f32",
+                inputs,
+                output,
+                |a, b| a * b,
+                |x| x / (1.0 + (-x).exp()),
+            );
         }
         "div_silu_f32" => {
-            fused_binary_activation_dispatch_precopied("div_silu_f32", inputs, output, |a, b| a / b, |x| x / (1.0 + (-x).exp()));
+            fused_binary_activation_dispatch_precopied(
+                "div_silu_f32",
+                inputs,
+                output,
+                |a, b| a / b,
+                |x| x / (1.0 + (-x).exp()),
+            );
         }
         // ── Softmax ────────────────────────────────────────────
         "softmax" => {
@@ -1003,22 +1472,37 @@ fn run_kernel_precopied(
                         if has_avx2() {
                             unsafe {
                                 crate::backend::cpu::microkernels::batch_norm_inference_f32_avx2(
-                                    data, weight, bias, running_mean, running_var,
-                                    out_f32, eps,
+                                    data,
+                                    weight,
+                                    bias,
+                                    running_mean,
+                                    running_var,
+                                    out_f32,
+                                    eps,
                                 );
                             }
                         } else {
                             crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                                data, weight, bias, running_mean, running_var,
-                                out_f32, eps,
+                                data,
+                                weight,
+                                bias,
+                                running_mean,
+                                running_var,
+                                out_f32,
+                                eps,
                             );
                         }
                     }
                     #[cfg(not(feature = "simd"))]
                     {
                         crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                            data, weight, bias, running_mean, running_var,
-                            out_f32, eps,
+                            data,
+                            weight,
+                            bias,
+                            running_mean,
+                            running_var,
+                            out_f32,
+                            eps,
                         );
                     }
                 }
@@ -1053,17 +1537,12 @@ fn run_kernel_precopied(
                 };
                 let n = input_data.len() / (c * h * w).max(1);
                 let f = weight_data.len() / (c_per_group * kh * kw).max(1);
-                let _h_out = (h + 2 * padding)
-                    .saturating_sub(dilation * (kh - 1) + 1)
-                    / stride
-                    + 1;
-                let _w_out = (w + 2 * padding)
-                    .saturating_sub(dilation * (kw - 1) + 1)
-                    / stride
-                    + 1;
+                let _h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
+                let _w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
                 let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
                 let relu_fn: fn(f32) -> f32 = |x| x.max(0.0);
-                let gelu_fn: fn(f32) -> f32 = |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
+                let gelu_fn: fn(f32) -> f32 =
+                    |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
                 let silu_fn: fn(f32) -> f32 = |x| x / (1.0 + (-x).exp());
                 let identity_fn: fn(f32) -> f32 = |x| x;
                 let conv_act: Option<fn(f32) -> f32> = fused_act.map(|act| match act {
@@ -1077,8 +1556,17 @@ fn run_kernel_precopied(
                     &weight_data,
                     &bias_data,
                     out_f32,
-                    n, c, h, w, f, kh, kw,
-                    stride, padding, dilation, groups,
+                    n,
+                    c,
+                    h,
+                    w,
+                    f,
+                    kh,
+                    kw,
+                    stride,
+                    padding,
+                    dilation,
+                    groups,
                     conv_act,
                 );
             }
@@ -1104,9 +1592,8 @@ fn run_kernel_precopied(
                         let src_start = outer_pos * block;
                         let src_end = (src_start + block).min(input_data.len());
                         let dst_end = (output_offset + src_end - src_start).min(out_f32.len());
-                        out_f32[output_offset..dst_end].copy_from_slice(
-                            &input_data[src_start..src_end]
-                        );
+                        out_f32[output_offset..dst_end]
+                            .copy_from_slice(&input_data[src_start..src_end]);
                         output_offset += src_end - src_start;
                     }
                 }
@@ -1125,7 +1612,11 @@ fn run_kernel_precopied(
         }),
         "eq_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
             for i in 0..out.len() {
-                out[i] = if (data[i % data.len()] - s).abs() < 1e-6 { 1.0 } else { 0.0 };
+                out[i] = if (data[i % data.len()] - s).abs() < 1e-6 {
+                    1.0
+                } else {
+                    0.0
+                };
             }
         }),
         "add_scalar_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
@@ -1150,7 +1641,11 @@ fn run_kernel_precopied(
                 let b = bytemuck::cast_slice::<_, f32>(&inputs[2]);
                 let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
                 for i in 0..out_f32.len() {
-                    out_f32[i] = if cond[i % cond.len()] != 0.0 { a[i % a.len()] } else { b[i % b.len()] };
+                    out_f32[i] = if cond[i % cond.len()] != 0.0 {
+                        a[i % a.len()]
+                    } else {
+                        b[i % b.len()]
+                    };
                 }
             }
         }
@@ -1197,7 +1692,8 @@ fn run_kernel_precopied(
         // ── Catch-all for any kernel not yet covered ───────────
         other => {
             return Err(BackendError::UnsupportedOp(format!(
-                "run_kernel_precopied: unsupported kernel '{}'", other
+                "run_kernel_precopied: unsupported kernel '{}'",
+                other
             )));
         }
     }
@@ -1434,7 +1930,9 @@ impl Backend for CpuBackend {
     fn allocate_arena(&self, total_bytes: usize) -> CpuBuffer {
         // No need to zero-fill — every output slot is written before read
         let mut buf = Vec::with_capacity(total_bytes);
-        unsafe { buf.set_len(total_bytes); }
+        unsafe {
+            buf.set_len(total_bytes);
+        }
         CpuBuffer::new(buf)
     }
 
@@ -1563,6 +2061,21 @@ impl Backend for CpuBackend {
                         (Some("OpGelu"), false) => "matmul_gelu",
                         (Some("OpSilu"), false) => "matmul_silu",
                         (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8))
+                                && input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
+                        {
+                            "matmul_u4_i8"
+                        }
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8))
+                                && input_dtypes.iter().any(|d| matches!(d, IrDType::U8 { .. }))
+                                && !input_dtypes
+                                    .iter()
+                                    .any(|d| matches!(d, IrDType::U4 { .. })) =>
+                        {
+                            "matmul_u8_i8"
+                        }
+                        (_, true)
                             if input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
                         {
                             "matmul_u4"
@@ -1690,7 +2203,7 @@ impl Backend for CpuBackend {
                                 _ => unreachable!(),
                             };
                         }
-                        _ => {},
+                        _ => {}
                     }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -2259,11 +2772,7 @@ impl Backend for CpuBackend {
                     let rank = input_shape.len();
 
                     // Read perm from node attrs (e.g. "0,3,1,2")
-                    let perm_str: String = node
-                        .attrs
-                        .get("perm")
-                        .cloned()
-                        .unwrap_or_default();
+                    let perm_str: String = node.attrs.get("perm").cloned().unwrap_or_default();
                     let perm: Vec<usize> = if perm_str.is_empty() {
                         (0..rank).rev().collect()
                     } else {
@@ -2397,8 +2906,8 @@ impl Backend for CpuBackend {
                         output_slice,
                         secondary_output_slice: None,
                         params: vec![
-                            stride, padding, dilation, input_c, input_d, input_h, input_w, kernel_d,
-                            kernel_h, kernel_w,
+                            stride, padding, dilation, input_c, input_d, input_h, input_w,
+                            kernel_d, kernel_h, kernel_w,
                         ],
                         param_dims: None,
                         weight_meta: None,
@@ -2503,32 +3012,50 @@ impl Backend for CpuBackend {
                 }
                 Opcode::GtScalar => {
                     instructions.push(scalar_kernel_instruction(
-                        node_id, "gt_scalar_f32", input_slices, output_slice,
+                        node_id,
+                        "gt_scalar_f32",
+                        input_slices,
+                        output_slice,
                     ));
                 }
                 Opcode::LtScalar => {
                     instructions.push(scalar_kernel_instruction(
-                        node_id, "lt_scalar_f32", input_slices, output_slice,
+                        node_id,
+                        "lt_scalar_f32",
+                        input_slices,
+                        output_slice,
                     ));
                 }
                 Opcode::EqScalar => {
                     instructions.push(scalar_kernel_instruction(
-                        node_id, "eq_scalar_f32", input_slices, output_slice,
+                        node_id,
+                        "eq_scalar_f32",
+                        input_slices,
+                        output_slice,
                     ));
                 }
                 Opcode::AddScalar => {
                     instructions.push(scalar_kernel_instruction(
-                        node_id, "add_scalar_f32", input_slices, output_slice,
+                        node_id,
+                        "add_scalar_f32",
+                        input_slices,
+                        output_slice,
                     ));
                 }
                 Opcode::MulScalar => {
                     instructions.push(scalar_kernel_instruction(
-                        node_id, "mul_scalar_f32", input_slices, output_slice,
+                        node_id,
+                        "mul_scalar_f32",
+                        input_slices,
+                        output_slice,
                     ));
                 }
                 Opcode::DivScalar => {
                     instructions.push(scalar_kernel_instruction(
-                        node_id, "div_scalar_f32", input_slices, output_slice,
+                        node_id,
+                        "div_scalar_f32",
+                        input_slices,
+                        output_slice,
                     ));
                 }
                 // Input nodes have no producer instruction — data is written
@@ -2554,7 +3081,8 @@ impl Backend for CpuBackend {
                             let idx = normalized as usize;
                             if idx < s.len() {
                                 let ds = s[idx] as usize;
-                                let inn: usize = s[idx + 1..].iter().copied().map(|x| x as usize).product();
+                                let inn: usize =
+                                    s[idx + 1..].iter().copied().map(|x| x as usize).product();
                                 Some((ds, inn))
                             } else {
                                 None
@@ -3462,7 +3990,11 @@ impl Backend for CpuBackend {
                         }
                         "leaky_relu_f32" => {
                             get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            let slope = if !params.is_empty() { f32::from_bits(params[0] as u32) } else { 0.01 };
+                            let slope = if !params.is_empty() {
+                                f32::from_bits(params[0] as u32)
+                            } else {
+                                0.01
+                            };
                             leaky_relu_f32(&input, out_f32, slope);
                         }
                         "elu_f32" => {
@@ -3479,8 +4011,16 @@ impl Backend for CpuBackend {
                         }
                         "clamp_f32" => {
                             get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            let min_val = if !params.is_empty() { f32::from_bits(params[0] as u32) } else { 0.0 };
-                            let max_val = if params.len() > 1 { f32::from_bits(params[1] as u32) } else { 1.0 };
+                            let min_val = if !params.is_empty() {
+                                f32::from_bits(params[0] as u32)
+                            } else {
+                                0.0
+                            };
+                            let max_val = if params.len() > 1 {
+                                f32::from_bits(params[1] as u32)
+                            } else {
+                                1.0
+                            };
                             clamp_f32(&input, out_f32, min_val, max_val);
                         }
                         "sign_f32" => {
@@ -3558,14 +4098,15 @@ impl Backend for CpuBackend {
                                             &a[a_s..a_s + a_stride],
                                             &b[b_s..b_s + b_stride],
                                             &mut out_f32[out_s..out_s + out_stride],
-                                            m, _k, n,
+                                            m,
+                                            _k,
+                                            n,
                                         );
                                     }
                                 } else {
                                     // Use SIMD+tiled blocked_row_matmul for small-to-medium matmuls
                                     let total_rows = batch_count * m;
-                                    let b_batch_stride
-                                        = if b_batched { b_stride } else { 0 };
+                                    let b_batch_stride = if b_batched { b_stride } else { 0 };
                                     #[cfg(feature = "parallel")]
                                     {
                                         use rayon::prelude::*;
@@ -3597,10 +4138,15 @@ impl Backend for CpuBackend {
                                                 b.as_ptr(),
                                                 out_f32.as_mut_ptr(),
                                                 row,
-                                                m, n, _k,
-                                                a_stride, _k, 1,
+                                                m,
+                                                n,
+                                                _k,
+                                                a_stride,
+                                                _k,
+                                                1,
                                                 b_batch_stride,
-                                                n, 1,
+                                                n,
+                                                1,
                                             );
                                         }
                                     }
@@ -3709,6 +4255,32 @@ impl Backend for CpuBackend {
                                 "matmul_u4",
                             )?;
                         }
+                        "matmul_u4_i8" => {
+                            quantized_matmul_dispatch_i8_u4(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                "matmul_u4_i8",
+                            )?;
+                        }
+                        "matmul_u8_i8" => {
+                            quantized_matmul_dispatch_i8_u8(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                "matmul_u8_i8",
+                            )?;
+                        }
                         "matmul_u8" => {
                             quantized_matmul_dispatch::<U8x4>(
                                 input_slices,
@@ -3727,7 +4299,8 @@ impl Backend for CpuBackend {
                             get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
                             let &[group_size, is_mean, is_max] = &params[..3] else {
                                 return Err(BackendError::Dispatch(
-                                    "reduce_f32: expected params [group_size, is_mean, is_max]".into(),
+                                    "reduce_f32: expected params [group_size, is_mean, is_max]"
+                                        .into(),
                                 ));
                             };
                             let effective_group_size = match param_dims {
@@ -3738,7 +4311,13 @@ impl Backend for CpuBackend {
                                 }
                                 _ => group_size,
                             };
-                            reduce_f32(&input, out_f32, effective_group_size, is_mean == 1, is_max == 1);
+                            reduce_f32(
+                                &input,
+                                out_f32,
+                                effective_group_size,
+                                is_mean == 1,
+                                is_max == 1,
+                            );
                         }
                         "transpose_f32" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -3763,7 +4342,9 @@ impl Backend for CpuBackend {
                                 };
                                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                 if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
-                                    unsafe { microkernels::transpose_f32_avx2(&input, out_f32, m, n); }
+                                    unsafe {
+                                        microkernels::transpose_f32_avx2(&input, out_f32, m, n);
+                                    }
                                 } else {
                                     #[cfg(not(feature = "parallel"))]
                                     {
@@ -3776,11 +4357,13 @@ impl Backend for CpuBackend {
                                     #[cfg(feature = "parallel")]
                                     {
                                         use rayon::prelude::*;
-                                        out_f32.par_chunks_mut(m).enumerate().for_each(|(j, col)| {
-                                            for i in 0..m {
-                                                col[i] = input[i * n + j];
-                                            }
-                                        });
+                                        out_f32.par_chunks_mut(m).enumerate().for_each(
+                                            |(j, col)| {
+                                                for i in 0..m {
+                                                    col[i] = input[i * n + j];
+                                                }
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -3800,8 +4383,7 @@ impl Backend for CpuBackend {
                                 let nd_params =
                                     resolve_params(params, param_dims, shape_env, 1 + 2 * rank)?;
                                 let dims: Vec<usize> = nd_params[1..1 + rank].to_vec();
-                                let perm: Vec<usize> =
-                                    nd_params[1 + rank..1 + 2 * rank].to_vec();
+                                let perm: Vec<usize> = nd_params[1 + rank..1 + 2 * rank].to_vec();
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -3848,13 +4430,37 @@ impl Backend for CpuBackend {
                             }
                         }
                         "add_relu_f32" => {
-                            fused_binary_activation_dispatch("add_relu_f32", input_slices, arena, out_start, out_end, |a, b| a + b, |x| x.max(0.0));
+                            fused_binary_activation_dispatch(
+                                "add_relu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a + b,
+                                |x| x.max(0.0),
+                            );
                         }
                         "sub_relu_f32" => {
-                            fused_binary_activation_dispatch("sub_relu_f32", input_slices, arena, out_start, out_end, |a, b| a - b, |x| x.max(0.0));
+                            fused_binary_activation_dispatch(
+                                "sub_relu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a - b,
+                                |x| x.max(0.0),
+                            );
                         }
                         "mul_relu_f32" => {
-                            fused_binary_activation_dispatch("mul_relu_f32", input_slices, arena, out_start, out_end, |a, b| a * b, |x| x.max(0.0));
+                            fused_binary_activation_dispatch(
+                                "mul_relu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a * b,
+                                |x| x.max(0.0),
+                            );
                         }
                         "softmax" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -3977,8 +4583,13 @@ impl Backend for CpuBackend {
                                     #[cfg(not(feature = "simd"))]
                                     {
                                         crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                                            &data, &weight, &bias, &running_mean, &running_var,
-                                            out_f32, eps,
+                                            &data,
+                                            &weight,
+                                            &bias,
+                                            &running_mean,
+                                            &running_var,
+                                            out_f32,
+                                            eps,
                                         );
                                     }
                                 }
@@ -4004,53 +4615,125 @@ impl Backend for CpuBackend {
                             }
                         }
                         "div_relu_f32" => {
-                            fused_binary_activation_dispatch("div_relu_f32", input_slices, arena, out_start, out_end, |a, b| a / b, |x| x.max(0.0));
+                            fused_binary_activation_dispatch(
+                                "div_relu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a / b,
+                                |x| x.max(0.0),
+                            );
                         }
                         // ── Fused elementwise + GELU ─────────────────────
                         "add_gelu_f32" => {
-                            fused_binary_activation_dispatch("add_gelu_f32", input_slices, arena, out_start, out_end, |a, b| a + b, |x| {
-                                let x3 = x * x * x;
-                                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                let t = tanh_arg.tanh();
-                                0.5 * x * (1.0 + t)
-                            });
+                            fused_binary_activation_dispatch(
+                                "add_gelu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a + b,
+                                |x| {
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    0.5 * x * (1.0 + t)
+                                },
+                            );
                         }
                         "sub_gelu_f32" => {
-                            fused_binary_activation_dispatch("sub_gelu_f32", input_slices, arena, out_start, out_end, |a, b| a - b, |x| {
-                                let x3 = x * x * x;
-                                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                let t = tanh_arg.tanh();
-                                0.5 * x * (1.0 + t)
-                            });
+                            fused_binary_activation_dispatch(
+                                "sub_gelu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a - b,
+                                |x| {
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    0.5 * x * (1.0 + t)
+                                },
+                            );
                         }
                         "mul_gelu_f32" => {
-                            fused_binary_activation_dispatch("mul_gelu_f32", input_slices, arena, out_start, out_end, |a, b| a * b, |x| {
-                                let x3 = x * x * x;
-                                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                let t = tanh_arg.tanh();
-                                0.5 * x * (1.0 + t)
-                            });
+                            fused_binary_activation_dispatch(
+                                "mul_gelu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a * b,
+                                |x| {
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    0.5 * x * (1.0 + t)
+                                },
+                            );
                         }
                         "div_gelu_f32" => {
-                            fused_binary_activation_dispatch("div_gelu_f32", input_slices, arena, out_start, out_end, |a, b| a / b, |x| {
-                                let x3 = x * x * x;
-                                let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                let t = tanh_arg.tanh();
-                                0.5 * x * (1.0 + t)
-                            });
+                            fused_binary_activation_dispatch(
+                                "div_gelu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a / b,
+                                |x| {
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    0.5 * x * (1.0 + t)
+                                },
+                            );
                         }
                         // ── Fused elementwise + SiLU ─────────────────────
                         "add_silu_f32" => {
-                            fused_binary_activation_dispatch("add_silu_f32", input_slices, arena, out_start, out_end, |a, b| a + b, |x| x / (1.0 + (-x).exp()));
+                            fused_binary_activation_dispatch(
+                                "add_silu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a + b,
+                                |x| x / (1.0 + (-x).exp()),
+                            );
                         }
                         "sub_silu_f32" => {
-                            fused_binary_activation_dispatch("sub_silu_f32", input_slices, arena, out_start, out_end, |a, b| a - b, |x| x / (1.0 + (-x).exp()));
+                            fused_binary_activation_dispatch(
+                                "sub_silu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a - b,
+                                |x| x / (1.0 + (-x).exp()),
+                            );
                         }
                         "mul_silu_f32" => {
-                            fused_binary_activation_dispatch("mul_silu_f32", input_slices, arena, out_start, out_end, |a, b| a * b, |x| x / (1.0 + (-x).exp()));
+                            fused_binary_activation_dispatch(
+                                "mul_silu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a * b,
+                                |x| x / (1.0 + (-x).exp()),
+                            );
                         }
                         "div_silu_f32" => {
-                            fused_binary_activation_dispatch("div_silu_f32", input_slices, arena, out_start, out_end, |a, b| a / b, |x| x / (1.0 + (-x).exp()));
+                            fused_binary_activation_dispatch(
+                                "div_silu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a / b,
+                                |x| x / (1.0 + (-x).exp()),
+                            );
                         }
                         "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu" => {
                             let fused_act = match kernel_name.as_str() {
@@ -4119,15 +4802,17 @@ impl Backend for CpuBackend {
                                 // vectorized activation used in the separate pass. But it saves the
                                 // entire extra memory round-trip over the output tensor.
                                 let relu_fn: fn(f32) -> f32 = |x| x.max(0.0);
-                                let gelu_fn: fn(f32) -> f32 = |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
+                                let gelu_fn: fn(f32) -> f32 =
+                                    |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
                                 let silu_fn: fn(f32) -> f32 = |x| x / (1.0 + (-x).exp());
                                 let identity_fn: fn(f32) -> f32 = |x| x;
-                                let conv_act: Option<fn(f32) -> f32> = fused_act.map(|act| match act {
-                                    "relu" => relu_fn,
-                                    "gelu" => gelu_fn,
-                                    "silu" => silu_fn,
-                                    _ => identity_fn,
-                                });
+                                let conv_act: Option<fn(f32) -> f32> =
+                                    fused_act.map(|act| match act {
+                                        "relu" => relu_fn,
+                                        "gelu" => gelu_fn,
+                                        "silu" => silu_fn,
+                                        _ => identity_fn,
+                                    });
 
                                 // Delegate to the im2col + GEMM microkernel (falls back to tiled for small tensors)
                                 crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
@@ -4312,9 +4997,7 @@ impl Backend for CpuBackend {
                                 }
                                 let out_f32 = {
                                     let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(
-                                        &mut d[out_start..out_end],
-                                    )
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 let mut output_offset = 0;
                                 for outer_pos in 0..outer_count {
@@ -4341,12 +5024,17 @@ impl Backend for CpuBackend {
                                                 );
                                             }
                                         } else {
-                                            out_f32[output_offset..dst_end]
-                                                .copy_from_slice(&input_data[src_start..src_start + actual_copy]);
+                                            out_f32[output_offset..dst_end].copy_from_slice(
+                                                &input_data[src_start..src_start + actual_copy],
+                                            );
                                         }
-                                        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                                        out_f32[output_offset..dst_end]
-                                            .copy_from_slice(&input_data[src_start..src_start + actual_copy]);
+                                        #[cfg(not(all(
+                                            feature = "simd",
+                                            target_arch = "x86_64"
+                                        )))]
+                                        out_f32[output_offset..dst_end].copy_from_slice(
+                                            &input_data[src_start..src_start + actual_copy],
+                                        );
                                         #[cfg(feature = "debug_canary")]
                                         eprintln!(
                                             "[FNN_DBG_CONCAT] out=[{},{}) outer={} input[{}]: off={} sz={} block={} copy={}",
@@ -4439,44 +5127,102 @@ impl Backend for CpuBackend {
                                             });
                                         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                         if microkernels::simd_avx2_available() {
-                                            unsafe { microkernels::pool_max_f32_avx2(
-                                                &input, out_f32, n, c, h, w,
-                                                kernel, stride_val, padding_val, h_out, w_out,
-                                                indices_out,
-                                            ); }
+                                            unsafe {
+                                                microkernels::pool_max_f32_avx2(
+                                                    &input,
+                                                    out_f32,
+                                                    n,
+                                                    c,
+                                                    h,
+                                                    w,
+                                                    kernel,
+                                                    stride_val,
+                                                    padding_val,
+                                                    h_out,
+                                                    w_out,
+                                                    indices_out,
+                                                );
+                                            }
                                         } else {
                                             microkernels::pool_max_f32_scalar(
-                                                &input, out_f32, n, c, h, w,
-                                                kernel, stride_val, padding_val, h_out, w_out,
+                                                &input,
+                                                out_f32,
+                                                n,
+                                                c,
+                                                h,
+                                                w,
+                                                kernel,
+                                                stride_val,
+                                                padding_val,
+                                                h_out,
+                                                w_out,
                                                 indices_out,
                                             );
                                         }
                                         #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                         {
                                             microkernels::pool_max_f32_scalar(
-                                                &input, out_f32, n, c, h, w,
-                                                kernel, stride_val, padding_val, h_out, w_out,
+                                                &input,
+                                                out_f32,
+                                                n,
+                                                c,
+                                                h,
+                                                w,
+                                                kernel,
+                                                stride_val,
+                                                padding_val,
+                                                h_out,
+                                                w_out,
                                                 indices_out,
                                             );
                                         }
                                     } else {
                                         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                         if microkernels::simd_avx2_available() {
-                                            unsafe { microkernels::pool_avg_f32_avx2(
-                                                &input, out_f32, n, c, h, w,
-                                                kernel, stride_val, padding_val, h_out, w_out,
-                                            ); }
+                                            unsafe {
+                                                microkernels::pool_avg_f32_avx2(
+                                                    &input,
+                                                    out_f32,
+                                                    n,
+                                                    c,
+                                                    h,
+                                                    w,
+                                                    kernel,
+                                                    stride_val,
+                                                    padding_val,
+                                                    h_out,
+                                                    w_out,
+                                                );
+                                            }
                                         } else {
                                             microkernels::pool_avg_f32_scalar(
-                                                &input, out_f32, n, c, h, w,
-                                                kernel, stride_val, padding_val, h_out, w_out,
+                                                &input,
+                                                out_f32,
+                                                n,
+                                                c,
+                                                h,
+                                                w,
+                                                kernel,
+                                                stride_val,
+                                                padding_val,
+                                                h_out,
+                                                w_out,
                                             );
                                         }
                                         #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                         {
                                             microkernels::pool_avg_f32_scalar(
-                                                &input, out_f32, n, c, h, w,
-                                                kernel, stride_val, padding_val, h_out, w_out,
+                                                &input,
+                                                out_f32,
+                                                n,
+                                                c,
+                                                h,
+                                                w,
+                                                kernel,
+                                                stride_val,
+                                                padding_val,
+                                                h_out,
+                                                w_out,
                                             );
                                         }
                                     }
@@ -4493,18 +5239,17 @@ impl Backend for CpuBackend {
                                     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                     let use_simd = false;
                                     if is_max == 1 {
-                                        let (idx_ptr_val, has_indices) = if let Some(sec_slice) =
-                                            secondary_output_slice
-                                        {
-                                            let d = arena.data_mut();
-                                            let idx_end = sec_slice.offset + sec_slice.size;
-                                            let idx_slice = bytemuck::cast_slice_mut::<_, i64>(
-                                                &mut d[sec_slice.offset..idx_end],
-                                            );
-                                            (idx_slice.as_mut_ptr() as usize, true)
-                                        } else {
-                                            (0usize, false)
-                                        };
+                                        let (idx_ptr_val, has_indices) =
+                                            if let Some(sec_slice) = secondary_output_slice {
+                                                let d = arena.data_mut();
+                                                let idx_end = sec_slice.offset + sec_slice.size;
+                                                let idx_slice = bytemuck::cast_slice_mut::<_, i64>(
+                                                    &mut d[sec_slice.offset..idx_end],
+                                                );
+                                                (idx_slice.as_mut_ptr() as usize, true)
+                                            } else {
+                                                (0usize, false)
+                                            };
                                         (0..nc).into_par_iter().for_each(|nc_idx| {
                                             let nn = nc_idx / c;
                                             let cc = nc_idx % c;
@@ -4540,18 +5285,46 @@ impl Backend for CpuBackend {
                                                 None
                                             };
                                             if use_simd {
-                                                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                                                unsafe { microkernels::pool_max_f32_avx2(
-                                                    inp, out, 1, 1, h, w,
-                                                    kernel, stride_val, padding_val, h_out, w_out,
-                                                    idx,
-                                                ); }
-                                                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                                                { unreachable!(); }
+                                                #[cfg(all(
+                                                    feature = "simd",
+                                                    target_arch = "x86_64"
+                                                ))]
+                                                unsafe {
+                                                    microkernels::pool_max_f32_avx2(
+                                                        inp,
+                                                        out,
+                                                        1,
+                                                        1,
+                                                        h,
+                                                        w,
+                                                        kernel,
+                                                        stride_val,
+                                                        padding_val,
+                                                        h_out,
+                                                        w_out,
+                                                        idx,
+                                                    );
+                                                }
+                                                #[cfg(not(all(
+                                                    feature = "simd",
+                                                    target_arch = "x86_64"
+                                                )))]
+                                                {
+                                                    unreachable!();
+                                                }
                                             } else {
                                                 microkernels::pool_max_f32_scalar(
-                                                    inp, out, 1, 1, h, w,
-                                                    kernel, stride_val, padding_val, h_out, w_out,
+                                                    inp,
+                                                    out,
+                                                    1,
+                                                    1,
+                                                    h,
+                                                    w,
+                                                    kernel,
+                                                    stride_val,
+                                                    padding_val,
+                                                    h_out,
+                                                    w_out,
                                                     idx,
                                                 );
                                             }
@@ -4579,17 +5352,45 @@ impl Backend for CpuBackend {
                                                 )
                                             };
                                             if use_simd {
-                                                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                                                unsafe { microkernels::pool_avg_f32_avx2(
-                                                    inp, out, 1, 1, h, w,
-                                                    kernel, stride_val, padding_val, h_out, w_out,
-                                                ); }
-                                                #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                                                { unreachable!(); }
+                                                #[cfg(all(
+                                                    feature = "simd",
+                                                    target_arch = "x86_64"
+                                                ))]
+                                                unsafe {
+                                                    microkernels::pool_avg_f32_avx2(
+                                                        inp,
+                                                        out,
+                                                        1,
+                                                        1,
+                                                        h,
+                                                        w,
+                                                        kernel,
+                                                        stride_val,
+                                                        padding_val,
+                                                        h_out,
+                                                        w_out,
+                                                    );
+                                                }
+                                                #[cfg(not(all(
+                                                    feature = "simd",
+                                                    target_arch = "x86_64"
+                                                )))]
+                                                {
+                                                    unreachable!();
+                                                }
                                             } else {
                                                 microkernels::pool_avg_f32_scalar(
-                                                    inp, out, 1, 1, h, w,
-                                                    kernel, stride_val, padding_val, h_out, w_out,
+                                                    inp,
+                                                    out,
+                                                    1,
+                                                    1,
+                                                    h,
+                                                    w,
+                                                    kernel,
+                                                    stride_val,
+                                                    padding_val,
+                                                    h_out,
+                                                    w_out,
                                                 );
                                             }
                                         });
@@ -4741,9 +5542,7 @@ impl Backend for CpuBackend {
                                         for i in 0..num_indices {
                                             let mut linear_offset = 0usize;
                                             for j in 0..index_depth {
-                                                let idx = indices_f32
-                                                    [i * index_depth + j]
-                                                    as usize;
+                                                let idx = indices_f32[i * index_depth + j] as usize;
                                                 let mut stride = 1usize;
                                                 for k in (j + 1)..data_rank {
                                                     stride *= data_dims[k];
@@ -4755,8 +5554,7 @@ impl Backend for CpuBackend {
                                             if linear_offset + inner_size <= out_f32.len()
                                                 && update_end <= updates.len()
                                             {
-                                                out_f32[linear_offset
-                                                    ..linear_offset + inner_size]
+                                                out_f32[linear_offset..linear_offset + inner_size]
                                                     .copy_from_slice(
                                                         &updates[update_start..update_end],
                                                     );
@@ -4836,16 +5634,27 @@ impl Backend for CpuBackend {
                                         .to_vec(),
                                     )
                                 };
-                                let &[stride, padding, dilation, c, d, h, w, kd, kh, kw] = &params[..] else {
+                                let &[stride, padding, dilation, c, d, h, w, kd, kh, kw] =
+                                    &params[..]
+                                else {
                                     return Err(BackendError::Dispatch(
                                         "conv3d: expected params [stride, padding, dilation, input_c, input_d, input_h, input_w, kernel_d, kernel_h, kernel_w]".into(),
                                     ));
                                 };
                                 let n = input.len() / (c * d * h * w).max(1);
                                 let f = weight.len() / (c * kd * kh * kw).max(1);
-                                let d_out = (d + 2 * padding).saturating_sub(dilation * (kd - 1) + 1) / stride + 1;
-                                let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
-                                let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
+                                let d_out = (d + 2 * padding)
+                                    .saturating_sub(dilation * (kd - 1) + 1)
+                                    / stride
+                                    + 1;
+                                let h_out = (h + 2 * padding)
+                                    .saturating_sub(dilation * (kh - 1) + 1)
+                                    / stride
+                                    + 1;
+                                let w_out = (w + 2 * padding)
+                                    .saturating_sub(dilation * (kw - 1) + 1)
+                                    / stride
+                                    + 1;
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -4860,9 +5669,12 @@ impl Backend for CpuBackend {
                                                         for kkd in 0..kd {
                                                             for kkh in 0..kh {
                                                                 for kkw in 0..kw {
-                                                                    let d_in = dd * stride + kkd * dilation;
-                                                                    let h_in = hh * stride + kkh * dilation;
-                                                                    let w_in = ww * stride + kkw * dilation;
+                                                                    let d_in = dd * stride
+                                                                        + kkd * dilation;
+                                                                    let h_in = hh * stride
+                                                                        + kkh * dilation;
+                                                                    let w_in = ww * stride
+                                                                        + kkw * dilation;
                                                                     if d_in >= padding
                                                                         && h_in >= padding
                                                                         && w_in >= padding
@@ -5178,7 +5990,13 @@ impl Backend for CpuBackend {
                                 let row_size = len;
                                 if row_size > 0 {
                                     let norm_input = out_f32.to_vec();
-                                    rms_norm_f32(&norm_input, &weight, &mut *out_f32, row_size, eps);
+                                    rms_norm_f32(
+                                        &norm_input,
+                                        &weight,
+                                        &mut *out_f32,
+                                        row_size,
+                                        eps,
+                                    );
                                 }
                             }
                         }
@@ -5900,7 +6718,10 @@ impl Backend for CpuBackend {
                                 let t = params[4] as f32;
                                 let bias_corr1 = 1.0 - beta1.powi(t as i32);
                                 let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                                adam_update_f32(w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps, bias_corr1, bias_corr2)
+                                adam_update_f32(
+                                    w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps,
+                                    bias_corr1, bias_corr2,
+                                )
                             };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -5948,8 +6769,7 @@ impl Backend for CpuBackend {
                                 let (t, wd) = if input_slices.len() >= 5 {
                                     // New path: t is a runtime tensor (5th input slice)
                                     let t = u64::from_le_bytes(
-                                        d_ref[input_slices[4].offset
-                                            ..input_slices[4].offset + 8]
+                                        d_ref[input_slices[4].offset..input_slices[4].offset + 8]
                                             .try_into()
                                             .unwrap(),
                                     ) as f32;
@@ -5963,7 +6783,10 @@ impl Backend for CpuBackend {
                                 };
                                 let bias_corr1 = 1.0 - beta1.powi(t as i32);
                                 let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                                adamw_update_f32(w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd)
+                                adamw_update_f32(
+                                    w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps,
+                                    bias_corr1, bias_corr2, wd,
+                                )
                             };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6234,8 +7057,7 @@ impl Backend for CpuBackend {
                                 let (t, wd) = if input_slices.len() >= 5 {
                                     // New path: t is a runtime tensor (5th input slice)
                                     let t = u64::from_le_bytes(
-                                        d_ref[input_slices[4].offset
-                                            ..input_slices[4].offset + 8]
+                                        d_ref[input_slices[4].offset..input_slices[4].offset + 8]
                                             .try_into()
                                             .unwrap(),
                                     ) as f32;
@@ -7020,7 +7842,9 @@ macro_rules! impl_simd_unary_wrapper {
                 });
             }
             #[cfg(not(feature = "parallel"))]
-            for i in 0..len { output[i] = $scalar(input[i]); }
+            for i in 0..len {
+                output[i] = $scalar(input[i]);
+            }
         }
     };
 }
@@ -7030,7 +7854,9 @@ macro_rules! impl_simd_binary_wrapper {
         #[inline]
         fn $name(a: &[f32], b: &[f32], output: &mut [f32]) {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if (a.len() == output.len() || b.len() == output.len()) && microkernels::simd_avx2_available() {
+            if (a.len() == output.len() || b.len() == output.len())
+                && microkernels::simd_avx2_available()
+            {
                 return unsafe { $avx2(a, b, output) };
             }
             let len = output.len().min(a.len().max(b.len()));
@@ -7080,55 +7906,163 @@ macro_rules! impl_simd_scalar_wrapper {
 // was previously inlined in the big `dispatch()` match arms —
 // flattened to reduce duplication.
 
-impl_simd_unary_wrapper!(relu_f32, microkernels::relu_f32_avx2, microkernels::relu_f32_scalar);
-impl_simd_unary_wrapper!(gelu_f32, microkernels::gelu_f32_avx2, microkernels::gelu_f32_scalar);
-impl_simd_unary_wrapper!(silu_f32, microkernels::silu_f32_avx2, microkernels::silu_f32_scalar);
-impl_simd_unary_wrapper!(sigmoid_f32, microkernels::sigmoid_f32_avx2, microkernels::sigmoid_f32_scalar);
-impl_simd_unary_wrapper!(tanh_f32, microkernels::tanh_f32_avx2, microkernels::tanh_f32_scalar);
-impl_simd_unary_wrapper!(exp_f32, microkernels::exp_f32_avx2, microkernels::exp_f32_scalar);
-impl_simd_unary_wrapper!(log_f32, microkernels::log_f32_avx2, microkernels::log_f32_scalar);
-impl_simd_unary_wrapper!(sqrt_f32, microkernels::sqrt_f32_avx2, microkernels::sqrt_f32_scalar);
-impl_simd_unary_wrapper!(neg_f32, microkernels::neg_f32_avx2, microkernels::neg_f32_scalar);
-impl_simd_unary_wrapper!(abs_f32, microkernels::abs_f32_avx2, microkernels::abs_f32_scalar);
-impl_simd_unary_wrapper!(elu_f32, microkernels::elu_f32_avx2, microkernels::elu_f32_scalar);
-impl_simd_unary_wrapper!(softplus_f32, microkernels::softplus_f32_avx2, microkernels::softplus_f32_scalar);
-impl_simd_unary_wrapper!(hardswish_f32, microkernels::hardswish_f32_avx2, microkernels::hardswish_f32_scalar);
-impl_simd_unary_wrapper!(sign_f32, microkernels::sign_f32_avx2, microkernels::sign_f32_scalar);
-impl_simd_unary_wrapper!(round_f32, microkernels::round_f32_avx2, microkernels::round_f32_scalar);
-impl_simd_unary_wrapper!(logical_not_f32, microkernels::logical_not_f32_avx2, microkernels::logical_not_f32_scalar);
-impl_simd_unary_wrapper!(mish_f32, microkernels::mish_f32_avx2, microkernels::mish_f32_scalar);
+impl_simd_unary_wrapper!(
+    relu_f32,
+    microkernels::relu_f32_avx2,
+    microkernels::relu_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    gelu_f32,
+    microkernels::gelu_f32_avx2,
+    microkernels::gelu_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    silu_f32,
+    microkernels::silu_f32_avx2,
+    microkernels::silu_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    sigmoid_f32,
+    microkernels::sigmoid_f32_avx2,
+    microkernels::sigmoid_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    tanh_f32,
+    microkernels::tanh_f32_avx2,
+    microkernels::tanh_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    exp_f32,
+    microkernels::exp_f32_avx2,
+    microkernels::exp_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    log_f32,
+    microkernels::log_f32_avx2,
+    microkernels::log_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    sqrt_f32,
+    microkernels::sqrt_f32_avx2,
+    microkernels::sqrt_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    neg_f32,
+    microkernels::neg_f32_avx2,
+    microkernels::neg_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    abs_f32,
+    microkernels::abs_f32_avx2,
+    microkernels::abs_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    elu_f32,
+    microkernels::elu_f32_avx2,
+    microkernels::elu_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    softplus_f32,
+    microkernels::softplus_f32_avx2,
+    microkernels::softplus_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    hardswish_f32,
+    microkernels::hardswish_f32_avx2,
+    microkernels::hardswish_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    sign_f32,
+    microkernels::sign_f32_avx2,
+    microkernels::sign_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    round_f32,
+    microkernels::round_f32_avx2,
+    microkernels::round_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    logical_not_f32,
+    microkernels::logical_not_f32_avx2,
+    microkernels::logical_not_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    mish_f32,
+    microkernels::mish_f32_avx2,
+    microkernels::mish_f32_scalar
+);
 
 #[inline]
 fn leaky_relu_f32(input: &[f32], output: &mut [f32], slope: f32) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::leaky_relu_f32_avx2(input, output, slope) }; }
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::leaky_relu_f32_avx2(input, output, slope) };
+    }
     let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::leaky_relu_f32_scalar(input[i], slope); }
+    for i in 0..len {
+        output[i] = microkernels::leaky_relu_f32_scalar(input[i], slope);
+    }
 }
 
 #[inline]
 fn clamp_f32(input: &[f32], output: &mut [f32], min_val: f32, max_val: f32) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::clamp_f32_avx2(input, output, min_val, max_val) }; }
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::clamp_f32_avx2(input, output, min_val, max_val) };
+    }
     let len = output.len().min(input.len());
-    for i in 0..len { output[i] = microkernels::clamp_f32_scalar(input[i], min_val, max_val); }
+    for i in 0..len {
+        output[i] = microkernels::clamp_f32_scalar(input[i], min_val, max_val);
+    }
 }
 
 #[inline]
 fn log_softmax_f32(input: &[f32], output: &mut [f32]) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() { return unsafe { microkernels::log_softmax_f32_avx2(input, output) }; }
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::log_softmax_f32_avx2(input, output) };
+    }
     microkernels::log_softmax_f32_scalar_all(input, output);
 }
 
 // ── Binary ops ──────────────────────────────────────────────
 
-impl_simd_binary_wrapper!(add_f32, microkernels::add_f32_avx2_broadcast, microkernels::add_f32_scalar_broadcast, |a, b| a + b);
-impl_simd_binary_wrapper!(sub_f32, microkernels::sub_f32_avx2_broadcast, microkernels::sub_f32_scalar_broadcast, |a, b| a - b);
-impl_simd_binary_wrapper!(mul_f32, microkernels::mul_f32_avx2_broadcast, microkernels::mul_f32_scalar_broadcast, |a, b| a * b);
-impl_simd_binary_wrapper!(div_f32, microkernels::div_f32_avx2_broadcast, microkernels::div_f32_scalar_broadcast, |a, b| a / b);
-impl_simd_binary_wrapper!(max_f32, microkernels::max_f32_avx2_broadcast, microkernels::max_f32_scalar_broadcast, |a: f32, b: f32| a.max(b));
-impl_simd_binary_wrapper!(min_f32, microkernels::min_f32_avx2_broadcast, microkernels::min_f32_scalar_broadcast, |a: f32, b: f32| a.min(b));
+impl_simd_binary_wrapper!(
+    add_f32,
+    microkernels::add_f32_avx2_broadcast,
+    microkernels::add_f32_scalar_broadcast,
+    |a, b| a + b
+);
+impl_simd_binary_wrapper!(
+    sub_f32,
+    microkernels::sub_f32_avx2_broadcast,
+    microkernels::sub_f32_scalar_broadcast,
+    |a, b| a - b
+);
+impl_simd_binary_wrapper!(
+    mul_f32,
+    microkernels::mul_f32_avx2_broadcast,
+    microkernels::mul_f32_scalar_broadcast,
+    |a, b| a * b
+);
+impl_simd_binary_wrapper!(
+    div_f32,
+    microkernels::div_f32_avx2_broadcast,
+    microkernels::div_f32_scalar_broadcast,
+    |a, b| a / b
+);
+impl_simd_binary_wrapper!(
+    max_f32,
+    microkernels::max_f32_avx2_broadcast,
+    microkernels::max_f32_scalar_broadcast,
+    |a: f32, b: f32| a.max(b)
+);
+impl_simd_binary_wrapper!(
+    min_f32,
+    microkernels::min_f32_avx2_broadcast,
+    microkernels::min_f32_scalar_broadcast,
+    |a: f32, b: f32| a.min(b)
+);
 
 // ============================================================
 // New dispatch wrappers — Reductions
@@ -7145,7 +8079,9 @@ fn reduce_f32(input: &[f32], output: &mut [f32], group_size: usize, is_mean: boo
     } else {
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         if microkernels::simd_avx2_available() {
-            return unsafe { microkernels::reduce_sum_f32_avx2(input, output, group_size, is_mean) };
+            return unsafe {
+                microkernels::reduce_sum_f32_avx2(input, output, group_size, is_mean)
+            };
         }
         microkernels::reduce_sum_f32_scalar(input, output, group_size, is_mean);
     }
@@ -7155,17 +8091,47 @@ fn reduce_f32(input: &[f32], output: &mut [f32], group_size: usize, is_mean: boo
 // New dispatch wrappers — Scalar arithmetic
 // ============================================================
 
-impl_simd_scalar_wrapper!(add_scalar_f32, microkernels::add_scalar_f32_avx2, microkernels::add_scalar_f32_scalar, |a, s| a + s);
-impl_simd_scalar_wrapper!(mul_scalar_f32, microkernels::mul_scalar_f32_avx2, microkernels::mul_scalar_f32_scalar, |a, s| a * s);
-impl_simd_scalar_wrapper!(div_scalar_f32, microkernels::div_scalar_f32_avx2, microkernels::div_scalar_f32_scalar, |a, s| a / s);
+impl_simd_scalar_wrapper!(
+    add_scalar_f32,
+    microkernels::add_scalar_f32_avx2,
+    microkernels::add_scalar_f32_scalar,
+    |a, s| a + s
+);
+impl_simd_scalar_wrapper!(
+    mul_scalar_f32,
+    microkernels::mul_scalar_f32_avx2,
+    microkernels::mul_scalar_f32_scalar,
+    |a, s| a * s
+);
+impl_simd_scalar_wrapper!(
+    div_scalar_f32,
+    microkernels::div_scalar_f32_avx2,
+    microkernels::div_scalar_f32_scalar,
+    |a, s| a / s
+);
 
 // ============================================================
 // New dispatch wrappers — Scalar comparison
 // ============================================================
 
-impl_simd_scalar_wrapper!(gt_scalar_f32, microkernels::gt_scalar_f32_avx2, microkernels::gt_scalar_f32_scalar, |a, s| if a > s { 1.0 } else { 0.0 });
-impl_simd_scalar_wrapper!(lt_scalar_f32, microkernels::lt_scalar_f32_avx2, microkernels::lt_scalar_f32_scalar, |a, s| if a < s { 1.0 } else { 0.0 });
-impl_simd_scalar_wrapper!(eq_scalar_f32, microkernels::eq_scalar_f32_avx2, microkernels::eq_scalar_f32_scalar, |a, s| if a == s { 1.0 } else { 0.0 });
+impl_simd_scalar_wrapper!(
+    gt_scalar_f32,
+    microkernels::gt_scalar_f32_avx2,
+    microkernels::gt_scalar_f32_scalar,
+    |a, s| if a > s { 1.0 } else { 0.0 }
+);
+impl_simd_scalar_wrapper!(
+    lt_scalar_f32,
+    microkernels::lt_scalar_f32_avx2,
+    microkernels::lt_scalar_f32_scalar,
+    |a, s| if a < s { 1.0 } else { 0.0 }
+);
+impl_simd_scalar_wrapper!(
+    eq_scalar_f32,
+    microkernels::eq_scalar_f32_avx2,
+    microkernels::eq_scalar_f32_scalar,
+    |a, s| if a == s { 1.0 } else { 0.0 }
+);
 
 // ============================================================
 // New dispatch wrappers — BiasAdd, Norm, RMS Norm, Softmax
@@ -7199,15 +8165,25 @@ fn rms_norm_f32(input: &[f32], weight: &[f32], output: &mut [f32], row_size: usi
 }
 
 #[inline]
-fn softmax_f32(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: usize, num_rows: usize) {
+fn softmax_f32(
+    input: &[f32],
+    output: &mut [f32],
+    axis_dim_size: usize,
+    stride: usize,
+    num_rows: usize,
+) {
     #[cfg(feature = "parallel")]
     if num_rows > 1 && stride == 1 {
         use rayon::prelude::*;
         let has_avx2 = {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            { microkernels::simd_avx2_available() }
+            {
+                microkernels::simd_avx2_available()
+            }
             #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            { false }
+            {
+                false
+            }
         };
         // Build non-overlapping row slices before the parallel section
         // to satisfy the borrow checker and rayon's Send requirements.
@@ -7216,12 +8192,16 @@ fn softmax_f32(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: 
             let offset = row * axis_dim_size;
             let inp = &input[offset..offset + axis_dim_size];
             // SAFETY: Each row writes to a unique non-overlapping region of output.
-            let out = unsafe { std::slice::from_raw_parts_mut(output.as_mut_ptr().add(offset), axis_dim_size) };
+            let out = unsafe {
+                std::slice::from_raw_parts_mut(output.as_mut_ptr().add(offset), axis_dim_size)
+            };
             row_slices.push((inp, out));
         }
         row_slices.par_iter_mut().for_each(|(inp, out)| {
             if has_avx2 {
-                unsafe { microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1); }
+                unsafe {
+                    microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1);
+                }
             } else {
                 microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
             }
@@ -7231,7 +8211,9 @@ fn softmax_f32(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: 
     // Single-threaded fallback
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::softmax_f32_avx2_strided(input, output, axis_dim_size, stride, num_rows) };
+        return unsafe {
+            microkernels::softmax_f32_avx2_strided(input, output, axis_dim_size, stride, num_rows)
+        };
     }
     microkernels::softmax_f32_scalar_strided(input, output, axis_dim_size, stride, num_rows);
 }
@@ -7251,30 +8233,65 @@ fn sgd_update_f32(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec<f32> {
 
 #[inline]
 fn adam_update_f32(
-    w: &[f32], g: &[f32], m: &[f32], v: &[f32],
-    lr: f32, beta1: f32, beta2: f32, eps: f32, bias_corr1: f32, bias_corr2: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::adam_update_f32_avx2(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2) };
+        return unsafe {
+            microkernels::adam_update_f32_avx2(
+                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2,
+            )
+        };
     }
     microkernels::adam_update_f32_scalar(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2)
 }
 
 #[inline]
 fn adamw_update_f32(
-    w: &[f32], g: &[f32], m: &[f32], v: &[f32],
-    lr: f32, beta1: f32, beta2: f32, eps: f32, bias_corr1: f32, bias_corr2: f32, wd: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    wd: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::adamw_update_f32_avx2(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd) };
+        return unsafe {
+            microkernels::adamw_update_f32_avx2(
+                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd,
+            )
+        };
     }
-    microkernels::adamw_update_f32_scalar(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd)
+    microkernels::adamw_update_f32_scalar(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd,
+    )
 }
 
 #[inline]
-fn lion_update_f32(w: &[f32], g: &[f32], m: &[f32], lr: f32, beta1: f32, beta2: f32, wd: f32) -> (Vec<f32>, Vec<f32>) {
+fn lion_update_f32(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    wd: f32,
+) -> (Vec<f32>, Vec<f32>) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::lion_update_f32_avx2(w, g, m, lr, beta1, beta2, wd) };
@@ -7283,7 +8300,14 @@ fn lion_update_f32(w: &[f32], g: &[f32], m: &[f32], lr: f32, beta1: f32, beta2: 
 }
 
 #[inline]
-fn rmsprop_update_f32(w: &[f32], g: &[f32], v: &[f32], lr: f32, beta: f32, eps: f32) -> (Vec<f32>, Vec<f32>) {
+fn rmsprop_update_f32(
+    w: &[f32],
+    g: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta: f32,
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::rmsprop_update_f32_avx2(w, g, v, lr, beta, eps) };
@@ -7292,7 +8316,14 @@ fn rmsprop_update_f32(w: &[f32], g: &[f32], v: &[f32], lr: f32, beta: f32, eps: 
 }
 
 #[inline]
-fn muon_update_f32(w: &[f32], g: &[f32], m: &[f32], lr: f32, beta: f32, wd: f32) -> (Vec<f32>, Vec<f32>) {
+fn muon_update_f32(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta: f32,
+    wd: f32,
+) -> (Vec<f32>, Vec<f32>) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::muon_update_f32_avx2(w, g, m, lr, beta, wd) };

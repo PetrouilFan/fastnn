@@ -1,6 +1,6 @@
+use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
-use super::PendingRead;
 
 const NORM_WORKGROUP_SIZE: u32 = 256;
 

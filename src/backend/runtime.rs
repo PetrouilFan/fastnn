@@ -121,7 +121,8 @@ impl<B: Backend> Runtime<B> {
         }
         let arena_ref = &self.cached_arena.as_ref().unwrap().1;
         if enough_capacity {
-            self.backend.write_arena(arena_ref, 0, &vec![0u8; arena_size]);
+            self.backend
+                .write_arena(arena_ref, 0, &vec![0u8; arena_size]);
         }
 
         // Write inputs into earliest slots (ordering cached at construction).

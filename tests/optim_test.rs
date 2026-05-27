@@ -24,12 +24,20 @@ fn test_adam_optimizer() {
     set_grads(&mut params);
     adam.params_mut().clone_from(&params);
 
-    let initial = adam.params().iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let initial = adam
+        .params()
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
 
     adam.step();
     adam.zero_grad();
 
-    let final_params = adam.params().iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let final_params = adam
+        .params()
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "Adam should update parameters");
 
     // Test state_dict and load_state_dict
@@ -47,12 +55,20 @@ fn test_adamw_optimizer() {
     set_grads(&mut params_with_grad);
     adamw.params_mut().clone_from(&params_with_grad);
 
-    let initial = adamw.params().iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let initial = adamw
+        .params()
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
 
     adamw.step();
     adamw.zero_grad();
 
-    let final_params = adamw.params().iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let final_params = adamw
+        .params()
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "AdamW should update parameters");
 }
 
@@ -65,16 +81,27 @@ fn test_sgd_optimizer() {
     set_grads(&mut params_with_grad);
     sgd.params_mut().clone_from(&params_with_grad);
 
-    let initial = sgd.params().iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let initial = sgd
+        .params()
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
 
     sgd.step();
     sgd.zero_grad();
 
-    let final_params = sgd.params().iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let final_params = sgd
+        .params()
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "SGD should update parameters");
     for (init_vals, final_vals) in initial.iter().zip(final_params.iter()) {
         for (&i, &f) in init_vals.iter().zip(final_vals.iter()) {
-            assert!(f < i, "SGD should decrease parameters with positive gradient");
+            assert!(
+                f < i,
+                "SGD should decrease parameters with positive gradient"
+            );
         }
     }
 }
@@ -88,12 +115,20 @@ fn test_rmsprop_optimizer() {
     set_grads(&mut params_with_grad);
     rmsprop.params_mut().clone_from(&params_with_grad);
 
-    let initial = rmsprop.params.iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let initial = rmsprop
+        .params
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
 
     rmsprop.step();
     rmsprop.zero_grad();
 
-    let final_params = rmsprop.params.iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let final_params = rmsprop
+        .params
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "RMSprop should update parameters");
 }
 
@@ -106,12 +141,20 @@ fn test_lion_optimizer() {
     set_grads(&mut params_with_grad);
     lion.params_mut().clone_from(&params_with_grad);
 
-    let initial = lion.params().iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let initial = lion
+        .params()
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
 
     lion.step();
     lion.zero_grad();
 
-    let final_params = lion.params().iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let final_params = lion
+        .params()
+        .iter()
+        .map(|p| p.to_numpy())
+        .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "Lion should update parameters");
 }
 
@@ -145,7 +188,10 @@ fn test_weight_decay_optimizers() {
     adam.mark_biases_no_decay();
     assert!(adam.no_decay[0], "1D bias param should be no_decay");
     assert!(adam.no_decay[1], "1D bias param should be no_decay");
-    assert!(!adam.no_decay[2], "2D weight param should have weight decay");
+    assert!(
+        !adam.no_decay[2],
+        "2D weight param should have weight decay"
+    );
 
     let mut sgd = SGD::new(params.clone(), 0.01, 0.9, 0.0, 0.01, false);
     sgd.mark_biases_no_decay();
@@ -157,7 +203,10 @@ fn test_weight_decay_optimizers() {
     lion.mark_biases_no_decay();
     assert!(lion.no_decay[0], "1D bias param should be no_decay");
     assert!(lion.no_decay[1], "1D bias param should be no_decay");
-    assert!(!lion.no_decay[2], "2D weight param should have weight decay");
+    assert!(
+        !lion.no_decay[2],
+        "2D weight param should have weight decay"
+    );
 }
 
 #[test]

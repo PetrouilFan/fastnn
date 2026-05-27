@@ -9,15 +9,60 @@ struct GemmShape {
 
 fn main() {
     let shapes = [
-        GemmShape { name: "backbone_3x3_s2_16ch", m: 160 * 160, k: 3 * 3 * 3, n: 16 },
-        GemmShape { name: "backbone_3x3_s2_32ch", m: 80 * 80, k: 16 * 3 * 3, n: 32 },
-        GemmShape { name: "backbone_3x3_s2_64ch", m: 40 * 40, k: 32 * 3 * 3, n: 64 },
-        GemmShape { name: "mid_3x3_64ch_80", m: 80 * 80, k: 64 * 3 * 3, n: 64 },
-        GemmShape { name: "mid_3x3_128ch_40", m: 40 * 40, k: 128 * 3 * 3, n: 128 },
-        GemmShape { name: "1x1_up_64to128", m: 80 * 80, k: 64, n: 128 },
-        GemmShape { name: "1x1_down_128to64", m: 80 * 80, k: 128, n: 64 },
-        GemmShape { name: "neck_3x3_128ch_80", m: 80 * 80, k: 128 * 3 * 3, n: 128 },
-        GemmShape { name: "dw_80ch", m: 80 * 80, k: 9, n: 1 },
+        GemmShape {
+            name: "backbone_3x3_s2_16ch",
+            m: 160 * 160,
+            k: 3 * 3 * 3,
+            n: 16,
+        },
+        GemmShape {
+            name: "backbone_3x3_s2_32ch",
+            m: 80 * 80,
+            k: 16 * 3 * 3,
+            n: 32,
+        },
+        GemmShape {
+            name: "backbone_3x3_s2_64ch",
+            m: 40 * 40,
+            k: 32 * 3 * 3,
+            n: 64,
+        },
+        GemmShape {
+            name: "mid_3x3_64ch_80",
+            m: 80 * 80,
+            k: 64 * 3 * 3,
+            n: 64,
+        },
+        GemmShape {
+            name: "mid_3x3_128ch_40",
+            m: 40 * 40,
+            k: 128 * 3 * 3,
+            n: 128,
+        },
+        GemmShape {
+            name: "1x1_up_64to128",
+            m: 80 * 80,
+            k: 64,
+            n: 128,
+        },
+        GemmShape {
+            name: "1x1_down_128to64",
+            m: 80 * 80,
+            k: 128,
+            n: 64,
+        },
+        GemmShape {
+            name: "neck_3x3_128ch_80",
+            m: 80 * 80,
+            k: 128 * 3 * 3,
+            n: 128,
+        },
+        GemmShape {
+            name: "dw_80ch",
+            m: 80 * 80,
+            k: 9,
+            n: 1,
+        },
     ];
 
     let iters: u32 = match std::env::var("GEMM_ITERS") {
@@ -32,8 +77,10 @@ fn main() {
     println!("  avx:   {}", is_x86_feature_detected!("avx"));
     println!("  sse2:  {}", is_x86_feature_detected!("sse2"));
     println!("Iterations per shape: {}\n", iters);
-    println!("{:<30} {:>8} {:>6} {:>6} {:>12} {:>14} {:>12}", 
-             "Shape", "M", "K", "N", "GFLOPS", "GB/s", "ms");
+    println!(
+        "{:<30} {:>8} {:>6} {:>6} {:>12} {:>14} {:>12}",
+        "Shape", "M", "K", "N", "GFLOPS", "GB/s", "ms"
+    );
     println!("{}", "-".repeat(92));
 
     for shape in &shapes {
@@ -49,12 +96,20 @@ fn main() {
         for _ in 0..5 {
             unsafe {
                 matrixmultiply::sgemm(
-                    m, k, n,
+                    m,
+                    k,
+                    n,
                     1.0,
-                    a.as_ptr(), k as isize, 1,
-                    b.as_ptr(), n as isize, 1,
+                    a.as_ptr(),
+                    k as isize,
+                    1,
+                    b.as_ptr(),
+                    n as isize,
+                    1,
                     0.0,
-                    c.as_mut_ptr(), n as isize, 1,
+                    c.as_mut_ptr(),
+                    n as isize,
+                    1,
                 );
             }
         }
@@ -63,12 +118,20 @@ fn main() {
         for _ in 0..iters {
             unsafe {
                 matrixmultiply::sgemm(
-                    m, k, n,
+                    m,
+                    k,
+                    n,
                     1.0,
-                    a.as_ptr(), k as isize, 1,
-                    b.as_ptr(), n as isize, 1,
+                    a.as_ptr(),
+                    k as isize,
+                    1,
+                    b.as_ptr(),
+                    n as isize,
+                    1,
                     0.0,
-                    c.as_mut_ptr(), n as isize, 1,
+                    c.as_mut_ptr(),
+                    n as isize,
+                    1,
                 );
             }
         }
@@ -82,8 +145,10 @@ fn main() {
         let total_bytes = bytes_read + bytes_written;
         let bw = total_bytes / (ms / 1000.0) / 1e9;
 
-        println!("{:<30} {:>8} {:>6} {:>6} {:>12.2} {:>14.2} {:>12.3}",
-                 shape.name, m, k, n, gflops, bw, ms);
+        println!(
+            "{:<30} {:>8} {:>6} {:>6} {:>12.2} {:>14.2} {:>12.3}",
+            shape.name, m, k, n, gflops, bw, ms
+        );
     }
 
     println!("\nNotes:");

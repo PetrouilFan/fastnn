@@ -1,35 +1,91 @@
-# FastNN Benchmarks
+# fastnn Benchmarks
 
-## How to Run
+fastnn ships one maintained CPU benchmark suite: `cpu_baselines`.
+
+The suite measures execution only (weights are packed before timing) and compares:
+- scalar f32 reference loops (`baseline_scalar_f32`)
+- fastnn f32 packed execution (`fastnn_f32x1`)
+- fastnn quantized execution (`fastnn_u8x4`, `fastnn_u4x8`)
+
+Covered workloads:
+- GEMV: matrix-vector multiply on CPU
+- GEMM: batched matrix-matrix style multiply on CPU
+
+## Commands
+
+Run the maintained suite:
 
 ```bash
-# Run all benchmarks
-cargo bench
-
-# Specific benchmark groups
-cargo bench --bench quantized_vs_pytorch
-cargo bench --bench packed_bench
-cargo bench --bench wgpu_bench
+cargo +stable bench --bench cpu_baselines
 ```
 
-## Historical Benchmarks
+Save a reusable Criterion baseline for future comparisons:
 
-Detailed benchmark results (GEMV throughput, fused kernel speedups, etc.) are maintained in the project's [performance tracking](https://github.com/PetrouilFan/fastnn/wiki/Performance) wiki.
+```bash
+cargo +stable bench --bench cpu_baselines -- --save-baseline cpu-local
+```
 
-### GEMV Performance (AMD Ryzen 7 3700X, 8 threads)
+Compare the current run against a previously captured baseline:
 
-| Implementation | Time | GFLOP/s | vs PyTorch f32 | Memory |
-|---------------|------|---------|----------------|--------|
-| PyTorch f32 (MKL) | 4.04 ms | 8.3 | 1.0× | 64 MB |
-| fastnn F16x2 | 1.80 ms | 18.6 | 2.2× | 32 MB |
-| fastnn U8x4 | 0.76 ms | 44.4 | 5.3× | 16 MB |
-| fastnn U4x8 | 0.55 ms | 61.1 | 7.4× | 8 MB |
+```bash
+cargo +stable bench --bench cpu_baselines -- --baseline cpu-local
+```
 
-### Fused Conv2d+BN+SiLU
+Export the latest Criterion results to one JSON file:
 
-| Configuration | PyTorch (separate) | fastnn (fused) | Speedup |
-|---------------|-------------------|----------------|---------|
-| Conv2d(32→64) + BN + SiLU (64×64) | 81.81 ms | 3.27 ms | 25.0× |
-| Conv2d(64→128) + BN + SiLU (32×32) | 42.55 ms | 2.01 ms | 21.2× |
+```bash
+python scripts/criterion_to_json.py \
+  --criterion-dir target/criterion \
+  --output benchmark-results/cpu-local.json
+```
 
-> Run `cargo bench --bench packed_bench` on your hardware to reproduce the GEMV numbers.
+## Baseline capture format
+
+Regression baselines are stored in two layers:
+
+1. Raw Criterion output in `target/criterion/...`
+   - includes per-benchmark estimates and comparison data
+2. Optional normalized JSON summary produced by `scripts/criterion_to_json.py`
+   - one file per run for check-in, review, or artifact upload
+
+Example normalized JSON shape:
+
+```json
+{
+  "generated_at_utc": "2026-05-21T12:34:56Z",
+  "criterion_dir": "target/criterion",
+  "benchmarks": [
+    {
+      "group": "cpu_gemv",
+      "benchmark": "fastnn_u4x8/1024x1024",
+      "mean_ns": 12345.0,
+      "median_ns": 12010.0,
+      "std_dev_ns": 210.0
+    }
+  ]
+}
+```
+
+## Reproducibility expectations
+
+For regression work:
+- use `cargo +stable`
+- run benchmarks on an otherwise idle machine
+- keep thread count and CPU governor consistent between runs
+- compare runs with Criterion baselines instead of copying numbers into docs by hand
+- treat large regressions as actionable; treat small deltas as noise until reproduced
+
+## Performance claim policy
+
+Do not add README or release-note speed claims unless they come from a reproducible benchmark run in this suite or another checked-in benchmark with the same standards.
+
+Every public performance claim should include:
+- exact benchmark command
+- hardware context
+- baseline being compared against
+- whether the number is latency, throughput, or memory footprint
+
+Unsupported claims to avoid:
+- hard-coded speedup tables with no runnable command
+- comparisons to external frameworks without checked-in reproduction steps
+- GPU performance claims from machines where the GPU benchmark was not run successfully

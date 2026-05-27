@@ -246,16 +246,16 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                                 if i >= 2 {
                                     let total_pad = if i == 2 { pad_h } else { pad_w };
                                     match dim {
-                                        DimExpr::Known(w) => {
-                                            DimExpr::Known(
-                                                ((*w as i64 + total_pad - kernel) / stride + 1)
-                                                    .max(1)
-                                                    as u64,
-                                            )
-                                        }
+                                        DimExpr::Known(w) => DimExpr::Known(
+                                            ((*w as i64 + total_pad - kernel) / stride + 1).max(1)
+                                                as u64,
+                                        ),
                                         DimExpr::Bounded { sym, max } => {
                                             // Apply spatial reduction to Bounded dims
-                                            let reduced = ((*max as i64 + total_pad - kernel) / stride + 1).max(1) as u64;
+                                            let reduced =
+                                                ((*max as i64 + total_pad - kernel) / stride + 1)
+                                                    .max(1)
+                                                    as u64;
                                             DimExpr::Bounded {
                                                 sym: format!("pool({})", sym),
                                                 max: reduced,
@@ -739,8 +739,10 @@ fn conv_transpose2d_output_shape(
     let n = input_shape[0].clone();
     let f = weight_shape[1].clone();
 
-    let h_out = conv_transpose_spatial_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
-    let w_out = conv_transpose_spatial_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
+    let h_out =
+        conv_transpose_spatial_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
+    let w_out =
+        conv_transpose_spatial_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
 
     Ok(vec![n, f, h_out, w_out])
 }
