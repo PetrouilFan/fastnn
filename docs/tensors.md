@@ -306,6 +306,29 @@ x = fnn.randn([3, 4], requires_grad=True)
 y = x.detach()  # New tensor without gradient tracking
 ```
 
+### Numerical Gradient Checks
+
+The Rust test suite includes finite-difference checks for the eager autograd path on small CPU `f32` tensors:
+
+- elementwise `add` and `mul`
+- `matmul`
+- activations `relu`, `gelu`, and `silu`
+- reductions `sum(dim=1, keepdim=false)` and `mean(dim=1, keepdim=false)`
+
+Run them with:
+
+```bash
+cargo +stable test --test autograd_gradient_checks
+```
+
+Tolerances are intentionally op-specific:
+
+- default ops (`add`, `mul`, `matmul`, `relu`, `sum`, `mean`): `atol=2e-2`, `rtol=2e-2`
+- `silu`: `atol=3e-2`, `rtol=3e-2`
+- `gelu`: `atol=4e-2`, `rtol=4e-2`
+
+The checks avoid non-differentiable points such as `relu(0)`, where finite differences are not a stable oracle.
+
 ## Tensor Properties
 
 ```python

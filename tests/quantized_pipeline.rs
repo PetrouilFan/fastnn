@@ -4,8 +4,17 @@
 //! Covers MatMul and Conv2d with both U4 and U8 quantization.
 
 use fastnn::backend::cpu::CpuBackend;
+use fastnn::backend::executor::GraphExecutor;
+use fastnn::backend::{Backend, Instruction};
+use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
+use fastnn::compiler::passes::memory_planning::plan_memory;
+use fastnn::compiler::passes::quantization::quantize_weights;
+use fastnn::compiler::passes::shape_inference::infer_shapes;
+use fastnn::dtypes::U4x8;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+use fastnn::ir::node::ComputeGraph;
+use fastnn::ir::node::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
+use fastnn::packed_tensor::PackedTensor;
 
 /// Helper: build a MatMul graph and run through the full pipeline.
 /// Returns output as Vec<f32>.
@@ -268,11 +277,7 @@ fn test_conv2d_u4_end_to_end() {
         }
     }
     let rms = (sum_sq / 18.0).sqrt();
-    assert!(
-        rms < 0.5,
-        "U4 conv2d RMS error too large: {:.4}",
-        rms
-    );
+    assert!(rms < 0.5, "U4 conv2d RMS error too large: {:.4}", rms);
     assert!(
         u4_correct >= 15,
         "At least 15/18 U4 conv2d outputs should be close to f32 (got {}/18)",
@@ -455,6 +460,306 @@ fn test_quantize_none_produces_f32_pipeline() {
             "Output[{}] should be finite, got {}",
             i,
             val
+        );
+    }
+}
+
+/// Test the matmul_u8_i8 dispatch path by constructing U8-quantized weights
+/// and an I8 activation payload directly (verifies compile-time kernel
+/// selection without relying on the activation_quantization pass).
+///
+/// Builds a graph: Input(f32) → MatMul(f32 weight quantized to U8),
+/// plus a separate I8 Constant that mimics a QuantizeActivations payload.
+/// The MatMul receives [I8, U8] inputs and must select "matmul_u8_i8".
+#[test]
+fn test_matmul_u8_i8_dispatch_path() {
+    // Build a graph with U8-quantized weights and I8 activation.
+    let mut graph = ComputeGraph::new();
+
+    // Create an I8 activation payload constant.
+    // Payload format: [scale_f32(4)][zp_f32(4)][i8_data...]
+    let act_scale = 1.0f32;
+    let act_zp = 0.0f32;
+    let act_i8: Vec<i8> = vec![1, 2, 3, 4];
+    let mut payload: Vec<u8> = Vec::new();
+    payload.extend_from_slice(&act_scale.to_le_bytes());
+    payload.extend_from_slice(&act_zp.to_le_bytes());
+    for &v in &act_i8 {
+        payload.push(v as u8);
+    }
+    let act_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::I8);
+    let act_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: payload,
+            tensor_type: act_tt.clone(),
+        }),
+        vec![],
+        act_tt,
+    );
+
+    // Create a U8-quantized weight via the weight-quantization pipeline.
+    // Start with f32 constant weights, then quantize.
+    let w_data: Vec<f32> = vec![
+        2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0,
+    ]; // [4, 4] scaled-identity
+    let w_tt = TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32);
+    let w_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: bytemuck::cast_slice(&w_data).to_vec(),
+            tensor_type: w_tt.clone(),
+        }),
+        vec![],
+        w_tt,
+    );
+
+    let mm_id = graph.add_node(
+        Opcode::MatMul,
+        vec![act_id, w_id],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![]);
+    graph.set_outputs(vec![mm_id]);
+
+    // Apply weight quantization (U8) to convert the f32 weight constant.
+    infer_shapes(&mut graph).unwrap();
+    quantize_weights(&mut graph, 8).unwrap();
+    eliminate_dead_code(&mut graph);
+
+    // Now the MatMul should see [I8, U8] and select "matmul_u8_i8".
+    let mem = plan_memory(&graph).expect("memory planning should succeed");
+    let mut plan = CpuBackend.compile(&graph, &mem).unwrap();
+
+    let mut executor = GraphExecutor::new(CpuBackend);
+    let result = executor.execute(&graph, &mut plan, &mem, &[]).unwrap();
+    let result_f32: Vec<f32> = bytemuck::cast_slice(&result[0]).to_vec();
+
+    // Expected: input [1,2,3,4] × W=2*identity → [2,4,6,8]
+    // (with small quantization error).
+    let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0];
+    assert_eq!(result_f32.len(), expected.len());
+    for (i, (&got, &exp)) in result_f32.iter().zip(expected.iter()).enumerate() {
+        let err = (got - exp).abs();
+        let tol = 0.5;
+        assert!(
+            err <= tol,
+            "Mismatch at output[{}]: got {}, expected {} (err={})",
+            i,
+            got,
+            exp,
+            err
+        );
+    }
+}
+
+#[test]
+fn test_matmul_u4_i8_dispatch_path() {
+    let mut graph = ComputeGraph::new();
+
+    let act_scale = 1.0f32;
+    let act_zp = 0.0f32;
+    let act_i8: Vec<i8> = vec![1, -2, 3, -4, 5, -6, 7, -8];
+    let mut payload: Vec<u8> = Vec::new();
+    payload.extend_from_slice(&act_scale.to_le_bytes());
+    payload.extend_from_slice(&act_zp.to_le_bytes());
+    for &v in &act_i8 {
+        payload.push(v as u8);
+    }
+    let act_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(8)], IrDType::I8);
+    let act_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: payload,
+            tensor_type: act_tt.clone(),
+        }),
+        vec![],
+        act_tt,
+    );
+
+    let w_data: Vec<f32> = vec![
+        -8.0, -4.0, -1.0, 0.0, 1.0, 3.0, 6.0, 7.0, 7.0, 6.0, 3.0, 1.0, 0.0, -1.0, -4.0, -8.0,
+    ];
+    let w_tt = TensorType::new(vec![DimExpr::Known(8), DimExpr::Known(2)], IrDType::F32);
+    let w_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: bytemuck::cast_slice(&w_data).to_vec(),
+            tensor_type: w_tt.clone(),
+        }),
+        vec![],
+        w_tt,
+    );
+
+    let mm_id = graph.add_node(
+        Opcode::MatMul,
+        vec![act_id, w_id],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(2)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![]);
+    graph.set_outputs(vec![mm_id]);
+
+    infer_shapes(&mut graph).unwrap();
+    quantize_weights(&mut graph, 4).unwrap();
+    eliminate_dead_code(&mut graph);
+
+    let mem = plan_memory(&graph).expect("memory planning should succeed");
+    let mut plan = CpuBackend.compile(&graph, &mem).unwrap();
+    let kernel_names: Vec<&str> = plan
+        .instructions
+        .iter()
+        .filter_map(|instr| match instr {
+            Instruction::CallKernel { kernel_name, .. } => Some(kernel_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        kernel_names.iter().any(|name| *name == "matmul_u4_i8"),
+        "expected compiled plan to select matmul_u4_i8, got {:?}",
+        kernel_names
+    );
+
+    let mm_node = graph.get_node(mm_id).unwrap();
+    let packed_weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
+    let (scales, zero_points) = match &packed_weight_node.output_type.dtype {
+        IrDType::U4 {
+            scales,
+            zero_points,
+        } => (scales.clone(), zero_points.clone()),
+        other => panic!("expected U4 weight node, got {:?}", other),
+    };
+    let raw_bytes = match &packed_weight_node.opcode {
+        Opcode::Constant(TensorValue::Data { bytes, .. }) => bytes.clone(),
+        other => panic!("expected packed weight constant, got {:?}", other),
+    };
+    let mut aligned = vec![0u32; raw_bytes.len().div_ceil(4)];
+    let aligned_bytes = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+    aligned_bytes[..raw_bytes.len()].copy_from_slice(&raw_bytes);
+    let typed_data: Vec<U4x8> = bytemuck::cast_slice(&aligned).to_vec();
+    let mut packed_shape: Vec<usize> = packed_weight_node
+        .output_type
+        .shape
+        .iter()
+        .map(|dim| dim.evaluate().unwrap() as usize)
+        .collect();
+    if packed_shape.len() == 2 {
+        packed_shape.reverse();
+    }
+    let packed = PackedTensor::from_raw(typed_data, packed_shape, scales, zero_points);
+    let mut expected_payload = Vec::new();
+    expected_payload.extend_from_slice(&act_scale.to_le_bytes());
+    expected_payload.extend_from_slice(&act_zp.to_le_bytes());
+    expected_payload.extend_from_slice(bytemuck::cast_slice::<i8, u8>(&act_i8));
+    let mut expected = vec![0.0f32; 2];
+    fastnn::backend::cpu::microkernels::gemm_cpu_flat_i8_u4x8(
+        &packed,
+        &expected_payload,
+        &mut expected,
+        1,
+        8,
+        2,
+    );
+
+    let mut executor = GraphExecutor::new(CpuBackend);
+    let result = executor.execute(&graph, &mut plan, &mem, &[]).unwrap();
+    let result_f32: Vec<f32> = bytemuck::cast_slice(&result[0]).to_vec();
+
+    assert_eq!(result_f32.len(), expected.len());
+    for (i, (&got, &exp)) in result_f32.iter().zip(expected.iter()).enumerate() {
+        let err = (got - exp).abs();
+        assert!(
+            err <= 1e-4,
+            "Mismatch at output[{}]: got {}, expected {} (err={})",
+            i,
+            got,
+            exp,
+            err
+        );
+    }
+}
+
+/// End-to-end CPU auto-cast path: a non-input activation is quantized to I8,
+/// U8 weights stay packed, and MatMul must produce F32 directly without a
+/// trailing DequantizeActivations node misreading its output as an I8 payload.
+#[test]
+fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
+    let mut graph = ComputeGraph::new();
+
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+    );
+
+    let relu_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+    );
+
+    let w_data: Vec<f32> = vec![
+        2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0,
+    ];
+    let w_tt = TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32);
+    let weight_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: bytemuck::cast_slice(&w_data).to_vec(),
+            tensor_type: w_tt.clone(),
+        }),
+        vec![],
+        w_tt,
+    );
+
+    let mm_id = graph.add_node(
+        Opcode::MatMul,
+        vec![relu_id, weight_id],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![mm_id]);
+
+    infer_shapes(&mut graph).unwrap();
+    fastnn::compiler::passes::auto_cast::auto_cast(
+        &mut graph,
+        &fastnn::compiler::passes::auto_cast::AutoCastOptions {
+            weight_bit_width: Some(8),
+            enable_activation_quant: true,
+        },
+    )
+    .unwrap();
+    eliminate_dead_code(&mut graph);
+
+    let output_id = graph.outputs[0];
+    let output_node = graph.get_node(output_id).unwrap();
+    assert_eq!(
+        output_node.opcode,
+        Opcode::MatMul,
+        "MatMul already outputs F32; activation quantization must not add a trailing DequantizeActivations"
+    );
+
+    let mm_node = graph.get_node(mm_id).unwrap();
+    let act_node = graph.get_node(mm_node.inputs[0]).unwrap();
+    assert_eq!(act_node.opcode, Opcode::QuantizeActivations);
+    let weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
+    assert!(matches!(weight_node.output_type.dtype, IrDType::U8 { .. }));
+
+    let mem = plan_memory(&graph).expect("memory planning should succeed");
+    let mut plan = CpuBackend.compile(&graph, &mem).unwrap();
+    let mut executor = GraphExecutor::new(CpuBackend);
+
+    let input = vec![1.0f32, 2.0, 3.0, 4.0];
+    let input_bytes: Vec<u8> = bytemuck::cast_slice(&input).to_vec();
+    let result = executor
+        .execute(&graph, &mut plan, &mem, &[&input_bytes])
+        .unwrap();
+    let result_f32: Vec<f32> = bytemuck::cast_slice(&result[0]).to_vec();
+
+    let expected = vec![2.0f32, 4.0, 6.0, 8.0];
+    assert_eq!(result_f32.len(), expected.len());
+    for (i, (&got, &exp)) in result_f32.iter().zip(expected.iter()).enumerate() {
+        let err = (got - exp).abs();
+        assert!(
+            err <= 0.5,
+            "output[{i}] got {got}, expected {exp}, err={err}"
         );
     }
 }

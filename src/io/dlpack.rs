@@ -327,8 +327,8 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor>
                 let mut data = vec![0.0f32; numel];
                 if is_contiguous {
                     // Fast path: flat byte copy
-                    let byte_ptr = (dl_tensor.data as *const u8)
-                        .add(dl_tensor.byte_offset as usize);
+                    let byte_ptr =
+                        (dl_tensor.data as *const u8).add(dl_tensor.byte_offset as usize);
                     let num_bytes = numel * std::mem::size_of::<f32>();
                     std::ptr::copy_nonoverlapping(
                         byte_ptr,

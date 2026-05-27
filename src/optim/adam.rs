@@ -104,10 +104,8 @@ impl Optimizer for Adam {
                 self.step[i] += 1;
                 let t = self.step[i];
 
-                let mut results = self.params[i].adam_update(
-                    &grad, &self.m[i], &self.v[i],
-                    lr, beta1, beta2, eps, t,
-                );
+                let mut results = self.params[i]
+                    .adam_update(&grad, &self.m[i], &self.v[i], lr, beta1, beta2, eps, t);
                 self.v[i] = results.pop().unwrap();
                 self.m[i] = results.pop().unwrap();
                 self.params[i] = results.pop().unwrap();

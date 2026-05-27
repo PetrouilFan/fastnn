@@ -47,7 +47,11 @@ fn read_slice_i64(reader: &mut impl Read) -> FastnnResult<Vec<i64>> {
     let bytes = read_length_prefixed(reader)?;
     let result: Vec<i64> = bytes
         .chunks_exact(8)
-        .map(|chunk| i64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]))
+        .map(|chunk| {
+            i64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ])
+        })
         .collect();
     Ok(result)
 }

@@ -73,7 +73,6 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
 
     let graph_ref = &*graph;
     let _ = crate::utils::traverse_graph(graph_ref, |node_id, node| {
-
         let replacement = match node.opcode {
             Opcode::Reshape => {
                 // Identity reshape: target shape matches input shape
@@ -116,8 +115,16 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
                 node.inputs.first().copied().and_then(|inp_id| {
                     let input_node = graph_ref.get_node(inp_id)?;
                     let dim: usize = node.attrs.get("dim").and_then(|s| s.parse().ok())?;
-                    let start: u64 = node.attrs.get("start").and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let end: u64 = node.attrs.get("end").and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let start: u64 = node
+                        .attrs
+                        .get("start")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let end: u64 = node
+                        .attrs
+                        .get("end")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
 
                     if dim < input_node.output_type.shape.len() && start == 0 {
                         let input_dim = &input_node.output_type.shape[dim];
@@ -166,12 +173,10 @@ fn shapes_equal(a: &[DimExpr], b: &[DimExpr]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(da, db)| {
-        match (da.evaluate(), db.evaluate()) {
+    a.iter()
+        .zip(b.iter())
+        .all(|(da, db)| match (da.evaluate(), db.evaluate()) {
             (Some(va), Some(vb)) => va == vb,
             _ => da == db,
-        }
-    })
+        })
 }
-
-

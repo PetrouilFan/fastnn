@@ -780,7 +780,12 @@ mod tests {
         );
 
         let results = executor
-            .execute(&compiled_graph, &mut plan, &memory_plan, &[&x_bytes, &dW_bytes])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_bytes, &dW_bytes],
+            )
             .expect("quantized training execution should succeed");
 
         // Should have one output (the re-quantized updated weight)
