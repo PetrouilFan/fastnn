@@ -108,7 +108,10 @@ fn test_wgpu_matmul_u4() {
         assert!(
             diff < tolerance,
             "GPU vs CPU mismatch at [{}]: GPU={} CPU={} diff={}",
-            i, g, c, diff
+            i,
+            g,
+            c,
+            diff
         );
     }
 }
@@ -132,12 +135,13 @@ fn test_wgpu_matmul_u8() {
         assert!(
             diff < tolerance,
             "GPU vs CPU mismatch at [{}]: GPU={} CPU={} diff={}",
-            i, g, c, diff
+            i,
+            g,
+            c,
+            diff
         );
     }
 }
-
-
 
 // ── Conv2d GPU tests ───────────────────────────────────────────────────
 
@@ -181,7 +185,10 @@ fn test_wgpu_conv2d_u4() {
         assert!(
             diff < tolerance,
             "GPU vs CPU mismatch at [{}]: GPU={} CPU={} diff={}",
-            i, g, c, diff
+            i,
+            g,
+            c,
+            diff
         );
     }
 }
@@ -226,9 +233,10 @@ fn test_wgpu_conv2d_u8() {
         assert!(
             diff < tolerance,
             "GPU vs CPU mismatch at [{}]: GPU={} CPU={} diff={}",
-            i, g, c, diff
+            i,
+            g,
+            c,
+            diff
         );
     }
 }
-
-

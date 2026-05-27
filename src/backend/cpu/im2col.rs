@@ -115,13 +115,7 @@ pub unsafe fn im2col_kernel_rect(
 /// Caller must guarantee AVX2+FMA are available at runtime.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-pub unsafe fn im2col_kernel_rect_avx2(
-    data: &[f32],
-    c: usize,
-    h: usize,
-    w: usize,
-    col: &mut [f32],
-) {
+pub unsafe fn im2col_kernel_rect_avx2(data: &[f32], c: usize, h: usize, w: usize, col: &mut [f32]) {
     let h_out = h; // stride=1, pad=1 → h_out = h
     let w_out = w; // stride=1, pad=1 → w_out = w
     let col_w = c * 9;
@@ -308,7 +302,11 @@ pub unsafe fn im2col_dispatch(
 ) {
     // Fastest: SIMD for stride=1, padding=1, 3×3
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if stride == 1 && padding == 1 && dilation == 1 && kh == 3 && kw == 3
+    if stride == 1
+        && padding == 1
+        && dilation == 1
+        && kh == 3
+        && kw == 3
         && crate::backend::cpu::microkernels::has_avx2()
     {
         return im2col_kernel_rect_avx2(data, c, h, w, col);
@@ -320,8 +318,16 @@ pub unsafe fn im2col_dispatch(
     {
         let dh = (kh - 1) * dilation + 1;
         let dw = (kw - 1) * dilation + 1;
-        let h_out = if h + 2 * padding >= dh { (h + 2 * padding - dh) / stride + 1 } else { 0 };
-        let w_out = if w + 2 * padding >= dw { (w + 2 * padding - dw) / stride + 1 } else { 0 };
+        let h_out = if h + 2 * padding >= dh {
+            (h + 2 * padding - dh) / stride + 1
+        } else {
+            0
+        };
+        let w_out = if w + 2 * padding >= dw {
+            (w + 2 * padding - dw) / stride + 1
+        } else {
+            0
+        };
         let col_elems = h_out * w_out * c * kh * kw;
         if col_elems > 4096 {
             return im2col_parallel(data, c, h, w, kh, kw, stride, padding, dilation, col);
@@ -357,7 +363,16 @@ mod tests {
             let mut col_ref = vec![-1.0f32; h_out * w_out * col_w];
             unsafe {
                 im2col_kernel_rect(
-                    &input, c, h, w, kh, kw, stride, padding, dilation, &mut col_ref,
+                    &input,
+                    c,
+                    h,
+                    w,
+                    kh,
+                    kw,
+                    stride,
+                    padding,
+                    dilation,
+                    &mut col_ref,
                 );
             }
 
@@ -375,7 +390,16 @@ mod tests {
             } else {
                 unsafe {
                     im2col_kernel_rect(
-                        &input, c, h, w, kh, kw, stride, padding, dilation, &mut col_simd,
+                        &input,
+                        c,
+                        h,
+                        w,
+                        kh,
+                        kw,
+                        stride,
+                        padding,
+                        dilation,
+                        &mut col_simd,
                     );
                 }
             }
@@ -390,7 +414,10 @@ mod tests {
             assert!(
                 max_diff < 1e-6,
                 "c={},h={},w={}: max_diff={}",
-                c, h, w, max_diff
+                c,
+                h,
+                w,
+                max_diff
             );
         }
     }

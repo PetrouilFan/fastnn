@@ -1,7 +1,7 @@
+use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
 use crate::dispatch_gpu_compute;
-use super::PendingRead;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -16,14 +16,21 @@ dispatch_gpu_compute!(
     dispatch_reduce_gpu,
     build_reduce_shader(),
     "reduce",
-    input, arg1, arg2,
+    input,
+    arg1,
+    arg2,
     {
         let ng = input.len().checked_div(arg1).unwrap_or(1);
         (ng * 4) as u64
     },
     {
         let ng = input.len().checked_div(arg1).unwrap_or(1);
-        RdParams { num_groups: ng as u32, group_size: arg1 as u32, is_mean: arg2 as u32, _pad: 0 }
+        RdParams {
+            num_groups: ng as u32,
+            group_size: arg1 as u32,
+            is_mean: arg2 as u32,
+            _pad: 0,
+        }
     },
     {
         let ng = input.len().checked_div(arg1).unwrap_or(1);

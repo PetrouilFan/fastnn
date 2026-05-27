@@ -68,12 +68,14 @@ impl Optimizer for AdamW {
             let t = self.step[i];
 
             let no_decay = self.no_decay.get(i).copied().unwrap_or(false);
-            let wd = if weight_decay != 0.0 && !no_decay { weight_decay } else { 0.0 };
+            let wd = if weight_decay != 0.0 && !no_decay {
+                weight_decay
+            } else {
+                0.0
+            };
 
-            let mut results = self.params[i].adamw_update(
-                &grad, &self.m[i], &self.v[i],
-                lr, beta1, beta2, eps, t, wd,
-            );
+            let mut results = self.params[i]
+                .adamw_update(&grad, &self.m[i], &self.v[i], lr, beta1, beta2, eps, t, wd);
             self.v[i] = results.pop().unwrap();
             self.m[i] = results.pop().unwrap();
             self.params[i] = results.pop().unwrap();

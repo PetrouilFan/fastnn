@@ -17,7 +17,10 @@ fn cpu_f32_fast_path_setup(t: &Tensor) -> Option<(usize, *const f32, *mut f32, T
         let inner = Arc::make_mut(&mut output.inner);
         let storage = Arc::make_mut(&mut inner.storage);
         #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-        let Storage::Cpu(cpu_storage) = storage else { unreachable!() };
+        let Storage::Cpu(cpu_storage) = storage
+        else {
+            unreachable!()
+        };
         let out_data = Arc::make_mut(&mut cpu_storage.data);
         let a_ptr = t.data_ptr_f32();
         let out_ptr = out_data.as_mut_ptr() as *mut f32;
@@ -123,10 +126,7 @@ impl Tensor {
         // ge(a,b) = not(b > a) = not(gt_scalar(b - a, 0))
         Tensor::exec_aot(&[self, other], |g, ins| {
             let diff = g.sub(&ins[1], &ins[0]); // b - a
-            let zero = g.constant(
-                &0.0f32.to_le_bytes(),
-                TensorType::new(vec![], IrDType::F32),
-            );
+            let zero = g.constant(&0.0f32.to_le_bytes(), TensorType::new(vec![], IrDType::F32));
             let gt = g.gt_scalar(&diff, &zero); // b - a > 0  (i.e. b > a)
             vec![g.logical_not(&gt)] // not(b > a) = a >= b
         })
@@ -140,10 +140,7 @@ impl Tensor {
         // le(a,b) = not(a > b) = not(gt_scalar(a - b, 0))
         Tensor::exec_aot(&[self, other], |g, ins| {
             let diff = g.sub(&ins[0], &ins[1]); // a - b
-            let zero = g.constant(
-                &0.0f32.to_le_bytes(),
-                TensorType::new(vec![], IrDType::F32),
-            );
+            let zero = g.constant(&0.0f32.to_le_bytes(), TensorType::new(vec![], IrDType::F32));
             let gt = g.gt_scalar(&diff, &zero); // a - b > 0 (i.e. a > b)
             vec![g.logical_not(&gt)] // not(a > b) = a <= b
         })

@@ -85,25 +85,12 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
             mm_node.inputs[0] = quantize_id;
         }
 
-        let dequant_type = TensorType::new(rw.matmul_shape, IrDType::F32);
-        let dequantize_id =
-            graph.add_node(Opcode::DequantizeActivations, vec![rw.matmul_id], dequant_type);
-
-        for &consumer_id in &rw.consumers {
-            if let Some(consumer) = graph.get_node_mut(consumer_id) {
-                for inp in consumer.inputs.iter_mut() {
-                    if *inp == rw.matmul_id {
-                        *inp = dequantize_id;
-                    }
-                }
-            }
-        }
-
-        if rw.is_graph_output {
-            if let Some(pos) = graph.outputs.iter().position(|&id| id == rw.matmul_id) {
-                graph.outputs[pos] = dequantize_id;
-            }
-        }
+        // MatMul kernels consume quantized activations but still produce F32.
+        // Do not insert DequantizeActivations after MatMul: that node expects
+        // an I8 activation payload and would misread the F32 MatMul output.
+        let _ = rw.matmul_shape;
+        let _ = rw.consumers;
+        let _ = rw.is_graph_output;
     }
 
     Ok(())
@@ -177,7 +164,12 @@ mod tests {
         let mut plan_q = CpuBackend.compile(&graph_q, &mem_q).unwrap();
 
         let result_q = executor
-            .execute(&graph_q, &mut plan_q, &mem_q, &[&input_bytes_a, &input_bytes_w])
+            .execute(
+                &graph_q,
+                &mut plan_q,
+                &mem_q,
+                &[&input_bytes_a, &input_bytes_w],
+            )
             .unwrap();
         let result_q_f32: Vec<f32> = bytemuck::cast_slice(&result_q[0]).to_vec();
 
@@ -350,10 +342,11 @@ mod tests {
         );
     }
 
-    /// Test that DequantizeActivations is inserted after MatMul when
-    /// there are downstream non-MatMul consumers.
+    /// Test that MatMul output stays F32 directly when activation quantization
+    /// is inserted before MatMul. Downstream F32 consumers should consume the
+    /// MatMul output directly; DequantizeActivations is only for I8 payloads.
     #[test]
-    fn test_activation_quantization_downstream_dequantize() {
+    fn test_activation_quantization_downstream_f32_consumers_use_matmul_output() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
             Opcode::Input,
@@ -388,14 +381,20 @@ mod tests {
         shape_inference::infer_shapes(&mut graph).unwrap();
         quantize_activations(&mut graph).unwrap();
 
-        // The Relu node should consume DequantizeActivations, not the MatMul directly
+        // The Relu node should consume the MatMul directly because MatMul
+        // output_type is already F32.
         let relu_node = graph.get_node(relu_id).unwrap();
-        let dq_id = relu_node.inputs[0];
-        let dq_node = graph.get_node(dq_id).unwrap();
         assert_eq!(
-            dq_node.opcode,
-            Opcode::DequantizeActivations,
-            "downstream non-MatMul consumer should get DequantizeActivations"
+            relu_node.inputs[0], mm_id,
+            "downstream F32 consumer should receive MatMul output directly"
+        );
+
+        let mm_node = graph.get_node(mm_id).unwrap();
+        let qa_node = graph.get_node(mm_node.inputs[0]).unwrap();
+        assert_eq!(
+            qa_node.opcode,
+            Opcode::QuantizeActivations,
+            "MatMul activation input should still be quantized"
         );
     }
 

@@ -26,15 +26,21 @@ macro_rules! impl_unary_op {
             let output = exec_single(&[self], |g, ins| vec![g.$ir_method(&ins[0])])?;
             if autograd::is_grad_enabled() && self.requires_grad() {
                 let inputs = vec![self.clone()];
-                Ok(Self::attach_grad_fn(output, autograd::make_node_info($backward, inputs)))
+                Ok(Self::attach_grad_fn(
+                    output,
+                    autograd::make_node_info($backward, inputs),
+                ))
             } else {
                 Ok(output)
             }
         }
 
         pub fn $name(&self) -> Tensor {
-            self.$try_name()
-                .expect(concat!("Tensor::", stringify!($name), ": AOT execution failed"))
+            self.$try_name().expect(concat!(
+                "Tensor::",
+                stringify!($name),
+                ": AOT execution failed"
+            ))
         }
     };
 }
@@ -216,7 +222,8 @@ impl Tensor {
                 let inner = Arc::make_mut(&mut output.inner);
                 let storage = Arc::make_mut(&mut inner.storage);
                 #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-                let Storage::Cpu(cpu_storage) = storage else {
+                let Storage::Cpu(cpu_storage) = storage
+                else {
                     unreachable!("add fast path only runs when both tensors are on CPU")
                 };
                 let out_data = Arc::make_mut(&mut cpu_storage.data);
@@ -268,7 +275,10 @@ impl Tensor {
         let output = exec_single(&[self, other], |g, ins| vec![g.add(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(output, autograd::make_node_info("AddBackward", inputs)))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("AddBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -490,7 +500,10 @@ impl Tensor {
         let output = exec_single(&[self, other], |g, ins| vec![g.sub(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(output, autograd::make_node_info("SubBackward", inputs)))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("SubBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -505,7 +518,10 @@ impl Tensor {
         let output = exec_single(&[self, other], |g, ins| vec![g.mul(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(output, autograd::make_node_info("MulBackward", inputs)))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("MulBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -520,7 +536,10 @@ impl Tensor {
         let output = exec_single(&[self, other], |g, ins| vec![g.div(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(output, autograd::make_node_info("DivBackward", inputs)))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("DivBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -535,7 +554,10 @@ impl Tensor {
         let output = exec_single(&[self, other], |g, ins| vec![g.matmul(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(output, autograd::make_node_info("MatmulBackward", inputs)))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("MatmulBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -592,7 +614,10 @@ impl Tensor {
         let output = exec_single(&[self, &exp], |g, ins| vec![g.pow(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
-            Ok(Self::attach_grad_fn(output, autograd::make_node_info("PowBackward", inputs)))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("PowBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -611,18 +636,27 @@ impl Tensor {
         match src.inner.dtype {
             DType::I32 => {
                 let data = src.as_byte_slice().expect("contiguous CPU tensor");
-                bytemuck::cast_slice::<_, i32>(data).iter().map(|&v| v as i64).collect()
+                bytemuck::cast_slice::<_, i32>(data)
+                    .iter()
+                    .map(|&v| v as i64)
+                    .collect()
             }
             DType::I64 => {
                 let data = src.as_byte_slice().expect("contiguous CPU tensor");
-                bytemuck::cast_slice::<_, i64>(data).iter().copied().collect()
+                bytemuck::cast_slice::<_, i64>(data)
+                    .iter()
+                    .copied()
+                    .collect()
             }
             DType::F32 => {
                 let data = src.as_f32_slice();
                 data.iter().map(|&v| v as i64).collect()
             }
             _ => {
-                panic!("as_i64_slice: unsupported dtype {:?}. Use explicit conversion.", src.inner.dtype)
+                panic!(
+                    "as_i64_slice: unsupported dtype {:?}. Use explicit conversion.",
+                    src.inner.dtype
+                )
             }
         }
     }
@@ -644,7 +678,18 @@ impl Tensor {
         weight_decay: f32,
     ) -> Vec<Tensor> {
         Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
-            let updated = g.apply_adamw(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t, weight_decay);
+            let updated = g.apply_adamw(
+                &ins[0],
+                &ins[1],
+                &ins[2],
+                &ins[3],
+                lr,
+                beta1,
+                beta2,
+                eps,
+                t,
+                weight_decay,
+            );
             vec![updated, ins[2].clone(), ins[3].clone()]
         })
         .expect("Tensor::adamw_update: AOT execution failed")
@@ -664,7 +709,8 @@ impl Tensor {
         t: u64,
     ) -> Vec<Tensor> {
         Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
-            let updated = g.apply_adam(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t);
+            let updated =
+                g.apply_adam(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t);
             vec![updated, ins[2].clone(), ins[3].clone()]
         })
         .expect("Tensor::adam_update: AOT execution failed")

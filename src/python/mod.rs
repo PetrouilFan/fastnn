@@ -13,9 +13,9 @@ use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
 use pyo3::PyAny;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(feature = "gpu")]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 // Custom exception hierarchy for fastnn

@@ -1,6 +1,6 @@
 # fastnn
 
-**fastnn** is a high-performance neural network library built in Rust with Python bindings. It combines an AOT compiler pipeline (90+ IR opcodes, operator fusion, per-channel weight quantization, arena-based memory planning) with an eager-mode autograd engine for research and training.
+**fastnn** is a neural network library built in Rust with Python bindings. It combines an AOT compiler pipeline (90+ IR opcodes, operator fusion, per-channel weight quantization, arena-based memory planning) with an eager-mode autograd engine for research and training.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
@@ -234,23 +234,15 @@ output = executor.forward({"input": input_tensor})
 
 ## Performance
 
-### Quantized GEMV (AMD Ryzen 7 3700X, 8 threads)
+Performance numbers are hardware-dependent and must be backed by a runnable benchmark command.
 
-| Implementation | Time | GFLOP/s | vs PyTorch f32 | Memory |
-|---------------|------|---------|----------------|--------|
-| PyTorch f32 (MKL) | 4.04 ms | 8.3 | 1.0× | 64 MB |
-| fastnn F16x2 | 1.80 ms | 18.6 | 2.2× | 32 MB |
-| fastnn U8x4 | 0.76 ms | 44.4 | 5.3× | 16 MB |
-| fastnn U4x8 | 0.55 ms | 61.1 | 7.4× | 8 MB |
+- Run the maintained CPU suite with `cargo +stable bench --bench cpu_baselines`
+- Save a regression baseline with `cargo +stable bench --bench cpu_baselines -- --save-baseline <name>`
+- Export a normalized JSON summary with `python scripts/criterion_to_json.py --criterion-dir target/criterion --output benchmark-results/<name>.json`
 
-### Fused Conv2d+BN+SiLU
+Public speed claims should point to a checked-in benchmark command, name the comparison baseline, and avoid hard-coded tables that cannot be reproduced locally.
 
-| Configuration | PyTorch (separate) | fastnn (fused) | Speedup |
-|---------------|-------------------|----------------|---------|
-| Conv2d(32→64) + BN + SiLU (64×64) | 81.81 ms | 3.27 ms | 25.0× |
-| Conv2d(64→128) + BN + SiLU (32×32) | 42.55 ms | 2.01 ms | 21.2× |
-
-> See `BENCHMARKS.md` for current benchmark results and `cargo bench` to reproduce.
+> See `BENCHMARKS.md` for commands, baseline capture format, and the performance-claim policy.
 
 ---
 

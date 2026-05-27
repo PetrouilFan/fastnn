@@ -125,7 +125,7 @@ impl Module for ResidualBlock {
             for t in ds_conv.parameters().iter().chain(ds_bn.parameters().iter()) {
                 if let Some(meta) = &t.inner.autograd_meta {
                     let mut lock = meta.lock();
-                        lock.grad = None;
+                    lock.grad = None;
                 }
             }
         }
