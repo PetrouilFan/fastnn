@@ -19,7 +19,12 @@ fn reduce_mean_all(t: &Tensor) -> Tensor {
     for _ in 0..ndim {
         result = result.mean(0, false);
     }
-    result
+    // Keep Python scalar reductions as rank-1 tensors for the public API.
+    if result.shape().is_empty() {
+        result.reshape(vec![1])
+    } else {
+        result
+    }
 }
 
 fn reduce_sum_all(t: &Tensor) -> Tensor {
@@ -28,7 +33,12 @@ fn reduce_sum_all(t: &Tensor) -> Tensor {
     for _ in 0..ndim {
         result = result.sum(0, false);
     }
-    result
+    // Keep Python scalar reductions as rank-1 tensors for the public API.
+    if result.shape().is_empty() {
+        result.reshape(vec![1])
+    } else {
+        result
+    }
 }
 
 fn reduce_max_all(t: &Tensor) -> Tensor {
