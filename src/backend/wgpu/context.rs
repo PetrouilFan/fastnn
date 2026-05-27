@@ -138,7 +138,9 @@ impl WgpuContext {
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
                 contents,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
             })
     }
 
@@ -871,14 +873,14 @@ impl GpuContext {
         let cache_key = self.get_cache_key(name, dtype, wgsl);
         let existing_data = self.load_pipeline_data_from_cache(&cache_key);
 
-        let pipeline_cache =
-            unsafe {
-                self.device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+        let pipeline_cache = unsafe {
+            self.device
+                .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
                     label: Some(&cache_key),
                     data: existing_data.as_deref(),
                     fallback: true,
                 })
-            };
+        };
 
         let shader = self.get_or_create_shader(name, wgsl);
         let pipeline = self

@@ -1,4 +1,6 @@
-use crate::ir::node::{ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, TensorType, TensorValue};
+use crate::ir::node::{
+    ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, TensorType, TensorValue,
+};
 
 pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
     struct Fold {
@@ -13,10 +15,11 @@ pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
             return Ok(());
         }
 
-        let all_const = node
-            .inputs
-            .iter()
-            .all(|&input_id| graph_ref.get_node(input_id).map_or(false, |n| matches!(n.opcode, Opcode::Constant(_))));
+        let all_const = node.inputs.iter().all(|&input_id| {
+            graph_ref
+                .get_node(input_id)
+                .map_or(false, |n| matches!(n.opcode, Opcode::Constant(_)))
+        });
 
         if !all_const {
             return Ok(());
@@ -147,13 +150,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
         Opcode::Sign => unary_float_op(&input_vals, |x| x.signum())
             .or_else(|| unary_int_op(&input_vals, |x| x.signum())),
 
-        Opcode::LogicalNot => unary_int_op(&input_vals, |x| {
-            if x == 0 {
-                1
-            } else {
-                0
-            }
-        }),
+        Opcode::LogicalNot => unary_int_op(&input_vals, |x| if x == 0 { 1 } else { 0 }),
 
         Opcode::Round => unary_float_op(&input_vals, |x| x.round())
             .or_else(|| unary_f32_data_op(&input_vals, |x| x.round())),
@@ -163,12 +160,11 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
             let sign = x.signum();
             let x_abs = x.abs();
             let t = 1.0 / (1.0 + 0.3275911 * x_abs);
-            let y = 1.0 - ((((1.061405429 * t + 1.453152027) * t + 1.421413741) * t
-                - 0.284496736)
-                * t
-                + 0.254829592)
-                * t
-                * (-x_abs * x_abs).exp();
+            let y = 1.0
+                - ((((1.061405429 * t + 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
+                    + 0.254829592)
+                    * t
+                    * (-x_abs * x_abs).exp();
             sign * y
         })
         .or_else(|| {
@@ -176,19 +172,22 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                 let sign = x.signum();
                 let x_abs = x.abs();
                 let t = 1.0 / (1.0 + 0.3275911 * x_abs);
-                let y = 1.0 - ((((1.061405429 * t + 1.453152027) * t + 1.421413741) * t
-                    - 0.284496736)
-                    * t
-                    + 0.254829592)
-                    * t
-                    * (-x_abs * x_abs).exp();
+                let y = 1.0
+                    - ((((1.061405429 * t + 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
+                        + 0.254829592)
+                        * t
+                        * (-x_abs * x_abs).exp();
                 sign * y
             })
         }),
 
         Opcode::Reshape => {
             // Reshape of constant data: change the TensorType shape metadata
-            if let Some(TensorValue::Data { bytes, tensor_type: _ }) = input_vals.first() {
+            if let Some(TensorValue::Data {
+                bytes,
+                tensor_type: _,
+            }) = input_vals.first()
+            {
                 let output_type = &node.output_type;
                 Some(TensorValue::Data {
                     bytes: bytes.clone(),
@@ -196,7 +195,11 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                 })
             } else if let Some(TensorValue::Float(v)) = input_vals.first() {
                 let output_type = &node.output_type;
-                let n: u64 = output_type.shape.iter().filter_map(|d| d.evaluate()).product();
+                let n: u64 = output_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| d.evaluate())
+                    .product();
                 if output_type.dtype == IrDType::F32 && n == 1 {
                     Some(TensorValue::Data {
                         bytes: v.to_le_bytes().to_vec(),
@@ -207,7 +210,11 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                 }
             } else if let Some(TensorValue::Int(v)) = input_vals.first() {
                 let output_type = &node.output_type;
-                let n: u64 = output_type.shape.iter().filter_map(|d| d.evaluate()).product();
+                let n: u64 = output_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| d.evaluate())
+                    .product();
                 if output_type.dtype == IrDType::I64 && n == 1 {
                     Some(TensorValue::Data {
                         bytes: v.to_le_bytes().to_vec(),
@@ -231,7 +238,8 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                 match (src_dtype, target) {
                     (IrDType::F32, IrDType::I32) => {
                         let src: &[f32] = bytemuck::cast_slice(bytes);
-                        let dst: Vec<i32> = src.iter().take(elem_count).map(|&x| x as i32).collect();
+                        let dst: Vec<i32> =
+                            src.iter().take(elem_count).map(|&x| x as i32).collect();
                         Some(TensorValue::Data {
                             bytes: bytemuck::cast_slice(&dst).to_vec(),
                             tensor_type: TensorType::new(out_shape, target.clone()),
@@ -239,7 +247,8 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     }
                     (IrDType::I32, IrDType::F32) => {
                         let src: &[i32] = bytemuck::cast_slice(bytes);
-                        let dst: Vec<f32> = src.iter().take(elem_count).map(|&x| x as f32).collect();
+                        let dst: Vec<f32> =
+                            src.iter().take(elem_count).map(|&x| x as f32).collect();
                         Some(TensorValue::Data {
                             bytes: bytemuck::cast_slice(&dst).to_vec(),
                             tensor_type: TensorType::new(out_shape, target.clone()),
@@ -247,7 +256,8 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     }
                     (IrDType::F32, IrDType::I64) => {
                         let src: &[f32] = bytemuck::cast_slice(bytes);
-                        let dst: Vec<i64> = src.iter().take(elem_count).map(|&x| x as i64).collect();
+                        let dst: Vec<i64> =
+                            src.iter().take(elem_count).map(|&x| x as i64).collect();
                         Some(TensorValue::Data {
                             bytes: bytemuck::cast_slice(&dst).to_vec(),
                             tensor_type: TensorType::new(out_shape, target.clone()),
@@ -255,7 +265,8 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     }
                     (IrDType::I64, IrDType::F32) => {
                         let src: &[i64] = bytemuck::cast_slice(bytes);
-                        let dst: Vec<f32> = src.iter().take(elem_count).map(|&x| x as f32).collect();
+                        let dst: Vec<f32> =
+                            src.iter().take(elem_count).map(|&x| x as f32).collect();
                         Some(TensorValue::Data {
                             bytes: bytemuck::cast_slice(&dst).to_vec(),
                             tensor_type: TensorType::new(out_shape, target.clone()),

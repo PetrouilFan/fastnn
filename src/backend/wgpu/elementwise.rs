@@ -1,6 +1,6 @@
+use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
-use super::PendingRead;
 
 pub(super) fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
     match kernel_name {

@@ -68,7 +68,6 @@ impl Module for MaxPool2d {
 
         output
     }
-
 }
 
 #[derive(Clone)]
@@ -262,5 +261,4 @@ impl Module for AvgPool2d {
 
         output
     }
-
 }

@@ -7,8 +7,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use crate::dtypes::{F16x2, U4x8, U8x4};
-use crate::dtypes::{F32x1, PackedWord};
+use crate::dtypes::F16x2;
+use crate::dtypes::{F32x1, PackedWord, U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
 use std::sync::OnceLock;
 
@@ -38,9 +38,13 @@ pub(crate) fn has_avx2() -> bool {
 #[inline]
 pub fn simd_avx2_available() -> bool {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    { has_avx2() }
+    {
+        has_avx2()
+    }
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-    { false }
+    {
+        false
+    }
 }
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn has_f16c() -> bool {
@@ -210,6 +214,68 @@ fn fma_f32_scalar(a: &[f32], b: &[f32]) -> f32 {
     acc
 }
 
+#[inline(always)]
+fn affine_sum_term(sum_source: &[f32], len: usize, zero: f32) -> f32 {
+    // PackedTensor stores dequantization as value = q * scale + zero.
+    // The additive term therefore scales with the summed activation/input values,
+    // not a single +zero bias per row.
+    if zero == 0.0 {
+        0.0
+    } else {
+        sum_source.iter().take(len).copied().sum()
+    }
+}
+
+#[inline(always)]
+fn apply_affine_dot(dot: f32, scale: f32, zero: f32, input_sum: f32) -> f32 {
+    dot * scale + zero * input_sum
+}
+
+const I8_ACTIVATION_PAYLOAD_HEADER_LEN: usize = 8;
+
+#[derive(Clone, Copy)]
+struct I8ActivationAffine {
+    scale: f32,
+    zero: f32,
+}
+
+impl I8ActivationAffine {
+    #[inline(always)]
+    fn dequantize(self, q: i8) -> f32 {
+        // Activation payloads store dequantization as activation = qA * scale_a + zp_a.
+        (q as f32) * self.scale + self.zero
+    }
+
+    #[inline(always)]
+    fn sum_from_q_sum(self, q_sum: i32, len: usize) -> f32 {
+        // The affine offset contributes once per activation lane, so Σactivation
+        // expands to scale_a * ΣqA + len * zp_a.
+        (q_sum as f32) * self.scale + (len as f32) * self.zero
+    }
+}
+
+#[inline(always)]
+fn parse_i8_activation_payload(activation_payload: &[u8]) -> (I8ActivationAffine, &[u8]) {
+    let scale = if activation_payload.len() >= 4 {
+        f32::from_le_bytes(activation_payload[0..4].try_into().unwrap())
+    } else {
+        1.0
+    };
+    let zero = if activation_payload.len() >= I8_ACTIVATION_PAYLOAD_HEADER_LEN {
+        f32::from_le_bytes(
+            activation_payload[4..I8_ACTIVATION_PAYLOAD_HEADER_LEN]
+                .try_into()
+                .unwrap(),
+        )
+    } else {
+        0.0
+    };
+    let payload = activation_payload
+        .get(I8_ACTIVATION_PAYLOAD_HEADER_LEN..)
+        .unwrap_or(&[]);
+    (I8ActivationAffine { scale, zero }, payload)
+}
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
@@ -315,7 +381,9 @@ unsafe fn fma_f32_avx512(a: &[f32], b: &[f32]) -> f32 {
 // ── Simple ops (direct AVX2 intrinsics) ──────────────────────
 
 #[inline]
-pub fn relu_f32_scalar(x: f32) -> f32 { x.max(0.0) }
+pub fn relu_f32_scalar(x: f32) -> f32 {
+    x.max(0.0)
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -324,15 +392,21 @@ pub unsafe fn relu_f32_avx2(input: &[f32], output: &mut [f32]) {
     let mut i = 0;
     let zero = _mm256_setzero_ps();
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_max_ps(_mm256_loadu_ps(input.as_ptr().add(i)), zero));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_max_ps(_mm256_loadu_ps(input.as_ptr().add(i)), zero),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = relu_f32_scalar(input[j]); }
+    for j in i..len {
+        output[j] = relu_f32_scalar(input[j]);
+    }
 }
 
 #[inline]
-pub fn neg_f32_scalar(x: f32) -> f32 { -x }
+pub fn neg_f32_scalar(x: f32) -> f32 {
+    -x
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -341,15 +415,21 @@ pub unsafe fn neg_f32_avx2(input: &[f32], output: &mut [f32]) {
     let mut i = 0;
     let sign_mask = _mm256_set1_ps(-0.0f32);
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_xor_ps(_mm256_loadu_ps(input.as_ptr().add(i)), sign_mask));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_xor_ps(_mm256_loadu_ps(input.as_ptr().add(i)), sign_mask),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = neg_f32_scalar(input[j]); }
+    for j in i..len {
+        output[j] = neg_f32_scalar(input[j]);
+    }
 }
 
 #[inline]
-pub fn abs_f32_scalar(x: f32) -> f32 { x.abs() }
+pub fn abs_f32_scalar(x: f32) -> f32 {
+    x.abs()
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -358,15 +438,21 @@ pub unsafe fn abs_f32_avx2(input: &[f32], output: &mut [f32]) {
     let mut i = 0;
     let inv_sign_mask = _mm256_set1_ps(f32::from_bits(0x7fff_ffff));
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_and_ps(_mm256_loadu_ps(input.as_ptr().add(i)), inv_sign_mask));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_and_ps(_mm256_loadu_ps(input.as_ptr().add(i)), inv_sign_mask),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = abs_f32_scalar(input[j]); }
+    for j in i..len {
+        output[j] = abs_f32_scalar(input[j]);
+    }
 }
 
 #[inline]
-pub fn sqrt_f32_scalar(x: f32) -> f32 { x.sqrt() }
+pub fn sqrt_f32_scalar(x: f32) -> f32 {
+    x.sqrt()
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -374,15 +460,21 @@ pub unsafe fn sqrt_f32_avx2(input: &[f32], output: &mut [f32]) {
     let len = output.len().min(input.len());
     let mut i = 0;
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_sqrt_ps(_mm256_loadu_ps(input.as_ptr().add(i))));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_sqrt_ps(_mm256_loadu_ps(input.as_ptr().add(i))),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = sqrt_f32_scalar(input[j]); }
+    for j in i..len {
+        output[j] = sqrt_f32_scalar(input[j]);
+    }
 }
 
 #[inline]
-pub fn sign_f32_scalar(x: f32) -> f32 { x.signum() }
+pub fn sign_f32_scalar(x: f32) -> f32 {
+    x.signum()
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -394,16 +486,24 @@ pub unsafe fn sign_f32_avx2(input: &[f32], output: &mut [f32]) {
     let neg_one = _mm256_set1_ps(-1.0);
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_or_ps(_mm256_and_ps(_mm256_cmp_ps::<{_CMP_GT_OQ}>(x, zero), one),
-                          _mm256_and_ps(_mm256_cmp_ps::<{_CMP_LT_OQ}>(x, zero), neg_one)));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_or_ps(
+                _mm256_and_ps(_mm256_cmp_ps::<{ _CMP_GT_OQ }>(x, zero), one),
+                _mm256_and_ps(_mm256_cmp_ps::<{ _CMP_LT_OQ }>(x, zero), neg_one),
+            ),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = sign_f32_scalar(input[j]); }
+    for j in i..len {
+        output[j] = sign_f32_scalar(input[j]);
+    }
 }
 
 #[inline]
-pub fn round_f32_scalar(x: f32) -> f32 { x.round() }
+pub fn round_f32_scalar(x: f32) -> f32 {
+    x.round()
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -411,15 +511,28 @@ pub unsafe fn round_f32_avx2(input: &[f32], output: &mut [f32]) {
     let len = output.len().min(input.len());
     let mut i = 0;
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_round_ps(_mm256_loadu_ps(input.as_ptr().add(i)), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_round_ps(
+                _mm256_loadu_ps(input.as_ptr().add(i)),
+                _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+            ),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = round_f32_scalar(input[j]); }
+    for j in i..len {
+        output[j] = round_f32_scalar(input[j]);
+    }
 }
 
 #[inline]
-pub fn logical_not_f32_scalar(x: f32) -> f32 { if x == 0.0 { 1.0 } else { 0.0 } }
+pub fn logical_not_f32_scalar(x: f32) -> f32 {
+    if x == 0.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -429,17 +542,26 @@ pub unsafe fn logical_not_f32_avx2(input: &[f32], output: &mut [f32]) {
     let zero = _mm256_setzero_ps();
     let one = _mm256_set1_ps(1.0);
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_and_ps(_mm256_cmp_ps::<{_CMP_EQ_OQ}>(_mm256_loadu_ps(input.as_ptr().add(i)), zero), one));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_and_ps(
+                _mm256_cmp_ps::<{ _CMP_EQ_OQ }>(_mm256_loadu_ps(input.as_ptr().add(i)), zero),
+                one,
+            ),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = logical_not_f32_scalar(input[j]); }
+    for j in i..len {
+        output[j] = logical_not_f32_scalar(input[j]);
+    }
 }
 
 // ── Parametric ops ───────────────────────────────────────────
 
 #[inline]
-pub fn clamp_f32_scalar(x: f32, min_val: f32, max_val: f32) -> f32 { x.max(min_val).min(max_val) }
+pub fn clamp_f32_scalar(x: f32, min_val: f32, max_val: f32) -> f32 {
+    x.max(min_val).min(max_val)
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -449,15 +571,28 @@ pub unsafe fn clamp_f32_avx2(input: &[f32], output: &mut [f32], min_val: f32, ma
     let vmin = _mm256_set1_ps(min_val);
     let vmax = _mm256_set1_ps(max_val);
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_min_ps(_mm256_max_ps(_mm256_loadu_ps(input.as_ptr().add(i)), vmin), vmax));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_min_ps(
+                _mm256_max_ps(_mm256_loadu_ps(input.as_ptr().add(i)), vmin),
+                vmax,
+            ),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = clamp_f32_scalar(input[j], min_val, max_val); }
+    for j in i..len {
+        output[j] = clamp_f32_scalar(input[j], min_val, max_val);
+    }
 }
 
 #[inline]
-pub fn leaky_relu_f32_scalar(x: f32, slope: f32) -> f32 { if x > 0.0 { x } else { x * slope } }
+pub fn leaky_relu_f32_scalar(x: f32, slope: f32) -> f32 {
+    if x > 0.0 {
+        x
+    } else {
+        x * slope
+    }
+}
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
@@ -468,12 +603,19 @@ pub unsafe fn leaky_relu_f32_avx2(input: &[f32], output: &mut [f32], slope: f32)
     let vslope = _mm256_set1_ps(slope);
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
-        _mm256_storeu_ps(output.as_mut_ptr().add(i),
-            _mm256_blendv_ps(_mm256_mul_ps(x, vslope), x,
-                _mm256_cmp_ps::<{_CMP_GT_OQ}>(x, zero)));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_blendv_ps(
+                _mm256_mul_ps(x, vslope),
+                x,
+                _mm256_cmp_ps::<{ _CMP_GT_OQ }>(x, zero),
+            ),
+        );
         i += 8;
     }
-    for j in i..len { output[j] = leaky_relu_f32_scalar(input[j], slope); }
+    for j in i..len {
+        output[j] = leaky_relu_f32_scalar(input[j], slope);
+    }
 }
 
 // ── Complex ops (SIMD struct load/store, per-element scalar math) ───
@@ -496,7 +638,7 @@ macro_rules! avx2_elwise_fallback {
                 let x5 = *input.as_ptr().add(i + 5);
                 let x6 = *input.as_ptr().add(i + 6);
                 let x7 = *input.as_ptr().add(i + 7);
-                *output.as_mut_ptr().add(i)     = $scalar_fn(x0);
+                *output.as_mut_ptr().add(i) = $scalar_fn(x0);
                 *output.as_mut_ptr().add(i + 1) = $scalar_fn(x1);
                 *output.as_mut_ptr().add(i + 2) = $scalar_fn(x2);
                 *output.as_mut_ptr().add(i + 3) = $scalar_fn(x3);
@@ -513,11 +655,20 @@ macro_rules! avx2_elwise_fallback {
     };
 }
 
-#[inline] pub fn exp_f32_scalar(x: f32) -> f32 { x.exp() }
+#[inline]
+pub fn exp_f32_scalar(x: f32) -> f32 {
+    x.exp()
+}
 
-#[inline] pub fn sigmoid_f32_scalar(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+#[inline]
+pub fn sigmoid_f32_scalar(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
 
-#[inline] pub fn tanh_f32_scalar(x: f32) -> f32 { x.tanh() }
+#[inline]
+pub fn tanh_f32_scalar(x: f32) -> f32 {
+    x.tanh()
+}
 
 // ============================================================
 // SIMD vector helpers — reusable across activation microkernels
@@ -553,8 +704,10 @@ unsafe fn exp_avx2_vec(x: __m256) -> __m256 {
         _mm256_max_epi32(k_int, _mm256_set1_epi32(-126)),
         _mm256_set1_epi32(127),
     );
-    let exp_factor =
-        _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(k_clamped, _mm256_set1_epi32(127)), 23));
+    let exp_factor = _mm256_castsi256_ps(_mm256_slli_epi32(
+        _mm256_add_epi32(k_clamped, _mm256_set1_epi32(127)),
+        23,
+    ));
     _mm256_mul_ps(p, exp_factor)
 }
 
@@ -586,9 +739,7 @@ unsafe fn log_avx2_vec(x: __m256) -> __m256 {
 
     // Extract mantissa in [1, 2): clear exponent, set to 127 (bias)
     let mant_raw = _mm256_and_si256(raw, _mm256_set1_epi32(0x007FFFFF));
-    let mant_f = _mm256_castsi256_ps(
-        _mm256_or_si256(mant_raw, _mm256_set1_epi32(0x3F800000)),
-    );
+    let mant_f = _mm256_castsi256_ps(_mm256_or_si256(mant_raw, _mm256_set1_epi32(0x3F800000)));
 
     // Degree-4 minimax polynomial for ln(m) on m ∈ [1, 2]
     // Coefficients from Sollya: max error ~3e-4
@@ -634,7 +785,10 @@ pub unsafe fn exp_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
-#[inline] pub fn log_f32_scalar(x: f32) -> f32 { x.ln() }
+#[inline]
+pub fn log_f32_scalar(x: f32) -> f32 {
+    x.ln()
+}
 
 /// True AVX2 ln(x) using frexp decomposition + polynomial on [1, 2).
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -692,7 +846,14 @@ pub unsafe fn tanh_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
-#[inline] pub fn elu_f32_scalar(x: f32) -> f32 { if x > 0.0 { x } else { x.exp() - 1.0 } }
+#[inline]
+pub fn elu_f32_scalar(x: f32) -> f32 {
+    if x > 0.0 {
+        x
+    } else {
+        x.exp() - 1.0
+    }
+}
 
 /// True AVX2 ELU(x) = if x > 0 then x else exp(x) - 1.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -706,8 +867,11 @@ pub unsafe fn elu_f32_avx2(input: &[f32], output: &mut [f32]) {
         let exp_x = exp_avx2_vec(x);
         let exp_minus_1 = _mm256_sub_ps(exp_x, _mm256_set1_ps(1.0f32));
         // blend: when x > 0, select x; otherwise select exp(x)-1
-        let mask = _mm256_cmp_ps::<{_CMP_GT_OQ}>(x, vzero);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_blendv_ps(exp_minus_1, x, mask));
+        let mask = _mm256_cmp_ps::<{ _CMP_GT_OQ }>(x, vzero);
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_blendv_ps(exp_minus_1, x, mask),
+        );
         i += 8;
     }
     for j in i..len {
@@ -750,7 +914,10 @@ pub unsafe fn gelu_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
-#[inline] pub fn silu_f32_scalar(x: f32) -> f32 { x / (1.0 + (-x).exp()) }
+#[inline]
+pub fn silu_f32_scalar(x: f32) -> f32 {
+    x / (1.0 + (-x).exp())
+}
 
 /// True AVX2 SiLU(x) = x * sigmoid(x).
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -773,7 +940,10 @@ pub unsafe fn silu_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
-#[inline] pub fn softplus_f32_scalar(x: f32) -> f32 { (1.0 + x.exp()).ln() }
+#[inline]
+pub fn softplus_f32_scalar(x: f32) -> f32 {
+    (1.0 + x.exp()).ln()
+}
 
 /// True AVX2 softplus(x) = ln(1 + exp(x)).
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -797,7 +967,10 @@ pub unsafe fn softplus_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
-#[inline] pub fn hardswish_f32_scalar(x: f32) -> f32 { x * (x + 3.0).clamp(0.0, 6.0) / 6.0 }
+#[inline]
+pub fn hardswish_f32_scalar(x: f32) -> f32 {
+    x * (x + 3.0).clamp(0.0, 6.0) / 6.0
+}
 
 /// True AVX2 hardswish(x) = x * clamp(x+3, 0, 6) / 6.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -813,7 +986,10 @@ pub unsafe fn hardswish_f32_avx2(input: &[f32], output: &mut [f32]) {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
         let x3 = _mm256_add_ps(x, vthree);
         let clamped = _mm256_min_ps(_mm256_max_ps(x3, vzero), vsix);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_mul_ps(x, clamped), vinvsix));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_mul_ps(_mm256_mul_ps(x, clamped), vinvsix),
+        );
         i += 8;
     }
     for j in i..len {
@@ -822,7 +998,11 @@ pub unsafe fn hardswish_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
-#[inline] pub fn mish_f32_scalar(x: f32) -> f32 { let sp = (1.0 + x.exp()).ln(); x * sp.tanh() }
+#[inline]
+pub fn mish_f32_scalar(x: f32) -> f32 {
+    let sp = (1.0 + x.exp()).ln();
+    x * sp.tanh()
+}
 
 /// True AVX2 mish(x) = x * tanh(ln(1 + exp(x))).
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -834,7 +1014,10 @@ pub unsafe fn mish_f32_avx2(input: &[f32], output: &mut [f32]) {
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
         let sp = log_avx2_vec(_mm256_add_ps(vone, exp_avx2_vec(x))); // ln(1+exp(x))
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(x, tanh_avx2_vec(sp)));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_mul_ps(x, tanh_avx2_vec(sp)),
+        );
         i += 8;
     }
     for j in i..len {
@@ -850,7 +1033,9 @@ pub unsafe fn mish_f32_avx2(input: &[f32], output: &mut [f32]) {
 #[target_feature(enable = "avx2")]
 pub unsafe fn log_softmax_f32_avx2(input: &[f32], output: &mut [f32]) {
     let len = output.len().min(input.len());
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
     // 1. Find max with AVX2 horizontal reduction
     let mut max_val = f32::NEG_INFINITY;
     let mut i = 0;
@@ -861,12 +1046,16 @@ pub unsafe fn log_softmax_f32_avx2(input: &[f32], output: &mut [f32]) {
         let mx = _mm256_max_ps(mx, _mm256_shuffle_ps(mx, mx, 0b_00_11_10_01));
         let mx = _mm256_max_ps(mx, _mm256_shuffle_ps(mx, mx, 0b_00_00_00_10));
         let candidate = _mm256_cvtss_f32(mx);
-        if candidate > max_val { max_val = candidate; }
+        if candidate > max_val {
+            max_val = candidate;
+        }
         i += 8;
     }
     for j in i..len {
         let v = *input.as_ptr().add(j);
-        if v > max_val { max_val = v; }
+        if v > max_val {
+            max_val = v;
+        }
     }
     // 2. Sum of exp(x - max) using f64 accumulator for precision
     let mut sum = 0.0f64;
@@ -891,12 +1080,18 @@ pub unsafe fn log_softmax_f32_avx2(input: &[f32], output: &mut [f32]) {
 /// Scalar fallback for log_softmax
 pub fn log_softmax_f32_scalar_all(input: &[f32], output: &mut [f32]) {
     let len = output.len().min(input.len());
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
     let max_val = input.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0f64;
-    for &x in &input[..len] { sum += ((x - max_val).exp()) as f64; }
+    for &x in &input[..len] {
+        sum += ((x - max_val).exp()) as f64;
+    }
     let log_sum = (sum as f32).ln();
-    for i in 0..len { output[i] = input[i] - max_val - log_sum; }
+    for i in 0..len {
+        output[i] = input[i] - max_val - log_sum;
+    }
 }
 
 // ── Binary ops (AVX2 when dense, scalar broadcast fallback) ──
@@ -999,8 +1194,18 @@ impl_binary_arith_broadcast!(add_f32_scalar_broadcast, add_f32_avx2_broadcast, +
 impl_binary_arith_broadcast!(sub_f32_scalar_broadcast, sub_f32_avx2_broadcast, -, _mm256_sub_ps);
 impl_binary_arith_broadcast!(mul_f32_scalar_broadcast, mul_f32_avx2_broadcast, *, _mm256_mul_ps);
 impl_binary_arith_broadcast!(div_f32_scalar_broadcast, div_f32_avx2_broadcast, /, _mm256_div_ps);
-impl_binary_minmax_broadcast!(max_f32_scalar_broadcast, max_f32_avx2_broadcast, max, _mm256_max_ps);
-impl_binary_minmax_broadcast!(min_f32_scalar_broadcast, min_f32_avx2_broadcast, min, _mm256_min_ps);
+impl_binary_minmax_broadcast!(
+    max_f32_scalar_broadcast,
+    max_f32_avx2_broadcast,
+    max,
+    _mm256_max_ps
+);
+impl_binary_minmax_broadcast!(
+    min_f32_scalar_broadcast,
+    min_f32_avx2_broadcast,
+    min,
+    _mm256_min_ps
+);
 
 // ============================================================
 // GEMM constants
@@ -1065,26 +1270,42 @@ fn gemv_u8x4_dispatch(weights: &PackedTensor<U8x4>, activation: &[f32], output: 
     let k = shape[1];
     let k_packed = k.div_ceil(4);
     let weights_u32 = weights.as_u32();
+    let act_sum = affine_sum_term(activation, k, 1.0);
 
     if has_avx512() {
         for row in 0..m {
             let dot = unsafe {
                 gemv_row_u8x4_avx512(weights_u32, activation, row * k_packed, k, k_packed)
             };
-            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     } else if has_avx2() {
         for row in 0..m {
             let dot =
                 unsafe { gemv_row_u8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
-            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     } else {
         for row in 0..m {
             let row_offset = row * k_packed;
             let dot =
                 unsafe { gemv_row_u8x4_scalar(weights_u32, activation, row_offset, k, k_packed) };
-            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     }
 }
@@ -1274,19 +1495,30 @@ fn gemv_u4x8_dispatch(weights: &PackedTensor<U4x8>, activation: &[f32], output: 
     let k = shape[1];
     let k_packed = k.div_ceil(8);
     let weights_u32 = weights.as_u32();
+    let act_sum = affine_sum_term(activation, k, 1.0);
 
     if has_avx512() {
         for row in 0..m {
             let dot = unsafe {
                 gemv_row_u4x8_avx512(weights_u32, activation, row * k_packed, k, k_packed)
             };
-            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     } else if has_avx2() {
         for row in 0..m {
             let dot =
                 unsafe { gemv_row_u4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
-            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     } else {
         gemv_generic_fallback(weights, activation, output);
@@ -1452,13 +1684,19 @@ fn gemv_f16x2_dispatch(weights: &PackedTensor<F16x2>, activation: &[f32], output
     let k = shape[1];
     let k_packed = k.div_ceil(2);
     let weights_u32 = weights.as_u32();
+    let act_sum = affine_sum_term(activation, k, 1.0);
 
     if has_f16c() {
         for row in 0..m {
             let dot = unsafe {
                 gemv_row_f16x2_f16c(weights_u32, activation, row * k_packed, k, k_packed)
             };
-            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     } else {
         gemv_generic_fallback(weights, activation, output);
@@ -1582,11 +1820,17 @@ fn gemv_f32x1_dispatch(weights: &PackedTensor<F32x1>, activation: &[f32], output
             weights.packed_len(),
         )
     };
+    let act_sum = affine_sum_term(activation, k, 1.0);
 
     for row in 0..m {
         let row_data = &weights_f32[row * k..(row + 1) * k];
         let dot = fma_f32_slice(row_data, activation);
-        output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+        output[row] = apply_affine_dot(
+            dot,
+            weights.scale_for_row(row),
+            weights.zero_for_row(row),
+            act_sum,
+        );
     }
 }
 
@@ -1621,10 +1865,16 @@ fn gemv_packed_inner<T: PackedWord>(
     k: usize,
     k_packed: usize,
 ) {
+    let act_sum = affine_sum_term(activation, k, 1.0);
     with_scratch(k_packed * T::ITEMS, |unpack_buf| {
         for row in 0.._m {
             let dot = gemv_row::<T>(weights, activation, row, k, k_packed, unpack_buf);
-            output[row] = dot * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     });
 }
@@ -1643,6 +1893,7 @@ fn gemv_packed_blocked<T: PackedWord>(
     }
 
     let items = T::ITEMS;
+    let act_sum = affine_sum_term(activation, k, 1.0);
 
     with_scratch(K_BLOCK_SIZE, |unpack_buf| {
         let mut k_offset = 0;
@@ -1680,7 +1931,12 @@ fn gemv_packed_blocked<T: PackedWord>(
         }
 
         for row in 0..m {
-            output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                output[row],
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     });
 }
@@ -1743,6 +1999,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
     let m = shape[0];
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
+    let act_sum = affine_sum_term(activation, k, 1.0);
 
     for o in output.iter_mut() {
         *o = 0.0;
@@ -1794,7 +2051,12 @@ pub fn gemv_packed_tiled<T: PackedWord>(
         }
 
         for row in 0..m {
-            output[row] = output[row] * weights.scale_for_row(row) + weights.zero_for_row(row);
+            output[row] = apply_affine_dot(
+                output[row],
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
         }
     });
 }
@@ -2040,7 +2302,8 @@ pub fn gemm_packed_batched<T: PackedWord>(
             }
             for (bi, input) in batch_inputs.iter().enumerate() {
                 let acc = fma_f32_slice(unpack_buf, input);
-                outputs[bi][row] = acc * scale + zero;
+                let input_sum = affine_sum_term(input, k, zero);
+                outputs[bi][row] = apply_affine_dot(acc, scale, zero, input_sum);
             }
         }
     });
@@ -2083,10 +2346,194 @@ pub fn gemm_cpu_flat<T: PackedWord>(
             for bi in 0..num_pixels {
                 let input = &batch_inputs[bi * col_w..(bi + 1) * col_w];
                 let acc = fma_f32_slice(unpack_buf, input);
-                outputs[bi * oc + row] = acc * scale + zero;
+                let input_sum = affine_sum_term(input, k, zero);
+                outputs[bi * oc + row] = apply_affine_dot(acc, scale, zero, input_sum);
             }
         }
     });
+}
+
+// ============================================================
+// I8 × U8x4 quantized GEMM  (scalar, no SIMD)
+// ============================================================
+
+/// Flat-buffer I8 × U8x4 quantized GEMM.
+///
+/// Activation payload format: [scale_f32][zp_f32][i8_data...]
+/// (8-byte header followed by `m × k` signed i8 elements).
+///
+/// Weights are `PackedTensor<U8x4>` with shape [N, K].
+/// Output is `[m × n]` f32.
+///
+/// Computes the affine dot product exactly for the stored quantized values:
+///   weight_i = qW_i * scale_w + zero_w
+///   activation_i = qA_i * scale_a + zp_a
+///   output = Σ_i weight_i * activation_i
+///
+/// The zp_a == 0 path keeps the qW*qA term as an i32 dot product and adds
+/// the zero_w contribution as `zero_w * scale_a * ΣqA`.
+#[inline(always)]
+pub fn gemm_cpu_flat_i8_u8x4(
+    weights: &PackedTensor<U8x4>,
+    activation_payload: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    let shape = weights.shape();
+    let oc = shape[0];
+    let k_in = shape[1];
+    assert_eq!(
+        oc, n,
+        "gemm_cpu_flat_i8_u8x4: weight output channels (oc={oc}) must equal n={n}"
+    );
+    assert_eq!(
+        k_in, k,
+        "gemm_cpu_flat_i8_u8x4: weight input channels (k_in={k_in}) must equal k={k}"
+    );
+
+    let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
+
+    // Non-zero activation zero-point requires lane-by-lane dequantization.
+    if activation_affine.zero != 0.0 {
+        let k_packed = k.div_ceil(U8x4::ITEMS);
+        for row in 0..oc {
+            let scale_w = weights.scale_for_row(row);
+            let zero_w = weights.zero_for_row(row);
+            for bi in 0..m {
+                let mut acc_f32 = 0.0f32;
+                let mut activation_sum = 0.0f32;
+                for kk in 0..k {
+                    let a = activation_affine.dequantize(act_i8[bi * k + kk] as i8);
+                    let word = weights.as_packed()[row * k_packed + kk / 4].0;
+                    let bytes = word.to_le_bytes();
+                    let q_w = bytes[kk % 4] as i8 as f32;
+                    acc_f32 += a * q_w;
+                    activation_sum += a;
+                }
+                outputs[bi * n + row] = apply_affine_dot(acc_f32, scale_w, zero_w, activation_sum);
+            }
+        }
+        return;
+    }
+
+    // Fast path: zero activation offset keeps the qW*qA term in integer space,
+    // then reuses the shared Σactivation helper for the affine zero_w term.
+    let k_packed = k.div_ceil(U8x4::ITEMS);
+    for row in 0..oc {
+        let scale_w = weights.scale_for_row(row);
+        let zero_w = weights.zero_for_row(row);
+        let row_offset = row * k_packed;
+
+        for bi in 0..m {
+            let mut acc: i32 = 0;
+            let mut q_activation_sum: i32 = 0;
+            let act_base = bi * k;
+
+            for p in 0..k_packed {
+                let word = weights.as_packed()[row_offset + p].0;
+                let bytes = word.to_le_bytes();
+                for lane in 0..4 {
+                    let idx = p * 4 + lane;
+                    if idx < k {
+                        let q_w = bytes[lane] as i8 as i32;
+                        let q_a = act_i8[act_base + idx] as i8 as i32;
+                        acc += q_w * q_a;
+                        q_activation_sum += q_a;
+                    }
+                }
+            }
+            outputs[bi * n + row] = apply_affine_dot(
+                (acc as f32) * activation_affine.scale,
+                scale_w,
+                zero_w,
+                activation_affine.sum_from_q_sum(q_activation_sum, k),
+            );
+        }
+    }
+}
+
+/// Flat-buffer I8 × U4x8 quantized GEMM.
+///
+/// Semantics mirror `gemm_cpu_flat_i8_u8x4`, but each packed weight word stores
+/// eight signed 4-bit qW lanes (`[-8, 7]`) before the affine `qW * scale_w + zero_w`
+/// dequantization is applied.
+#[inline(always)]
+pub fn gemm_cpu_flat_i8_u4x8(
+    weights: &PackedTensor<U4x8>,
+    activation_payload: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    let shape = weights.shape();
+    let oc = shape[0];
+    let k_in = shape[1];
+    assert_eq!(
+        oc, n,
+        "gemm_cpu_flat_i8_u4x8: weight output channels (oc={oc}) must equal n={n}"
+    );
+    assert_eq!(
+        k_in, k,
+        "gemm_cpu_flat_i8_u4x8: weight input channels (k_in={k_in}) must equal k={k}"
+    );
+
+    let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
+    let k_packed = k.div_ceil(U4x8::ITEMS);
+
+    if activation_affine.zero != 0.0 {
+        for row in 0..oc {
+            let scale_w = weights.scale_for_row(row);
+            let zero_w = weights.zero_for_row(row);
+            let row_offset = row * k_packed;
+            for bi in 0..m {
+                let mut acc_f32 = 0.0f32;
+                let mut activation_sum = 0.0f32;
+                for p in 0..k_packed {
+                    let unpacked = weights.as_packed()[row_offset + p].unpack_to_f32();
+                    for lane in 0..U4x8::ITEMS {
+                        let idx = p * U4x8::ITEMS + lane;
+                        if idx < k {
+                            let a = activation_affine.dequantize(act_i8[bi * k + idx] as i8);
+                            acc_f32 += unpacked[lane] * a;
+                            activation_sum += a;
+                        }
+                    }
+                }
+                outputs[bi * n + row] = apply_affine_dot(acc_f32, scale_w, zero_w, activation_sum);
+            }
+        }
+        return;
+    }
+
+    for row in 0..oc {
+        let scale_w = weights.scale_for_row(row);
+        let zero_w = weights.zero_for_row(row);
+        let row_offset = row * k_packed;
+        for bi in 0..m {
+            let mut acc = 0.0f32;
+            let mut q_activation_sum: i32 = 0;
+            for p in 0..k_packed {
+                let unpacked = weights.as_packed()[row_offset + p].unpack_to_f32();
+                for lane in 0..U4x8::ITEMS {
+                    let idx = p * U4x8::ITEMS + lane;
+                    if idx < k {
+                        let q_a = act_i8[bi * k + idx] as i8 as i32;
+                        acc += unpacked[lane] * (q_a as f32);
+                        q_activation_sum += q_a;
+                    }
+                }
+            }
+            outputs[bi * n + row] = apply_affine_dot(
+                acc * activation_affine.scale,
+                scale_w,
+                zero_w,
+                activation_affine.sum_from_q_sum(q_activation_sum, k),
+            );
+        }
+    }
 }
 
 // ============================================================
@@ -2143,10 +2590,12 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
     }
 
     for bi in 0..n {
+        let input = &activation[bi * k..(bi + 1) * k];
+        let input_sum = affine_sum_term(input, k, 1.0);
         for row in 0..m {
             let scale = weights.scale_for_row(row);
             let zero = weights.zero_for_row(row);
-            output[bi * m + row] = output[bi * m + row] * scale + zero;
+            output[bi * m + row] = apply_affine_dot(output[bi * m + row], scale, zero, input_sum);
         }
     }
 }
@@ -3024,10 +3473,7 @@ pub unsafe fn batch_norm_inference_f32_avx2(
         // Channel indices ch_j = (i + j) % c  via float:  idx - floor(idx/c)*c
         let vi = _mm256_set1_ps(i as f32);
         let vindices_f = _mm256_add_ps(vi, vinc);
-        let vdiv = _mm256_round_ps(
-            _mm256_div_ps(vindices_f, vc),
-            _MM_FROUND_TO_NEG_INF,
-        );
+        let vdiv = _mm256_round_ps(_mm256_div_ps(vindices_f, vc), _MM_FROUND_TO_NEG_INF);
         let vch_f = _mm256_sub_ps(vindices_f, _mm256_mul_ps(vdiv, vc));
         let vch = _mm256_cvttps_epi32(vch_f);
 
@@ -3037,7 +3483,10 @@ pub unsafe fn batch_norm_inference_f32_avx2(
 
         // out[i] = data[i] * scale + shift
         let vdata = _mm256_loadu_ps(data.as_ptr().add(i));
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_fmadd_ps(vdata, vscale, vshift));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_fmadd_ps(vdata, vscale, vshift),
+        );
         i += 8;
     }
     for j in i..len {
@@ -3052,10 +3501,17 @@ pub unsafe fn batch_norm_inference_f32_avx2(
 
 #[inline]
 pub fn pool_max_f32_scalar(
-    input: &[f32], output: &mut [f32],
-    n: usize, c: usize, h: usize, w: usize,
-    kernel: usize, stride_val: usize, padding_val: usize,
-    h_out: usize, w_out: usize,
+    input: &[f32],
+    output: &mut [f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    kernel: usize,
+    stride_val: usize,
+    padding_val: usize,
+    h_out: usize,
+    w_out: usize,
     mut indices_out: Option<&mut [i64]>,
 ) {
     let hw_out = h_out * w_out;
@@ -3103,10 +3559,17 @@ pub fn pool_max_f32_scalar(
 
 #[inline]
 pub fn pool_avg_f32_scalar(
-    input: &[f32], output: &mut [f32],
-    n: usize, c: usize, h: usize, w: usize,
-    kernel: usize, stride_val: usize, padding_val: usize,
-    h_out: usize, w_out: usize,
+    input: &[f32],
+    output: &mut [f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    kernel: usize,
+    stride_val: usize,
+    padding_val: usize,
+    h_out: usize,
+    w_out: usize,
 ) {
     let hw_out = h_out * w_out;
     for nn in 0..n {
@@ -3147,9 +3610,13 @@ pub fn pool_avg_f32_scalar(
 
 #[inline]
 pub fn adaptive_avg_pool2d_f32_scalar(
-    input: &[f32], output: &mut [f32],
-    nc: usize, h: usize, w: usize,
-    out_h: usize, out_w: usize,
+    input: &[f32],
+    output: &mut [f32],
+    nc: usize,
+    h: usize,
+    w: usize,
+    out_h: usize,
+    out_w: usize,
 ) {
     let hw = h * w;
     for nci in 0..nc {
@@ -3179,21 +3646,43 @@ pub fn adaptive_avg_pool2d_f32_scalar(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn pool_max_f32_avx2(
-    input: &[f32], output: &mut [f32],
-    n: usize, c: usize, h: usize, w: usize,
-    kernel: usize, stride_val: usize, padding_val: usize,
-    h_out: usize, w_out: usize,
+    input: &[f32],
+    output: &mut [f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    kernel: usize,
+    stride_val: usize,
+    padding_val: usize,
+    h_out: usize,
+    w_out: usize,
     indices_out: Option<&mut [i64]>,
 ) {
     if stride_val != 1 || indices_out.is_some() {
         return pool_max_f32_scalar(
-            input, output, n, c, h, w, kernel, stride_val, padding_val, h_out, w_out, indices_out,
+            input,
+            output,
+            n,
+            c,
+            h,
+            w,
+            kernel,
+            stride_val,
+            padding_val,
+            h_out,
+            w_out,
+            indices_out,
         );
     }
     let hw_out = h_out * w_out;
 
     // Interior hh where all kh are valid (stride=1): hh in [padding_val, padding_val + h - kernel]
-    let interior_h_start = if padding_val < h_out { padding_val } else { h_out };
+    let interior_h_start = if padding_val < h_out {
+        padding_val
+    } else {
+        h_out
+    };
     let interior_h_end = if padding_val + h >= kernel {
         (padding_val + h - kernel + 1).min(h_out)
     } else {
@@ -3202,7 +3691,11 @@ pub unsafe fn pool_max_f32_avx2(
 
     // Interior ww where 8 consecutive outputs all have valid kw: ww in [padding_val, w+padding_val-kernel-7]
     // exclusive upper bound: min(w_out, w+padding_val-kernel-6)
-    let interior_w_start = if padding_val < w_out { padding_val } else { w_out };
+    let interior_w_start = if padding_val < w_out {
+        padding_val
+    } else {
+        w_out
+    };
     let interior_w_end = if w + padding_val >= kernel + 7 {
         (w + padding_val - kernel - 6).min(w_out)
     } else {
@@ -3228,7 +3721,9 @@ pub unsafe fn pool_max_f32_avx2(
                                 let w_in = ww + kw;
                                 if w_in >= padding_val && w_in - padding_val < w {
                                     let inp = input[rbase + w_in - padding_val];
-                                    if inp > val { val = inp; }
+                                    if inp > val {
+                                        val = inp;
+                                    }
                                 }
                             }
                         }
@@ -3249,7 +3744,9 @@ pub unsafe fn pool_max_f32_avx2(
                             let w_in = ww + kw;
                             if w_in >= padding_val && w_in - padding_val < w {
                                 let inp = input[rbase + w_in - padding_val];
-                                if inp > val { val = inp; }
+                                if inp > val {
+                                    val = inp;
+                                }
                             }
                         }
                     }
@@ -3283,7 +3780,9 @@ pub unsafe fn pool_max_f32_avx2(
                             let w_in = ww + kw;
                             if w_in >= padding_val && w_in - padding_val < w {
                                 let inp = input[rbase + w_in - padding_val];
-                                if inp > val { val = inp; }
+                                if inp > val {
+                                    val = inp;
+                                }
                             }
                         }
                     }
@@ -3303,7 +3802,9 @@ pub unsafe fn pool_max_f32_avx2(
                                 let w_in = ww + kw;
                                 if w_in >= padding_val && w_in - padding_val < w {
                                     let inp = input[rbase + w_in - padding_val];
-                                    if inp > val { val = inp; }
+                                    if inp > val {
+                                        val = inp;
+                                    }
                                 }
                             }
                         }
@@ -3318,26 +3819,51 @@ pub unsafe fn pool_max_f32_avx2(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn pool_avg_f32_avx2(
-    input: &[f32], output: &mut [f32],
-    n: usize, c: usize, h: usize, w: usize,
-    kernel: usize, stride_val: usize, padding_val: usize,
-    h_out: usize, w_out: usize,
+    input: &[f32],
+    output: &mut [f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    kernel: usize,
+    stride_val: usize,
+    padding_val: usize,
+    h_out: usize,
+    w_out: usize,
 ) {
     if stride_val != 1 {
         return pool_avg_f32_scalar(
-            input, output, n, c, h, w, kernel, stride_val, padding_val, h_out, w_out,
+            input,
+            output,
+            n,
+            c,
+            h,
+            w,
+            kernel,
+            stride_val,
+            padding_val,
+            h_out,
+            w_out,
         );
     }
     let hw_out = h_out * w_out;
     let kernel_area = (kernel * kernel) as f32;
 
-    let interior_h_start = if padding_val < h_out { padding_val } else { h_out };
+    let interior_h_start = if padding_val < h_out {
+        padding_val
+    } else {
+        h_out
+    };
     let interior_h_end = if padding_val + h >= kernel {
         (padding_val + h - kernel + 1).min(h_out)
     } else {
         interior_h_start
     };
-    let interior_w_start = if padding_val < w_out { padding_val } else { w_out };
+    let interior_w_start = if padding_val < w_out {
+        padding_val
+    } else {
+        w_out
+    };
     let interior_w_end = if w + padding_val >= kernel + 7 {
         (w + padding_val - kernel - 6).min(w_out)
     } else {
@@ -3369,7 +3895,9 @@ pub unsafe fn pool_avg_f32_avx2(
                             }
                         }
                     }
-                    if count > 0 { val /= count as f32; }
+                    if count > 0 {
+                        val /= count as f32;
+                    }
                     *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
                 }
             }
@@ -3391,7 +3919,9 @@ pub unsafe fn pool_avg_f32_avx2(
                             }
                         }
                     }
-                    if count > 0 { val /= count as f32; }
+                    if count > 0 {
+                        val /= count as f32;
+                    }
                     *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
                 }
 
@@ -3428,7 +3958,9 @@ pub unsafe fn pool_avg_f32_avx2(
                             }
                         }
                     }
-                    if count > 0 { val /= count as f32; }
+                    if count > 0 {
+                        val /= count as f32;
+                    }
                     *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
                 }
             }
@@ -3451,7 +3983,9 @@ pub unsafe fn pool_avg_f32_avx2(
                             }
                         }
                     }
-                    if count > 0 { val /= count as f32; }
+                    if count > 0 {
+                        val /= count as f32;
+                    }
                     *output.as_mut_ptr().add(ch_out_off + hh * w_out + ww) = val;
                 }
             }
@@ -3473,14 +4007,29 @@ pub fn reduce_sum_f32_scalar(input: &[f32], output: &mut [f32], group_size: usiz
         let end = (start + group_size).min(input.len());
         let cnt = (end - start) as f32;
         let mut sum = 0.0f32;
-        for i in start..end { sum += input[i]; }
-        output[g] = if is_mean { if cnt > 0.0 { sum / cnt } else { 0.0 } } else { sum };
+        for i in start..end {
+            sum += input[i];
+        }
+        output[g] = if is_mean {
+            if cnt > 0.0 {
+                sum / cnt
+            } else {
+                0.0
+            }
+        } else {
+            sum
+        };
     }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-pub unsafe fn reduce_sum_f32_avx2(input: &[f32], output: &mut [f32], group_size: usize, is_mean: bool) {
+pub unsafe fn reduce_sum_f32_avx2(
+    input: &[f32],
+    output: &mut [f32],
+    group_size: usize,
+    is_mean: bool,
+) {
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
@@ -3493,8 +4042,18 @@ pub unsafe fn reduce_sum_f32_avx2(input: &[f32], output: &mut [f32], group_size:
             i += 8;
         }
         let mut sum = hsum256_ps(acc);
-        for j in i..end { sum += input[j]; }
-        output[g] = if is_mean { if cnt > 0.0 { sum / cnt } else { 0.0 } } else { sum };
+        for j in i..end {
+            sum += input[j];
+        }
+        output[g] = if is_mean {
+            if cnt > 0.0 {
+                sum / cnt
+            } else {
+                0.0
+            }
+        } else {
+            sum
+        };
     }
 }
 
@@ -3507,7 +4066,11 @@ pub fn reduce_max_f32_scalar(input: &[f32], output: &mut [f32], group_size: usiz
         let start = g * group_size;
         let end = (start + group_size).min(input.len());
         let mut val = f32::NEG_INFINITY;
-        for i in start..end { if input[i] > val { val = input[i]; } }
+        for i in start..end {
+            if input[i] > val {
+                val = input[i];
+            }
+        }
         output[g] = val;
     }
 }
@@ -3526,14 +4089,15 @@ pub unsafe fn reduce_max_f32_avx2(input: &[f32], output: &mut [f32], group_size:
             i += 8;
         }
         // horizontal max
-        let mx128 = _mm_max_ps(
-            _mm256_castps256_ps128(vmax),
-            _mm256_extractf128_ps(vmax, 1),
-        );
+        let mx128 = _mm_max_ps(_mm256_castps256_ps128(vmax), _mm256_extractf128_ps(vmax, 1));
         let mx = _mm_max_ps(mx128, _mm_shuffle_ps(mx128, mx128, 0x0E));
         let mx = _mm_max_ps(mx, _mm_shuffle_ps(mx, mx, 0x01));
         let mut max_val = _mm_cvtss_f32(mx);
-        for j in i..end { if input[j] > max_val { max_val = input[j]; } }
+        for j in i..end {
+            if input[j] > max_val {
+                max_val = input[j];
+            }
+        }
         output[g] = max_val;
     }
 }
@@ -3551,7 +4115,12 @@ pub fn biasadd_f32_scalar(data: &[f32], bias: &[f32], output: &mut [f32], channe
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-pub unsafe fn biasadd_f32_avx2(data: &[f32], bias: &[f32], output: &mut [f32], channel_stride: usize) {
+pub unsafe fn biasadd_f32_avx2(
+    data: &[f32],
+    bias: &[f32],
+    output: &mut [f32],
+    channel_stride: usize,
+) {
     let len = output.len().min(data.len());
     let bias_len = bias.len().max(1);
     let mut i = 0;
@@ -3585,21 +4154,33 @@ pub fn norm_layernorm_f32_scalar(input: &[f32], output: &mut [f32], row_size: us
         let n = row_size as f32;
         // Pass 1: sum
         let mut sum = 0.0f32;
-        for i in start..end { sum += input[i]; }
+        for i in start..end {
+            sum += input[i];
+        }
         let mean = if n > 0.0 { sum / n } else { 0.0 };
         // Pass 2: sum of squared diffs
         let mut var = 0.0f32;
-        for i in start..end { let d = input[i] - mean; var += d * d; }
+        for i in start..end {
+            let d = input[i] - mean;
+            var += d * d;
+        }
         var = var / n;
         let inv_std = 1.0 / (var + eps).sqrt();
         // Pass 3: normalize
-        for i in start..end { output[i] = (input[i] - mean) * inv_std; }
+        for i in start..end {
+            output[i] = (input[i] - mean) * inv_std;
+        }
     }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-pub unsafe fn norm_layernorm_f32_avx2(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+pub unsafe fn norm_layernorm_f32_avx2(
+    input: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -3613,7 +4194,9 @@ pub unsafe fn norm_layernorm_f32_avx2(input: &[f32], output: &mut [f32], row_siz
             i += 8;
         }
         let mut sum = hsum256_ps(vsum);
-        for j in i..end { sum += input[j]; }
+        for j in i..end {
+            sum += input[j];
+        }
         let mean = if n > 0.0 { sum / n } else { 0.0 };
         let vmean = _mm256_set1_ps(mean);
         // Pass 2: vectorized sum of (x - mean)^2
@@ -3625,7 +4208,10 @@ pub unsafe fn norm_layernorm_f32_avx2(input: &[f32], output: &mut [f32], row_siz
             i += 8;
         }
         let mut var = hsum256_ps(vvar);
-        for j in i..end { let d = input[j] - mean; var += d * d; }
+        for j in i..end {
+            let d = input[j] - mean;
+            var += d * d;
+        }
         var = var / n;
         let inv_std = 1.0 / (var + eps).sqrt();
         // Pass 3: vectorized normalize
@@ -3634,28 +4220,49 @@ pub unsafe fn norm_layernorm_f32_avx2(input: &[f32], output: &mut [f32], row_siz
         while i + 8 <= end {
             _mm256_storeu_ps(
                 output.as_mut_ptr().add(i),
-                _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(input.as_ptr().add(i)), vmean), vinv_std),
+                _mm256_mul_ps(
+                    _mm256_sub_ps(_mm256_loadu_ps(input.as_ptr().add(i)), vmean),
+                    vinv_std,
+                ),
             );
             i += 8;
         }
-        for j in i..end { output[j] = (input[j] - mean) * inv_std; }
+        for j in i..end {
+            output[j] = (input[j] - mean) * inv_std;
+        }
     }
 }
 
 // ── rms_norm_f32 ────────────────────────────────────────────
 
 #[inline]
-pub fn rms_norm_f32_scalar(input: &[f32], weight: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+pub fn rms_norm_f32_scalar(
+    input: &[f32],
+    weight: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
         let mut sq_sum = 0.0f32;
-        for i in start..end { sq_sum += input[i] * input[i]; }
-        let n = row_size as f32;
-        let rms = if n > 0.0 { (sq_sum / n + eps).sqrt() } else { 1.0 };
         for i in start..end {
-            let w = if i - start < weight.len() { weight[i - start] } else { 1.0 };
+            sq_sum += input[i] * input[i];
+        }
+        let n = row_size as f32;
+        let rms = if n > 0.0 {
+            (sq_sum / n + eps).sqrt()
+        } else {
+            1.0
+        };
+        for i in start..end {
+            let w = if i - start < weight.len() {
+                weight[i - start]
+            } else {
+                1.0
+            };
             output[i] = input[i] / rms * w;
         }
     }
@@ -3663,7 +4270,13 @@ pub fn rms_norm_f32_scalar(input: &[f32], weight: &[f32], output: &mut [f32], ro
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-pub unsafe fn rms_norm_f32_avx2(input: &[f32], weight: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+pub unsafe fn rms_norm_f32_avx2(
+    input: &[f32],
+    weight: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -3677,9 +4290,15 @@ pub unsafe fn rms_norm_f32_avx2(input: &[f32], weight: &[f32], output: &mut [f32
             i += 8;
         }
         let mut sq_sum = hsum256_ps(vsq);
-        for j in i..end { sq_sum += input[j] * input[j]; }
+        for j in i..end {
+            sq_sum += input[j] * input[j];
+        }
         let n = row_size as f32;
-        let rms = if n > 0.0 { (sq_sum / n + eps).sqrt() } else { 1.0 };
+        let rms = if n > 0.0 {
+            (sq_sum / n + eps).sqrt()
+        } else {
+            1.0
+        };
         let inv_rms = _mm256_set1_ps(1.0 / rms);
         // Vectorized writeback with weight
         i = start;
@@ -3688,13 +4307,24 @@ pub unsafe fn rms_norm_f32_avx2(input: &[f32], weight: &[f32], output: &mut [f32
             let w = if weight.len() >= 8 {
                 _mm256_loadu_ps(weight.as_ptr().add(i - start))
             } else {
-                _mm256_set1_ps(if i - start < weight.len() { weight[i - start] } else { 1.0 })
+                _mm256_set1_ps(if i - start < weight.len() {
+                    weight[i - start]
+                } else {
+                    1.0
+                })
             };
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w));
+            _mm256_storeu_ps(
+                output.as_mut_ptr().add(i),
+                _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w),
+            );
             i += 8;
         }
         for j in i..end {
-            let w = if j - start < weight.len() { weight[j - start] } else { 1.0 };
+            let w = if j - start < weight.len() {
+                weight[j - start]
+            } else {
+                1.0
+            };
             *output.as_mut_ptr().add(j) = input[j] / rms * w;
         }
     }
@@ -3705,7 +4335,9 @@ pub unsafe fn rms_norm_f32_avx2(input: &[f32], weight: &[f32], output: &mut [f32
 #[inline]
 pub fn add_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
     let len = output.len().min(data.len());
-    for i in 0..len { output[i] = data[i] + s; }
+    for i in 0..len {
+        output[i] = data[i] + s;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -3715,16 +4347,23 @@ pub unsafe fn add_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_add_ps(_mm256_loadu_ps(data.as_ptr().add(i)), vs));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_add_ps(_mm256_loadu_ps(data.as_ptr().add(i)), vs),
+        );
         i += 8;
     }
-    for j in i..len { *output.as_mut_ptr().add(j) = data[j] + s; }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = data[j] + s;
+    }
 }
 
 #[inline]
 pub fn mul_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
     let len = output.len().min(data.len());
-    for i in 0..len { output[i] = data[i] * s; }
+    for i in 0..len {
+        output[i] = data[i] * s;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -3734,16 +4373,23 @@ pub unsafe fn mul_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_loadu_ps(data.as_ptr().add(i)), vs));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_mul_ps(_mm256_loadu_ps(data.as_ptr().add(i)), vs),
+        );
         i += 8;
     }
-    for j in i..len { *output.as_mut_ptr().add(j) = data[j] * s; }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = data[j] * s;
+    }
 }
 
 #[inline]
 pub fn div_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
     let len = output.len().min(data.len());
-    for i in 0..len { output[i] = data[i] / s; }
+    for i in 0..len {
+        output[i] = data[i] / s;
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -3753,10 +4399,15 @@ pub unsafe fn div_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_div_ps(_mm256_loadu_ps(data.as_ptr().add(i)), vs));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_div_ps(_mm256_loadu_ps(data.as_ptr().add(i)), vs),
+        );
         i += 8;
     }
-    for j in i..len { *output.as_mut_ptr().add(j) = data[j] / s; }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = data[j] / s;
+    }
 }
 
 // ── Scalar comparison ───────────────────────────────────────
@@ -3764,7 +4415,9 @@ pub unsafe fn div_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 #[inline]
 pub fn gt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
     let len = output.len().min(data.len());
-    for i in 0..len { output[i] = if data[i] > s { 1.0 } else { 0.0 }; }
+    for i in 0..len {
+        output[i] = if data[i] > s { 1.0 } else { 0.0 };
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -3776,17 +4429,24 @@ pub unsafe fn gt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
     let vone = _mm256_set1_ps(1.0);
     let vzero = _mm256_setzero_ps();
     while i + 8 <= len {
-        let mask = _mm256_cmp_ps::<{_CMP_GT_OQ}>(_mm256_loadu_ps(data.as_ptr().add(i)), vs);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_blendv_ps(vzero, vone, mask));
+        let mask = _mm256_cmp_ps::<{ _CMP_GT_OQ }>(_mm256_loadu_ps(data.as_ptr().add(i)), vs);
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_blendv_ps(vzero, vone, mask),
+        );
         i += 8;
     }
-    for j in i..len { *output.as_mut_ptr().add(j) = if data[j] > s { 1.0 } else { 0.0 }; }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = if data[j] > s { 1.0 } else { 0.0 };
+    }
 }
 
 #[inline]
 pub fn lt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
     let len = output.len().min(data.len());
-    for i in 0..len { output[i] = if data[i] < s { 1.0 } else { 0.0 }; }
+    for i in 0..len {
+        output[i] = if data[i] < s { 1.0 } else { 0.0 };
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -3798,17 +4458,24 @@ pub unsafe fn lt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
     let vone = _mm256_set1_ps(1.0);
     let vzero = _mm256_setzero_ps();
     while i + 8 <= len {
-        let mask = _mm256_cmp_ps::<{_CMP_LT_OQ}>(_mm256_loadu_ps(data.as_ptr().add(i)), vs);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_blendv_ps(vzero, vone, mask));
+        let mask = _mm256_cmp_ps::<{ _CMP_LT_OQ }>(_mm256_loadu_ps(data.as_ptr().add(i)), vs);
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_blendv_ps(vzero, vone, mask),
+        );
         i += 8;
     }
-    for j in i..len { *output.as_mut_ptr().add(j) = if data[j] < s { 1.0 } else { 0.0 }; }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = if data[j] < s { 1.0 } else { 0.0 };
+    }
 }
 
 #[inline]
 pub fn eq_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
     let len = output.len().min(data.len());
-    for i in 0..len { output[i] = if (data[i] - s).abs() < 1e-6 { 1.0 } else { 0.0 }; }
+    for i in 0..len {
+        output[i] = if (data[i] - s).abs() < 1e-6 { 1.0 } else { 0.0 };
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -3824,17 +4491,28 @@ pub unsafe fn eq_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
     while i + 8 <= len {
         let vdiff = _mm256_sub_ps(_mm256_loadu_ps(data.as_ptr().add(i)), vs);
         let vabsdiff = _mm256_and_ps(vdiff, vabsmask);
-        let mask = _mm256_cmp_ps::<{_CMP_LT_OQ}>(vabsdiff, veps);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_blendv_ps(vzero, vone, mask));
+        let mask = _mm256_cmp_ps::<{ _CMP_LT_OQ }>(vabsdiff, veps);
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_blendv_ps(vzero, vone, mask),
+        );
         i += 8;
     }
-    for j in i..len { *output.as_mut_ptr().add(j) = if (data[j] - s).abs() < 1e-6 { 1.0 } else { 0.0 }; }
+    for j in i..len {
+        *output.as_mut_ptr().add(j) = if (data[j] - s).abs() < 1e-6 { 1.0 } else { 0.0 };
+    }
 }
 
 // ── softmax ─────────────────────────────────────────────────
 
 #[inline]
-pub fn softmax_f32_scalar_strided(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: usize, num_rows: usize) {
+pub fn softmax_f32_scalar_strided(
+    input: &[f32],
+    output: &mut [f32],
+    axis_dim_size: usize,
+    stride: usize,
+    num_rows: usize,
+) {
     for r in 0..num_rows {
         let outer = r / stride;
         let inner = r % stride;
@@ -3842,7 +4520,9 @@ pub fn softmax_f32_scalar_strided(input: &[f32], output: &mut [f32], axis_dim_si
         let mut max_val = f32::NEG_INFINITY;
         for i in 0..axis_dim_size {
             let idx = base + i * stride;
-            if input[idx] > max_val { max_val = input[idx]; }
+            if input[idx] > max_val {
+                max_val = input[idx];
+            }
         }
         let mut sum = 0.0f32;
         for i in 0..axis_dim_size {
@@ -3862,7 +4542,13 @@ pub fn softmax_f32_scalar_strided(input: &[f32], output: &mut [f32], axis_dim_si
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-pub unsafe fn softmax_f32_avx2_strided(input: &[f32], output: &mut [f32], axis_dim_size: usize, stride: usize, num_rows: usize) {
+pub unsafe fn softmax_f32_avx2_strided(
+    input: &[f32],
+    output: &mut [f32],
+    axis_dim_size: usize,
+    stride: usize,
+    num_rows: usize,
+) {
     if stride != 1 {
         // Strided access — fall back to scalar for correctness
         softmax_f32_scalar_strided(input, output, axis_dim_size, stride, num_rows);
@@ -3880,14 +4566,15 @@ pub unsafe fn softmax_f32_avx2_strided(input: &[f32], output: &mut [f32], axis_d
             i += 8;
         }
         // horizontal max
-        let mx128 = _mm_max_ps(
-            _mm256_castps256_ps128(vmax),
-            _mm256_extractf128_ps(vmax, 1),
-        );
+        let mx128 = _mm_max_ps(_mm256_castps256_ps128(vmax), _mm256_extractf128_ps(vmax, 1));
         let mx = _mm_max_ps(mx128, _mm_shuffle_ps(mx128, mx128, 0x0E));
         let mx = _mm_max_ps(mx, _mm_shuffle_ps(mx, mx, 0x01));
         let mut max_val = _mm_cvtss_f32(mx);
-        for j in i..end { if input[j] > max_val { max_val = input[j]; } }
+        for j in i..end {
+            if input[j] > max_val {
+                max_val = input[j];
+            }
+        }
         let vmax_bcast = _mm256_set1_ps(max_val);
         // 2. Vectorized exp + sum using scalar f64 accumulator for precision
         let mut sum = 0.0f64;
@@ -3918,7 +4605,9 @@ pub unsafe fn softmax_f32_avx2_strided(input: &[f32], output: &mut [f32], axis_d
                 _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_div_ps(vexp, vsum));
                 i += 8;
             }
-            for j in i..end { *output.as_mut_ptr().add(j) /= sum_f32; }
+            for j in i..end {
+                *output.as_mut_ptr().add(j) /= sum_f32;
+            }
         }
     }
 }
@@ -3968,8 +4657,16 @@ pub unsafe fn sgd_update_f32_avx2(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec
 
 #[inline]
 pub fn adam_update_f32_scalar(
-    w: &[f32], g: &[f32], m: &[f32], v: &[f32],
-    lr: f32, beta1: f32, beta2: f32, eps: f32, bias_corr1: f32, bias_corr2: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -3989,8 +4686,16 @@ pub fn adam_update_f32_scalar(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn adam_update_f32_avx2(
-    w: &[f32], g: &[f32], m: &[f32], v: &[f32],
-    lr: f32, beta1: f32, beta2: f32, eps: f32, bias_corr1: f32, bias_corr2: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4043,8 +4748,17 @@ pub unsafe fn adam_update_f32_avx2(
 
 #[inline]
 pub fn adamw_update_f32_scalar(
-    w: &[f32], g: &[f32], m: &[f32], v: &[f32],
-    lr: f32, beta1: f32, beta2: f32, eps: f32, bias_corr1: f32, bias_corr2: f32, wd: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    wd: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4065,8 +4779,17 @@ pub fn adamw_update_f32_scalar(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn adamw_update_f32_avx2(
-    w: &[f32], g: &[f32], m: &[f32], v: &[f32],
-    lr: f32, beta1: f32, beta2: f32, eps: f32, bias_corr1: f32, bias_corr2: f32, wd: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    wd: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4100,7 +4823,10 @@ pub unsafe fn adamw_update_f32_avx2(
             // w -= lr * m_hat / (sqrt(v_hat) + eps)
             let vdenom = _mm256_add_ps(_mm256_sqrt_ps(vv_hat), veps);
             let vupdate = _mm256_div_ps(_mm256_mul_ps(vlr, vm_hat), vdenom);
-            _mm256_storeu_ps(w_new.as_mut_ptr().add(i), _mm256_sub_ps(vw_decayed, vupdate));
+            _mm256_storeu_ps(
+                w_new.as_mut_ptr().add(i),
+                _mm256_sub_ps(vw_decayed, vupdate),
+            );
             _mm256_storeu_ps(m_new.as_mut_ptr().add(i), vm_new);
             _mm256_storeu_ps(v_new.as_mut_ptr().add(i), vv_new);
             i += 8;
@@ -4122,8 +4848,13 @@ pub unsafe fn adamw_update_f32_avx2(
 
 #[inline]
 pub fn lion_update_f32_scalar(
-    w: &[f32], g: &[f32], m: &[f32],
-    lr: f32, beta1: f32, beta2: f32, wd: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    wd: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4141,8 +4872,13 @@ pub fn lion_update_f32_scalar(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn lion_update_f32_avx2(
-    w: &[f32], g: &[f32], m: &[f32],
-    lr: f32, beta1: f32, beta2: f32, wd: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    wd: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4167,15 +4903,18 @@ pub unsafe fn lion_update_f32_avx2(
             // update = beta1 * m_new + (1-beta1) * g
             let vupdate = _mm256_fmadd_ps(vb1c, vg, _mm256_mul_ps(vb1, vm_new));
             // signum(update) with blendv
-            let vpos_mask = _mm256_cmp_ps::<{_CMP_GT_OQ}>(vupdate, vzero);
-            let vneg_mask = _mm256_cmp_ps::<{_CMP_LT_OQ}>(vupdate, vzero);
+            let vpos_mask = _mm256_cmp_ps::<{ _CMP_GT_OQ }>(vupdate, vzero);
+            let vneg_mask = _mm256_cmp_ps::<{ _CMP_LT_OQ }>(vupdate, vzero);
             let vsign = _mm256_or_ps(
                 _mm256_and_ps(vpos_mask, vone),
                 _mm256_and_ps(vneg_mask, vneg_one),
             );
             // w -= lr * (sign + wd * w)  =  vw - vlr * (vsign + vwd * vw)
             let vsign_wd = _mm256_fmadd_ps(vwd, vw, vsign); // vwd * vw + vsign
-            _mm256_storeu_ps(w_new.as_mut_ptr().add(i), _mm256_fnmadd_ps(vlr, vsign_wd, vw));
+            _mm256_storeu_ps(
+                w_new.as_mut_ptr().add(i),
+                _mm256_fnmadd_ps(vlr, vsign_wd, vw),
+            );
             _mm256_storeu_ps(m_new.as_mut_ptr().add(i), vm_new);
             i += 8;
         }
@@ -4193,8 +4932,12 @@ pub unsafe fn lion_update_f32_avx2(
 
 #[inline]
 pub fn rmsprop_update_f32_scalar(
-    w: &[f32], g: &[f32], v: &[f32],
-    lr: f32, beta: f32, eps: f32,
+    w: &[f32],
+    g: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta: f32,
+    eps: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4210,8 +4953,12 @@ pub fn rmsprop_update_f32_scalar(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn rmsprop_update_f32_avx2(
-    w: &[f32], g: &[f32], v: &[f32],
-    lr: f32, beta: f32, eps: f32,
+    w: &[f32],
+    g: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta: f32,
+    eps: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4248,8 +4995,12 @@ pub unsafe fn rmsprop_update_f32_avx2(
 
 #[inline]
 pub fn muon_update_f32_scalar(
-    w: &[f32], g: &[f32], m: &[f32],
-    lr: f32, beta: f32, wd: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta: f32,
+    wd: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4265,8 +5016,12 @@ pub fn muon_update_f32_scalar(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn muon_update_f32_avx2(
-    w: &[f32], g: &[f32], m: &[f32],
-    lr: f32, beta: f32, wd: f32,
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta: f32,
+    wd: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     let len = w.len();
     let mut w_new = w.to_vec();
@@ -4327,8 +5082,10 @@ pub fn conv2d_f32_im2col_gemm(
 ) {
     let c_per_group = c / groups.max(1);
     let f_per_group = f / groups.max(1);
-    let h_out = (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1) / stride + 1;
-    let w_out = (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1) / stride + 1;
+    let h_out =
+        (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1) / stride + 1;
+    let w_out =
+        (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1) / stride + 1;
     let spatial_size = h_out * w_out;
 
     // Small tensor fallback to avoid im2col overhead
@@ -4400,22 +5157,29 @@ pub fn conv2d_f32_im2col_gemm(
                 let temp_ptr = temp_out.as_ptr() as usize;
                 let out_ptr = output.as_mut_ptr() as usize;
                 let f_whole = f;
-                (0..num_pixels * f_per_group).into_par_iter().for_each(|idx| {
-                    let pixel = idx / f_per_group;
-                    let ff = idx % f_per_group;
-                    let nn = pixel / spatial_size;
-                    let spatial = pixel % spatial_size;
-                    let mut val = unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
-                    if !bias.is_empty() {
-                        val += bias[f_start + ff];
-                    }
-                    if let Some(act) = activation {
-                        val = act(val);
-                    }
-                    unsafe {
-                        *(out_ptr as *mut f32).add(nn * (f_whole * spatial_size) + (f_start + ff) * spatial_size + spatial) = val;
-                    }
-                });
+                (0..num_pixels * f_per_group)
+                    .into_par_iter()
+                    .for_each(|idx| {
+                        let pixel = idx / f_per_group;
+                        let ff = idx % f_per_group;
+                        let nn = pixel / spatial_size;
+                        let spatial = pixel % spatial_size;
+                        let mut val =
+                            unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
+                        if !bias.is_empty() {
+                            val += bias[f_start + ff];
+                        }
+                        if let Some(act) = activation {
+                            val = act(val);
+                        }
+                        unsafe {
+                            *(out_ptr as *mut f32).add(
+                                nn * (f_whole * spatial_size)
+                                    + (f_start + ff) * spatial_size
+                                    + spatial,
+                            ) = val;
+                        }
+                    });
             }
             #[cfg(not(feature = "parallel"))]
             for pixel in 0..num_pixels {
@@ -4502,22 +5266,27 @@ pub fn conv2d_f32_im2col_gemm(
             let temp_ptr = temp_out.as_ptr() as usize;
             let out_ptr = output.as_mut_ptr() as usize;
             let f_whole = f;
-            (0..num_pixels * f_per_group).into_par_iter().for_each(|idx| {
-                let pixel = idx / f_per_group;
-                let ff = idx % f_per_group;
-                let nn = pixel / spatial_size;
-                let spatial = pixel % spatial_size;
-                let mut val = unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
-                if !bias.is_empty() {
-                    val += bias[f_start + ff];
-                }
-                if let Some(act) = activation {
-                    val = act(val);
-                }
-                unsafe {
-                    *(out_ptr as *mut f32).add(nn * (f_whole * spatial_size) + (f_start + ff) * spatial_size + spatial) = val;
-                }
-            });
+            (0..num_pixels * f_per_group)
+                .into_par_iter()
+                .for_each(|idx| {
+                    let pixel = idx / f_per_group;
+                    let ff = idx % f_per_group;
+                    let nn = pixel / spatial_size;
+                    let spatial = pixel % spatial_size;
+                    let mut val =
+                        unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
+                    if !bias.is_empty() {
+                        val += bias[f_start + ff];
+                    }
+                    if let Some(act) = activation {
+                        val = act(val);
+                    }
+                    unsafe {
+                        *(out_ptr as *mut f32).add(
+                            nn * (f_whole * spatial_size) + (f_start + ff) * spatial_size + spatial,
+                        ) = val;
+                    }
+                });
         }
         #[cfg(not(feature = "parallel"))]
         for pixel in 0..num_pixels {
@@ -4705,7 +5474,6 @@ pub unsafe fn concat_f32_avx2(input: &[f32], output: &mut [f32], output_offset: 
     out_start + copy_len
 }
 
-
 // ============================================================
 // Transpose 2D — scalar and AVX2 tiled 8×8
 // ============================================================
@@ -4748,8 +5516,8 @@ pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n:
             let r7 = _mm256_loadu_ps(input.as_ptr().add((i + 7) * n + j));
 
             // Unpack low/high 64-bit halves (4-element chunks)
-            let t01a = _mm256_unpacklo_ps(r0, r1);  // r0[0], r1[0], r0[1], r1[1]
-            let t01b = _mm256_unpackhi_ps(r0, r1);  // r0[2], r1[2], r0[3], r1[3]
+            let t01a = _mm256_unpacklo_ps(r0, r1); // r0[0], r1[0], r0[1], r1[1]
+            let t01b = _mm256_unpackhi_ps(r0, r1); // r0[2], r1[2], r0[3], r1[3]
             let t23a = _mm256_unpacklo_ps(r2, r3);
             let t23b = _mm256_unpackhi_ps(r2, r3);
             let t45a = _mm256_unpacklo_ps(r4, r5);
@@ -4758,14 +5526,14 @@ pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n:
             let t67b = _mm256_unpackhi_ps(r6, r7);
 
             // Combine into 8-wide transpose result
-            let q0 = _mm256_shuffle_ps(t01a, t23a, 0b_01_00_01_00);  // cols 0,1 of rows 0-3
-            let q1 = _mm256_shuffle_ps(t01a, t23a, 0b_11_10_11_10);  // cols 2,3 of rows 0-3
-            let q2 = _mm256_shuffle_ps(t01b, t23b, 0b_01_00_01_00);  // cols 4,5 of rows 0-3
-            let q3 = _mm256_shuffle_ps(t01b, t23b, 0b_11_10_11_10);  // cols 6,7 of rows 0-3
-            let q4 = _mm256_shuffle_ps(t45a, t67a, 0b_01_00_01_00);  // cols 0,1 of rows 4-7
-            let q5 = _mm256_shuffle_ps(t45a, t67a, 0b_11_10_11_10);  // cols 2,3 of rows 4-7
-            let q6 = _mm256_shuffle_ps(t45b, t67b, 0b_01_00_01_00);  // cols 4,5 of rows 4-7
-            let q7 = _mm256_shuffle_ps(t45b, t67b, 0b_11_10_11_10);  // cols 6,7 of rows 4-7
+            let q0 = _mm256_shuffle_ps(t01a, t23a, 0b_01_00_01_00); // cols 0,1 of rows 0-3
+            let q1 = _mm256_shuffle_ps(t01a, t23a, 0b_11_10_11_10); // cols 2,3 of rows 0-3
+            let q2 = _mm256_shuffle_ps(t01b, t23b, 0b_01_00_01_00); // cols 4,5 of rows 0-3
+            let q3 = _mm256_shuffle_ps(t01b, t23b, 0b_11_10_11_10); // cols 6,7 of rows 0-3
+            let q4 = _mm256_shuffle_ps(t45a, t67a, 0b_01_00_01_00); // cols 0,1 of rows 4-7
+            let q5 = _mm256_shuffle_ps(t45a, t67a, 0b_11_10_11_10); // cols 2,3 of rows 4-7
+            let q6 = _mm256_shuffle_ps(t45b, t67b, 0b_01_00_01_00); // cols 4,5 of rows 4-7
+            let q7 = _mm256_shuffle_ps(t45b, t67b, 0b_11_10_11_10); // cols 6,7 of rows 4-7
 
             // Permute to final layout — now rows are in order 0,4,1,5,2,6,3,7
             // We need them as 0,1,2,3,4,5,6,7
@@ -4805,7 +5573,6 @@ pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n:
         }
     }
 }
-
 
 // ============================================================
 // NEON kernel correctness tests
@@ -5054,6 +5821,596 @@ mod neon_tests {
                 row,
                 output_tiled[row],
                 dot
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemm_cpu_flat_i8_u8x4_basic() {
+        let n = 2;
+        let k = 4;
+        let m = 1;
+
+        // f32 weights: row 0 = [1, 2, 3, 4], row 1 = [5, 6, 7, 8]
+        let weights_f32 = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let packed = PackedTensor::<U8x4>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
+
+        let act_scale = 1.0f32;
+        let act_zp = 0.0f32;
+        let act_i8: Vec<i8> = vec![1, 2, 3, 4];
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(&act_scale.to_le_bytes());
+        payload.extend_from_slice(&act_zp.to_le_bytes());
+        for &v in &act_i8 {
+            payload.push(v as u8);
+        }
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_u8x4(&packed, &payload, &mut output, m, k, n);
+
+        // Expected: row 0 = 1*1 + 2*2 + 3*3 + 4*4 = 30
+        //          row 1 = 5*1 + 6*2 + 7*3 + 8*4 = 70
+        assert!(
+            (output[0] - 30.0).abs() < 1e-3,
+            "row 0: expected 30.0, got {}",
+            output[0]
+        );
+        assert!(
+            (output[1] - 70.0).abs() < 1e-3,
+            "row 1: expected 70.0, got {}",
+            output[1]
+        );
+    }
+
+    #[test]
+    fn test_gemm_cpu_flat_i8_u8x4_with_scale() {
+        let n = 2;
+        let k = 8;
+        let m = 1;
+
+        let w_scale = 2.0f32;
+        let weights_f32: Vec<f32> = (0..n * k).map(|i| i as f32).collect();
+        let packed = PackedTensor::<U8x4>::from_f32_slice(&weights_f32, &[n, k], w_scale, 0.0);
+
+        let act_scale = 1.5f32;
+        let act_zp = 0.0f32;
+        let act_data: Vec<f32> = (0..k).map(|i| (i as f32) * 0.5).collect();
+        let mut act_i8: Vec<i8> = Vec::with_capacity(k);
+        for &v in &act_data {
+            act_i8.push((v / act_scale).round().clamp(-128.0, 127.0) as i8);
+        }
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(&act_scale.to_le_bytes());
+        payload.extend_from_slice(&act_zp.to_le_bytes());
+        for &v in &act_i8 {
+            payload.push(v as u8);
+        }
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_u8x4(&packed, &payload, &mut output, m, k, n);
+
+        // Manual reference
+        let quantized_weights: Vec<Vec<i8>> = (0..n)
+            .map(|row| {
+                (0..k)
+                    .map(|kk| {
+                        (weights_f32[row * k + kk] / w_scale)
+                            .round()
+                            .clamp(-128.0, 127.0) as i8
+                    })
+                    .collect()
+            })
+            .collect();
+
+        for row in 0..n {
+            let mut dot: i32 = 0;
+            for kk in 0..k {
+                dot += quantized_weights[row][kk] as i32 * act_i8[kk] as i32;
+            }
+            let expected = (dot as f32) * w_scale * act_scale;
+            assert!(
+                (output[row] - expected).abs() < 1e-3,
+                "row {}: expected {}, got {}",
+                row,
+                expected,
+                output[row]
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemm_cpu_flat_i8_u8x4_batched() {
+        let n = 3;
+        let k = 4;
+        let m = 2;
+
+        let weights_f32: Vec<f32> = (0..n * k).map(|i| ((i % 4) as f32) - 1.5).collect();
+        let packed = PackedTensor::<U8x4>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
+
+        // Use round numbers that are exactly representable as i8
+        let act_scale = 1.0f32;
+        let act_zp = 0.0f32;
+        let act_i8: Vec<i8> = vec![1, 2, 3, 4, -1, -2, -3, -4];
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(&act_scale.to_le_bytes());
+        payload.extend_from_slice(&act_zp.to_le_bytes());
+        for &v in &act_i8 {
+            payload.push(v as u8);
+        }
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_u8x4(&packed, &payload, &mut output, m, k, n);
+
+        // Reference: use existing gemm_cpu_flat with the same dequantized activations
+        let act_f32: Vec<f32> = act_i8.iter().map(|&v| v as f32).collect();
+        let mut ref_output = vec![0.0f32; m * n];
+        gemm_cpu_flat::<U8x4>(&packed, &act_f32, &mut ref_output, m, k, n);
+
+        for i in 0..m * n {
+            let err = (output[i] - ref_output[i]).abs();
+            assert!(
+                err < 1e-4,
+                "batch {} row {}: i8_u8x4={}, ref={}, err={}",
+                i / n,
+                i % n,
+                output[i],
+                ref_output[i],
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemm_cpu_flat_u8x4_asymmetric_zero_is_per_input_sum() {
+        let n = 1;
+        let k = 4;
+        let m = 2;
+
+        // Dequantized weight is q_w * 2.0 + 10.0 = [12, 14, 16, 18].
+        // The zero/offset contribution must be 10.0 * sum(input), not +10 once.
+        let packed =
+            PackedTensor::<U8x4>::from_f32_slice(&[12.0, 14.0, 16.0, 18.0], &[n, k], 2.0, 10.0);
+        let input = vec![1.0, 2.0, 3.0, 4.0, -1.0, 0.5, 2.0, -3.0];
+        let mut output = vec![0.0f32; m * n];
+
+        gemm_cpu_flat::<U8x4>(&packed, &input, &mut output, m, k, n);
+
+        let expected0 = 12.0 * 1.0 + 14.0 * 2.0 + 16.0 * 3.0 + 18.0 * 4.0;
+        let expected1 = 12.0 * -1.0 + 14.0 * 0.5 + 16.0 * 2.0 + 18.0 * -3.0;
+        assert!(
+            (output[0] - expected0).abs() < 1e-4,
+            "row0 got {}, expected {}",
+            output[0],
+            expected0
+        );
+        assert!(
+            (output[1] - expected1).abs() < 1e-4,
+            "row1 got {}, expected {}",
+            output[1],
+            expected1
+        );
+    }
+
+    #[test]
+    fn test_gemm_cpu_flat_i8_u8x4_asymmetric_weight_zero_is_per_activation_sum() {
+        let n = 1;
+        let k = 4;
+        let m = 1;
+
+        // q_w = [1,2,3,4], scale_w=2, zero_w=10 -> w=[12,14,16,18].
+        let packed =
+            PackedTensor::<U8x4>::from_f32_slice(&[12.0, 14.0, 16.0, 18.0], &[n, k], 2.0, 10.0);
+        let act_scale = 1.0f32;
+        let act_zp = 0.0f32;
+        let act_i8: Vec<i8> = vec![1, 2, 3, 4];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&act_scale.to_le_bytes());
+        payload.extend_from_slice(&act_zp.to_le_bytes());
+        for &v in &act_i8 {
+            payload.push(v as u8);
+        }
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_u8x4(&packed, &payload, &mut output, m, k, n);
+
+        let expected = 12.0 * 1.0 + 14.0 * 2.0 + 16.0 * 3.0 + 18.0 * 4.0;
+        assert!(
+            (output[0] - expected).abs() < 1e-4,
+            "got {}, expected {}",
+            output[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn test_gemm_cpu_flat_i8_u4x8_signed_nibbles_match_f32_reference() {
+        let n = 2;
+        let k = 8;
+        let m = 1;
+
+        let weights_f32 = vec![
+            -8.0, -4.0, -1.0, 0.0, 1.0, 3.0, 6.0, 7.0, 7.0, 6.0, 3.0, 1.0, 0.0, -1.0, -4.0, -8.0,
+        ];
+        let packed = PackedTensor::<U4x8>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
+
+        let act_scale = 1.0f32;
+        let act_zp = 0.0f32;
+        let act_i8: Vec<i8> = vec![1, -2, 3, -4, 5, -6, 7, -8];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&act_scale.to_le_bytes());
+        payload.extend_from_slice(&act_zp.to_le_bytes());
+        for &v in &act_i8 {
+            payload.push(v as u8);
+        }
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_u4x8(&packed, &payload, &mut output, m, k, n);
+
+        let act_f32: Vec<f32> = act_i8.iter().map(|&v| v as f32).collect();
+        let mut ref_output = vec![0.0f32; m * n];
+        gemm_cpu_flat::<U4x8>(&packed, &act_f32, &mut ref_output, m, k, n);
+
+        for i in 0..(m * n) {
+            let err = (output[i] - ref_output[i]).abs();
+            assert!(
+                err < 1e-4,
+                "lane {}: i8_u4x8={}, ref={}, err={}",
+                i,
+                output[i],
+                ref_output[i],
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_gemm_cpu_flat_i8_u4x8_asymmetric_weight_zero_is_per_activation_sum() {
+        let n = 1;
+        let k = 8;
+        let m = 1;
+
+        let weights = [8.0, 10.0, 12.0, 14.0, -4.0, -2.0, 0.0, 2.0];
+        let packed = PackedTensor::<U4x8>::from_f32_slice(&weights, &[n, k], 2.0, 10.0);
+        let act_scale = 1.0f32;
+        let act_zp = 0.0f32;
+        let act_i8: Vec<i8> = vec![1, 2, 3, 4, -1, -2, -3, -4];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&act_scale.to_le_bytes());
+        payload.extend_from_slice(&act_zp.to_le_bytes());
+        for &v in &act_i8 {
+            payload.push(v as u8);
+        }
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_u4x8(&packed, &payload, &mut output, m, k, n);
+
+        let expected: f32 = weights
+            .iter()
+            .zip(act_i8.iter())
+            .map(|(w, a)| *w * (*a as f32))
+            .sum();
+        assert!(
+            (output[0] - expected).abs() < 1e-4,
+            "got {}, expected {}",
+            output[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn test_gemm_cpu_flat_i8_u4x8_nonzero_activation_zp_matches_affine_reference() {
+        let n = 1;
+        let k = 8;
+        let m = 1;
+
+        let packed = PackedTensor::<U4x8>::from_f32_slice(
+            &[-8.0, -6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0],
+            &[n, k],
+            2.0,
+            0.0,
+        );
+        let act_scale = 0.5f32;
+        let act_zp = 1.5f32;
+        let act_i8: Vec<i8> = vec![-4, -3, -2, -1, 0, 1, 2, 3];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&act_scale.to_le_bytes());
+        payload.extend_from_slice(&act_zp.to_le_bytes());
+        for &v in &act_i8 {
+            payload.push(v as u8);
+        }
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_u4x8(&packed, &payload, &mut output, m, k, n);
+
+        let deq_weights = packed.to_f32_vec();
+        let expected: f32 = deq_weights
+            .iter()
+            .zip(act_i8.iter())
+            .map(|(w, a)| *w * ((*a as f32) * act_scale + act_zp))
+            .sum();
+        assert!(
+            (output[0] - expected).abs() < 1e-4,
+            "got {}, expected {}",
+            output[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn test_gemv_cpu_u8x4_asymmetric_zero() {
+        let m: usize = 2;
+        let k: usize = 4;
+
+        // Dequantized weights: row0=[12,14,16,18], row1=[1,2,3,4]
+        // Packed with scale=2, zero=10 for row0 and scale=1, zero=0 for row1
+        let w0: Vec<f32> = vec![12.0, 14.0, 16.0, 18.0];
+        let w1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        // Per-channel packing for per-row scale/zero
+        let scales = vec![2.0, 1.0];
+        let zeros = vec![10.0, 0.0];
+        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let packed_len = m * k_packed;
+        let mut packed = PackedTensor::<U8x4>::from_raw(
+            vec![U8x4::default(); packed_len],
+            vec![m, k],
+            scales,
+            zeros,
+        );
+        // Manually pack: q = (x - zero) / scale
+        for row in 0..m {
+            let row_data = if row == 0 { &w0 } else { &w1 };
+            let s = packed.scale_for_row(row);
+            let z = packed.zero_for_row(row);
+            for word in 0..k_packed {
+                let mut arr = [0.0f32; 4];
+                for i in 0..4 {
+                    let idx = row * k + word * 4 + i;
+                    if idx < (row + 1) * k {
+                        arr[i] = (row_data[word * 4 + i] - z) / s;
+                    }
+                }
+                packed.data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+            }
+        }
+
+        let activation: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let mut output = vec![0.0f32; m];
+        gemv_cpu(&packed, &activation, &mut output);
+
+        // Reference: direct dot product with dequantized weights
+        let expected0 = 12.0 * 1.0 + 14.0 * 2.0 + 16.0 * 3.0 + 18.0 * 4.0;
+        let expected1 = 1.0 * 1.0 + 2.0 * 2.0 + 3.0 * 3.0 + 4.0 * 4.0;
+        assert!(
+            (output[0] - expected0).abs() < 1e-4,
+            "row0: got {}, expected {}",
+            output[0],
+            expected0
+        );
+        assert!(
+            (output[1] - expected1).abs() < 1e-4,
+            "row1: got {}, expected {}",
+            output[1],
+            expected1
+        );
+    }
+
+    #[test]
+    fn test_gemv_cpu_u4x8_asymmetric_zero() {
+        let m: usize = 1;
+        let k: usize = 8;
+
+        // U4x8 range is [-8, 7]; with scale=2, zero=10:
+        //   w = q * 2 + 10 → representable w: even numbers in [-6, 24]
+        let w: Vec<f32> = vec![12.0, 14.0, 16.0, 18.0, 0.0, 2.0, 4.0, 6.0];
+        let packed = PackedTensor::<U4x8>::from_f32_slice(&w, &[m, k], 2.0, 10.0);
+
+        // Reference from dequantized packed values
+        let deq = packed.to_f32_vec();
+        let activation: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 0.5, -1.0, 2.0, -3.0];
+        let mut output = vec![0.0f32; m];
+        gemv_cpu(&packed, &activation, &mut output);
+
+        let expected: f32 = deq.iter().zip(activation.iter()).map(|(w, a)| w * a).sum();
+        assert!(
+            (output[0] - expected).abs() < 1e-4,
+            "got {}, expected {}, deq={:?}",
+            output[0],
+            expected,
+            deq
+        );
+    }
+
+    #[test]
+    fn test_gemv_cpu_u8x4_asymmetric_zero_negative_activations() {
+        let m: usize = 2;
+        let k: usize = 4;
+
+        // The test is designed to fail with the old formula:
+        //   old: output = dot * scale + zero
+        //   new: output = dot * scale + zero * Σ(activation)
+        // With Σ(activation) != 1, the old formula gives wrong results.
+        let scales = vec![2.0, 3.0];
+        let zeros = vec![10.0, -5.0];
+        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let packed_len = m * k_packed;
+
+        // Round-trip via from_f32_slice (symmetric, zero=0) then manually set scale/zero
+        let w_vals: Vec<f32> = vec![12.0, 4.0, 20.0, -6.0, 7.0, -14.0, 1.0, 13.0];
+        let mut packed_data = vec![U8x4::default(); packed_len + 16];
+        for row in 0..m {
+            let s = scales[row];
+            let z = zeros[row];
+            for word in 0..k_packed {
+                let mut arr = [0.0f32; 4];
+                for i in 0..4 {
+                    let idx = row * k + word * 4 + i;
+                    if idx < (row + 1) * k {
+                        arr[i] = (w_vals[idx] - z) / s;
+                    }
+                }
+                packed_data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+            }
+        }
+        let packed = PackedTensor::<U8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
+
+        let activation: Vec<f32> = vec![2.0, -3.0, 1.0, -2.0];
+        let mut output = vec![0.0f32; m];
+        gemv_cpu(&packed, &activation, &mut output);
+
+        let expected0 = 12.0 * 2.0 + 4.0 * -3.0 + 20.0 * 1.0 + (-6.0) * -2.0;
+        let expected1 = 7.0 * 2.0 + (-14.0) * -3.0 + 1.0 * 1.0 + 13.0 * -2.0;
+        assert!(
+            (output[0] - expected0).abs() < 1e-4,
+            "row0: got {}, expected {}",
+            output[0],
+            expected0
+        );
+        assert!(
+            (output[1] - expected1).abs() < 1e-4,
+            "row1: got {}, expected {}",
+            output[1],
+            expected1
+        );
+    }
+
+    #[test]
+    fn test_gemv_packed_inner_u8x4_asymmetric_zero() {
+        let m: usize = 2;
+        let k: usize = 4;
+
+        let w_vals: Vec<f32> = vec![5.0, 15.0, 25.0, 35.0, 0.5, 1.5, 2.5, 3.5];
+        let scales = vec![2.0, 0.5];
+        let zeros = vec![3.0, -1.0];
+        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let packed_len = m * k_packed;
+        let mut packed_data = vec![U8x4::default(); packed_len + 16];
+        for row in 0..m {
+            let s = scales[row];
+            let z = zeros[row];
+            for word in 0..k_packed {
+                let mut arr = [0.0f32; 4];
+                for i in 0..4 {
+                    let idx = row * k + word * 4 + i;
+                    if idx < (row + 1) * k {
+                        arr[i] = (w_vals[idx] - z) / s;
+                    }
+                }
+                packed_data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+            }
+        }
+        let packed = PackedTensor::<U8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
+
+        let activation: Vec<f32> = vec![1.0, -2.0, 3.0, -4.0];
+        let mut output = vec![0.0f32; m];
+        // Call inner directly to bypass SIMD dispatch
+        let k_packed_calc = k.div_ceil(U8x4::ITEMS);
+        gemv_packed_inner::<U8x4>(&packed, &activation, &mut output, m, k, k_packed_calc);
+
+        let expected0 = 5.0 * 1.0 + 15.0 * -2.0 + 25.0 * 3.0 + 35.0 * -4.0;
+        let expected1 = 0.5 * 1.0 + 1.5 * -2.0 + 2.5 * 3.0 + 3.5 * -4.0;
+        assert!(
+            (output[0] - expected0).abs() < 1e-4,
+            "row0: got {}, expected {}",
+            output[0],
+            expected0
+        );
+        assert!(
+            (output[1] - expected1).abs() < 1e-4,
+            "row1: got {}, expected {}",
+            output[1],
+            expected1
+        );
+    }
+
+    #[test]
+    fn test_gemv_packed_blocked_u8x4_asymmetric_zero() {
+        let m: usize = 2;
+        let k: usize = 48;
+
+        let scales = vec![2.0, 10.0];
+        let zeros = vec![3.0, -5.0];
+        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let packed_len = m * k_packed;
+        let mut packed_data = vec![U8x4::default(); packed_len + 16];
+        let w_vals: Vec<f32> = (0..m * k).map(|i| ((i % 13) as f32) * 1.5).collect();
+        for row in 0..m {
+            let s = scales[row];
+            let z = zeros[row];
+            for word in 0..k_packed {
+                let mut arr = [0.0f32; 4];
+                for i in 0..4 {
+                    let idx = row * k + word * 4 + i;
+                    if idx < (row + 1) * k {
+                        arr[i] = (w_vals[idx] - z) / s;
+                    }
+                }
+                packed_data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+            }
+        }
+        let packed = PackedTensor::<U8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
+
+        // Reference from dequantized values (not original w_vals, which lose precision)
+        let deq = packed.to_f32_vec();
+        let activation: Vec<f32> = (0..k).map(|i| ((i % 7) as f32) - 3.0).collect();
+        let mut output = vec![0.0f32; m];
+        gemv_packed_blocked::<U8x4>(&packed, &activation, &mut output, m, k, k_packed);
+
+        let expected0: f32 = (0..k).map(|i| deq[i] * activation[i]).sum();
+        let expected1: f32 = (0..k).map(|i| deq[k + i] * activation[i]).sum();
+        assert!(
+            (output[0] - expected0).abs() < 1e-3,
+            "row0: got {}, expected {}",
+            output[0],
+            expected0
+        );
+        assert!(
+            (output[1] - expected1).abs() < 1e-3,
+            "row1: got {}, expected {}",
+            output[1],
+            expected1
+        );
+    }
+
+    #[test]
+    fn test_gemv_packed_tiled_u8x4_asymmetric_zero() {
+        let m: usize = 4;
+        let k: usize = 8192;
+
+        let scales = vec![2.0; m];
+        let zeros = vec![10.0; m];
+        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let packed_len = m * k_packed;
+        let mut packed_data = vec![U8x4::default(); packed_len + 16];
+        let w_vals: Vec<f32> = (0..m * k).map(|i| (i % 127) as f32).collect();
+        for row in 0..m {
+            let s = scales[row];
+            let z = zeros[row];
+            for word in 0..k_packed {
+                let mut arr = [0.0f32; 4];
+                for i in 0..4 {
+                    let idx = row * k + word * 4 + i;
+                    if idx < (row + 1) * k {
+                        arr[i] = (w_vals[idx] - z) / s;
+                    }
+                }
+                packed_data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+            }
+        }
+        let packed = PackedTensor::<U8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
+
+        let deq = packed.to_f32_vec();
+        let activation: Vec<f32> = (0..k).map(|i| ((i % 31) as f32) - 15.0).collect();
+        let mut output = vec![0.0f32; m];
+        gemv_packed_tiled::<U8x4>(&packed, &activation, &mut output);
+
+        for row in 0..m {
+            let expected: f32 = (0..k).map(|i| deq[row * k + i] * activation[i]).sum();
+            assert!(
+                (output[row] - expected).abs() < 1e-2,
+                "row{}: got {}, expected {}",
+                row,
+                output[row],
+                expected
             );
         }
     }

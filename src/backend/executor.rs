@@ -91,10 +91,10 @@ impl<B: Backend> GraphExecutor<B> {
         // ── Phase 1: Shape inference ──────────────────────────────────────
         shape_inference::infer_shapes(&mut graph)
             .map_err(|e| BackendError::Compilation(format!("shape inference: {e}")))?;
- 
-         // ── Phase 2: Operator fusion ──────────────────────────────────────
-         operator_fusion::fuse_operators(&mut graph)
-             .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
+
+        // ── Phase 2: Operator fusion ──────────────────────────────────────
+        operator_fusion::fuse_operators(&mut graph)
+            .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
 
         // ── Phase 2.5: Quantization (optional) ───────────────────────────
         if let Some(bit_width) = quantize {
@@ -166,6 +166,7 @@ impl<B: Backend> GraphExecutor<B> {
                         IrDType::U4 { .. } | IrDType::U8 { .. } => {
                             node.output_type.dtype.packed_byte_size(numel as usize)
                         }
+                        IrDType::I8 => numel as usize + 8,
                         _ => raw,
                     }
                 } else {
@@ -241,6 +242,7 @@ impl<B: Backend> GraphExecutor<B> {
                     IrDType::U4 { .. } | IrDType::U8 { .. } => {
                         node.output_type.dtype.packed_byte_size(actual_numel)
                     }
+                    IrDType::I8 => actual_numel + 8,
                     _ => actual_numel * node.output_type.dtype.byte_size(),
                 };
                 (computed, resolved_shape)
@@ -531,22 +533,18 @@ impl<B: Backend> CompiledTrainingModel<B> {
                             )));
                         }
                         let t_slice = &input_slices[4];
-                        let t_bytes =
-                            self.backend.read_arena(&self.arena, t_slice.offset, 8);
-                        let t_arr: [u8; 8] = t_bytes[..8].try_into().map_err(|_| {
-                            BackendError::Dispatch("invalid t step value".into())
-                        })?;
+                        let t_bytes = self.backend.read_arena(&self.arena, t_slice.offset, 8);
+                        let t_arr: [u8; 8] = t_bytes[..8]
+                            .try_into()
+                            .map_err(|_| BackendError::Dispatch("invalid t step value".into()))?;
                         let t_val = u64::from_le_bytes(t_arr);
                         let new_t = t_val.checked_add(1).ok_or_else(|| {
                             BackendError::Dispatch(
                                 "train_step: AdamW step overflow (t > u64::MAX)".into(),
                             )
                         })?;
-                        self.backend.write_arena(
-                            &self.arena,
-                            t_slice.offset,
-                            &new_t.to_le_bytes(),
-                        );
+                        self.backend
+                            .write_arena(&self.arena, t_slice.offset, &new_t.to_le_bytes());
                     }
                     _ => {}
                 }
@@ -620,8 +618,7 @@ pub fn tighten_slices(
                         for &input_nid in &node.inputs {
                             if tightened_memory_plan.slots.contains_key(&input_nid) {
                                 if let Some(slice) = slice_iter.next() {
-                                    if let Some(slot) =
-                                        tightened_memory_plan.slots.get(&input_nid)
+                                    if let Some(slot) = tightened_memory_plan.slots.get(&input_nid)
                                     {
                                         slice.offset = slot.offset;
                                         slice.size = slot.size;

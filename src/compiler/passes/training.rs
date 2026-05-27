@@ -168,7 +168,12 @@ pub fn inject_optimizer(
                 updated_param_nodes.push(muon_id);
                 state_input_nodes.push(vec![m_id]);
             }
-            OptimizerConfig::Lion { lr, beta1, beta2, weight_decay } => {
+            OptimizerConfig::Lion {
+                lr,
+                beta1,
+                beta2,
+                weight_decay,
+            } => {
                 let m_id = graph.add_node(
                     Opcode::Input,
                     vec![],

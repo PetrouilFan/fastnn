@@ -1,6 +1,6 @@
+use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::{BackendError, BufferSlice};
-use super::PendingRead;
 
 fn ensure_argmax_pipeline(
     ctx: &mut WgpuContext,

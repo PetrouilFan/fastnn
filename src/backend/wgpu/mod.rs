@@ -180,8 +180,7 @@ impl Backend for WgpuBackend {
                                     .copy_from_slice(&arena.data_mut()[s.offset..end]);
                             }
                             // Output slot may overlap with input; copy it too.
-                            let o_end =
-                                (out_start + output_slice.size).min(arena.data_mut().len());
+                            let o_end = (out_start + output_slice.size).min(arena.data_mut().len());
                             tmp[out_start..o_end]
                                 .copy_from_slice(&arena.data_mut()[out_start..o_end]);
 
@@ -346,7 +345,13 @@ fn try_gpu_dispatch(
         "softmax" => {
             let axis_dim = params.first().copied().unwrap_or(1);
             softmax::dispatch_softmax_gpu(
-                ctx, encoder, pending_reads, &input0, numel, axis_dim, out_start,
+                ctx,
+                encoder,
+                pending_reads,
+                &input0,
+                numel,
+                axis_dim,
+                out_start,
             )
         }
         "reduce_f32" => {
@@ -363,42 +368,100 @@ fn try_gpu_dispatch(
             )
         }
         "matmul" => matmul::dispatch_matmul_gpu(
-            ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
+            ctx,
+            encoder,
+            pending_reads,
+            arena,
+            input_slices,
+            output_slice,
+            &resolved_params,
             shape_env,
         ),
         "matmul_relu" => matmul::dispatch_matmul_activation_gpu(
-            ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
-            shape_env, "relu", false,
+            ctx,
+            encoder,
+            pending_reads,
+            arena,
+            input_slices,
+            output_slice,
+            &resolved_params,
+            shape_env,
+            "relu",
+            false,
         ),
         "matmul_gelu" => matmul::dispatch_matmul_activation_gpu(
-            ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
-            shape_env, "gelu", false,
+            ctx,
+            encoder,
+            pending_reads,
+            arena,
+            input_slices,
+            output_slice,
+            &resolved_params,
+            shape_env,
+            "gelu",
+            false,
         ),
         "matmul_silu" => matmul::dispatch_matmul_activation_gpu(
-            ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
-            shape_env, "silu", false,
+            ctx,
+            encoder,
+            pending_reads,
+            arena,
+            input_slices,
+            output_slice,
+            &resolved_params,
+            shape_env,
+            "silu",
+            false,
         ),
         "fused_matmul_add_relu" => matmul::dispatch_matmul_activation_gpu(
-            ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
-            shape_env, "relu", true,
+            ctx,
+            encoder,
+            pending_reads,
+            arena,
+            input_slices,
+            output_slice,
+            &resolved_params,
+            shape_env,
+            "relu",
+            true,
         ),
         "fused_matmul_add_gelu" => matmul::dispatch_matmul_activation_gpu(
-            ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
-            shape_env, "gelu", true,
+            ctx,
+            encoder,
+            pending_reads,
+            arena,
+            input_slices,
+            output_slice,
+            &resolved_params,
+            shape_env,
+            "gelu",
+            true,
         ),
         "fused_matmul_add_silu" => matmul::dispatch_matmul_activation_gpu(
-            ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
-            shape_env, "silu", true,
+            ctx,
+            encoder,
+            pending_reads,
+            arena,
+            input_slices,
+            output_slice,
+            &resolved_params,
+            shape_env,
+            "silu",
+            true,
         ),
         "transpose_f32" => {
             let m = resolved_params.first().copied().unwrap_or(1);
             let n = resolved_params.get(1).copied().unwrap_or(1);
-            transpose::dispatch_transpose_gpu(
-                ctx, encoder, pending_reads, &input0, m, n, out_start,
-            )
+            transpose::dispatch_transpose_gpu(ctx, encoder, pending_reads, &input0, m, n, out_start)
         }
         "conv2d" => conv::dispatch_conv_gpu(
-            ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
+            ctx,
+            encoder,
+            pending_reads,
+            arena,
+            input_slices,
+            output_slice,
+            &resolved_params,
             shape_env,
         ),
         "norm_f32" | "rms_norm" => norm::dispatch_norm_gpu(
@@ -448,8 +511,16 @@ fn try_gpu_dispatch(
                 .map(|m| m.zero_points.clone())
                 .unwrap_or_default();
             quantized::dispatch_quantized_matmul_gpu(
-                ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
-                bit_width, &scales, &zero_points,
+                ctx,
+                encoder,
+                pending_reads,
+                arena,
+                input_slices,
+                output_slice,
+                &resolved_params,
+                bit_width,
+                &scales,
+                &zero_points,
             )
         }
         "conv2d_u4" | "conv2d_u8" => {
@@ -463,8 +534,16 @@ fn try_gpu_dispatch(
                 .map(|m| m.zero_points.clone())
                 .unwrap_or_default();
             quantized::dispatch_quantized_conv_gpu(
-                ctx, encoder, pending_reads, arena, input_slices, output_slice, &resolved_params,
-                bit_width, &scales, &zero_points,
+                ctx,
+                encoder,
+                pending_reads,
+                arena,
+                input_slices,
+                output_slice,
+                &resolved_params,
+                bit_width,
+                &scales,
+                &zero_points,
             )
         }
         "upsample_nearest2d" | "upsample_bilinear2d" => {

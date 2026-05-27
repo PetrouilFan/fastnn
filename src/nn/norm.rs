@@ -1,6 +1,4 @@
-use crate::autograd::{
-    self, AutogradMeta,
-};
+use crate::autograd::{self, AutogradMeta};
 use crate::ir::node::{DimExpr, IrDType, TensorType};
 use crate::tensor::Tensor;
 use crate::{
@@ -230,7 +228,11 @@ impl Module for BatchNorm1d {
             } else if n > 0.0 {
                 batch_var.clone()
             } else {
-                Tensor::zeros(vec![num_features as i64], crate::storage::DType::F32, crate::storage::Device::Cpu)
+                Tensor::zeros(
+                    vec![num_features as i64],
+                    crate::storage::DType::F32,
+                    crate::storage::Device::Cpu,
+                )
             };
 
             let mom = self.momentum as f32;

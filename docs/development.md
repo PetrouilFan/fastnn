@@ -286,6 +286,25 @@ These modules continue to serve their v1 roles:
 - **`io/`** — Serialization and DLPack interop
 - **`python/`** — PyO3 bindings; `nn.rs` includes `AotExecutor` bindings with a `quantize` parameter for v2 AOT execution
 
+## Local quality gates
+
+Use the pinned stable toolchain from `rust-toolchain.toml` so local runs match CI.
+
+```bash
+# Minimum PR gate set (same sequence as the CI quality job)
+./scripts/ci/check-rustfmt-baseline.sh
+python3 ./scripts/ci/check-clippy-baseline.py
+cargo test --lib
+cargo test --test quantized_pipeline
+cargo test --test optim_test
+```
+
+Policy notes:
+
+- `rustfmt` currently uses a file baseline in `ci/rustfmt-baseline.txt`; CI fails only when a newly touched file adds formatting debt outside that list.
+- `clippy` currently uses a diagnostic baseline in `ci/clippy-baseline.txt`; CI fails on new warnings, while existing debt stays tracked until cleanup lands.
+- When you fix an entry already covered by either baseline, remove it from the corresponding file in the same PR.
+
 ## Adding a New Operation
 
 Adding a new op in v2.0.0 requires touching multiple modules in a specific order. Use an existing op (e.g., `Gelu`) as a reference.
