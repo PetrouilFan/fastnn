@@ -6,12 +6,13 @@ Supports versioned serialization format for backward and forward compatibility.
 __all__ = ["SerializationError"]
 
 from typing import Dict, Any, Optional
+import json
 import numpy as np
 import struct
 
 from fastnn.tensor import tensor
-from fastnn._core import IoError
 from fastnn.io import (
+    SerializationError,
     write_tensor,
     read_tensor,
     _pack_u64,
@@ -31,11 +32,6 @@ from fastnn.io import (
     serialization_error,
 )
 from fastnn.utils.tensor_utils import to_numpy
-
-
-class SerializationError(IoError):
-    """Raised when serialization or deserialization fails."""
-    pass
 
 
 def _save_model(model: Any, path: str, version: int = MODEL_VERSION) -> None:
@@ -169,20 +165,31 @@ def _load_model(path: str, version: Optional[int] = None) -> Dict[str, Any]:
 
             elif file_version >= 3:
                 # v3+: dtype-tagged packed tensors — use unified reader
-                from fastnn.io import read_fnn_header, read_fnn_parameters
-                # Seek back to start of file (read_fnn_header reads from offset 0)
-                f.seek(0)
-                _magic, _ver, _header, num_params = read_fnn_header(f)
+                from fastnn.io import read_fnn_parameters
+                # Already read magic + version (8 bytes), continue from current position
+                header_len = _unpack_u64(f.read(8))
+                header_bytes = f.read(header_len)
+                _header = json.loads(header_bytes.decode("utf-8"))
+                num_params = _unpack_u64(f.read(8))
                 raw_params = read_fnn_parameters(f, num_params, version=file_version)
                 result = {}
                 for name, val in raw_params.items():
                     if isinstance(val, tuple):
-                        data, dtype, scales, zeros = val
+                        data, dtype, scales, zeros, shape = val
                         if isinstance(data, np.ndarray):
                             result[name] = tensor(data, list(data.shape))
                         else:
-                            # Packed data loaded as bytes — wrap in numpy for compatibility
-                            result[name] = tensor(np.frombuffer(data, dtype=np.float32).copy(), [0])
+                            # Packed quantized data — dequantize with scales/zeros
+                            raw = np.frombuffer(data, dtype=np.uint8).astype(np.float32)
+                            s = np.asarray(scales, dtype=np.float32)
+                            z = np.asarray(zeros, dtype=np.float32)
+                            if s.size > 0:
+                                dequantized = s * (raw - z)
+                            else:
+                                dequantized = raw
+                            if shape:
+                                dequantized = dequantized.reshape(shape)
+                            result[name] = tensor(dequantized, list(dequantized.shape))
                     else:
                         result[name] = tensor(val, list(val.shape))
                 return result
@@ -240,7 +247,11 @@ def _save_optimizer(opt: Any, path: str, version: int = OPTIMIZER_VERSION) -> No
             for i in range(n):
                 for state_tensor_name in ["m", "v", "v_hat"]:
                     state_list = getattr(opt, state_tensor_name, None)
-                    if state_list and i < len(state_list):
+                    if state_list is None:
+                        f.write(_pack_u8(0))
+                        f.write(_pack_u64(0))
+                        continue
+                    if i < len(state_list):
                         data = to_numpy(state_list[i]).astype(np.float32, copy=False).ravel()
                         f.write(_pack_u8(1))
                         f.write(_pack_u64(len(data)))
@@ -289,7 +300,11 @@ def _load_optimizer(opt: Any, path: str) -> None:
                     state_list = getattr(opt, state_tensor_name, None)
                     has_data = _unpack_u8(f.read(1))
                     data_len = _unpack_u64(f.read(8))
-                    if has_data and state_list and i < len(state_list):
+                    if state_list is None:
+                        if has_data:
+                            f.read(data_len * 4)
+                        continue
+                    if has_data and i < len(state_list):
                         data = np.frombuffer(f.read(data_len * 4), dtype=np.float32)
                         state_list[i].copy_(tensor(data.copy(), list(state_list[i].shape)))
                     elif has_data:

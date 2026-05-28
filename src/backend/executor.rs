@@ -32,12 +32,16 @@ use std::sync::atomic::Ordering;
 /// Generic over the backend type `B` (e.g. `CpuBackend`).
 pub struct GraphExecutor<B: Backend> {
     backend: B,
+    cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
 }
 
 impl<B: Backend> GraphExecutor<B> {
     /// Create a new executor backed by the given backend.
     pub fn new(backend: B) -> Self {
-        GraphExecutor { backend }
+        GraphExecutor {
+            backend,
+            cached_arena: None,
+        }
     }
 
     /// Return a reference to the backend.
@@ -110,10 +114,7 @@ impl<B: Backend> GraphExecutor<B> {
         }
 
         // ── Phase 3: Dead code elimination ────────────────────────────────
-        let removed = dead_code_elimination::eliminate_dead_code(&mut graph);
-        if removed > 0 {
-            eprintln!("DCE removed {} dead node(s)", removed);
-        }
+        let _removed = dead_code_elimination::eliminate_dead_code(&mut graph);
 
         // ── Phase 4: Memory planning ──────────────────────────────────────
         let memory_plan = memory_planning::plan_memory(&graph)
@@ -136,9 +137,9 @@ impl<B: Backend> GraphExecutor<B> {
     /// `inputs` must correspond one-to-one with `graph.inputs` (in order).
     /// Returns output byte slices corresponding to `graph.outputs` (in order).
     pub fn execute(
-        &self,
+        &mut self,
         graph: &ComputeGraph,
-        plan: &ExecutablePlan,
+        plan: &mut ExecutablePlan,
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
@@ -153,7 +154,7 @@ impl<B: Backend> GraphExecutor<B> {
         // This avoids a full backend re-compilation while still shrinking
         // the arena from SYMBOL_DIM_MAX worst-case to actual sizes.
         let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
-        let tightened_plan = tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
+        tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
 
         // Safety check: every node's resolved output must fit in its slot.
         for (&node_id, slot) in &tightened_memory_plan.slots {
@@ -165,6 +166,7 @@ impl<B: Backend> GraphExecutor<B> {
                         IrDType::U4 { .. } | IrDType::U8 { .. } => {
                             node.output_type.dtype.packed_byte_size(numel as usize)
                         }
+                        IrDType::I8 => numel as usize + 8,
                         _ => raw,
                     }
                 } else {
@@ -179,8 +181,20 @@ impl<B: Backend> GraphExecutor<B> {
             }
         }
 
-        // Allocate tightened arena
-        let arena = self.backend.allocate_arena(tightened_plan.arena_size);
+        // Arena caching: reuse or replace
+        let arena_size = plan.arena_size;
+        let enough_capacity = self
+            .cached_arena
+            .as_ref()
+            .map_or(false, |(cap, _)| *cap >= arena_size);
+        if !enough_capacity {
+            self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
+        }
+        let arena = &self.cached_arena.as_ref().unwrap().1;
+        // No need to zero-fill the arena — every kernel writes its output
+        // slot before it can be read, so stale data from the previous
+        // execution does not affect correctness.  (The memory planner's
+        // live-range analysis guarantees non-overlapping intervals.)
 
         // Write input data into the arena at tightened input slots
         for (i, &input_node_id) in graph.inputs.iter().enumerate() {
@@ -198,11 +212,11 @@ impl<B: Backend> GraphExecutor<B> {
                     ))
                 })?;
 
-            self.backend.write_arena(&arena, slot.offset, input_bytes);
+            self.backend.write_arena(arena, slot.offset, input_bytes);
         }
 
         // Dispatch the tightened plan
-        self.backend.dispatch(&tightened_plan, &arena, &shape_env)?;
+        self.backend.dispatch(plan, arena, &shape_env)?;
 
         // Read output data — compute actual sizes via shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
@@ -228,6 +242,7 @@ impl<B: Backend> GraphExecutor<B> {
                     IrDType::U4 { .. } | IrDType::U8 { .. } => {
                         node.output_type.dtype.packed_byte_size(actual_numel)
                     }
+                    IrDType::I8 => actual_numel + 8,
                     _ => actual_numel * node.output_type.dtype.byte_size(),
                 };
                 (computed, resolved_shape)
@@ -235,7 +250,7 @@ impl<B: Backend> GraphExecutor<B> {
                 (slot.size, vec![])
             };
 
-            let data = self.backend.read_arena(&arena, slot.offset, actual_size);
+            let data = self.backend.read_arena(arena, slot.offset, actual_size);
             outputs.push(data);
         }
 
@@ -244,12 +259,12 @@ impl<B: Backend> GraphExecutor<B> {
 
     /// Convenience: compile + execute in a single call.
     pub fn run(
-        &self,
+        &mut self,
         graph: &ComputeGraph,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        let (plan, memory_plan, compiled_graph) = self.compile_with_plan(graph)?;
-        self.execute(&compiled_graph, &plan, &memory_plan, inputs)
+        let (mut plan, memory_plan, compiled_graph) = self.compile_with_plan(graph)?;
+        self.execute(&compiled_graph, &mut plan, &memory_plan, inputs)
     }
 
     /// Compile a training model from a forward graph.
@@ -281,7 +296,7 @@ impl<B: Backend> GraphExecutor<B> {
         let mut combined_graph = forward_graph.clone();
 
         // 2. Build backward graph (result already contains forward + backward nodes)
-        let (grad_graph, grad_map) = build_backward_graph(&combined_graph, loss_node)
+        let (grad_graph, grad_map) = build_backward_graph(&combined_graph, loss_node, None)
             .map_err(|e| BackendError::Compilation(format!("build_backward_graph: {e}")))?;
         combined_graph = grad_graph;
 
@@ -339,9 +354,10 @@ impl<B: Backend> GraphExecutor<B> {
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
         let (plan, memory_plan) = if let Some(shape_env) = batch_shape_env {
             let tightened_mp = memory_plan.tighten(&final_graph, shape_env);
-            let tightened_plan = tighten_slices(&plan, &memory_plan, &tightened_mp, &final_graph)
+            let mut plan = plan;
+            tighten_slices(&mut plan, &memory_plan, &tightened_mp, &final_graph)
                 .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
-            (tightened_plan, tightened_mp)
+            (plan, tightened_mp)
         } else {
             (plan, memory_plan)
         };
@@ -374,14 +390,23 @@ impl<B: Backend> GraphExecutor<B> {
             self.backend.write_arena(&arena, slot.offset, data);
         }
 
-        // Write zero-initialized optimizer state (m, v for AdamW)
+        // Write zero-initialized optimizer state (m, v for AdamW),
+        // with t (timestep counter) initialized to 1.
         for state_nodes in &injection.state_input_nodes {
             for &state_id in state_nodes {
                 let slot = memory_plan.slots.get(&state_id).ok_or_else(|| {
                     BackendError::Compilation(format!("state node {} slot not found", state_id))
                 })?;
-                let zeros = vec![0u8; slot.size];
-                self.backend.write_arena(&arena, slot.offset, &zeros);
+                let is_t = final_graph
+                    .get_node(state_id)
+                    .map(|n| n.name.starts_with("optimizer/t_"))
+                    .unwrap_or(false);
+                let init_data: Vec<u8> = if is_t {
+                    1u64.to_le_bytes().to_vec()
+                } else {
+                    vec![0u8; slot.size]
+                };
+                self.backend.write_arena(&arena, slot.offset, &init_data);
             }
         }
 
@@ -471,21 +496,21 @@ impl<B: Backend> CompiledTrainingModel<B> {
         Ok(loss)
     }
 
-    /// Increment `t` (params[4]) in all Adam/AdamW kernel instructions.
+    /// Increment `t` in all Adam/AdamW kernel instructions.
     /// This advances the bias correction denominator for the next step.
+    /// For AdamW, `t` is stored in the arena at input_slices[4].
+    /// For Adam, `t` is still in params[4].
     fn increment_optimizer_steps(&mut self) -> Result<(), BackendError> {
         for instr in &mut self.plan.instructions {
             if let Instruction::CallKernel {
                 kernel_name,
                 params,
+                input_slices,
                 ..
             } = instr
             {
                 match kernel_name.as_str() {
-                    "adam_update_f32"
-                    | "adam_update_f16_state"
-                    | "adamw_update_f32"
-                    | "adamw_update_f16_state" => {
+                    "adam_update_f32" | "adam_update_f16_state" => {
                         if params.len() <= 4 {
                             return Err(BackendError::Dispatch(format!(
                                 "{} expected >=5 params, got {}",
@@ -493,12 +518,33 @@ impl<B: Backend> CompiledTrainingModel<B> {
                                 params.len()
                             )));
                         }
-                        // params[4] = step counter t (u64 stored as usize)
                         params[4] = params[4].checked_add(1).ok_or_else(|| {
                             BackendError::Dispatch(
                                 "train_step: Adam step overflow (t > u64::MAX)".into(),
                             )
                         })?;
+                    }
+                    "adamw_update_f32" | "adamw_update_f16_state" => {
+                        if input_slices.len() <= 4 {
+                            return Err(BackendError::Dispatch(format!(
+                                "{} expected >=5 input slices, got {}",
+                                kernel_name,
+                                input_slices.len()
+                            )));
+                        }
+                        let t_slice = &input_slices[4];
+                        let t_bytes = self.backend.read_arena(&self.arena, t_slice.offset, 8);
+                        let t_arr: [u8; 8] = t_bytes[..8]
+                            .try_into()
+                            .map_err(|_| BackendError::Dispatch("invalid t step value".into()))?;
+                        let t_val = u64::from_le_bytes(t_arr);
+                        let new_t = t_val.checked_add(1).ok_or_else(|| {
+                            BackendError::Dispatch(
+                                "train_step: AdamW step overflow (t > u64::MAX)".into(),
+                            )
+                        })?;
+                        self.backend
+                            .write_arena(&self.arena, t_slice.offset, &new_t.to_le_bytes());
                     }
                     _ => {}
                 }
@@ -520,13 +566,11 @@ impl<B: Backend> CompiledTrainingModel<B> {
 /// it avoids re-running fusion checks, quantization detection, and all other
 /// backend lowering logic that is unchanged after tightening.
 pub fn tighten_slices(
-    plan: &ExecutablePlan,
+    plan: &mut ExecutablePlan,
     _original_memory_plan: &MemoryPlan,
     tightened_memory_plan: &MemoryPlan,
     graph: &ComputeGraph,
-) -> Result<ExecutablePlan, BackendError> {
-    let mut tightened = plan.clone();
-
+) -> Result<(), BackendError> {
     // Build an offset → tightened_size map for non-CallKernel instructions
     // (Fill, MemCopy, WriteConst) that don't carry a node_id.
     let mut offset_size: HashMap<usize, usize> = HashMap::new();
@@ -537,7 +581,7 @@ pub fn tighten_slices(
         offset_size.insert(slot.offset, slot.size);
     }
 
-    for instr in &mut tightened.instructions {
+    for instr in &mut plan.instructions {
         match instr {
             Instruction::CallKernel {
                 input_slices,
@@ -561,12 +605,24 @@ pub fn tighten_slices(
                         }
                     }
                     // ── Update input slices from the graph ──
+                    // IMPORTANT: Must use the same filter_map logic as compilation
+                    // (cpu/mod.rs line 196-205) which skips inputs without memory
+                    // slots.  Using enumerate() with node.inputs directly causes
+                    // index misalignment when some inputs lack slots — e.g. if
+                    // input A has no slot but B and C do, input_slices = [B, C].
+                    // enumerate() would map input_slices[0]→A (skipped) and
+                    // input_slices[1]→B, so C never gets updated and B's offset
+                    // is written to C's slice, causing buffer aliasing.
                     if let Some(node) = graph.get_node(*nid) {
-                        for (i, slice) in input_slices.iter_mut().enumerate() {
-                            if let Some(&input_nid) = node.inputs.get(i) {
-                                if let Some(slot) = tightened_memory_plan.slots.get(&input_nid) {
-                                    slice.offset = slot.offset;
-                                    slice.size = slot.size;
+                        let mut slice_iter = input_slices.iter_mut();
+                        for &input_nid in &node.inputs {
+                            if tightened_memory_plan.slots.contains_key(&input_nid) {
+                                if let Some(slice) = slice_iter.next() {
+                                    if let Some(slot) = tightened_memory_plan.slots.get(&input_nid)
+                                    {
+                                        slice.offset = slot.offset;
+                                        slice.size = slot.size;
+                                    }
                                 }
                             }
                         }
@@ -599,8 +655,8 @@ pub fn tighten_slices(
         }
     }
 
-    tightened.arena_size = tightened_memory_plan.total_size;
-    Ok(tightened)
+    plan.arena_size = tightened_memory_plan.total_size;
+    Ok(())
 }
 
 /// Compute the byte size of a tensor described by shape dims and element size.
@@ -1069,6 +1125,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             | Opcode::Exp
             | Opcode::Log
             | Opcode::Sqrt
+            | Opcode::Round
             | Opcode::Relu
             | Opcode::Gelu
             | Opcode::Silu

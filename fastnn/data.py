@@ -277,7 +277,7 @@ def default_collate(batch: list) -> tuple:
     if isinstance(elem, tuple):
         return tuple(map(default_collate, zip(*batch)))
 
-    if hasattr(elem, "numpy") and all(hasattr(b, "numpy") for b in batch):
+    if hasattr(elem, "numpy") and batch and all(hasattr(b, "numpy") for b in batch):
         return fnn.stack(batch, dim=0)
 
     if hasattr(elem, "numpy") or isinstance(elem, np.ndarray):
@@ -749,6 +749,7 @@ class DataLoader:
 
         if batch_sampler is not None:
             self.batch_sampler = batch_sampler
+            self.sampler = None  # No sampler when batch_sampler is provided
         else:
             if sampler is not None:
                 self.sampler = sampler
@@ -791,7 +792,7 @@ class DataLoader:
             self.prefetch_size = prefetch
             self._metrics.reset()
 
-        if self.shuffle:
+        if self.shuffle and self.sampler is not None:
             if isinstance(self.sampler, RandomSampler):
                 self.sampler.generator = self.generator
             # Only recreate BatchSampler if the sampler has changed

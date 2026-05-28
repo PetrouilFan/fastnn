@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+import fastnn as fnn
 from fastnn.precision import Precision, PrecisionConfig, Quantizer
 
 logger = logging.getLogger(__name__)
@@ -87,10 +88,7 @@ class PrecisionProfiler:
     def _set_param(self, name: str, arr: np.ndarray):
         """Set a parameter in the model."""
         if hasattr(self.model, "params") and name in self.model.params:
-            import fastnn as fnn
             self.model.params[name] = fnn.tensor(arr, list(arr.shape))
-        elif hasattr(self.model, "params") and name in self.model.params:
-            self.model.params[name] = arr
 
     def profile_layer_sensitivity(self) -> Dict[str, float]:
         """Profile each layer's sensitivity to quantization.
@@ -111,13 +109,10 @@ class PrecisionProfiler:
         original_params: Dict[str, np.ndarray] = {}
         for name, arr in weights.items():
             if hasattr(self.model, "params") and name in self.model.params:
-                import fastnn as fnn
                 original_params[name] = arr.copy()
 
         sensitivities: Dict[str, float] = {}
         for param_name, weight_arr in weights.items():
-            import fastnn as fnn
-
             deq, _scales, _zeros = self._quantize_weights(weight_arr, Precision.U4)
             if hasattr(self.model, "params") and param_name in self.model.params:
                 self.model.params[param_name] = fnn.tensor(deq, list(deq.shape))
@@ -132,7 +127,6 @@ class PrecisionProfiler:
             sensitivities[param_name] = sensitivity
 
             if hasattr(self.model, "params") and param_name in original_params:
-                import fastnn as fnn
                 orig = original_params[param_name]
                 self.model.params[param_name] = fnn.tensor(orig, list(orig.shape))
 

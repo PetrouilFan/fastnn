@@ -39,6 +39,7 @@ def benchmark_basicblock(num_iters=50):
     conv2 = fnn.Conv2d(64, 64, 3, padding=1)
     bn2 = fnn.BatchNorm2d(64)
     py_block = fnn.BasicBlock(conv1, bn1, fnn.ReLU(), conv2, bn2)
+    py_block.eval()
     x = fnn.randn([32, 64, 32, 32])
     
     # Benchmark Python BasicBlock with built-in warmup

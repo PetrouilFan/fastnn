@@ -92,7 +92,7 @@ def _extract_shape(value_info):
     if value_info.type.tensor_type.HasField("shape"):
         for d in value_info.type.tensor_type.shape.dim:
             shape.append(f"Known({d.dim_value})" if d.HasField("dim_value") and d.dim_value > 0 else "Unknown")
-    dtype = {1: "F32", 9: "I32", 7: "I64", 10: "I32", 11: "I64", 6: "I32"}.get(
+    dtype = {1: "F32", 9: "BOOL", 7: "I64", 10: "F16", 11: "F64", 6: "I32"}.get(
         value_info.type.tensor_type.elem_type, "F32")
     return shape, dtype
 
@@ -365,6 +365,15 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
 
         else:
             nodes.append({"id": oid, "opcode": ir_op, "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
+
+    nid_map = {n["id"]: n for n in nodes}
+    for node in nodes:
+        node["outputs"] = []
+        for inp in node.get("inputs", []):
+            producer_nid = inp & ((1 << 20) - 1)
+            producer = nid_map.get(producer_nid)
+            if producer is not None:
+                producer["outputs"].append(node["id"])
 
     out_ids = []
     for out in model.graph.output:

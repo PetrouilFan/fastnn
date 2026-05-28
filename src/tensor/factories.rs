@@ -1,12 +1,16 @@
 // Tensor factory/constructor methods
 
+#[cfg(feature = "gpu")]
 use crate::backend::wgpu::context::get_wgpu_context;
-use crate::storage::{DType, Device, GpuStorage, Storage};
+#[cfg(feature = "gpu")]
+use crate::storage::GpuStorage;
+use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
+#[cfg(feature = "gpu")]
 use parking_lot::RwLock;
 use smallvec::smallvec;
 use smallvec::SmallVec;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI8, AtomicU64};
 use std::sync::Arc;
 
 use super::shape::compute_strides;
@@ -69,7 +73,9 @@ impl Tensor {
     pub fn from_scalar(value: f32) -> Self {
         let mut storage = get_storage_pool().acquire_uninit(4, Device::Cpu);
         let storage_mut = Arc::make_mut(&mut storage);
-        let Storage::Cpu(cpu_storage) = storage_mut else {
+        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
+        let Storage::Cpu(cpu_storage) = storage_mut
+        else {
             panic!("Expected CPU storage");
         };
         let data = Arc::make_mut(&mut cpu_storage.data);
@@ -88,6 +94,7 @@ impl Tensor {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let nbytes = values.len() * 4;
         let mut storage = get_storage_pool().acquire_uninit(nbytes, Device::Cpu);
+        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
         let Storage::Cpu(cpu) = Arc::make_mut(&mut storage) else {
             panic!("Expected CPU storage");
         };
@@ -102,10 +109,26 @@ impl Tensor {
         Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
     }
 
-    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, _device: Device) -> Self {
+    pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
-        Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+        match device {
+            Device::Cpu => {
+                let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
+                Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+            }
+            #[cfg(feature = "gpu")]
+            Device::Wgpu(device_id) => {
+                let ctx = get_wgpu_context(device_id);
+                let buffer = ctx.create_gpu_buffer_from_data(&values, "from_vec");
+                let storage = Arc::new(Storage::Wgpu(GpuStorage {
+                    buffer: buffer.buffer,
+                    nbytes: values.len() * 4,
+                    device_id,
+                    staging: RwLock::new(None),
+                }));
+                Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+            }
+        }
     }
 
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
@@ -115,6 +138,7 @@ impl Tensor {
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let ctx = get_wgpu_context(device_id);
                 let buffer = ctx.create_buffer(nbytes, "zeros");
@@ -138,6 +162,7 @@ impl Tensor {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
+            contiguous_cache: AtomicI8::new(1),
         })
     }
 
@@ -148,6 +173,7 @@ impl Tensor {
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let ctx = get_wgpu_context(device_id);
                 let buffer = ctx.create_buffer(nbytes, "empty");
@@ -162,6 +188,7 @@ impl Tensor {
 
         match device {
             Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
+            #[cfg(feature = "gpu")]
             Device::Wgpu(_) => {
                 Tensor::new(TensorImpl::new_with_device(storage, sizes, device, dtype))
             }
@@ -178,7 +205,9 @@ impl Tensor {
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
                 let inner = Arc::make_mut(&mut storage);
-                let Storage::Cpu(cpu_storage) = inner else {
+                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
+                let Storage::Cpu(cpu_storage) = inner
+                else {
                     panic!("Expected CPU storage for ones()");
                 };
                 let data = Arc::make_mut(&mut cpu_storage.data);
@@ -245,8 +274,10 @@ impl Tensor {
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
                     requires_grad: false,
+                    contiguous_cache: AtomicI8::new(1),
                 })
             }
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let cpu_ones = Self::ones(shape.clone(), dtype, Device::Cpu);
                 cpu_ones.to_gpu(device_id)
@@ -268,7 +299,9 @@ impl Tensor {
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
                 let inner = Arc::make_mut(&mut storage);
-                let Storage::Cpu(cpu_storage) = inner else {
+                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
+                let Storage::Cpu(cpu_storage) = inner
+                else {
                     panic!("Expected CPU storage for full()");
                 };
                 let data = Arc::make_mut(&mut cpu_storage.data);
@@ -309,7 +342,21 @@ impl Tensor {
                         };
                         slice.fill(half::f16::from_f32(value));
                     }
-                    _ => {}
+                    DType::I64 => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i64, numel)
+                        };
+                        slice.fill(value as i64);
+                    }
+                    DType::Bool => {
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut u8, numel)
+                        };
+                        slice.fill(if value != 0.0 { 1u8 } else { 0u8 });
+                    }
+                    DType::U4 | DType::U8 => {
+                        panic!("full() does not support packed U4/U8 dtypes. Use zeros() or from_vec() with packed data.");
+                    }
                 }
                 let strides = compute_strides(&sizes);
                 Tensor::new(TensorImpl {
@@ -322,8 +369,10 @@ impl Tensor {
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
                     requires_grad: false,
+                    contiguous_cache: AtomicI8::new(1),
                 })
             }
+            #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let sizes: SmallVec<[i64; 8]> = shape.into();
                 let numel: i64 = sizes.iter().product();
@@ -347,6 +396,7 @@ impl Tensor {
                     version_counter: Arc::new(AtomicU64::new(0)),
                     autograd_meta: None,
                     requires_grad: false,
+                    contiguous_cache: AtomicI8::new(1),
                 })
             }
         }

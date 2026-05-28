@@ -15,6 +15,8 @@ pub struct Linear {
 
 impl Linear {
     pub fn new(in_features: i64, out_features: i64, bias: bool) -> Self {
+        assert!(in_features > 0, "Linear: in_features must be positive");
+        assert!(out_features > 0, "Linear: out_features must be positive");
         let scale = (2.0 / in_features as f32).sqrt();
 
         // Store weight as [in_features, out_features] for direct matmul

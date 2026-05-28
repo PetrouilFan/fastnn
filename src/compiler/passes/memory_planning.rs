@@ -67,12 +67,7 @@ impl MemoryPlan {
         // ── Compute tightened kernel params ──────────────────────────
         // Iterate over every node in topological order and re-derive
         // shape-dependent kernel parameters using the concrete ShapeEnv.
-        let order = graph.topological_sort();
-        for &node_id in &order {
-            let node = match graph.get_node(node_id) {
-                Some(n) => n,
-                None => continue,
-            };
+        crate::utils::traverse_graph(graph, |node_id, node| {
             let resolved_input_shapes: Vec<Vec<u64>> = node
                 .inputs
                 .iter()
@@ -89,7 +84,7 @@ impl MemoryPlan {
             let tightened = match node.opcode {
                 Opcode::MatMul => {
                     if resolved_input_shapes.len() < 2 {
-                        continue;
+                        return Ok(());
                     }
                     let m = resolved_input_shapes[0]
                         .get(resolved_input_shapes[0].len().saturating_sub(2))
@@ -100,17 +95,34 @@ impl MemoryPlan {
                     vec![m, k, n]
                 }
                 Opcode::Transpose => {
-                    let m = resolved_input_shapes
-                        .first()
-                        .and_then(|s| s.first())
-                        .copied()
-                        .unwrap_or(1) as usize;
-                    let n = resolved_input_shapes
-                        .first()
-                        .and_then(|s| s.get(1))
-                        .copied()
-                        .unwrap_or(1) as usize;
-                    vec![m, n]
+                    let input_shape = resolved_input_shapes.first().cloned().unwrap_or_default();
+                    let rank = input_shape.len();
+                    if rank == 2 {
+                        // 2D transpose: params = [M, N]
+                        let m = input_shape[0] as usize;
+                        let n = input_shape[1] as usize;
+                        vec![m, n]
+                    } else {
+                        // N-D permute transpose: params = [rank, d0..dN, p0..pN]
+                        // The perm comes from node attrs (e.g. "0,3,1,2")
+                        let perm_str = node.attrs.get("perm").cloned().unwrap_or_default();
+                        let mut params: Vec<usize> = Vec::with_capacity(1 + 2 * rank);
+                        params.push(rank as usize);
+                        params.extend(input_shape.iter().map(|&d| d as usize));
+                        if perm_str.is_empty() {
+                            // Default: reverse
+                            for i in (0..rank).rev() {
+                                params.push(i);
+                            }
+                        } else {
+                            let perm: Vec<usize> =
+                                perm_str.split(',').filter_map(|s| s.parse().ok()).collect();
+                            for i in 0..rank {
+                                params.push(perm.get(i).copied().unwrap_or(i));
+                            }
+                        }
+                        params
+                    }
                 }
                 Opcode::Softmax => {
                     let axis: i64 = node
@@ -151,17 +163,19 @@ impl MemoryPlan {
                         .first()
                         .and_then(|s| s.get(axis).copied())
                         .unwrap_or(1) as usize;
-                    let is_mean = if matches!(node.opcode, Opcode::ReduceMean) {
-                        1
-                    } else {
-                        0
+                    let (is_mean, is_max) = match node.opcode {
+                        Opcode::ReduceMean => (1, 0),
+                        Opcode::ReduceMax => (0, 1),
+                        _ => (0, 0), // ReduceSum
                     };
-                    vec![group_size, is_mean]
+                    vec![group_size, is_mean, is_max]
                 }
-                _ => continue,
+                _ => return Ok(()),
             };
             mp.tightened_params.insert(node_id, tightened);
-        }
+            Ok(())
+        })
+        .unwrap_or(());
 
         mp
     }
@@ -311,14 +325,37 @@ pub fn plan_memory_with_env(
     let position: HashMap<NodeId, usize> =
         order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
 
-    let mut alloc_infos: Vec<AllocInfo> = Vec::new();
-
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
+    // ── Transitive consumer analysis ─────────────────────────────────
+    // Compute the latest position of any transitive consumer that is a
+    // required node or graph output.  This ensures that a node's lifetime
+    // is extended if its data flows (through any chain of consumers) to a
+    // required node or output.
+    let mut transitive_last_use: HashMap<NodeId, usize> = HashMap::new();
+    // Process nodes in reverse topological order so that consumers are
+    // processed before their producers.
+    for &node_id in order.iter().rev() {
+        let _node = match graph.get_node(node_id) {
             Some(n) => n,
             None => continue,
         };
+        let my_pos = position.get(&node_id).copied().unwrap_or(0);
+        let is_terminal =
+            graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id);
+        let base = if is_terminal { order.len() - 1 } else { my_pos };
+        // Start with our own position (or end if terminal)
+        let mut last = base;
+        // Propagate through direct consumers
+        for &cid in &graph.consumers(node_id) {
+            if let Some(&consumer_last) = transitive_last_use.get(&cid) {
+                last = last.max(consumer_last);
+            }
+        }
+        transitive_last_use.insert(node_id, last);
+    }
 
+    let mut alloc_infos: Vec<AllocInfo> = Vec::new();
+
+    crate::utils::traverse_graph(graph, |node_id, node| {
         // Primary output
         let size = tensor_byte_size(&node.output_type, shape_env);
         if size > 0 {
@@ -335,34 +372,13 @@ pub fn plan_memory_with_env(
             } else {
                 position.get(&node_id).copied().unwrap_or(0)
             };
-            let consumers = graph.consumers(node_id);
-            let last_use = if graph.required_nodes.contains(&node_id) {
-                // Required nodes must stay alive until end of execution
-                order.len() - 1
-            } else if consumers.is_empty() {
-                if graph.outputs.contains(&node_id) {
-                    order.len() - 1
-                } else {
-                    first_use
-                }
-            } else {
-                // When a node has consumers AND is also a graph output or
-                // required node, extend its lifetime to the end of execution
-                // so the memory slot is preserved for the final output read.
-                // Without this check the memory planner would free the slot
-                // after the last consumer, and a later node would reuse it —
-                // corrupting the output data before the executor reads it.
-                if graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id) {
-                    order.len() - 1
-                } else {
-                    consumers
-                        .iter()
-                        .filter_map(|cid| position.get(cid))
-                        .copied()
-                        .max()
-                        .unwrap_or(first_use)
-                }
-            };
+            // Use transitive consumer analysis for last_use.  This ensures
+            // that a node's lifetime is extended if its data flows (through
+            // any chain of consumers) to a required node or graph output.
+            let last_use = transitive_last_use
+                .get(&node_id)
+                .copied()
+                .unwrap_or(first_use);
 
             alloc_infos.push(AllocInfo {
                 node_id,
@@ -377,32 +393,11 @@ pub fn plan_memory_with_env(
             let sec_size = tensor_byte_size(sec_type, shape_env);
             if sec_size > 0 {
                 let first_use = position.get(&node_id).copied().unwrap_or(0);
-                let consumers = graph.consumers(node_id);
-                let last_use = if consumers.is_empty() {
-                    if graph.outputs.contains(&node_id) {
-                        order.len() - 1
-                    } else {
-                        first_use
-                    }
-                } else {
-                    let consumer_last = consumers
-                        .iter()
-                        .filter_map(|cid| position.get(cid))
-                        .copied()
-                        .max()
-                        .unwrap_or(first_use);
-                    // If the node is a graph output, the secondary output must
-                    // also live until the end, because the secondary slot's
-                    // allocation is in the same arena and freeing it early
-                    // changes the free-list state — which can cause a later
-                    // allocation to land adjacent to or (in edge cases) overlap
-                    // with the primary slot's data.
-                    if graph.outputs.contains(&node_id) || graph.required_nodes.contains(&node_id) {
-                        order.len() - 1
-                    } else {
-                        consumer_last
-                    }
-                };
+                // Use transitive consumer analysis for secondary output too
+                let last_use = transitive_last_use
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(first_use);
                 alloc_infos.push(AllocInfo {
                     node_id,
                     size: sec_size,
@@ -411,7 +406,9 @@ pub fn plan_memory_with_env(
                 });
             }
         }
-    }
+        Ok(())
+    })
+    .unwrap_or(());
 
     // Sort by (start_time, primary-first, size-desc).
     // The primary-first tiebreaker ensures that a node's primary output
@@ -424,6 +421,125 @@ pub fn plan_memory_with_env(
             .then_with(|| a.is_secondary.cmp(&b.is_secondary))
             .then_with(|| b.size.cmp(&a.size))
     });
+
+    // ── In-place buffer reuse for unary elementwise ops ──────────────
+    // Identify candidates BEFORE the allocation loop so that the allocator
+    // sees the correct (extended) input lifetimes and skips candidate
+    // outputs entirely (size=0 => no active entry => no double-free).
+    //
+    // When a unary elementwise node's input has no other consumers after
+    // this node, and the output is not a graph output, reuse the input's
+    // buffer instead of allocating a new one.  This reduces arena size.
+    //
+    // We do NOT reuse buffers of Input nodes -- the autograd backward pass
+    // reads forward inputs directly, and sharing the input's buffer with
+    // the elementwise output can cause subtle data-race-like issues.
+    //
+    // IMPORTANT: This analysis MUST run before the allocation loop below.
+    // The original code ran it after allocation, which caused a double-free
+    // + buffer-overlap bug: the allocation loop committed separate buffers
+    // for both input and candidate, then the reuse pass changed the
+    // candidate's offset to the input's -- but the candidate's original
+    // buffer may have already been freed and reassigned to a different node
+    // during the loop.  Both the candidate and that other node would then
+    // write to the same arena offset, corrupting each other's data.
+    let unary_elementwise_ops: &[Opcode] = &[
+        Opcode::Relu,
+        Opcode::Gelu,
+        Opcode::Silu,
+        Opcode::Sigmoid,
+        Opcode::Tanh,
+        Opcode::Exp,
+        Opcode::Log,
+        Opcode::Sqrt,
+        Opcode::Neg,
+        Opcode::Abs,
+        Opcode::LeakyRelu,
+        Opcode::Elu,
+        Opcode::Softplus,
+        Opcode::Hardswish,
+        Opcode::Clamp,
+        Opcode::Sign,
+        Opcode::LogicalNot,
+        Opcode::LogSoftmax,
+        Opcode::Mish,
+        Opcode::Erf,
+        Opcode::ToF16,
+        Opcode::ToF32,
+        Opcode::Cast,
+    ];
+    struct ReuseCandidate {
+        node_id: NodeId,
+        input_id: NodeId,
+        output_last_use: usize,
+        ai_idx: usize,
+    }
+    let mut reuse_candidates: Vec<ReuseCandidate> = Vec::new();
+    for ai_idx in 0..alloc_infos.len() {
+        let info = &alloc_infos[ai_idx];
+        if info.is_secondary {
+            continue;
+        }
+        let node = match graph.get_node(info.node_id) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !unary_elementwise_ops.contains(&node.opcode) || node.inputs.len() != 1 {
+            continue;
+        }
+        if graph.outputs.contains(&info.node_id) {
+            continue;
+        }
+        let input_id = node.inputs[0];
+        // Skip Input nodes -- their buffer is used directly by the executor
+        // and sharing it can interfere with autograd backward reads.
+        if let Some(input_node) = graph.get_node(input_id) {
+            if matches!(input_node.opcode, Opcode::Input) {
+                continue;
+            }
+        }
+        let input_type = match graph.get_node(input_id) {
+            Some(n) => &n.output_type,
+            None => continue,
+        };
+        let input_size = tensor_byte_size(input_type, shape_env);
+        if input_size != info.size || input_size == 0 {
+            continue;
+        }
+        let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
+        let consumers = graph.consumers(input_id);
+        let has_consumer_after = consumers
+            .iter()
+            .any(|&cid| cid != info.node_id && position.get(&cid).copied().unwrap_or(0) > node_pos);
+        if has_consumer_after {
+            continue;
+        }
+        reuse_candidates.push(ReuseCandidate {
+            node_id: info.node_id,
+            input_id,
+            output_last_use: info.live_range.1,
+            ai_idx,
+        });
+    }
+    // Extend input lifetimes to cover the candidate's output lifetime.
+    // Because this runs BEFORE the allocation loop, the active-list
+    // entries will use the correct (extended) end positions.
+    for cand in &reuse_candidates {
+        if let Some(input_info) = alloc_infos
+            .iter_mut()
+            .find(|ai| ai.node_id == cand.input_id && !ai.is_secondary)
+        {
+            input_info.live_range.1 = input_info.live_range.1.max(cand.output_last_use);
+        }
+    }
+    // Zero candidate sizes so the allocation loop creates NO slots /
+    // active entries for them.  The post-loop pass below creates
+    // candidate slots that point to the input's slot.
+    for cand in &reuse_candidates {
+        if let Some(info) = alloc_infos.get_mut(cand.ai_idx) {
+            info.size = 0;
+        }
+    }
 
     let mut slots: HashMap<NodeId, AllocSlot> = HashMap::new();
     let mut secondary_slots: HashMap<(NodeId, usize), AllocSlot> = HashMap::new();
@@ -440,7 +556,7 @@ pub fn plan_memory_with_env(
                 // IMPORTANT: only free the slot that corresponds to this
                 // specific active entry.  When a node has both a primary and
                 // a secondary output (e.g. MaxPool), two separate entries
-                // are pushed to `active` — one for each.  Freeing both slots
+                // are pushed to `active` -- one for each.  Freeing both slots
                 // on every expiry would double-free the same memory region
                 // into the free list, creating duplicate entries that let
                 // the allocator hand out overlapping addresses for different
@@ -457,14 +573,14 @@ pub fn plan_memory_with_env(
             }
         }
 
-        // Round up size to 8 bytes so all allocations start at 8-byte
-        // aligned offsets (satisfies both f32 4-byte and i64 8-byte alignment).
-        let size_aligned = align_up(info.size, 8);
+        // Round up to 64 bytes (cache line alignment) so all allocations
+        // satisfy both SIMD (32-byte) alignment and cache line boundaries.
+        let size_aligned = align_up(info.size, 64);
 
         let offset = match free_list.alloc(size_aligned) {
             Some(off) => off,
             None => {
-                let off = align_up(arena_top, 8);
+                let off = align_up(arena_top, 64);
                 arena_top = off + size_aligned;
                 off
             }
@@ -487,16 +603,43 @@ pub fn plan_memory_with_env(
             };
             secondary_slots.insert((info.node_id, 1), sec_slot);
         } else {
-            // Primary output — use the main slot
+            // Primary output -- use the main slot
             slots.insert(info.node_id, slot);
         }
 
-        active.push((
-            info.live_range.1,
-            info.node_id,
-            info.size,
-            info.is_secondary,
-        ));
+        if info.size > 0 {
+            active.push((
+                info.live_range.1,
+                info.node_id,
+                info.size,
+                info.is_secondary,
+            ));
+        }
+    }
+
+    // ── Post-allocation: create reuse slots pointing to input offsets ──
+    // The pre-loop analysis set candidate sizes to 0, so the allocation
+    // loop skipped them -- no slots or active entries were created.
+    // Here we create a slot for each candidate that points to the input's
+    // buffer (same offset + size).  Because no active entry exists for the
+    // candidate, the slot is never freed by the loop's expiry code, and
+    // the input's extended lifetime (set by the pre-loop analysis) ensures
+    // the shared buffer stays alive until the candidate's last consumer.
+    //
+    // Candidates are sorted by topological position so chain reuse works:
+    // A->B->C, B gets its slot before C looks up B's slot.
+    let mut sorted_candidates: Vec<&ReuseCandidate> = reuse_candidates.iter().collect();
+    sorted_candidates.sort_by_key(|c| position.get(&c.node_id).copied().unwrap_or(0));
+    for cand in &sorted_candidates {
+        if let Some(input_slot) = slots.get(&cand.input_id) {
+            let slot = AllocSlot {
+                offset: input_slot.offset,
+                size: input_slot.size,
+                node_id: cand.node_id,
+                output_index: 0,
+            };
+            slots.insert(cand.node_id, slot);
+        }
     }
 
     Ok(MemoryPlan {

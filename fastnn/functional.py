@@ -4,6 +4,8 @@ Provides stateless functions for common neural network operations.
 All functions work with fastnn.Tensor objects.
 """
 
+from functools import lru_cache
+
 import fastnn
 from fastnn import Tensor
 
@@ -105,11 +107,15 @@ def log_softmax(x: Tensor, dim: int = -1) -> Tensor:
 
 # --- Convolution ---
 
+@lru_cache(maxsize=128)
+def _get_conv2d(in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1):
+    return fastnn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, False)
+
 def conv2d(x: Tensor, weight: Tensor, bias=None, stride=1, padding=0, dilation=1, groups=1) -> Tensor:
     """Applies a 2D convolution over an input signal."""
-    conv = fastnn.Conv2d(
+    conv = _get_conv2d(
         weight.shape[1] * groups, weight.shape[0],
-        weight.shape[2], stride, padding, dilation, groups, False
+        weight.shape[2], stride, padding, dilation, groups
     )
     conv.set_weight(weight)
     if bias is not None:
@@ -117,9 +123,13 @@ def conv2d(x: Tensor, weight: Tensor, bias=None, stride=1, padding=0, dilation=1
     return conv(x)
 
 
+@lru_cache(maxsize=128)
+def _get_conv1d(in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=False):
+    return fastnn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
+
 def conv1d(x: Tensor, weight: Tensor, bias=None, stride=1, padding=0, dilation=1, groups=1) -> Tensor:
     """Applies a 1D convolution over an input signal."""
-    conv = fastnn.Conv1d(
+    conv = _get_conv1d(
         weight.shape[1] * groups, weight.shape[0],
         weight.shape[2], stride, padding, dilation, groups, bias is not None
     )
@@ -231,9 +241,13 @@ def dropout(x: Tensor, p: float = 0.5, training: bool = True) -> Tensor:
 
 # --- Linear ---
 
+@lru_cache(maxsize=128)
+def _get_linear(in_features, out_features, bias=False):
+    return fastnn.Linear(in_features, out_features, bias)
+
 def linear(x: Tensor, weight: Tensor, bias=None) -> Tensor:
     """Applies a linear transformation."""
-    lin = fastnn.Linear(weight.shape[1], weight.shape[0], bias is not None)
+    lin = _get_linear(weight.shape[1], weight.shape[0], bias is not None)
     lin.set_weight(weight)
     if bias is not None:
         lin.set_bias(bias)
@@ -259,13 +273,32 @@ def interpolate(x: Tensor, size=None, scale_factor=None, mode='nearest') -> Tens
 # --- Padding ---
 
 def pad(x: Tensor, pad_width, mode='constant', value=0.0):
-    """Pad tensor (basic implementation using slice and fill)."""
-    # Only a simple constant-pad implementation for now
-    if mode != 'constant':
-        raise NotImplementedError(f"Padding mode '{mode}' not implemented")
+    """Pad a tensor.
+
+    Args:
+        x: input tensor
+        pad_width: list of (before, after) padding for each dim, or int for all dims
+        mode: padding mode ('constant', 'reflect', 'replicate')
+        value: fill value for constant padding
+    """
+    # Convert pad_width to list of tuples
     if isinstance(pad_width, int):
-        pad_width = [pad_width]
-    # pad_width format: [left, right, top, bottom, front, back, ...]
-    # For 4D [N, C, H, W] input with pad=[left, right, top, bottom]:
-    # This is a placeholder that returns the input unchanged for now.
-    return x
+        pad_width = [(pad_width, pad_width)] * x.ndim
+    elif isinstance(pad_width, (list, tuple)) and len(pad_width) > 0:
+        if isinstance(pad_width[0], int):
+            # Flat list, group into pairs
+            pad_width = [(pad_width[i], pad_width[i+1]) for i in range(0, len(pad_width), 2)]
+
+    # Compute output shape
+    out_shape = []
+    for i, (before, after) in enumerate(pad_width):
+        out_shape.append(x.shape[i] + before + after)
+
+    if mode == 'constant':
+        result = _core.full(out_shape, value, dtype=x.dtype, device=x.device)
+        # Copy x into the center
+        slices = tuple(slice(before, before + x.shape[i]) for i in range(x.ndim))
+        result[slices] = x
+        return result
+
+    raise NotImplementedError(f"pad mode '{mode}' not implemented")

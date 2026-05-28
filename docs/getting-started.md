@@ -32,38 +32,31 @@ X = fnn.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], [4, 2])
 y = fnn.tensor([0.0, 1.0, 1.0, 0.0], [4, 1])
 
 # Build model
-model = fnn.models.MLP(
-    input_dim=2, 
-    hidden_dims=[16, 16], 
-    output_dim=1, 
-    activation="relu"
+model = fnn.Sequential(
+    fnn.Linear(2, 16),
+    fnn.ReLU(),
+    fnn.Linear(16, 1),
 )
 
 # Create optimizer
 optimizer = fnn.Adam(model.parameters(), lr=1e-2)
 
-# Prepare data
-ds = fnn.TensorDataset(X, y)
-loader = fnn.DataLoader(ds, batch_size=4, shuffle=True)
-
 # Training loop
 model.train()
 for epoch in range(100):
-    total_loss = 0
-    for batch_x, batch_y in loader:
-        pred = model(batch_x)
-        loss = fnn.mse_loss(pred, batch_y)
-        total_loss += loss.item()
-        
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+    pred = model(X)
+    loss = fnn.mse_loss(pred, y)
+    
+    # Backward pass
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
     
     if epoch % 20 == 0:
-        print(f"Epoch {epoch}: loss = {total_loss / len(loader):.4}")
+        print(f"Epoch {epoch}: loss = {loss.item():.4}")
 
 # Inference
+model.eval()
 with fnn.no_grad():
     preds = model(X)
     print("Predictions:", preds.numpy().round(2))
@@ -122,20 +115,18 @@ The typical training loop in FastNN:
 4. Optimizer step: update parameters
 5. Zero gradients
 
-### Packed Precision (Quantized Inference)
+### Quantized Inference (AOT Compiler Pass)
 
-FastNN stores weights in packed u32 words for 4×–8× memory savings and up to 7.4× GEMV speedup over PyTorch f32:
+Weight quantization is handled by the AOT compiler as a compile-time pass — not through separate layer types. Enable 4-bit or 8-bit quantization when compiling an ONNX model:
 
 ```python
-import fastnn as fnn
+from fastnn.io import AotExecutor
 
-# Create packed linear layers (4-bit, 8-bit, 16-bit, or 32-bit)
-layer4 = fnn.Linear4(128, 64)   # 4-bit packed weights
-layer8 = fnn.Linear8(128, 64)   # 8-bit packed weights
-
-# Create packed tensors from f32 data
-pt = fnn.packed_tensor_from_f32([0.5, -1.2, 3.7, ...], shape=[64, 128], dtype="u4")
+executor = AotExecutor(nodes, params, input_names, output_names, quantize=4)
+output = executor.forward({"input": tensor})
 ```
+
+This replaces eligible `MatMul` and `Conv2d` weight nodes with packed U4/U8 variants carrying per-channel scale and zero-point metadata. Dequantization is fused into the GEMM/conv kernels.
 
 ### ONNX Model Import
 
@@ -147,11 +138,11 @@ import fastnn as fnn
 # Import ONNX model
 info = fnn.convert_from_onnx("model.onnx", "model.fnn")
 
-# Build and run
+# Build and run (auto-detects model provenance)
 model = fnn.build_model_from_fnn("model.fnn")
 output = model(input_tensor)
 
-# Or use the YOLO wrapper directly
+# Or use the YOLO wrapper directly for object detection
 model = fnn.YOLO("yolov8n.onnx")
 detections = model("image.jpg")
 ```

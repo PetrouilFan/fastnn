@@ -3,21 +3,10 @@ import numpy as np
 import os
 import tempfile
 
-pytest_importorskip = None
-try:
-    import pytest
-except ImportError:
-    pass
-else:
-    pytest_importorskip = pytest.importorskip
-
-skip_msg = "onnx not installed, skipping"
-
-try:
-    import onnx
-    from onnx import helper, TensorProto
-except ImportError:
-    onnx = None
+import pytest
+pytest.importorskip("onnx", reason="onnx package not installed")
+import onnx
+from onnx import helper, TensorProto
 
 
 def create_qdq_conv_model():
@@ -55,9 +44,6 @@ def create_qdq_conv_model():
 
 def test_qdq_folding():
     """Test that Q/DQ pattern is detected and folded by import_onnx."""
-    if onnx is None:
-        print(f"SKIP: {skip_msg}")
-        return
     from fastnn.io.onnx import import_onnx
     onnx_path = create_qdq_conv_model()
     fnn_path = os.path.join(tempfile.gettempdir(), 'qdq_conv.fnn')
