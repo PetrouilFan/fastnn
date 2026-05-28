@@ -1,8 +1,10 @@
+use crate::autograd;
 use crate::tensor::Tensor;
 use crate::{
     impl_training_state,
     nn::{clear_grad, Module, TrainingState},
 };
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Embedding {
@@ -16,7 +18,7 @@ pub struct Embedding {
 
 impl Embedding {
     pub fn new(num_embeddings: i64, embedding_dim: i64) -> Self {
-        let scale = 0.05;
+        let scale = (1.0 / (embedding_dim as f32).sqrt()).min(0.05);
         let weight_data: Vec<f32> = (0..num_embeddings * embedding_dim)
             .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
             .collect();
@@ -34,13 +36,24 @@ impl Embedding {
 
 impl Module for Embedding {
     fn forward(&self, indices: &Tensor) -> Tensor {
-        Tensor::exec_aot(&[&self.weight, indices], |g, ins| {
+        let mut output = Tensor::exec_aot(&[&self.weight, indices], |g, ins| {
             vec![g.embedding(&ins[0], &ins[1])]
         })
         .expect("Embedding::forward: AOT failed")
         .into_iter()
         .next()
-        .unwrap()
+        .unwrap();
+
+        // Attach autograd so gradients flow to the weight
+        if self.weight.requires_grad() {
+            let inputs = vec![self.weight.clone(), indices.clone()];
+            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(autograd::make_node_info("EmbeddingBackward", inputs));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
+        }
+
+        output
     }
 
     fn parameters(&self) -> Vec<Tensor> {

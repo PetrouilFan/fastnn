@@ -1,13 +1,12 @@
 /// Helper to wrap loss function output with autograd support
-fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
+fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, _backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
     if autograd::is_grad_enabled() && input.requires_grad() {
-        let _edges = autograd::make_edge(input);
-        let backward = backward_fn();
+        let inputs = vec![input.clone()];
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-        meta.grad_fn = Some(backward);
+        meta.grad_fn = Some(crate::autograd::make_node_info("LossBackward", inputs));
         let mut output = output;
         Arc::make_mut(&mut output.inner).autograd_meta =
-            Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+            Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
         PyTensor::from_tensor(output)
     } else {
         PyTensor::from_tensor(output)
@@ -20,7 +19,12 @@ fn reduce_mean_all(t: &Tensor) -> Tensor {
     for _ in 0..ndim {
         result = result.mean(0, false);
     }
-    result
+    // Keep Python scalar reductions as rank-1 tensors for the public API.
+    if result.shape().is_empty() {
+        result.reshape(vec![1])
+    } else {
+        result
+    }
 }
 
 fn reduce_sum_all(t: &Tensor) -> Tensor {
@@ -28,6 +32,33 @@ fn reduce_sum_all(t: &Tensor) -> Tensor {
     let mut result = t.clone();
     for _ in 0..ndim {
         result = result.sum(0, false);
+    }
+    // Keep Python scalar reductions as rank-1 tensors for the public API.
+    if result.shape().is_empty() {
+        result.reshape(vec![1])
+    } else {
+        result
+    }
+}
+
+fn reduce_max_all(t: &Tensor) -> Tensor {
+    let ndim = t.ndim();
+    let mut result = t.clone();
+    for _ in 0..ndim {
+        result = result.max(0, false);
+    }
+    result
+}
+
+fn reduce_min_all(t: &Tensor) -> Tensor {
+    // Decompose min(x) = -max(-x). This is correct for all finite f32 inputs.
+    // For inputs near the negation boundary (~-3.4e38), negation may overflow to
+    // +inf, producing an incorrect -inf result. A native ReduceMin op would avoid
+    // this, but the IR currently only has ReduceMax.
+    let ndim = t.ndim();
+    let mut result = t.clone();
+    for _ in 0..ndim {
+        result = result.neg().max(0, false).neg();
     }
     result
 }
@@ -59,8 +90,7 @@ macro_rules! unary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
         fn $name(a: &PyTensor) -> PyTensor {
-            let a_inner = a.inner.clone();
-            PyTensor::from_tensor(a_inner.$method())
+            PyTensor::from_tensor(a.inner.$method())
         }
     };
 }
@@ -70,9 +100,7 @@ macro_rules! binary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
         fn $name(a: &PyTensor, b: &PyTensor) -> PyTensor {
-            let a_inner = a.inner.clone();
-            let b_inner = b.inner.clone();
-            PyTensor::from_tensor(a_inner.$method(&b_inner))
+            PyTensor::from_tensor(a.inner.$method(&b.inner))
         }
     };
 }
@@ -84,20 +112,18 @@ macro_rules! arg_op {
         #[pyo3(signature = (a, dim = None))]
         fn $name(a: &PyTensor, dim: Option<i32>) -> PyTensor {
             let dim = dim.unwrap_or(0) as usize;
-            let a_inner = a.inner.clone();
-            PyTensor::from_tensor(a_inner.$method(Some(dim)))
+            PyTensor::from_tensor(a.inner.$method(Some(dim)))
         }
     };
 }
 
 #[pyfunction]
 fn full_like(tensor: &PyTensor, value: f32) -> PyTensor {
-    let t_inner = tensor.inner.clone();
     PyTensor::from_tensor(Tensor::full(
-        t_inner.shape(),
+        tensor.inner.shape(),
         value,
-        t_inner.dtype(),
-        t_inner.device(),
+        tensor.inner.dtype(),
+        tensor.inner.device(),
     ))
 }
 
@@ -109,19 +135,14 @@ binary_op!(div, div);
 
 #[pyfunction]
 fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = b.inner.clone();
-    PyTensor::from_tensor(a_inner.add(&b_inner).relu())
+    PyTensor::from_tensor(a.inner.add(&b.inner).relu())
 }
 
 #[pyfunction]
 fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    let x_inner = x.inner.clone();
-    let w_inner = w.inner.clone();
-    let b_inner = bias.map(|b| b.inner.clone());
-    let out = x_inner.matmul(&w_inner);
-    let out = match &b_inner {
-        Some(b) => out.add(b),
+    let out = x.inner.matmul(&w.inner);
+    let out = match bias {
+        Some(b) => out.add(&b.inner),
         None => out,
     };
     PyTensor::from_tensor(out.relu())
@@ -129,12 +150,9 @@ fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyT
 
 #[pyfunction]
 fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    let x_inner = x.inner.clone();
-    let w_inner = w.inner.clone();
-    let b_inner = bias.map(|b| b.inner.clone());
-    let out = x_inner.matmul(&w_inner);
-    let out = match &b_inner {
-        Some(b) => out.add(b),
+    let out = x.inner.matmul(&w.inner);
+    let out = match bias {
+        Some(b) => out.add(&b.inner),
         None => out,
     };
     PyTensor::from_tensor(out.gelu())
@@ -188,9 +206,7 @@ fn fused_conv_bn_silu(
 
 #[pyfunction]
 fn matmul(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = b.inner.clone();
-    PyTensor::from_tensor(a_inner.matmul(&b_inner))
+    PyTensor::from_tensor(a.inner.matmul(&b.inner))
 }
 
 #[pyfunction]
@@ -241,88 +257,82 @@ unary_op!(silu, silu);
 #[pyfunction]
 #[pyo3(signature = (a, negative_slope = 0.01))]
 fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.leaky_relu(negative_slope))
+    PyTensor::from_tensor(a.inner.leaky_relu(negative_slope))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, alpha = 1.0))]
 fn elu(a: &PyTensor, alpha: f32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.elu(alpha))
+    PyTensor::from_tensor(a.inner.elu(alpha))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, beta = 1.0, threshold = 20.0))]
 fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.softplus(beta, threshold))
+    PyTensor::from_tensor(a.inner.softplus(beta, threshold))
 }
 
 #[pyfunction]
 fn hardswish(a: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.hardswish())
+    PyTensor::from_tensor(a.inner.hardswish())
 }
 
 #[pyfunction]
 fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.softmax(dim))
+    PyTensor::from_tensor(a.inner.softmax(dim))
 }
 
 #[pyfunction]
 fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.log_softmax(dim))
+    PyTensor::from_tensor(a.inner.log_softmax(dim))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a_inner.sum(d, keepdim))
+    match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.sum(d, keepdim)),
+        None => PyTensor::from_tensor(reduce_sum_all(&a.inner)),
+    }
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a_inner.mean(d, keepdim))
+    match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.mean(d, keepdim)),
+        None => PyTensor::from_tensor(reduce_mean_all(&a.inner)),
+    }
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a_inner.max(d, keepdim))
+    match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.max(d, keepdim)),
+        None => PyTensor::from_tensor(reduce_max_all(&a.inner)),
+    }
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
 fn maximum(a: &PyTensor, other: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = other.inner.clone();
-    PyTensor::from_tensor(a_inner.maximum(&b_inner))
+    PyTensor::from_tensor(a.inner.maximum(&other.inner))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
 fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let b_inner = other.inner.clone();
-    PyTensor::from_tensor(a_inner.minimum(&b_inner))
+    PyTensor::from_tensor(a.inner.minimum(&other.inner))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
 fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    let a_inner = a.inner.clone();
-    let d = dim.unwrap_or(0);
-    PyTensor::from_tensor(a_inner.neg().max(d, keepdim).neg())
+    match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.neg().max(d, keepdim).neg()),
+        None => PyTensor::from_tensor(reduce_min_all(&a.inner)),
+    }
 }
 
 // Argmax and argmin using macro
@@ -400,10 +410,6 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
     let inputs_inner: Vec<Tensor> = inputs.iter().map(|p| p.inner.clone()).collect();
     let requires_grad = inputs.iter().any(|p| p.inner.requires_grad());
 
-    if !requires_grad || !autograd::is_grad_enabled() {
-        return Ok(inputs);
-    }
-
     let num_inputs = inputs_inner.len();
     let forward_fn = fn_name.to_string();
 
@@ -411,71 +417,27 @@ fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
     let output_tensor = checkpoint_op(&forward_fn, &inputs_refs)?;
     let output = PyTensor::from_tensor(output_tensor);
 
+    // When grad is disabled, just return the computed outputs
+    // (not the inputs! — we must still compute and return results).
+    if !requires_grad || !autograd::is_grad_enabled() {
+        return Ok(vec![output]);
+    }
+
     let output_inner = output.inner.clone();
 
     if output_inner.requires_grad() {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-        let edges = autograd::make_edge(&inputs[0].inner);
-        meta.grad_fn = Some(std::sync::Arc::new(checkpoint_impl::CheckpointNode::new(
-            forward_fn,
-            inputs_inner,
-            edges,
-        )));
+        meta.grad_fn = Some(autograd::make_node_info("CheckpointBackward", inputs_inner));
         let mut out = output_inner.clone();
         Arc::make_mut(&mut out.inner).autograd_meta =
-            Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+            Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
         let mut result = vec![PyTensor::from_tensor(out)];
         for i in 1..num_inputs {
             result.push(inputs[i].clone());
         }
         Ok(result)
     } else {
-        Ok(inputs)
-    }
-}
-
-mod checkpoint_impl {
-    use super::{checkpoint_op, Tensor};
-    use crate::autograd::{Edge, Node};
-
-    pub struct CheckpointNode {
-        pub fn_name: String,
-        pub inputs: Vec<Tensor>,
-        pub edges: Vec<Edge>,
-    }
-
-    impl CheckpointNode {
-        pub fn new(fn_name: String, inputs: Vec<Tensor>, edges: Vec<Edge>) -> Self {
-            CheckpointNode {
-                fn_name,
-                inputs,
-                edges,
-            }
-        }
-    }
-
-    impl Node for CheckpointNode {
-        fn apply(&self, grad_outputs: Vec<Option<Tensor>>, _output_tensor_id: usize) -> Vec<Option<Tensor>> {
-            let args: Vec<&Tensor> = self.inputs.iter().collect();
-            let _ = checkpoint_op(&self.fn_name, &args);
-            grad_outputs.into_iter().collect()
-        }
-
-        fn next_edges(&self) -> &[Edge] {
-            &self.edges
-        }
-
-        fn num_inputs(&self) -> usize {
-            self.inputs.len()
-        }
-
-        fn name(&self) -> &str {
-            "CheckpointBackward"
-        }
-
-        fn inputs(&self) -> &[Tensor] {
-            &self.inputs
-        }
+        Ok(vec![output])
     }
 }
 
@@ -489,12 +451,16 @@ use rayon::ThreadPoolBuilder;
 
 #[pyfunction]
 #[cfg(feature = "parallel")]
-fn _set_num_threads(n: i32) {
+fn _set_num_threads(n: i32) -> PyResult<()> {
     if n > 0 {
         ThreadPoolBuilder::new()
             .num_threads(n as usize)
             .build_global()
-            .expect("Failed to set rayon thread pool");
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+                format!("Failed to set num threads: {}", e)
+            ))
+    } else {
+        Ok(())
     }
 }
 
@@ -506,7 +472,7 @@ fn _get_num_threads() -> usize {
 
 #[pyfunction]
 #[cfg(not(feature = "parallel"))]
-fn _set_num_threads(_n: i32) {}
+fn _set_num_threads(_n: i32) -> PyResult<()> { Ok(()) }
 
 #[pyfunction]
 #[cfg(not(feature = "parallel"))]
@@ -547,8 +513,7 @@ fn clamp(a: &PyTensor, min_val: f32, max_val: f32) -> PyTensor {
 
 #[pyfunction]
 fn pow(a: &PyTensor, exponent: f32) -> PyTensor {
-    let a_inner = a.inner.clone();
-    PyTensor::from_tensor(a_inner.pow(exponent))
+    PyTensor::from_tensor(a.inner.pow(exponent))
 }
 
 #[pyfunction]
@@ -652,45 +617,43 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTen
 // Tensor manipulation ops
 #[pyfunction]
 fn where_(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyTensor {
-    let x_inner = x.inner.clone();
-    let c_inner = condition.inner.clone();
-    let y_inner = y.inner.clone();
-    PyTensor::from_tensor(x_inner.where_tensor(&c_inner, &y_inner))
+    PyTensor::from_tensor(x.inner.where_tensor(&condition.inner, &y.inner))
 }
 
 #[pyfunction]
 fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.repeat(&repeats))
+    PyTensor::from_tensor(tensor.inner.repeat(&repeats))
 }
 
 #[pyfunction]
 fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.expand(shape))
+    PyTensor::from_tensor(tensor.inner.expand(shape))
 }
 
 #[pyfunction]
 #[pyo3(signature = (tensor, dim, start, end, step = 1))]
 fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.slice(dim, start, end, step))
+    PyTensor::from_tensor(tensor.inner.slice(dim, start, end, step))
 }
 
 #[pyfunction]
-fn topk(tensor: &PyTensor, _k: i64, dim: i64) -> (PyTensor, PyTensor) {
-    let t_inner = tensor.inner.clone();
-    let values = t_inner.max(dim as i32, false);
-    let indices = t_inner.argmax(Some(dim as usize));
-    (PyTensor::from_tensor(values), PyTensor::from_tensor(indices))
+fn topk(tensor: &PyTensor, k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
+    let ndim = tensor.inner.ndim() as i64;
+    let norm_dim = if dim < 0 { ndim + dim } else { dim };
+    let outputs = Tensor::exec_aot(&[&tensor.inner], |g, ins| {
+        let (values, indices) = g.topk(&ins[0], k as usize, norm_dim);
+        vec![values, indices]
+    })
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
+        format!("Tensor::topk: AOT execution failed: {}", e)
+    ))?;
+    Ok((PyTensor::from_tensor(outputs[0].clone()), PyTensor::from_tensor(outputs[1].clone())))
 }
 
 #[pyfunction]
 #[pyo3(signature = (tensor, axis, indices))]
 fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    let i_inner = indices.inner.clone();
-    PyTensor::from_tensor(t_inner.gather(axis, &i_inner))
+    PyTensor::from_tensor(tensor.inner.gather(axis, &indices.inner))
 }
 
 #[pyfunction]
@@ -709,8 +672,17 @@ fn im2col(
     padding: i64,
     dilation: i64,
 ) -> PyResult<PyTensor> {
-    let x_inner = &x.inner;
-    let shape = x_inner.shape();
+    // Ensure the tensor is on CPU before accessing raw data pointer
+    let x_cpu = {
+        #[cfg(feature = "gpu")]
+        if matches!(x.inner.device(), crate::storage::Device::Wgpu(_)) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "im2col does not support GPU tensors; call .cpu() first"
+            ));
+        }
+        x.inner.clone()
+    };
+    let shape = x_cpu.shape();
     if shape.len() != 4 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "Input must be a 4D tensor (N, C, H, W)",
@@ -730,19 +702,33 @@ fn im2col(
     let out_height = (in_height + 2 * padding_us - kernel_h) / stride_us + 1;
     let out_width = (in_width + 2 * padding_us - kernel_w) / stride_us + 1;
 
-    let col_tensor = unsafe {
-        crate::backend::cpu::im2col::im2col_kernel(
-            x_inner,
-            kernel_h,
-            kernel_w,
-            stride_us,
-            padding_us,
-            dilation_us,
-            out_height,
-            out_width,
-        )
-    };
-
+    let batch = shape[0] as usize;
+    let c = shape[1] as usize;
+    let h = shape[2] as usize;
+    let w = shape[3] as usize;
+    let col_rows = batch * out_height * out_width;
+    let col_cols = c * kernel_h * kernel_w;
+    let mut col_data = vec![0.0f32; col_rows * col_cols];
+    let x_data =
+        unsafe { std::slice::from_raw_parts(x_cpu.data_ptr_f32(), batch * c * h * w) };
+    for n in 0..batch {
+        let input_off = n * (c * h * w);
+        let col_off = n * out_height * out_width * col_cols;
+        unsafe {
+            crate::backend::cpu::im2col::im2col_kernel(
+                &x_data[input_off..input_off + c * h * w],
+                c,
+                h,
+                w,
+                kernel_h,
+                stride_us,
+                padding_us,
+                dilation_us,
+                &mut col_data[col_off..col_off + out_height * out_width * col_cols],
+            );
+        }
+    }
+    let col_tensor = Tensor::from_vec(col_data, vec![col_rows as i64, col_cols as i64]);
     Ok(PyTensor::from_tensor(col_tensor))
 }
 
@@ -756,33 +742,32 @@ fn flash_attention(
     scale: Option<f32>,
     causal: Option<bool>,
 ) -> PyTensor {
-    let q_inner = q.inner.clone();
-    let k_inner = k.inner.clone();
-    let v_inner = v.inner.clone();
     PyTensor::from_tensor(
         crate::backend::cpu::flash_attn::flash_attention(
-            &q_inner, &k_inner, &v_inner, scale, causal.unwrap_or(false),
+            &q.inner, &k.inner, &v.inner, scale, causal.unwrap_or(false),
         )
     )
 }
 
 #[pyfunction]
 fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.cumsum(dim, exclusive, reverse))
+    PyTensor::from_tensor(tensor.inner.cumsum(dim, exclusive, reverse))
 }
 
 #[pyfunction]
 fn erf(tensor: &PyTensor) -> PyTensor {
-    let t_inner = tensor.inner.clone();
-    PyTensor::from_tensor(t_inner.erf())
+    PyTensor::from_tensor(tensor.inner.erf())
 }
 
 #[allow(dead_code)]
 #[pyfunction]
 fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
-    let t_inner = tensor.inner.clone();
-    t_inner.nonzero()
+    let flat = tensor.inner.nonzero();
+    let ndim = tensor.inner.shape_ref().len();
+    if ndim == 0 {
+        return Vec::new();
+    }
+    flat.chunks(ndim).map(|c| c.to_vec()).collect()
 }
 
 #[pyfunction]

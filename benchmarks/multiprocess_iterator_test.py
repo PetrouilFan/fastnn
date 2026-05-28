@@ -13,7 +13,7 @@ class SlowDataset:
         return 32
     
     def __getitem__(self, idx):
-        slow_fetch(idx)
+        time.sleep(0.01)
         return fnn.randn([3, 32, 32]), idx
 
 if __name__ == "__main__":

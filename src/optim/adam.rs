@@ -1,9 +1,6 @@
-use crate::optim::{
-    zeros_like, Optimizer, OptimizerState, ParamGroup, ParamState, WeightDecayOptimizer,
-};
+use crate::optim::{zeros_like, Optimizer, WeightDecayOptimizer};
 use crate::tensor::Tensor;
-use crate::{get_grad_or_skip, impl_params_mut};
-use std::collections::HashMap;
+use crate::{get_grad_or_skip, impl_optim_boilerplate, impl_params_mut, impl_weight_decay};
 
 pub struct Adam {
     pub params: Vec<Tensor>,
@@ -52,15 +49,7 @@ impl Adam {
 }
 
 impl WeightDecayOptimizer for Adam {
-    fn params(&self) -> &Vec<Tensor> {
-        &self.params
-    }
-    fn no_decay(&self) -> &Vec<bool> {
-        &self.no_decay
-    }
-    fn no_decay_mut(&mut self) -> &mut Vec<bool> {
-        &mut self.no_decay
-    }
+    impl_weight_decay!();
 }
 
 impl Optimizer for Adam {
@@ -73,99 +62,61 @@ impl Optimizer for Adam {
         let eps = self.eps as f32;
         let weight_decay = self.weight_decay as f32;
 
-        for (i, param) in self.params.iter_mut().enumerate() {
-            let grad = get_grad_or_skip!(param);
+        if self.amsgrad {
+            // AMSGrad not supported by fused kernel — use decomposed path
+            for (i, param) in self.params.iter_mut().enumerate() {
+                let grad = get_grad_or_skip!(param);
 
-            self.step[i] += 1;
-            let bias_correction1 = 1.0 - self.betas.0.powi(self.step[i] as i32);
-            let bias_correction2 = 1.0 - self.betas.1.powi(self.step[i] as i32);
+                self.step[i] += 1;
+                let bias_correction1 = 1.0 - self.betas.0.powi(self.step[i] as i32);
+                let bias_correction2 = 1.0 - self.betas.1.powi(self.step[i] as i32);
 
-            // m = beta1 * m + (1 - beta1) * grad
-            let beta1_c = 1.0 - beta1;
-            let m_update = grad.mul_scalar(beta1_c);
-            self.m[i].mul_scalar_(beta1).add_(&m_update);
+                let beta1_c = 1.0 - beta1;
+                let m_update = grad.mul_scalar(beta1_c);
+                self.m[i].mul_scalar_(beta1).add_(&m_update);
 
-            // v = beta2 * v + (1 - beta2) * grad^2
-            let grad_sq = grad.mul(&grad);
-            let beta2_c = 1.0 - beta2;
-            let v_update = grad_sq.mul_scalar(beta2_c);
-            self.v[i].mul_scalar_(beta2).add_(&v_update);
+                let grad_sq = grad.mul(&grad);
+                let beta2_c = 1.0 - beta2;
+                let v_update = grad_sq.mul_scalar(beta2_c);
+                self.v[i].mul_scalar_(beta2).add_(&v_update);
 
-            // m_hat = m / bias_correction1
-            let mut m_hat = self.m[i].div_scalar(bias_correction1 as f32);
+                let mut m_hat = self.m[i].div_scalar(bias_correction1 as f32);
+                let v_hat = if self.amsgrad {
+                    let max_v = self.v_hat[i].maximum(&self.v[i]);
+                    self.v_hat[i] = max_v.clone();
+                    max_v.div_scalar(bias_correction2 as f32)
+                } else {
+                    self.v[i].clone().div_scalar(bias_correction2 as f32)
+                };
 
-            // v_hat = v / bias_correction2 (with optional amsgrad)
-            let v_hat = if self.amsgrad {
-                let max_v = self.v_hat[i].maximum(&self.v[i]);
-                self.v_hat[i] = max_v.clone();
-                max_v.div_scalar(bias_correction2 as f32)
-            } else {
-                self.v[i].clone().div_scalar(bias_correction2 as f32)
-            };
+                let denom = v_hat.sqrt().add_scalar(eps);
+                let update = m_hat.div_(&denom).mul_scalar(lr);
+                param.sub_(&update);
 
-            // update = m_hat / (sqrt(v_hat) + eps) * lr
-            let denom = v_hat.sqrt().add_scalar(eps);
-            let update = m_hat.div_(&denom).mul_scalar(lr);
-            param.sub_(&update);
+                if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
+                    param.mul_scalar_(1.0 - lr * weight_decay);
+                }
+            }
+        } else {
+            for i in 0..self.params.len() {
+                let grad = get_grad_or_skip!(&self.params[i]);
 
-            // Apply decoupled weight decay consistently
-            if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
-                param.mul_scalar_(1.0 - lr * weight_decay);
+                self.step[i] += 1;
+                let t = self.step[i];
+
+                let mut results = self.params[i]
+                    .adam_update(&grad, &self.m[i], &self.v[i], lr, beta1, beta2, eps, t);
+                self.v[i] = results.pop().unwrap();
+                self.m[i] = results.pop().unwrap();
+                self.params[i] = results.pop().unwrap();
+
+                if weight_decay != 0.0 && !self.no_decay.get(i).copied().unwrap_or(false) {
+                    self.params[i].mul_scalar_(1.0 - lr * weight_decay);
+                }
+                self.params[i].set_grad(None);
             }
         }
     }
 
-    fn add_param_group(&mut self, params: Vec<Tensor>) {
-        let m = zeros_like(&params);
-        let v = zeros_like(&params);
-        let v_hat = zeros_like(&params);
-
-        self.m.extend(m);
-        self.v.extend(v);
-        self.v_hat.extend(v_hat);
-        self.no_decay.extend(vec![false; params.len()]);
-        self.step.extend(vec![0u64; params.len()]);
-        self.params.extend(params);
-    }
-
-    fn state_dict(&self) -> OptimizerState {
-        let mut state = HashMap::new();
-        for (i, _) in self.params.iter().enumerate() {
-            state.insert(
-                i,
-                ParamState {
-                    step: self.step[i],
-                    m: Some(self.m[i].clone()),
-                    v: Some(self.v[i].clone()),
-                    v_hat: Some(self.v_hat[i].clone()),
-                },
-            );
-        }
-        OptimizerState {
-            param_groups: vec![ParamGroup {
-                params: self.params.clone(),
-            }],
-            state,
-        }
-    }
-
-    fn load_state_dict(&mut self, state: OptimizerState) {
-        if let Some(group) = state.param_groups.first() {
-            self.params = group.params.clone();
-        }
-        for (i, param_state) in state.state {
-            if i < self.m.len() {
-                if let Some(m) = param_state.m {
-                    self.m[i] = m;
-                }
-                if let Some(v) = param_state.v {
-                    self.v[i] = v;
-                }
-                if let Some(v_hat) = param_state.v_hat {
-                    self.v_hat[i] = v_hat;
-                }
-                self.step[i] = param_state.step;
-            }
-        }
-    }
+    impl_optim_boilerplate!(true, m, v, v_hat);
 }

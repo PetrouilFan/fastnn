@@ -60,8 +60,6 @@ fn expected_input_dtype(opcode: &Opcode, _input_index: usize) -> Option<IrDType>
 ///
 /// This pass is idempotent.
 pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), String> {
-    let order = graph.topological_sort();
-
     // Collect (consumer_id, input_index, conversion_opcode, target_dtype) rewrites.
     struct Rewrite {
         consumer_id: NodeId,
@@ -72,19 +70,15 @@ pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), String> {
 
     let mut rewrites: Vec<Rewrite> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-
+    let graph_ref = &*graph;
+    crate::utils::traverse_graph(graph_ref, |node_id, node| {
         for (i, &input_id) in node.inputs.iter().enumerate() {
             let expected = match expected_input_dtype(&node.opcode, i) {
                 Some(dt) => dt,
                 None => continue,
             };
 
-            let actual = match graph.get_node(input_id) {
+            let actual = match graph_ref.get_node(input_id) {
                 Some(n) => n.output_type.dtype.clone(),
                 None => continue,
             };
@@ -107,7 +101,8 @@ pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), String> {
                 target_dtype: expected,
             });
         }
-    }
+        Ok(())
+    })?;
 
     // Apply rewrites (insert conversion nodes and rewire).
     for rw in rewrites {

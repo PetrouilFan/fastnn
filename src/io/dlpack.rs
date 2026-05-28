@@ -129,7 +129,7 @@ fn compute_strides(shape: &[i64]) -> Vec<i64> {
 /// Returns a raw pointer that can be passed to other frameworks.
 /// The tensor's storage is kept alive via Arc until the deleter is called.
 #[allow(dead_code)]
-pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
+pub fn to_dlpack(tensor: &Tensor) -> Option<*mut DLManagedTensor> {
     let shape = tensor.shape();
     let ndim = shape.len() as i32;
 
@@ -137,7 +137,7 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
     let data_ptr = if tensor.inner.is_cpu() {
         tensor.data_ptr() as *mut std::ffi::c_void
     } else {
-        std::ptr::null_mut()
+        return None;
     };
 
     // Allocate shape array
@@ -146,10 +146,10 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
     // Create strides using helper function
     let strides_box = compute_strides(&shape).into_boxed_slice();
 
-    // Get dtype, returning null on error
+    // Get dtype, returning None on error
     let dtype = match dtype_to_dlpack(tensor.dtype()) {
         Ok(d) => d,
-        Err(_) => return std::ptr::null_mut(),
+        Err(_) => return None,
     };
 
     // Create context that holds a strong reference to the tensor's storage
@@ -181,7 +181,7 @@ pub fn to_dlpack(tensor: &Tensor) -> *mut DLManagedTensor {
         deleter: Some(dlpack_deleter),
     });
 
-    Box::into_raw(managed)
+    Some(Box::into_raw(managed))
 }
 
 /// Deleter function called by DLPack consumers when done with the tensor.
@@ -202,6 +202,62 @@ extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
             let _ = Box::from_raw(managed.manager_ctx as *mut DLPackContext);
         }
         // The managed tensor itself is dropped here
+    }
+}
+
+/// Read strides from a DLPack tensor, returning `None` if the pointer is null
+/// (indicating a contiguous row-major layout per the DLPack spec).
+///
+/// # Safety
+/// `strides_ptr` must be valid for `ndim` elements or null.
+unsafe fn read_dlpack_strides(strides_ptr: *mut i64, ndim: usize) -> Option<Vec<i64>> {
+    if strides_ptr.is_null() || ndim == 0 {
+        None
+    } else {
+        unsafe { Some(std::slice::from_raw_parts(strides_ptr, ndim).to_vec()) }
+    }
+}
+
+/// Return whether `strides` matches a contiguous row‑major layout for `shape`.
+fn strides_are_contiguous(shape: &[i64], strides: &[i64]) -> bool {
+    if shape.len() != strides.len() {
+        return false;
+    }
+    if shape.is_empty() {
+        return true;
+    }
+    let mut expected = 1i64;
+    for d in (0..shape.len()).rev() {
+        if strides[d] != expected {
+            return false;
+        }
+        expected *= shape[d];
+    }
+    true
+}
+
+/// Copy elements from a source with explicit strides to a contiguous destination.
+unsafe fn strided_copy_f32(
+    src: *const f32,
+    dst: *mut f32,
+    shape: &[i64],
+    strides: &[i64],
+    byte_offset: usize,
+    numel: usize,
+) {
+    let base = (src as *const u8).add(byte_offset) as *const f32;
+    for i in 0..numel {
+        // Convert flat index `i` to an n‑dimensional offset using `strides`.
+        let mut remaining = i;
+        let mut offset = 0i64;
+        for d in (0..shape.len()).rev() {
+            let dim_idx = (remaining as i64) % shape[d];
+            remaining /= shape[d] as usize;
+            offset += dim_idx * strides[d];
+        }
+        unsafe {
+            *dst.add(i) = *base.offset(offset as isize);
+        }
     }
 }
 
@@ -241,6 +297,15 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor>
             vec![]
         };
 
+        // Extract strides (null means contiguous per DLPack spec)
+        let strides: Option<Vec<i64>> = read_dlpack_strides(dl_tensor.strides, ndim);
+
+        // Determine whether the source tensor is contiguous in row-major order
+        let is_contiguous = match &strides {
+            None => true,
+            Some(s) => strides_are_contiguous(&shape, s),
+        };
+
         // Determine dtype
         let dtype = dlpack_to_dtype(dl_tensor.dtype)?;
 
@@ -259,11 +324,30 @@ pub unsafe fn from_dlpack(capsule: *mut DLManagedTensor) -> FastnnResult<Tensor>
         // requires careful lifetime management
         let data = match dtype {
             DType::F32 => {
-                let src = std::slice::from_raw_parts(
-                    (dl_tensor.data as *const f32).add(dl_tensor.byte_offset as usize),
-                    numel,
-                );
-                src.to_vec()
+                let mut data = vec![0.0f32; numel];
+                if is_contiguous {
+                    // Fast path: flat byte copy
+                    let byte_ptr =
+                        (dl_tensor.data as *const u8).add(dl_tensor.byte_offset as usize);
+                    let num_bytes = numel * std::mem::size_of::<f32>();
+                    std::ptr::copy_nonoverlapping(
+                        byte_ptr,
+                        data.as_mut_ptr() as *mut u8,
+                        num_bytes,
+                    );
+                } else {
+                    // Slow path: element-by-element strided copy
+                    let src_strides = strides.as_ref().unwrap(); // safe: known non-contiguous
+                    strided_copy_f32(
+                        dl_tensor.data as *const f32,
+                        data.as_mut_ptr(),
+                        &shape,
+                        src_strides,
+                        dl_tensor.byte_offset as usize,
+                        numel,
+                    );
+                }
+                data
             }
             _ => {
                 return Err(FastnnError::Dtype(format!(

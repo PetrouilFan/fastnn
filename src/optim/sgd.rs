@@ -3,7 +3,7 @@ use crate::optim::{
     WeightDecayOptimizer, WeightDecayType,
 };
 use crate::tensor::Tensor;
-use crate::{get_grad_or_skip, impl_params_mut};
+use crate::{get_grad_or_skip, impl_params_mut, impl_weight_decay};
 use std::collections::HashMap;
 
 #[allow(clippy::upper_case_acronyms)]
@@ -45,15 +45,7 @@ impl SGD {
 }
 
 impl WeightDecayOptimizer for SGD {
-    fn params(&self) -> &Vec<Tensor> {
-        &self.params
-    }
-    fn no_decay(&self) -> &Vec<bool> {
-        &self.no_decay
-    }
-    fn no_decay_mut(&mut self) -> &mut Vec<bool> {
-        &mut self.no_decay
-    }
+    impl_weight_decay!();
 }
 
 impl Optimizer for SGD {
@@ -86,7 +78,7 @@ impl Optimizer for SGD {
                 } else {
                     // Standard SGD: velocity = momentum * velocity + grad
                     velocity.mul_scalar_(momentum).add_(&grad);
-                    param.sub_(&velocity.clone().mul_scalar(lr));
+                    param.sub_(&velocity.mul_scalar(lr));
                 }
             } else {
                 // No momentum: simple update

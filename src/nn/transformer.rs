@@ -4,6 +4,8 @@ use crate::nn::embedding::Embedding;
 use crate::nn::linear::Linear;
 use crate::nn::norm::LayerNorm;
 use crate::nn::Module;
+use crate::storage::DType;
+use crate::storage::Device;
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +32,7 @@ pub struct TransformerBlock {
     pub d_model: i64,
     #[allow(dead_code)]
     pub ff_dim: i64,
+    bias_fallback: Tensor,
     training: AtomicBool,
 }
 
@@ -44,6 +47,7 @@ impl Clone for TransformerBlock {
             dropout: self.dropout.clone(),
             d_model: self.d_model,
             ff_dim: self.ff_dim,
+            bias_fallback: self.bias_fallback.clone(),
             training: AtomicBool::new(self.training.load(Ordering::Relaxed)),
         }
     }
@@ -76,6 +80,8 @@ impl TransformerBlock {
         let ff2 = Linear::new(ff_dim, d_model, true);
         let dropout = Dropout::new(dropout_p as f64);
 
+        let bias_fallback = Tensor::zeros(vec![ff_dim], DType::F32, Device::Cpu);
+
         TransformerBlock {
             self_attn,
             norm1,
@@ -85,6 +91,7 @@ impl TransformerBlock {
             dropout,
             d_model,
             ff_dim,
+            bias_fallback,
             training: AtomicBool::new(true),
         }
     }
@@ -103,9 +110,9 @@ impl TransformerBlock {
                 &self.norm2.weight,
                 &self.norm2.bias,
                 &self.ff1.weight,
-                self.ff1.bias.as_ref().unwrap(),
+                self.ff1.bias.as_ref().unwrap_or(&self.bias_fallback),
                 &self.ff2.weight,
-                self.ff2.bias.as_ref().unwrap(),
+                self.ff2.bias.as_ref().unwrap_or(&self.bias_fallback),
             ],
             |g, ins| {
                 let x_norm2 = g.layer_norm(&ins[0], &ins[1], &ins[2], 1e-5);
@@ -300,9 +307,10 @@ impl TransformerEncoder {
 
         // Use precomputed position tensor, slice to actual seq_len
         let pos_tensor = self.pos_cache.get().unwrap().as_ref().unwrap();
-        let pos_indices = pos_tensor.slice(0, 0, seq_len, 1);
+        let pos_indices = pos_tensor.slice(1, 0, seq_len, 1);
         // Expand to [batch, seq_len] for batching, embedding handles the d_model conversion
         let pos_expanded = pos_indices.expand(vec![batch, seq_len]);
+        let pos_expanded = pos_expanded.to_dtype(DType::I64);
         let pos_emb = self.pos_embedding.forward(&pos_expanded);
         let x = x.add(&pos_emb);
 

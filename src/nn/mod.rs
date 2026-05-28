@@ -20,12 +20,18 @@ use crate::tensor::Tensor;
 
 pub trait Module: Send + Sync {
     fn forward(&self, x: &Tensor) -> Tensor;
-    fn parameters(&self) -> Vec<Tensor>;
-    fn named_parameters(&self) -> Vec<(String, Tensor)>;
-    fn zero_grad(&self);
-    fn train_mode(&self);
-    fn eval_mode(&self);
-    fn is_training(&self) -> bool;
+    fn parameters(&self) -> Vec<Tensor> {
+        vec![]
+    }
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![]
+    }
+    fn zero_grad(&self) {}
+    fn train_mode(&self) {}
+    fn eval_mode(&self) {}
+    fn is_training(&self) -> bool {
+        false
+    }
 
     fn parameters_ref(&self) -> Vec<&Tensor> {
         vec![]
@@ -39,9 +45,8 @@ pub trait Module: Send + Sync {
 /// Helper to clear gradient from a tensor.
 pub fn clear_grad(tensor: &Tensor) {
     if let Some(meta) = &tensor.inner.autograd_meta {
-        if let Ok(mut lock) = meta.lock() {
-            lock.grad = None;
-        }
+        let mut lock = meta.lock();
+        lock.grad = None;
     }
 }
 

@@ -217,7 +217,7 @@ class ReduceLROnPlateau(LRScheduler):
             if self.mode == "min":
                 new_lr = max(new_lr, self.min_lr)
             else:
-                new_lr = min(new_lr, self.min_lr)
+                new_lr = max(new_lr, self.min_lr)
             self._should_reduce = False
             return new_lr
         return self._get_lr()
@@ -239,7 +239,7 @@ class ReduceLROnPlateau(LRScheduler):
         self.wait = state_dict.get("wait", 0)
         self._should_reduce = state_dict.get("_should_reduce", False)
 
-    def step(self, metric: float | None = None, **kwargs) -> float:
+    def step(self, metric: Optional[float] = None, **kwargs) -> float:
         if metric is None:
             if self.last_epoch == -1:
                 raise ValueError(
